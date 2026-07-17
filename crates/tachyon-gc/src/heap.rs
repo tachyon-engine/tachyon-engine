@@ -14,6 +14,7 @@ use crate::{
     roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full, sweep_young},
+    trigger::{CollectionAction, GcTrigger},
     tuning::SMALL_SIZE_CLASSES,
     weak::WeakOwners,
 };
@@ -73,6 +74,14 @@ pub enum MinorCollectionError {
     Sweep(SweepError),
 }
 
+/// A managed allocation reports collection and publication failures without erasing their phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagedAllocationError {
+    Allocation(HeapAllocationError),
+    MinorCollection(MinorCollectionError),
+    MajorCollection(MajorCollectionError),
+}
+
 /// Combined fixed-point and sweep evidence for one stop-the-world full major collection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MajorCollectionStats {
@@ -104,12 +113,44 @@ pub struct Heap {
     weak_owners: WeakOwners,
     kept_objects: KeptObjects,
     pending_finalizations: PendingFinalizations,
+    trigger: GcTrigger,
+}
+
+#[derive(Clone, Copy)]
+struct AllocationPlan {
+    space: AllocationSpace,
+    class_index: Option<usize>,
+    allocation_bytes: usize,
+    required_storage_bytes: usize,
+}
+
+struct AllocationRoots<'a, T> {
+    subsystem_roots: &'a mut dyn Trace,
+    pending_value: &'a mut T,
+}
+
+impl<T: Trace> Trace for AllocationRoots<'_, T> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn crate::Tracer) {
+        self.subsystem_roots.trace(tracer);
+        self.pending_value.trace(tracer);
+    }
 }
 
 impl Heap {
     /// Creates an empty heap without allocating a span or active-size-class side container.
     #[must_use]
     pub const fn new(limit: HeapLimit, types: TypeRegistry) -> Self {
+        Self::with_trigger_config(limit, types, crate::trigger::GcTriggerConfig::DEFAULT)
+    }
+
+    /// Creates an empty heap with validated host collection policy and no eager backing storage.
+    #[must_use]
+    pub const fn with_trigger_config(
+        limit: HeapLimit,
+        types: TypeRegistry,
+        trigger_config: crate::GcTriggerConfig,
+    ) -> Self {
         let limit_spans = limit.max_heap_bytes().div_ceil(SPAN_SIZE_BYTES);
         let max_sweep_entries = if limit_spans < MAX_LOGICAL_SPANS {
             limit_spans
@@ -138,6 +179,7 @@ impl Heap {
             weak_owners: WeakOwners::new(max_reference_entries),
             kept_objects: KeptObjects::new(max_reference_entries),
             pending_finalizations: PendingFinalizations::new(max_reference_entries),
+            trigger: GcTrigger::new(trigger_config),
         }
     }
 
@@ -150,29 +192,94 @@ impl Heap {
         value: T,
         space: AllocationSpace,
     ) -> Result<GcRef<T>, HeapAllocationError> {
-        if !self.types.matches(object_type) {
-            return Err(HeapAllocationError::UnregisteredOrMismatchedType {
-                type_id: object_type.type_id(),
-            });
-        }
-        let space = if object_type.descriptor().allocation_policy() == GcAllocationPolicy::OldOnly {
-            AllocationSpace::Old
-        } else {
-            space
-        };
-        if let Ok(layout) = SmallObjectLayout::for_type::<T>()
-            && let Some(class_index) = size_class_index(layout.slot_size())
-        {
-            return self.try_allocate_class(
+        let plan = self.allocation_plan(object_type, space)?;
+        let result = if let Some(class_index) = plan.class_index {
+            self.try_allocate_class(
                 class_index,
                 object_type.type_id(),
                 flags,
                 aux,
                 value,
-                space,
-            );
+                plan.space,
+            )
+        } else {
+            self.allocate_large(object_type.type_id(), flags, aux, value)
+        };
+        if result.is_ok() {
+            self.trigger
+                .record_allocation(plan.space, plan.allocation_bytes);
         }
-        self.allocate_large(object_type.type_id(), flags, aux, value)
+        result
+    }
+
+    /// Collects at a managed allocation safepoint with complete roots, then publishes once.
+    ///
+    /// The pending value participates in tracing because its fields may be the only strong edges
+    /// to objects that must survive the pre-allocation collection. A selected action runs at most
+    /// once, so an unrecoverable resource limit cannot create a collection/retry loop.
+    pub fn try_allocate_with_gc<T: Trace + 'static>(
+        &mut self,
+        object_type: GcType<T>,
+        flags: u16,
+        aux: u32,
+        mut value: T,
+        space: AllocationSpace,
+        roots: &mut dyn Trace,
+    ) -> Result<GcRef<T>, ManagedAllocationError> {
+        let plan = self
+            .allocation_plan(object_type, space)
+            .map_err(ManagedAllocationError::Allocation)?;
+        let decision = self.trigger.decide(
+            plan.space,
+            plan.allocation_bytes,
+            plan.required_storage_bytes,
+            self.committed_heap_bytes(),
+            self.limit,
+        );
+        if let Some(decision) = decision {
+            self.trigger.record_attempt(decision);
+            let mut allocation_roots = AllocationRoots {
+                subsystem_roots: roots,
+                pending_value: &mut value,
+            };
+            match decision.action {
+                CollectionAction::None => {}
+                CollectionAction::Minor => self
+                    .collect_minor(&mut allocation_roots)
+                    .map(|_| ())
+                    .map_err(ManagedAllocationError::MinorCollection)?,
+                CollectionAction::Major => self
+                    .collect_major(&mut allocation_roots)
+                    .map(|_| ())
+                    .map_err(ManagedAllocationError::MajorCollection)?,
+            }
+        }
+        self.try_allocate(object_type, flags, aux, value, plan.space)
+            .map_err(ManagedAllocationError::Allocation)
+    }
+
+    #[must_use]
+    pub const fn trigger_config(&self) -> crate::GcTriggerConfig {
+        self.trigger.config()
+    }
+
+    #[must_use]
+    pub const fn forced_collection_mode(&self) -> crate::ForcedCollectionMode {
+        self.trigger.forced_mode()
+    }
+
+    pub fn set_forced_collection_mode(&mut self, mode: crate::ForcedCollectionMode) {
+        self.trigger.set_forced_mode(mode);
+    }
+
+    /// Coalesces host pressure notifications into one full major at the next managed allocation.
+    pub fn request_memory_pressure_collection(&mut self) {
+        self.trigger.request_memory_pressure();
+    }
+
+    #[must_use]
+    pub const fn trigger_stats(&self) -> crate::GcTriggerStats {
+        self.trigger.stats()
     }
 
     /// Returns the logical table for collection and exact verifier operations.
@@ -352,6 +459,8 @@ impl Heap {
         sweep.external_bytes = self.external_bytes;
         self.clear_released_active_spans();
         result.map_err(MajorCollectionError::Sweep)?;
+        self.trigger
+            .record_collection_success(CollectionAction::Major);
         Ok(MajorCollectionStats { mark, sweep })
     }
 
@@ -377,6 +486,8 @@ impl Heap {
         sweep.sweep.external_bytes = self.external_bytes;
         self.repair_active_spans_after_minor(promoted_active_old);
         result.map_err(MinorCollectionError::Sweep)?;
+        self.trigger
+            .record_collection_success(CollectionAction::Minor);
         Ok(MinorCollectionStats { mark, sweep })
     }
 
@@ -543,6 +654,51 @@ impl Heap {
             .map_err(PersistentRootError::InvalidReference)
     }
 
+    /// Computes effective generation, charged object bytes, and storage growth without mutation.
+    fn allocation_plan<T: Trace + 'static>(
+        &self,
+        object_type: GcType<T>,
+        requested_space: AllocationSpace,
+    ) -> Result<AllocationPlan, HeapAllocationError> {
+        if !self.types.matches(object_type) {
+            return Err(HeapAllocationError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        let space = if object_type.descriptor().allocation_policy() == GcAllocationPolicy::OldOnly {
+            AllocationSpace::Old
+        } else {
+            requested_space
+        };
+        if let Ok(layout) = SmallObjectLayout::for_type::<T>()
+            && let Some(class_index) = size_class_index(layout.slot_size())
+        {
+            let active = match space {
+                AllocationSpace::Young => self.active_eden[class_index],
+                AllocationSpace::Old => self.active_old[class_index],
+            };
+            let required_storage_bytes =
+                if active.is_some_and(|span_id| self.table.can_allocate_in_span(span_id)) {
+                    0
+                } else {
+                    SPAN_SIZE_BYTES
+                };
+            return Ok(AllocationPlan {
+                space,
+                class_index: Some(class_index),
+                allocation_bytes: usize::from(SMALL_SIZE_CLASSES[class_index]),
+                required_storage_bytes,
+            });
+        }
+        let required_storage_bytes = large_storage_bytes::<T>()?;
+        Ok(AllocationPlan {
+            space: AllocationSpace::Old,
+            class_index: None,
+            allocation_bytes: required_storage_bytes,
+            required_storage_bytes,
+        })
+    }
+
     /// Revalidates heap registry, header type, layout, and liveness before an exclusive borrow.
     pub(crate) fn checked_payload_mut<T: Trace + 'static>(
         &mut self,
@@ -673,20 +829,7 @@ impl Heap {
         aux: u32,
         value: T,
     ) -> Result<GcRef<T>, HeapAllocationError> {
-        let layout = ObjectLayout::for_type::<T>().map_err(|_| {
-            HeapAllocationError::LargeAllocation(LargeAllocationError::AddressSpaceExhausted)
-        })?;
-        let logical_bytes = crate::MINIMUM_SLOT_SIZE_BYTES
-            .checked_add(layout.allocation_size())
-            .ok_or(HeapAllocationError::LargeAllocation(
-                LargeAllocationError::AddressSpaceExhausted,
-            ))?;
-        let requested = logical_bytes
-            .div_ceil(SPAN_SIZE_BYTES)
-            .checked_mul(SPAN_SIZE_BYTES)
-            .ok_or(HeapAllocationError::LargeAllocation(
-                LargeAllocationError::AddressSpaceExhausted,
-            ))?;
+        let requested = large_storage_bytes::<T>()?;
         let current = self.committed_heap_bytes();
         let committed = current.saturating_add(requested);
         if committed > self.limit.max_heap_bytes() {
@@ -704,6 +847,24 @@ impl Heap {
         self.committed_span_storage_bytes += requested;
         Ok(reference)
     }
+}
+
+/// Rounds a large object's header/payload layout to its contiguous logical span charge.
+fn large_storage_bytes<T>() -> Result<usize, HeapAllocationError> {
+    let layout = ObjectLayout::for_type::<T>().map_err(|_| {
+        HeapAllocationError::LargeAllocation(LargeAllocationError::AddressSpaceExhausted)
+    })?;
+    let logical_bytes = crate::MINIMUM_SLOT_SIZE_BYTES
+        .checked_add(layout.allocation_size())
+        .ok_or(HeapAllocationError::LargeAllocation(
+            LargeAllocationError::AddressSpaceExhausted,
+        ))?;
+    logical_bytes
+        .div_ceil(SPAN_SIZE_BYTES)
+        .checked_mul(SPAN_SIZE_BYTES)
+        .ok_or(HeapAllocationError::LargeAllocation(
+            LargeAllocationError::AddressSpaceExhausted,
+        ))
 }
 
 #[inline(always)]
@@ -724,8 +885,9 @@ mod tests {
 
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
     use crate::{
-        Ephemeron, FinalizationRegistration, GcRef, HeapReferenceError, RawHeapRef,
-        SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer, TypeRegistrationError, TypeRegistry, WeakGcRef,
+        Ephemeron, FinalizationRegistration, ForcedCollectionMode, GcRef, GcTriggerConfig,
+        HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer,
+        TypeRegistrationError, TypeRegistry, WeakGcRef,
     };
     use tachyon_value::Value;
 
@@ -914,6 +1076,276 @@ mod tests {
                 .type_id(),
             Some(object_type.type_id())
         );
+    }
+
+    #[test]
+    /// Pending object fields join complete roots before a forced pre-allocation minor collection.
+    fn forced_minor_traces_pending_value_and_reclaims_other_young_objects() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(2 * SPAN_SIZE_BYTES), types, config);
+        let target = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let dead = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.set_forced_collection_mode(ForcedCollectionMode::Minor);
+        let mut no_roots = Vec::<Value>::new();
+
+        let parent = heap
+            .try_allocate_with_gc(
+                object_type,
+                0,
+                0,
+                ChainNode { next: Some(target) },
+                AllocationSpace::Young,
+                &mut no_roots,
+            )
+            .unwrap();
+
+        assert!(heap.verify_reference(target.raw(), None).is_ok());
+        assert!(heap.verify_reference(parent.raw(), None).is_ok());
+        assert_eq!(
+            heap.verify_reference(dead.raw(), None),
+            Err(HeapReferenceError::UnallocatedSlot(dead.raw()))
+        );
+        let stats = heap.trigger_stats();
+        assert_eq!(stats.minor_attempts, 1);
+        assert_eq!(stats.minor_successes, 1);
+    }
+
+    #[test]
+    /// Forced major runs at every managed allocation point and preserves explicit subsystem roots.
+    fn forced_major_runs_per_allocation_and_traces_explicit_roots() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(4 * SPAN_SIZE_BYTES), types, config);
+        let mut root = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        heap.set_forced_collection_mode(ForcedCollectionMode::Major);
+
+        for _ in 0..2 {
+            heap.try_allocate_with_gc(
+                object_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+                &mut root,
+            )
+            .unwrap();
+        }
+
+        assert!(heap.verify_reference(root.raw(), None).is_ok());
+        let stats = heap.trigger_stats();
+        assert_eq!(stats.major_attempts, 2);
+        assert_eq!(stats.major_successes, 2);
+        assert_eq!(stats.forced_attempts, 2);
+    }
+
+    #[test]
+    /// Descriptor policy is resolved before forced-minor selection, not after publication.
+    fn forced_minor_observes_effective_old_only_allocation_policy() {
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register_old_only::<PinnedPayload>("PinnedPayload")
+            .unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(2 * SPAN_SIZE_BYTES), types, config);
+        heap.set_forced_collection_mode(ForcedCollectionMode::Minor);
+        let mut no_roots = Vec::<Value>::new();
+
+        let reference = heap
+            .try_allocate_with_gc(
+                object_type,
+                0,
+                0,
+                PinnedPayload,
+                AllocationSpace::Young,
+                &mut no_roots,
+            )
+            .unwrap();
+
+        assert_eq!(
+            heap.span_table()
+                .metadata(reference.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Old
+        );
+        assert_eq!(heap.trigger_stats().minor_attempts, 0);
+    }
+
+    #[test]
+    /// Raw publication accrues byte debt while only the complete-root managed path repays it.
+    fn raw_allocation_debt_triggers_the_next_managed_young_allocation() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<Value>("Value").unwrap();
+        let config = GcTriggerConfig::new(32, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(4 * SPAN_SIZE_BYTES), types, config);
+        let mut root = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                Value::from_i32(1),
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        assert_eq!(heap.trigger_stats().young_debt_bytes, 16);
+
+        heap.try_allocate_with_gc(
+            object_type,
+            0,
+            0,
+            Value::from_i32(2),
+            AllocationSpace::Young,
+            &mut root,
+        )
+        .unwrap();
+
+        assert!(heap.verify_reference(root.raw(), None).is_ok());
+        let stats = heap.trigger_stats();
+        assert_eq!(stats.minor_attempts, 1);
+        assert_eq!(stats.young_debt_attempts, 1);
+        assert_eq!(stats.young_debt_bytes, 16);
+        assert_eq!(stats.young_allocated_bytes, 32);
+    }
+
+    #[test]
+    /// Debt selects major first, then a distinct size class crosses the exact pressure boundary.
+    fn old_debt_and_storage_pressure_select_full_major_collection() {
+        let mut types = TypeRegistry::new();
+        let value_type = types.try_register::<Value>("Value").unwrap();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, 32, 50).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(4 * SPAN_SIZE_BYTES), types, config);
+        let mut root = heap
+            .try_allocate(value_type, 0, 0, Value::from_i32(1), AllocationSpace::Old)
+            .unwrap();
+        heap.try_allocate_with_gc(
+            value_type,
+            0,
+            0,
+            Value::from_i32(2),
+            AllocationSpace::Old,
+            &mut root,
+        )
+        .unwrap();
+        assert_eq!(heap.trigger_stats().old_debt_attempts, 1);
+
+        heap.try_allocate_with_gc(
+            fanout_type,
+            0,
+            0,
+            Fanout { edges: [None; 300] },
+            AllocationSpace::Old,
+            &mut root,
+        )
+        .unwrap();
+        assert_eq!(heap.trigger_stats().heap_pressure_attempts, 1);
+    }
+
+    #[test]
+    /// A hard-limit major rebuilds holes in the full active Old span before the single retry.
+    fn managed_allocation_reuses_old_holes_after_hard_limit_collection() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<Value>("Value").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap = Heap::with_trigger_config(HeapLimit::new(SPAN_SIZE_BYTES), types, config);
+        let mut root = heap
+            .try_allocate(object_type, 0, 0, Value::from_i32(0), AllocationSpace::Old)
+            .unwrap();
+        let span = root.raw().span_id();
+        let slot_count = heap
+            .span_table()
+            .metadata(span)
+            .unwrap()
+            .size_class()
+            .slot_count();
+        for value in 1..slot_count {
+            heap.try_allocate(
+                object_type,
+                0,
+                0,
+                Value::from_i32(i32::from(value)),
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        }
+
+        let allocated = heap
+            .try_allocate_with_gc(
+                object_type,
+                0,
+                0,
+                Value::from_i32(7),
+                AllocationSpace::Old,
+                &mut root,
+            )
+            .unwrap();
+
+        assert_eq!(allocated.raw().span_id(), span);
+        assert!(heap.verify_reference(root.raw(), None).is_ok());
+        assert_eq!(heap.committed_span_storage_bytes(), SPAN_SIZE_BYTES);
+        assert_eq!(heap.trigger_stats().heap_limit_attempts, 1);
+    }
+
+    #[test]
+    /// Repeated host notifications coalesce without turning later allocations into polling points.
+    fn memory_pressure_commands_coalesce_and_are_consumed_by_one_managed_allocation() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<Value>("Value").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(4 * SPAN_SIZE_BYTES), types, config);
+        heap.request_memory_pressure_collection();
+        heap.request_memory_pressure_collection();
+        let mut no_roots = Vec::<Value>::new();
+
+        for value in 0..2 {
+            heap.try_allocate_with_gc(
+                object_type,
+                0,
+                0,
+                Value::from_i32(value),
+                AllocationSpace::Young,
+                &mut no_roots,
+            )
+            .unwrap();
+        }
+
+        let stats = heap.trigger_stats();
+        assert_eq!(stats.memory_pressure_requests, 2);
+        assert_eq!(stats.memory_pressure_commands_consumed, 1);
+        assert_eq!(stats.major_attempts, 1);
     }
 
     #[test]

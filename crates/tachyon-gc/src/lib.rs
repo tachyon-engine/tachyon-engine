@@ -26,6 +26,7 @@ mod storage;
 mod sweep;
 mod table;
 mod trace;
+mod trigger;
 mod tuning;
 mod weak;
 
@@ -38,7 +39,7 @@ pub use gray::{GrayQueueError, GrayQueueStats};
 pub use handle::GcRef;
 pub use heap::{
     AllocationSpace, Heap, HeapAllocationError, HeapLimit, MajorCollectionError,
-    MajorCollectionStats, MinorCollectionError, MinorCollectionStats,
+    MajorCollectionStats, ManagedAllocationError, MinorCollectionError, MinorCollectionStats,
 };
 pub use layout::{
     CARD_BITMAP_WORDS, CARD_SIZE_BYTES, CARDS_PER_SPAN, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId,
@@ -66,4 +67,8 @@ pub use table::{
 };
 pub use tachyon_value::{RawHeapRef, SpanId, SpanOffset};
 pub use trace::{Trace, Tracer};
+pub use trigger::{
+    CollectionAction, CollectionReason, ForcedCollectionMode, GcTriggerConfig,
+    GcTriggerConfigError, GcTriggerStats,
+};
 pub use weak::{Ephemeron, WeakGcRef, WeakOwnerError, WeakOwnerStats};

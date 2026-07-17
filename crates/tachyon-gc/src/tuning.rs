@@ -26,6 +26,12 @@ pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 pub(crate) const CAPACITY_GROWTH_DENOMINATOR: usize = 2;
 /// Initial whole-span promotion age; corpus and pause/fragmentation benchmarks may retune it.
 pub(crate) const YOUNG_PROMOTION_AGE: u8 = 2;
+/// Young allocation bytes repaid by one minor collection; initial value awaits corpus tuning.
+pub(crate) const DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES: usize = 1024 * 1024;
+/// Old allocation bytes repaid by one major collection; initial value awaits corpus tuning.
+pub(crate) const DEFAULT_MAJOR_ALLOCATION_DEBT_BYTES: usize = 8 * 1024 * 1024;
+/// Committed-storage percentage at which growth first requests a full major collection.
+pub(crate) const DEFAULT_HEAP_PRESSURE_PERCENT: u8 = 90;
 
 /// Initial 1.0 size classes; benchmark evidence may refine spacing without changing `GcRef`.
 pub(crate) const SMALL_SIZE_CLASSES: [u16; 28] = [
