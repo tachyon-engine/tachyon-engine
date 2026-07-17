@@ -355,6 +355,12 @@ impl SmallSpanMetadata {
         &self.marks
     }
 
+    /// Returns mutable epoch marks to the single-threaded collector.
+    #[must_use]
+    pub const fn marks_mut(&mut self) -> &mut MarkBitmap {
+        &mut self.marks
+    }
+
     /// Returns old-to-young remembered cards.
     #[must_use]
     pub const fn cards(&self) -> &CardBitmap {

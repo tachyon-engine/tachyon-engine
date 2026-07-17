@@ -1,8 +1,8 @@
 //! Stable logical span indexing over independently allocated native storage.
 
 use crate::{
-    MAX_LOGICAL_SPANS, SizeClass, SmallSpanMetadata, SpanId, SpanReuseGeneration, SpanSpace,
-    SpanStorage, SpanStorageAllocationError,
+    CollectionEpoch, MAX_LOGICAL_SPANS, SizeClass, SmallSpanMetadata, SpanId, SpanReuseGeneration,
+    SpanSpace, SpanStorage, SpanStorageAllocationError,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_FREE_RANGE_CAPACITY,
         INITIAL_SPAN_TABLE_CAPACITY,
@@ -146,6 +146,21 @@ impl SpanTable {
         self.entries.capacity()
     }
 
+    /// Advances the epoch, physically resetting every live span bitmap on the forced-wrap path.
+    pub fn advance_collection_epoch(&mut self, current: CollectionEpoch) -> CollectionEpoch {
+        match current.next() {
+            Ok(next) => next,
+            Err(_) => {
+                for entry in &mut self.entries {
+                    if let Some(span) = &mut entry.span {
+                        span.metadata.marks_mut().reset_for_epoch_overflow();
+                    }
+                }
+                CollectionEpoch::INITIAL
+            }
+        }
+    }
+
     fn install_new(
         &mut self,
         storage: SpanStorage,
@@ -274,7 +289,7 @@ fn reserve_for_push<T>(
 #[cfg(test)]
 mod tests {
     use super::{SpanTable, SpanTableError};
-    use crate::{SizeClass, SpanId, SpanReuseGeneration, SpanSpace};
+    use crate::{CollectionEpoch, SizeClass, SlotIndex, SpanId, SpanReuseGeneration, SpanSpace};
 
     fn size_class() -> SizeClass {
         SizeClass::new(16).expect("minimum size class")
@@ -351,5 +366,58 @@ mod tests {
             Err(SpanTableError::UnknownSpan(unknown))
         );
         assert_eq!(table.live_spans(), 0);
+    }
+
+    #[test]
+    /// Forces epoch wrap and proves all live span bitmaps are reset before epoch one is reused.
+    fn epoch_overflow_resets_every_live_span_bitmap() {
+        let mut table = SpanTable::new();
+        let first = table
+            .try_allocate_small(size_class(), SpanSpace::Eden)
+            .unwrap();
+        let second = table
+            .try_allocate_small(size_class(), SpanSpace::Old)
+            .unwrap();
+        let maximum = CollectionEpoch::new(u32::MAX).unwrap();
+        let slot = SlotIndex::new(0).unwrap();
+        assert!(
+            table
+                .metadata_mut(first)
+                .unwrap()
+                .marks_mut()
+                .mark(slot, maximum)
+        );
+        assert!(
+            table
+                .metadata_mut(second)
+                .unwrap()
+                .marks_mut()
+                .mark(slot, maximum)
+        );
+
+        let next = table.advance_collection_epoch(maximum);
+
+        assert_eq!(next, CollectionEpoch::INITIAL);
+        assert!(
+            !table
+                .metadata(first)
+                .unwrap()
+                .marks()
+                .is_marked(slot, maximum)
+        );
+        assert!(
+            !table
+                .metadata(second)
+                .unwrap()
+                .marks()
+                .is_marked(slot, maximum)
+        );
+        assert!(
+            table
+                .metadata_mut(first)
+                .unwrap()
+                .marks_mut()
+                .mark(slot, next)
+        );
     }
 }
