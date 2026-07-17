@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::{
     AllocationSpace, GcRef, GcType, GcTypeId, Heap, HeapAllocationError, HeapReferenceError,
     MajorCollectionError, MajorCollectionStats, TemporaryRootError, Trace,
+    persistent::{PersistentRootError, PersistentRootId},
 };
 
 /// A reference cannot become a local handle unless it is live and root capacity is reserved.
@@ -171,6 +172,50 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
     pub fn temporary_root_stats(&self) -> crate::TemporaryRootStats {
         self.heap.temporary_root_stats()
     }
+
+    /// Creates an isolate-owned long-lived root ID from a local after descriptor validation.
+    pub fn persist<T: Trace + 'static>(
+        &mut self,
+        local: Local<'scope, T>,
+        object_type: GcType<T>,
+    ) -> Result<PersistentRootId<T>, PersistentRootError> {
+        self.heap
+            .create_persistent_root(local.as_gc_ref(), object_type)
+    }
+
+    /// Creates an independent root slot for a future actor-backed Persistent clone command.
+    pub fn clone_persistent<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<PersistentRootId<T>, PersistentRootError> {
+        self.heap.clone_persistent_root(id, object_type)
+    }
+
+    /// Resolves a persistent ID and publishes a temporary root before returning a Local.
+    pub fn local_from_persistent<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<Local<'scope, T>, PersistentResolveError> {
+        let reference = self
+            .heap
+            .resolve_persistent_root(id, object_type)
+            .map_err(PersistentResolveError::Persistent)?;
+        self.heap
+            .try_push_temporary_root(reference.raw())
+            .map_err(PersistentResolveError::TemporaryRoot)?;
+        Ok(Local::new(reference))
+    }
+
+    /// Releases one exact root generation; stale copies cannot release a reused slot.
+    pub fn release_persistent<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<(), PersistentRootError> {
+        self.heap.release_persistent_root(id, object_type)
+    }
 }
 
 impl Drop for RunningScope<'_, '_> {
@@ -184,6 +229,12 @@ impl Drop for RunningScope<'_, '_> {
 pub enum ScopedAllocationError {
     Allocation(HeapAllocationError),
     Root(RootError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PersistentResolveError {
+    Persistent(PersistentRootError),
+    TemporaryRoot(RootError),
 }
 
 /// A descriptor token or live logical reference failed before native payload dereference.
@@ -625,5 +676,140 @@ mod tests {
                 ));
             });
         });
+    }
+
+    #[test]
+    /// A persistent root outlives its creating Local and release cannot invalidate a resolved Local.
+    fn persistent_root_survives_scope_and_release_respects_temporary_root() {
+        let (mut heap, object_type, drops) = heap_and_type();
+        let persistent = heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    object_type,
+                    0,
+                    0,
+                    DropProbe {
+                        drops: Arc::clone(&drops),
+                    },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            running.persist(local, object_type).unwrap()
+        });
+        let mut no_roots = Vec::<Value>::new();
+        let retained = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(retained.sweep.live_objects, 1);
+        assert_eq!(heap.persistent_root_stats().live_roots, 1);
+
+        heap.with_running_scope(|running| {
+            let _local = running
+                .local_from_persistent(persistent, object_type)
+                .unwrap();
+            running.release_persistent(persistent, object_type).unwrap();
+            let mut no_other_roots = Vec::<Value>::new();
+            let retained_local = running.collect_major(&mut no_other_roots).unwrap();
+            assert_eq!(retained_local.sweep.live_objects, 1);
+            assert_eq!(running.temporary_root_stats().current_len, 1);
+        });
+
+        assert_eq!(heap.persistent_root_stats().live_roots, 0);
+        heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    /// Clone commands allocate independent slots so releasing one handle preserves the other root.
+    fn cloned_persistent_roots_release_independently() {
+        let (mut heap, object_type, drops) = heap_and_type();
+        let (first, second) = heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    object_type,
+                    0,
+                    0,
+                    DropProbe {
+                        drops: Arc::clone(&drops),
+                    },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            let first = running.persist(local, object_type).unwrap();
+            let second = running.clone_persistent(first, object_type).unwrap();
+            (first, second)
+        });
+        assert_eq!(heap.persistent_root_stats().live_roots, 2);
+
+        heap.with_running_scope(|running| {
+            running.release_persistent(first, object_type).unwrap();
+        });
+        let mut no_roots = Vec::<Value>::new();
+        assert_eq!(
+            heap.collect_major(&mut no_roots)
+                .unwrap()
+                .sweep
+                .live_objects,
+            1
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        heap.with_running_scope(|running| {
+            running.release_persistent(second, object_type).unwrap();
+        });
+        heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    /// Reused root slots advance generation, so a stale ID cannot resolve or release its successor.
+    fn stale_persistent_id_cannot_access_a_reused_slot() {
+        let (mut heap, object_type, drops) = heap_and_type();
+        let stale = heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    object_type,
+                    0,
+                    0,
+                    DropProbe {
+                        drops: Arc::clone(&drops),
+                    },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            let id = running.persist(local, object_type).unwrap();
+            running.release_persistent(id, object_type).unwrap();
+            id
+        });
+        let current = heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    object_type,
+                    0,
+                    0,
+                    DropProbe {
+                        drops: Arc::clone(&drops),
+                    },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            running.persist(local, object_type).unwrap()
+        });
+
+        heap.with_running_scope(|running| {
+            assert!(matches!(
+                running.local_from_persistent(stale, object_type),
+                Err(super::PersistentResolveError::Persistent(
+                    crate::PersistentRootError::StaleGeneration { .. }
+                ))
+            ));
+            assert!(matches!(
+                running.release_persistent(stale, object_type),
+                Err(crate::PersistentRootError::StaleGeneration { .. })
+            ));
+            assert!(running.local_from_persistent(current, object_type).is_ok());
+            running.release_persistent(current, object_type).unwrap();
+        });
+        let mut no_roots = Vec::<Value>::new();
+        heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 }

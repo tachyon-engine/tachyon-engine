@@ -3,7 +3,7 @@
 use crate::tuning::{
     CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_TEMPORARY_ROOT_CAPACITY,
 };
-use crate::{RawHeapRef, Trace, Tracer};
+use crate::{RawHeapRef, Trace, Tracer, persistent::PersistentRoots};
 
 /// A temporary root cannot be published within the isolate's bounded entry quota.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,13 +108,19 @@ impl Trace for TemporaryRoots {
 pub(crate) struct RootComposition<'a> {
     external: &'a mut dyn Trace,
     temporary: &'a mut TemporaryRoots,
+    persistent: &'a mut PersistentRoots,
 }
 
 impl<'a> RootComposition<'a> {
-    pub const fn new(external: &'a mut dyn Trace, temporary: &'a mut TemporaryRoots) -> Self {
+    pub const fn new(
+        external: &'a mut dyn Trace,
+        temporary: &'a mut TemporaryRoots,
+        persistent: &'a mut PersistentRoots,
+    ) -> Self {
         Self {
             external,
             temporary,
+            persistent,
         }
     }
 }
@@ -124,6 +130,7 @@ impl Trace for RootComposition<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.external.trace(tracer);
         self.temporary.trace(tracer);
+        self.persistent.trace(tracer);
     }
 }
 

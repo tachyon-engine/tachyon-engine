@@ -2,12 +2,13 @@
 
 use crate::{
     CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
-    LargeAllocationError, LargeReclaim, MAX_LOGICAL_SPANS, MarkError, MarkStats, ObjectLayout,
-    RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId, SpanSpace,
-    SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats, TemporaryRootStats,
-    Trace, TypeRegistry,
+    LargeAllocationError, LargeReclaim, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError,
+    MarkStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout,
+    SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats,
+    TemporaryRootStats, Trace, TypeRegistry,
     gray::GrayQueue,
     mark::mark_strong_roots,
+    persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
     roots::{RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full},
@@ -82,6 +83,7 @@ pub struct Heap {
     gray: GrayQueue,
     sweep_worklist: SweepWorklist,
     temporary_roots: TemporaryRoots,
+    persistent_roots: PersistentRoots,
 }
 
 impl Heap {
@@ -94,6 +96,12 @@ impl Heap {
         } else {
             MAX_LOGICAL_SPANS
         };
+        let limit_objects = limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES;
+        let max_reference_entries = if limit_objects < MAX_LOGICAL_OBJECT_COUNT {
+            limit_objects
+        } else {
+            MAX_LOGICAL_OBJECT_COUNT
+        };
         Self {
             types,
             table: SpanTable::new(),
@@ -103,11 +111,10 @@ impl Heap {
             committed_span_storage_bytes: 0,
             external_bytes: 0,
             collection_epoch: CollectionEpoch::INITIAL,
-            gray: GrayQueue::new(limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES),
+            gray: GrayQueue::new(max_reference_entries),
             sweep_worklist: SweepWorklist::new(max_sweep_entries),
-            temporary_roots: TemporaryRoots::new(
-                limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES,
-            ),
+            temporary_roots: TemporaryRoots::new(max_reference_entries),
+            persistent_roots: PersistentRoots::new(max_reference_entries),
         }
     }
 
@@ -220,7 +227,8 @@ impl Heap {
     /// Starts a fresh epoch and reaches the exact strong-root fixed point iteratively.
     pub fn mark_strong(&mut self, roots: &mut dyn Trace) -> Result<MarkStats, MarkError> {
         self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
-        let mut roots = RootComposition::new(roots, &mut self.temporary_roots);
+        let mut roots =
+            RootComposition::new(roots, &mut self.temporary_roots, &mut self.persistent_roots);
         mark_strong_roots(
             &mut self.table,
             &self.types,
@@ -295,6 +303,12 @@ impl Heap {
         self.temporary_roots.stats()
     }
 
+    /// Returns isolate-owned persistent root slot usage and retained capacity.
+    #[must_use]
+    pub fn persistent_root_stats(&self) -> PersistentRootStats {
+        self.persistent_roots.stats()
+    }
+
     pub(crate) const fn temporary_root_count(&self) -> usize {
         self.temporary_roots.len()
     }
@@ -333,6 +347,73 @@ impl Heap {
             .payload_address_shared(reference.raw(), descriptor)
             .map(|payload| payload.cast::<T>())
             .map_err(NoGcBorrowError::InvalidReference)
+    }
+
+    pub(crate) fn create_persistent_root<T: Trace + 'static>(
+        &mut self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<PersistentRootId<T>, PersistentRootError> {
+        self.validate_persistent_reference(reference, object_type)?;
+        self.persistent_roots
+            .try_insert(reference.raw(), object_type.type_id())
+    }
+
+    pub(crate) fn clone_persistent_root<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<PersistentRootId<T>, PersistentRootError> {
+        if !self.types.matches(object_type) {
+            return Err(PersistentRootError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        self.persistent_roots.try_clone(id, object_type.type_id())
+    }
+
+    pub(crate) fn resolve_persistent_root<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<GcRef<T>, PersistentRootError> {
+        if !self.types.matches(object_type) {
+            return Err(PersistentRootError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        let reference = self.persistent_roots.resolve(id, object_type.type_id())?;
+        let reference = GcRef::from_raw(reference);
+        self.validate_persistent_reference(reference, object_type)?;
+        Ok(reference)
+    }
+
+    pub(crate) fn release_persistent_root<T: Trace + 'static>(
+        &mut self,
+        id: PersistentRootId<T>,
+        object_type: GcType<T>,
+    ) -> Result<(), PersistentRootError> {
+        if !self.types.matches(object_type) {
+            return Err(PersistentRootError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        self.persistent_roots.release(id, object_type.type_id())
+    }
+
+    fn validate_persistent_reference<T: Trace + 'static>(
+        &self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<(), PersistentRootError> {
+        if !self.types.matches(object_type) {
+            return Err(PersistentRootError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        self.verify_reference(reference.raw(), Some(object_type.type_id()))
+            .map(|_| ())
+            .map_err(PersistentRootError::InvalidReference)
     }
 
     /// Revalidates heap registry, header type, layout, and liveness before an exclusive borrow.

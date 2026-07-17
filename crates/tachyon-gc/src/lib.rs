@@ -16,6 +16,7 @@ mod handle;
 mod heap;
 mod layout;
 mod mark;
+mod persistent;
 mod registry;
 mod roots;
 mod scope;
@@ -36,15 +37,17 @@ pub use heap::{
 };
 pub use layout::{
     CARD_BITMAP_WORDS, CARD_SIZE_BYTES, CARDS_PER_SPAN, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId,
-    LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_SPANS,
-    MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SLOT_BITMAP_WORDS,
-    SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
+    LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_OBJECT_COUNT,
+    MAX_LOGICAL_SPANS, MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout,
+    SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
 };
 pub use mark::{MarkError, MarkStats};
+pub use persistent::{PersistentRootError, PersistentRootId, PersistentRootStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
 pub use roots::{TemporaryRootError, TemporaryRootStats};
 pub use scope::{
-    Local, NoGcBorrowError, NoGcScope, RootError, RunningScope, ScopedAllocationError,
+    Local, NoGcBorrowError, NoGcScope, PersistentResolveError, RootError, RunningScope,
+    ScopedAllocationError,
 };
 pub use span::{
     AllocationBitmap, CardBitmap, LargeSpanMetadata, MarkBitmap, SizeClass, SlotIndex,

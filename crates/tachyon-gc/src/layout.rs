@@ -15,6 +15,9 @@ pub const SPAN_SIZE_BYTES: usize = 64 * 1024;
 pub const MAX_LOGICAL_SPANS: usize = 1 << 16;
 /// The smallest small-object allocation slot, including its object header.
 pub const MINIMUM_SLOT_SIZE_BYTES: usize = 16;
+/// Maximum number of minimum-size objects representable by the 32-bit logical address space.
+pub const MAX_LOGICAL_OBJECT_COUNT: usize =
+    (LOGICAL_ADDRESS_SPACE_BYTES / MINIMUM_SLOT_SIZE_BYTES as u64) as usize;
 /// The maximum slot count in a span after reserving the first minimum-size offset.
 pub const MAX_SMALL_OBJECT_SLOTS: usize =
     (SPAN_SIZE_BYTES - MINIMUM_SLOT_SIZE_BYTES) / MINIMUM_SLOT_SIZE_BYTES;
@@ -33,6 +36,7 @@ const _: () = assert!(LOGICAL_ADDRESS_SPACE_BYTES == u32::MAX as u64 + 1);
 const _: () = assert!(SPAN_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(MINIMUM_SLOT_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES));
+const _: () = assert!(MAX_LOGICAL_OBJECT_COUNT <= u32::MAX as usize);
 const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(CARD_SIZE_BYTES));
 const _: () =
     assert!(MAX_LOGICAL_SPANS as u64 * SPAN_SIZE_BYTES as u64 == LOGICAL_ADDRESS_SPACE_BYTES);
@@ -209,9 +213,9 @@ const _: [(); 4] = [(); core::mem::align_of::<GcHeader>()];
 #[cfg(test)]
 mod tests {
     use super::{
-        GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_SPANS,
-        MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SPAN_SIZE_BYTES, SmallObjectLayout,
-        SmallObjectLayoutError,
+        GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES,
+        MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout,
+        SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
     };
 
     #[test]
@@ -222,6 +226,10 @@ mod tests {
         );
         assert_eq!(GC_HEADER_SIZE_BYTES, core::mem::size_of::<GcHeader>());
         assert_eq!(MINIMUM_SLOT_SIZE_BYTES, 16);
+        assert_eq!(
+            MAX_LOGICAL_OBJECT_COUNT * MINIMUM_SLOT_SIZE_BYTES,
+            LOGICAL_ADDRESS_SPACE_BYTES as usize
+        );
     }
 
     #[test]
