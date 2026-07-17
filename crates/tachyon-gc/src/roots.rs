@@ -174,6 +174,15 @@ mod tests {
         fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
             *reference = RawHeapRef::new(reference.offset() + 16).unwrap();
         }
+
+        fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>) {
+            *reference =
+                reference.map(|reference| RawHeapRef::new(reference.offset() + 16).unwrap());
+        }
+
+        fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, _: &mut Value) {
+            self.trace_weak_raw_heap_ref(key);
+        }
     }
 
     #[test]

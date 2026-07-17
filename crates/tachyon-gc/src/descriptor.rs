@@ -156,6 +156,14 @@ mod tests {
         fn trace_raw_heap_ref(&mut self, _: &mut RawHeapRef) {
             self.0 += 1;
         }
+
+        fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>) {
+            self.0 += usize::from(reference.is_some());
+        }
+
+        fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value) {
+            self.0 += usize::from(key.is_some()) + usize::from(value.as_heap_ref().is_some());
+        }
     }
 
     struct Pair {

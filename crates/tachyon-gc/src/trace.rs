@@ -23,6 +23,12 @@ pub trait Tracer {
 
     /// Visits an encoded object reference held outside a `Value`.
     fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef);
+
+    /// Visits a nullable weak edge without treating its target as strongly reachable.
+    fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>);
+
+    /// Visits a weak key whose value becomes strong only after the key is proven live.
+    fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value);
 }
 
 impl Trace for Value {
@@ -97,6 +103,15 @@ mod tests {
         fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
             self.raw_references += 1;
             *reference = rewrite(*reference);
+        }
+
+        fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>) {
+            *reference = reference.map(rewrite);
+        }
+
+        fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value) {
+            *key = key.map(rewrite);
+            self.trace_value(value);
         }
     }
 

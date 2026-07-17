@@ -630,6 +630,15 @@ mod tests {
         fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
             *reference = rewrite(*reference);
         }
+
+        fn trace_weak_raw_heap_ref(&mut self, reference: &mut Option<RawHeapRef>) {
+            *reference = reference.map(rewrite);
+        }
+
+        fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value) {
+            *key = key.map(rewrite);
+            self.trace_value(value);
+        }
     }
 
     fn rewrite(reference: RawHeapRef) -> RawHeapRef {

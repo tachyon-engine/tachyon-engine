@@ -26,6 +26,7 @@ mod sweep;
 mod table;
 mod trace;
 mod tuning;
+mod weak;
 
 pub use descriptor::{DropObjectFn, GcType, TraceObjectFn, TypeDescriptor};
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
@@ -61,3 +62,4 @@ pub use table::{
 };
 pub use tachyon_value::{RawHeapRef, SpanId, SpanOffset};
 pub use trace::{Trace, Tracer};
+pub use weak::{Ephemeron, WeakGcRef, WeakOwnerError, WeakOwnerStats};
