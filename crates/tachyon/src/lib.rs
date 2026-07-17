@@ -228,4 +228,28 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
     }
+
+    #[test]
+    fn logical_not_uses_the_shared_truthiness_contract() {
+        let source = SourceText::new(
+            SourceId::new(10),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("!0;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 3,
+                    quantum: 3,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value) if value.as_immediate() == Some(tachyon_value::Immediate::True)
+        ));
+    }
 }

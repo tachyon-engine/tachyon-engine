@@ -181,6 +181,14 @@ impl Isolate {
                 let value = self.read(base, operands[1])?;
                 self.write(base, operands[0], value)?;
             }
+            Opcode::Not => {
+                let value = if is_truthy(self.read(base, operands[1])?) {
+                    Value::from_immediate(Immediate::False)
+                } else {
+                    Value::from_immediate(Immediate::True)
+                };
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;

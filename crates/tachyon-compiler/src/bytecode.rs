@@ -8,8 +8,8 @@ use tachyon_bytecode::{
 
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirProgram,
-    HirStatementKind, HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName,
-    SourceSpan, SourceText,
+    HirStatementKind, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    ProgramKind, SourceName, SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -155,6 +155,19 @@ impl Lowerer {
             }
             HirExpressionKind::Boolean(value) => self.load_boolean(*value, expression.span),
             HirExpressionKind::Null => self.load_null(expression.span),
+            HirExpressionKind::Unary {
+                operator: HirUnaryOperator::Not,
+                argument,
+            } => {
+                let argument = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::Not,
+                    &[destination.index(), argument.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Binary {
                 operator,
                 left,
@@ -408,6 +421,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             1,
             "bytecode instructions",
         ),
+        HirExpressionKind::Unary { argument, .. } => expression_instruction_count(argument),
         HirExpressionKind::Conditional {
             test,
             consequent,
@@ -508,6 +522,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             "bytecode labels",
         ),
         HirExpressionKind::Assignment { value, .. } => expression_label_count(value),
+        HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {
             test,
             consequent,
@@ -537,6 +552,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::Assignment { value, .. } => expression_literal_count(value),
+        HirExpressionKind::Unary { argument, .. } => expression_literal_count(argument),
         HirExpressionKind::Conditional {
             test,
             consequent,

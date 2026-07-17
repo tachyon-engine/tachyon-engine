@@ -128,6 +128,7 @@ pub enum Opcode {
     LoadNull = 20,
     LoadFalse = 21,
     LoadTrue = 22,
+    Not = 23,
 }
 
 impl Opcode {
@@ -145,6 +146,7 @@ impl Opcode {
             Self::LoadImmediate
             | Self::LoadConstant
             | Self::Move
+            | Self::Not
             | Self::JumpIfFalse
             | Self::CreateClosure
             | Self::LoadScope
@@ -190,6 +192,7 @@ impl Opcode {
             20 => Some(Self::LoadNull),
             21 => Some(Self::LoadFalse),
             22 => Some(Self::LoadTrue),
+            23 => Some(Self::Not),
             _ => None,
         }
     }
@@ -649,6 +652,7 @@ impl BytecodeBuilder {
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::Move => &[0, 1],
+            Opcode::Not => &[0, 1],
             Opcode::JumpIfFalse => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1430,6 +1434,10 @@ fn verify_instruction(
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
         Opcode::Move => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+        }
+        Opcode::Not => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
