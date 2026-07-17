@@ -36,4 +36,25 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
     }
+
+    #[test]
+    fn source_to_verified_module_to_number_result() {
+        let source = SourceText::new(
+            SourceId::new(1),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("1.5 + 2.5;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_f64() == Some(4.0)));
+    }
 }

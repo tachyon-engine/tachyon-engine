@@ -12,7 +12,8 @@
 use core::cell::Cell;
 
 use tachyon_bytecode::{
-    CompiledModule, FunctionId, Opcode, RegisterId, WordOffset, decode_instruction,
+    BytecodeConstant, CompiledModule, FunctionId, Opcode, RegisterId, WordOffset,
+    decode_instruction,
 };
 use tachyon_value::{Immediate, Value};
 
@@ -40,6 +41,7 @@ pub enum ExecutionError {
     RegisterAllocationFailed,
     DecodeInvariant(WordOffset),
     UnsupportedOpcode(Opcode),
+    UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
 }
 
@@ -129,7 +131,7 @@ impl Isolate {
             budget.fuel -= 1;
             budget.quantum -= 1;
             if let Some(outcome) =
-                self.dispatch(instruction.opcode, instruction.operands, frame.base)?
+                self.dispatch(module, instruction.opcode, instruction.operands, frame.base)?
             {
                 return Ok(Some(outcome));
             }
@@ -141,6 +143,7 @@ impl Isolate {
     #[inline(always)]
     fn dispatch(
         &mut self,
+        module: &CompiledModule,
         opcode: Opcode,
         operands: [u32; 3],
         base: u32,
@@ -148,6 +151,17 @@ impl Isolate {
         match opcode {
             Opcode::LoadImmediate => {
                 self.write(base, operands[0], Value::from_i32(operands[1] as i32))?
+            }
+            Opcode::LoadConstant => {
+                let constant = module
+                    .constants()
+                    .get(operands[1] as usize)
+                    .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?;
+                let value = match constant {
+                    BytecodeConstant::NumberBits(bits) => Value::from_f64(f64::from_bits(*bits)),
+                    _ => return Err(ExecutionError::UnsupportedConstant(operands[1])),
+                };
+                self.write(base, operands[0], value)?;
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
