@@ -196,6 +196,12 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::Jump => self.set_pc(WordOffset::new(operands[0])),
+            Opcode::JumpIfFalse => {
+                if !is_truthy(self.read(base, operands[0])?) {
+                    self.set_pc(WordOffset::new(operands[1]));
+                }
+            }
             Opcode::Return => {
                 return Ok(Some(RunOutcome::Completed(self.read(base, operands[0])?)));
             }
@@ -255,6 +261,15 @@ impl Isolate {
         *slot = value;
         Ok(())
     }
+
+    #[inline(always)]
+    fn set_pc(&mut self, pc: WordOffset) {
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("frame remains active while jumping")
+            .pc = pc;
+    }
 }
 
 #[inline(always)]
@@ -297,6 +312,20 @@ fn strict_equal(left: Value, right: Value) -> bool {
 #[inline(always)]
 fn numeric_value(value: Value) -> Option<f64> {
     value.as_i32().map(f64::from).or_else(|| value.as_f64())
+}
+
+#[inline(always)]
+fn is_truthy(value: Value) -> bool {
+    if let Some(integer) = value.as_i32() {
+        return integer != 0;
+    }
+    if let Some(number) = value.as_f64() {
+        return number != 0.0 && !number.is_nan();
+    }
+    !matches!(
+        value.as_immediate(),
+        Some(Immediate::Undefined | Immediate::Null | Immediate::False)
+    )
 }
 
 #[cfg(test)]

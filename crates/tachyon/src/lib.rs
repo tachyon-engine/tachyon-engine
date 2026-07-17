@@ -189,4 +189,43 @@ mod tests {
             RunOutcome::Completed(value) if value.as_immediate() == Some(tachyon_value::Immediate::True)
         ));
     }
+
+    #[test]
+    fn conditional_expression_branches_without_executing_the_alternate_arm() {
+        let source = SourceText::new(
+            SourceId::new(8),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("true ? 1 : 2;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(1)));
+
+        let source = SourceText::new(
+            SourceId::new(9),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("0 ? 1 : 2;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 5,
+                    quantum: 5,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
 }

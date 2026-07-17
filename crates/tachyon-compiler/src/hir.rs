@@ -129,6 +129,11 @@ pub enum HirExpressionKind {
         target: Arc<str>,
         value: Box<HirExpression>,
     },
+    Conditional {
+        test: Box<HirExpression>,
+        consequent: Box<HirExpression>,
+        alternate: Box<HirExpression>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -296,6 +301,11 @@ fn lower_expression(
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
             target: lower_assignment_target(&expression.left, expression.operator, source)?,
             value: Box::new(lower_expression(&expression.right, source)?),
+        },
+        Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
+            test: Box::new(lower_expression(&expression.test, source)?),
+            consequent: Box::new(lower_expression(&expression.consequent, source)?),
+            alternate: Box::new(lower_expression(&expression.alternate, source)?),
         },
         Expression::ParenthesizedExpression(expression) => {
             let mut lowered = lower_expression(&expression.expression, source)?;

@@ -30,7 +30,7 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
             collection: "bytecode words",
         })?;
     let mut lowerer = Lowerer {
-        builder: BytecodeBuilder::with_capacity(word_capacity, 0),
+        builder: BytecodeBuilder::with_capacity(word_capacity, hir_label_count(hir)?),
         constants: Vec::with_capacity(hir_literal_count(hir)?),
         locals: Vec::with_capacity(hir_binding_count(hir)?),
         next_register: 0,
@@ -216,12 +216,60 @@ impl Lowerer {
                 )?;
                 Ok(value)
             }
+            HirExpressionKind::Conditional {
+                test,
+                consequent,
+                alternate,
+            } => self.conditional(test, consequent, alternate, expression.span),
             _ => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span: expression.span,
                 syntax: "expression",
             }),
         }
+    }
+
+    /// Emits both arms into one result register and resolves their labels before bytecode becomes immutable.
+    fn conditional(
+        &mut self,
+        test: &HirExpression,
+        consequent: &HirExpression,
+        alternate: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let test = self.expression(test)?;
+        let alternate_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let destination = self.register()?;
+        let source_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        self.builder
+            .emit_jump_if_false(test, alternate_label, source_span)
+            .map_err(CompileError::Builder)?;
+        let consequent = self.expression(consequent)?;
+        self.emit(
+            Opcode::Move,
+            &[destination.index(), consequent.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump(end_label, source_span)
+            .map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(alternate_label)
+            .map_err(CompileError::Builder)?;
+        let alternate = self.expression(alternate)?;
+        self.emit(
+            Opcode::Move,
+            &[destination.index(), alternate.index()],
+            span,
+        )?;
+        self.builder
+            .bind_label(end_label)
+            .map_err(CompileError::Builder)?;
+        Ok(destination)
     }
 
     /// Lowers one declaration list in source order so initializers can use preceding local bindings.
@@ -360,6 +408,23 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             1,
             "bytecode instructions",
         ),
+        HirExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            let arms = checked_count_add(
+                expression_instruction_count(consequent)?,
+                expression_instruction_count(alternate)?,
+                "bytecode instructions",
+            )?;
+            let branches = checked_count_add(arms, 4, "bytecode instructions")?;
+            checked_count_add(
+                expression_instruction_count(test)?,
+                branches,
+                "bytecode instructions",
+            )
+        }
         _ => Ok(1),
     }
 }
@@ -403,6 +468,66 @@ fn hir_binding_count(hir: &HirProgram) -> Result<usize, CompileError> {
     Ok(count)
 }
 
+/// Counts every conditional label before bytecode construction so the builder's label vector stays fixed-size.
+fn hir_label_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in hir.statements() {
+        match &statement.kind {
+            HirStatementKind::Expression(expression) => {
+                count = checked_count_add(
+                    count,
+                    expression_label_count(expression)?,
+                    "bytecode labels",
+                )?;
+            }
+            HirStatementKind::VariableDeclaration(declaration) => {
+                for initializer in declaration
+                    .declarators
+                    .iter()
+                    .filter_map(|declarator| declarator.initializer.as_ref())
+                {
+                    count = checked_count_add(
+                        count,
+                        expression_label_count(initializer)?,
+                        "bytecode labels",
+                    )?;
+                }
+            }
+            HirStatementKind::Empty => {}
+        }
+    }
+    Ok(count)
+}
+
+/// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
+fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
+    match &expression.kind {
+        HirExpressionKind::Binary { left, right, .. } => checked_count_add(
+            expression_label_count(left)?,
+            expression_label_count(right)?,
+            "bytecode labels",
+        ),
+        HirExpressionKind::Assignment { value, .. } => expression_label_count(value),
+        HirExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            let nested = checked_count_add(
+                expression_label_count(test)?,
+                checked_count_add(
+                    expression_label_count(consequent)?,
+                    expression_label_count(alternate)?,
+                    "bytecode labels",
+                )?,
+                "bytecode labels",
+            )?;
+            checked_count_add(nested, 2, "bytecode labels")
+        }
+        _ => Ok(0),
+    }
+}
+
 fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Number(_) => Ok(1),
@@ -412,6 +537,19 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::Assignment { value, .. } => expression_literal_count(value),
+        HirExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => checked_count_add(
+            expression_literal_count(test)?,
+            checked_count_add(
+                expression_literal_count(consequent)?,
+                expression_literal_count(alternate)?,
+                "bytecode constants",
+            )?,
+            "bytecode constants",
+        ),
         _ => Ok(0),
     }
 }
