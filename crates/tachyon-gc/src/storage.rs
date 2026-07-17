@@ -1,7 +1,7 @@
 //! Rust-allocator-backed native storage for logical spans.
 
 use crate::{
-    GcHeader, MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES, SlotIndex, SmallObjectLayout,
+    GcHeader, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SPAN_SIZE_BYTES, SlotIndex,
     SmallObjectLayoutError, SpanOffset,
 };
 
@@ -17,6 +17,7 @@ pub enum SpanStorageAccessError {
     MisalignedObjectOffset(SpanOffset),
     ObjectCrossesSpanEnd(SpanOffset),
     InvalidPayloadLayout(SmallObjectLayoutError),
+    PayloadAlignmentTooLarge { alignment: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -34,11 +35,24 @@ pub struct SpanStorage {
 impl SpanStorage {
     /// Allocates and initializes one complete span without an infallible growth operation.
     pub fn try_new() -> Result<Self, SpanStorageAllocationError> {
+        Self::try_new_span_count(1)
+    }
+
+    /// Allocates one independent contiguous backing store for a logical span range.
+    pub(crate) fn try_new_span_count(
+        span_count: usize,
+    ) -> Result<Self, SpanStorageAllocationError> {
+        if span_count == 0 {
+            return Err(SpanStorageAllocationError);
+        }
+        let block_count = BLOCKS_PER_SPAN
+            .checked_mul(span_count)
+            .ok_or(SpanStorageAllocationError)?;
         let mut blocks = Vec::new();
         blocks
-            .try_reserve_exact(BLOCKS_PER_SPAN)
+            .try_reserve_exact(block_count)
             .map_err(|_| SpanStorageAllocationError)?;
-        blocks.resize(BLOCKS_PER_SPAN, AlignedBlock([0; MINIMUM_SLOT_SIZE_BYTES]));
+        blocks.resize(block_count, AlignedBlock([0; MINIMUM_SLOT_SIZE_BYTES]));
         Ok(Self { blocks })
     }
 
@@ -50,14 +64,14 @@ impl SpanStorage {
 
     /// Returns the fixed initialized storage length.
     #[must_use]
-    pub const fn len(&self) -> usize {
-        SPAN_SIZE_BYTES
+    pub fn len(&self) -> usize {
+        self.blocks.len() * MINIMUM_SLOT_SIZE_BYTES
     }
 
     /// Returns false because every valid storage allocation is exactly one logical span.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        false
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
     }
 
     /// Initializes a complete header and payload after validating alignment and the span tail.
@@ -67,13 +81,18 @@ impl SpanStorage {
         header: GcHeader,
         value: T,
     ) -> Result<(), SpanStorageAccessError> {
-        let layout = SmallObjectLayout::for_type::<T>()
-            .map_err(SpanStorageAccessError::InvalidPayloadLayout)?;
+        let layout =
+            ObjectLayout::for_type::<T>().map_err(SpanStorageAccessError::InvalidPayloadLayout)?;
+        if layout.alignment() > MINIMUM_SLOT_SIZE_BYTES {
+            return Err(SpanStorageAccessError::PayloadAlignmentTooLarge {
+                alignment: layout.alignment(),
+            });
+        }
         let object_offset = offset.get() as usize;
         if !object_offset.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES) {
             return Err(SpanStorageAccessError::MisalignedObjectOffset(offset));
         }
-        if object_offset + layout.slot_size() as usize > SPAN_SIZE_BYTES {
+        if object_offset + layout.allocation_size() > self.len() {
             return Err(SpanStorageAccessError::ObjectCrossesSpanEnd(offset));
         }
 
@@ -82,9 +101,7 @@ impl SpanStorage {
             .as_mut_ptr()
             .cast::<u8>()
             .wrapping_add(object_offset);
-        let payload = object
-            .wrapping_add(layout.payload_offset() as usize)
-            .cast::<T>();
+        let payload = object.wrapping_add(layout.payload_offset()).cast::<T>();
         debug_assert_eq!(object.addr() % core::mem::align_of::<GcHeader>(), 0);
         debug_assert_eq!(payload.addr() % core::mem::align_of::<T>(), 0);
         // SAFETY: the checks above keep both writes inside uniquely borrowed aligned span storage;
@@ -102,7 +119,7 @@ impl SpanStorage {
         if !object_offset.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES) {
             return Err(SpanStorageAccessError::MisalignedObjectOffset(offset));
         }
-        if object_offset + core::mem::size_of::<GcHeader>() > SPAN_SIZE_BYTES {
+        if object_offset + core::mem::size_of::<GcHeader>() > self.len() {
             return Err(SpanStorageAccessError::ObjectCrossesSpanEnd(offset));
         }
         let object = self
@@ -139,6 +156,13 @@ mod tests {
         let storage = SpanStorage::try_new().expect("test can allocate one span");
         assert_eq!(storage.len(), SPAN_SIZE_BYTES);
         assert!(!storage.is_empty());
+        assert_eq!(storage.base_address().addr() % 16, 0);
+    }
+
+    #[test]
+    fn contiguous_storage_scales_by_whole_logical_spans() {
+        let storage = SpanStorage::try_new_span_count(3).unwrap();
+        assert_eq!(storage.len(), 3 * SPAN_SIZE_BYTES);
         assert_eq!(storage.base_address().addr() % 16, 0);
     }
 

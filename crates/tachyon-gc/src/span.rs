@@ -43,6 +43,67 @@ pub enum SweepState {
     InProgress(CollectionEpoch),
 }
 
+/// Owner-side metadata for one non-moving object spanning contiguous logical IDs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeSpanMetadata {
+    span_count: u32,
+    object_bytes: usize,
+    allocated: bool,
+    mark_epoch: Option<CollectionEpoch>,
+    reuse_generation: SpanReuseGeneration,
+}
+
+impl LargeSpanMetadata {
+    #[must_use]
+    pub const fn new(
+        span_count: u32,
+        object_bytes: usize,
+        reuse_generation: SpanReuseGeneration,
+    ) -> Self {
+        Self {
+            span_count,
+            object_bytes,
+            allocated: true,
+            mark_epoch: None,
+            reuse_generation,
+        }
+    }
+
+    #[must_use]
+    pub const fn span_count(self) -> u32 {
+        self.span_count
+    }
+
+    #[must_use]
+    pub const fn object_bytes(self) -> usize {
+        self.object_bytes
+    }
+
+    #[must_use]
+    pub const fn is_allocated(self) -> bool {
+        self.allocated
+    }
+
+    #[must_use]
+    pub const fn mark_epoch(self) -> Option<CollectionEpoch> {
+        self.mark_epoch
+    }
+
+    #[must_use]
+    pub const fn reuse_generation(self) -> SpanReuseGeneration {
+        self.reuse_generation
+    }
+
+    pub(crate) fn reclaim(&mut self) {
+        self.allocated = false;
+        self.mark_epoch = None;
+    }
+
+    pub(crate) fn reset_mark_epoch(&mut self) {
+        self.mark_epoch = None;
+    }
+}
+
 /// A bitmap index validated against the largest possible small-object slot count.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
@@ -329,6 +390,10 @@ impl SmallSpanMetadata {
     #[must_use]
     pub const fn reuse_generation(&self) -> SpanReuseGeneration {
         self.reuse_generation
+    }
+
+    pub(crate) fn set_reuse_generation(&mut self, generation: SpanReuseGeneration) {
+        self.reuse_generation = generation;
     }
 
     /// Returns the number of initialized object slots.

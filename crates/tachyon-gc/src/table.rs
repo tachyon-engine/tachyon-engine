@@ -1,9 +1,11 @@
 //! Stable logical span indexing over independently allocated native storage.
 
+use core::ops::{Deref, DerefMut};
+
 use crate::{
-    CollectionEpoch, GcHeader, GcRef, GcTypeId, MAX_LOGICAL_SPANS, RawHeapRef, SizeClass,
-    SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata, SpanId, SpanReuseGeneration,
-    SpanSpace, SpanStorage, SpanStorageAllocationError, Trace,
+    CollectionEpoch, GcHeader, GcRef, GcTypeId, LargeSpanMetadata, MAX_LOGICAL_SPANS, ObjectLayout,
+    RawHeapRef, SizeClass, SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata, SpanId,
+    SpanReuseGeneration, SpanSpace, SpanStorage, SpanStorageAllocationError, Trace,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_FREE_RANGE_CAPACITY,
         INITIAL_SPAN_TABLE_CAPACITY,
@@ -19,9 +21,12 @@ pub enum SpanTableError {
     TableAllocationFailed,
     FreeRangeAllocationFailed,
     StorageAllocationFailed,
+    MetadataAllocationFailed,
     UnknownSpan(SpanId),
     VacantSpan(SpanId),
     LiveSpan(SpanId),
+    LargeOwnerSpan(SpanId),
+    LargeContinuationSpan { span: SpanId, owner: SpanId },
 }
 
 /// A rejected object allocation that leaves every published allocation bit unchanged.
@@ -33,6 +38,40 @@ pub enum SmallAllocationError {
     SpanFull(SpanId),
     InvalidInlineLayout(SmallObjectLayoutError),
     SizeClassTooSmall { required: u16, actual: u16 },
+}
+
+/// A large-object range or storage failure before an owner entry becomes visible.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LargeAllocationError {
+    AddressSpaceExhausted,
+    TableAllocationFailed,
+    StorageAllocationFailed,
+    PayloadAlignmentTooLarge { alignment: usize },
+}
+
+/// Accounting returned after an already-dropped large owner range is released.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeReclaim {
+    span_count: u32,
+    storage_bytes: usize,
+    object_bytes: usize,
+}
+
+impl LargeReclaim {
+    #[must_use]
+    pub const fn span_count(self) -> u32 {
+        self.span_count
+    }
+
+    #[must_use]
+    pub const fn storage_bytes(self) -> usize {
+        self.storage_bytes
+    }
+
+    #[must_use]
+    pub const fn object_bytes(self) -> usize {
+        self.object_bytes
+    }
 }
 
 /// A failed exact-reference check at the collector/debug boundary.
@@ -51,6 +90,12 @@ pub enum HeapReferenceError {
         expected: GcTypeId,
         actual: GcTypeId,
     },
+    LargeOwnerOffset(RawHeapRef),
+    LargeContinuationReference {
+        reference: RawHeapRef,
+        owner: SpanId,
+        ordinal: u32,
+    },
 }
 
 impl From<SpanStorageAllocationError> for SpanTableError {
@@ -61,12 +106,70 @@ impl From<SpanStorageAllocationError> for SpanTableError {
 
 struct SmallSpan {
     storage: SpanStorage,
-    metadata: SmallSpanMetadata,
+    metadata: MetadataBox<SmallSpanMetadata>,
+}
+
+impl SmallSpan {
+    fn try_new(
+        storage: SpanStorage,
+        size_class: SizeClass,
+        space: SpanSpace,
+        generation: SpanReuseGeneration,
+    ) -> Result<Self, SpanTableError> {
+        Ok(Self {
+            storage,
+            metadata: MetadataBox::try_new(SmallSpanMetadata::new(size_class, space, generation))?,
+        })
+    }
+}
+
+struct MetadataBox<T>(Vec<T>);
+
+impl<T> MetadataBox<T> {
+    fn try_new(value: T) -> Result<Self, SpanTableError> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(1)
+            .map_err(|_| SpanTableError::MetadataAllocationFailed)?;
+        values.push(value);
+        Ok(Self(values))
+    }
+}
+
+impl<T> Deref for MetadataBox<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0[0]
+    }
+}
+
+impl<T> DerefMut for MetadataBox<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0[0]
+    }
+}
+
+struct LargeSpan {
+    storage: SpanStorage,
+    metadata: LargeSpanMetadata,
+}
+
+#[derive(Clone, Copy)]
+struct LargeContinuation {
+    owner: SpanId,
+    ordinal: u32,
+}
+
+enum SpanKind {
+    Small(SmallSpan),
+    LargeOwner(LargeSpan),
+    LargeContinuation(LargeContinuation),
 }
 
 struct SpanEntry {
     generation: SpanReuseGeneration,
-    span: Option<SmallSpan>,
+    kind: Option<SpanKind>,
 }
 
 /// A coalesced inclusive range of vacant logical span IDs.
@@ -74,6 +177,20 @@ struct SpanEntry {
 struct FreeSpanRange {
     start: u16,
     end: u16,
+}
+
+#[derive(Clone, Copy)]
+enum SpanRangePlacement {
+    Reused { owner: SpanId },
+    Append { owner: SpanId },
+}
+
+impl SpanRangePlacement {
+    const fn owner(self) -> SpanId {
+        match self {
+            Self::Reused { owner } | Self::Append { owner } => owner,
+        }
+    }
 }
 
 /// An isolate-local mapping whose entry indices remain stable across metadata-vector growth.
@@ -102,12 +219,13 @@ impl SpanTable {
         space: SpanSpace,
     ) -> Result<SpanId, SpanTableError> {
         let storage = SpanStorage::try_new()?;
+        let span = SmallSpan::try_new(storage, size_class, space, SpanReuseGeneration::INITIAL)?;
         if let Some(span_id) = self.take_free_span() {
-            self.install_reused(span_id, storage, size_class, space);
+            self.install_reused(span_id, span);
             return Ok(span_id);
         }
 
-        self.install_new(storage, size_class, space)
+        self.install_new(span)
     }
 
     /// Releases native storage while retaining the table index and its incremented reuse generation.
@@ -116,20 +234,26 @@ impl SpanTable {
         let Some(entry) = self.entries.get(index) else {
             return Err(SpanTableError::UnknownSpan(span_id));
         };
-        if entry.span.is_none() {
+        if entry.kind.is_none() {
             return Err(SpanTableError::VacantSpan(span_id));
         }
-        if entry
-            .span
-            .as_ref()
-            .is_some_and(|span| span.metadata.allocated_slots() != 0)
-        {
-            return Err(SpanTableError::LiveSpan(span_id));
+        match entry.kind.as_ref().expect("checked occupied entry") {
+            SpanKind::Small(span) if span.metadata.allocated_slots() != 0 => {
+                return Err(SpanTableError::LiveSpan(span_id));
+            }
+            SpanKind::Small(_) => {}
+            SpanKind::LargeOwner(_) => return Err(SpanTableError::LargeOwnerSpan(span_id)),
+            SpanKind::LargeContinuation(continuation) => {
+                return Err(SpanTableError::LargeContinuationSpan {
+                    span: span_id,
+                    owner: continuation.owner,
+                });
+            }
         }
         self.reserve_free_range_if_needed(span_id.index())?;
 
         let entry = &mut self.entries[index];
-        entry.span = None;
+        entry.kind = None;
         entry.generation = entry.generation.next();
         self.insert_free_span(span_id.index());
         self.live_spans -= 1;
@@ -139,31 +263,56 @@ impl SpanTable {
     /// Resolves through the current table entry every time instead of caching a native object pointer.
     #[must_use]
     pub fn base_address(&self, span_id: SpanId) -> Option<*const u8> {
-        self.entries
-            .get(span_id.index() as usize)?
-            .span
-            .as_ref()
-            .map(|span| span.storage.base_address())
+        match self.entries.get(span_id.index() as usize)?.kind.as_ref()? {
+            SpanKind::Small(span) => Some(span.storage.base_address()),
+            SpanKind::LargeOwner(span) => Some(span.storage.base_address()),
+            SpanKind::LargeContinuation(continuation) => {
+                let owner = self.entries.get(continuation.owner.index() as usize)?;
+                let SpanKind::LargeOwner(span) = owner.kind.as_ref()? else {
+                    return None;
+                };
+                Some(
+                    span.storage
+                        .base_address()
+                        .wrapping_add(continuation.ordinal as usize * crate::SPAN_SIZE_BYTES),
+                )
+            }
+        }
     }
 
     /// Returns immutable side metadata for collector and verifier operations.
     #[must_use]
     pub fn metadata(&self, span_id: SpanId) -> Option<&SmallSpanMetadata> {
-        self.entries
-            .get(span_id.index() as usize)?
-            .span
-            .as_ref()
-            .map(|span| &span.metadata)
+        let SpanKind::Small(span) = self.entries.get(span_id.index() as usize)?.kind.as_ref()?
+        else {
+            return None;
+        };
+        Some(&span.metadata)
     }
 
     /// Returns mutable side metadata while preserving exclusive isolate ownership.
     #[must_use]
     pub fn metadata_mut(&mut self, span_id: SpanId) -> Option<&mut SmallSpanMetadata> {
-        self.entries
+        let SpanKind::Small(span) = self
+            .entries
             .get_mut(span_id.index() as usize)?
-            .span
-            .as_mut()
-            .map(|span| &mut span.metadata)
+            .kind
+            .as_mut()?
+        else {
+            return None;
+        };
+        Some(&mut span.metadata)
+    }
+
+    /// Returns owner metadata only when the ID names the beginning of a large range.
+    #[must_use]
+    pub fn large_metadata(&self, span_id: SpanId) -> Option<LargeSpanMetadata> {
+        let SpanKind::LargeOwner(span) =
+            self.entries.get(span_id.index() as usize)?.kind.as_ref()?
+        else {
+            return None;
+        };
+        Some(span.metadata)
     }
 
     /// Returns the count of currently backed entries.
@@ -190,8 +339,49 @@ impl SpanTable {
     pub fn can_allocate_in_span(&self, span_id: SpanId) -> bool {
         self.entries
             .get(span_id.index() as usize)
-            .and_then(|entry| entry.span.as_ref())
-            .is_some_and(|span| span.metadata.has_allocation_capacity())
+            .and_then(|entry| entry.kind.as_ref())
+            .is_some_and(|kind| match kind {
+                SpanKind::Small(span) => span.metadata.has_allocation_capacity(),
+                SpanKind::LargeOwner(_) | SpanKind::LargeContinuation(_) => false,
+            })
+    }
+
+    /// Allocates one independently backed large object and publishes its contiguous logical range.
+    pub(crate) fn try_allocate_large<T: Trace>(
+        &mut self,
+        type_id: GcTypeId,
+        flags: u16,
+        aux: u32,
+        value: T,
+    ) -> Result<(GcRef<T>, usize), LargeAllocationError> {
+        let layout = ObjectLayout::for_type::<T>()
+            .map_err(|_| LargeAllocationError::AddressSpaceExhausted)?;
+        if layout.alignment() > crate::MINIMUM_SLOT_SIZE_BYTES {
+            return Err(LargeAllocationError::PayloadAlignmentTooLarge {
+                alignment: layout.alignment(),
+            });
+        }
+        let logical_bytes = crate::MINIMUM_SLOT_SIZE_BYTES
+            .checked_add(layout.allocation_size())
+            .ok_or(LargeAllocationError::AddressSpaceExhausted)?;
+        let span_count = logical_bytes.div_ceil(crate::SPAN_SIZE_BYTES);
+        if span_count == 0 || span_count > MAX_LOGICAL_SPANS {
+            return Err(LargeAllocationError::AddressSpaceExhausted);
+        }
+        let mut storage = SpanStorage::try_new_span_count(span_count)
+            .map_err(|_| LargeAllocationError::StorageAllocationFailed)?;
+        let placement = self.reserve_span_range(span_count)?;
+        let owner = placement.owner();
+        let offset = crate::SpanOffset::new(crate::MINIMUM_SLOT_SIZE_BYTES as u16)
+            .expect("large owners reserve the non-zero first slot offset");
+        storage
+            .initialize(offset, GcHeader::new(type_id, flags, aux), value)
+            .expect("large range sizing and alignment were validated before publication");
+        self.install_large(placement, storage, layout.allocation_size(), span_count);
+        Ok((
+            GcRef::from_raw(RawHeapRef::from_parts(owner, offset)),
+            span_count * crate::SPAN_SIZE_BYTES,
+        ))
     }
 
     /// Initializes one typed object in a selected span without invoking a table/GC slow path.
@@ -206,13 +396,16 @@ impl SpanTable {
     ) -> Result<GcRef<T>, SmallAllocationError> {
         let layout = SmallObjectLayout::for_type::<T>()
             .map_err(SmallAllocationError::InvalidInlineLayout)?;
-        let span = self
+        let kind = self
             .entries
             .get_mut(span_id.index() as usize)
             .ok_or(SmallAllocationError::UnknownSpan(span_id))?
-            .span
+            .kind
             .as_mut()
             .ok_or(SmallAllocationError::VacantSpan(span_id))?;
+        let SpanKind::Small(span) = kind else {
+            return Err(SmallAllocationError::SpanFull(span_id));
+        };
         let actual = span.metadata.size_class().slot_size();
         if layout.slot_size() > actual {
             return Err(SmallAllocationError::SizeClassTooSmall {
@@ -233,8 +426,8 @@ impl SpanTable {
         Ok(GcRef::from_raw(RawHeapRef::from_parts(span_id, offset)))
     }
 
-    /// Verifies a live small object without relying on native page faults or cached pointers.
-    pub fn verify_small_reference(
+    /// Verifies a live small or large owner without native page faults or cached pointers.
+    pub fn verify_reference(
         &self,
         reference: RawHeapRef,
         expected_type: Option<GcTypeId>,
@@ -244,22 +437,31 @@ impl SpanTable {
             .entries
             .get(span_id.index() as usize)
             .ok_or(HeapReferenceError::UnknownSpan(span_id))?;
-        let span = entry
-            .span
+        let kind = entry
+            .kind
             .as_ref()
             .ok_or(HeapReferenceError::VacantSpan(span_id))?;
-        let slot = span
-            .metadata
-            .size_class()
-            .slot_for_offset(reference.span_offset())
-            .ok_or(HeapReferenceError::InvalidSlotBoundary(reference))?;
-        if !span.metadata.allocations().is_allocated(slot) {
-            return Err(HeapReferenceError::UnallocatedSlot(reference));
-        }
-        let header = span
-            .storage
-            .header(reference.span_offset())
-            .expect("validated small-object slots always contain a complete header");
+        let header = match kind {
+            SpanKind::Small(span) => verify_small_span(span, reference)?,
+            SpanKind::LargeOwner(span) => {
+                if reference.span_offset().get() != crate::MINIMUM_SLOT_SIZE_BYTES as u16 {
+                    return Err(HeapReferenceError::LargeOwnerOffset(reference));
+                }
+                if !span.metadata.is_allocated() {
+                    return Err(HeapReferenceError::UnallocatedSlot(reference));
+                }
+                span.storage
+                    .header(reference.span_offset())
+                    .expect("large owner storage contains a complete header")
+            }
+            SpanKind::LargeContinuation(continuation) => {
+                return Err(HeapReferenceError::LargeContinuationReference {
+                    reference,
+                    owner: continuation.owner,
+                    ordinal: continuation.ordinal,
+                });
+            }
+        };
         let actual = header
             .type_id()
             .ok_or(HeapReferenceError::InvalidTypeId(reference))?;
@@ -279,7 +481,11 @@ impl SpanTable {
         let Some(span) = self
             .entries
             .get_mut(reference.span_id().index() as usize)
-            .and_then(|entry| entry.span.as_mut())
+            .and_then(|entry| entry.kind.as_mut())
+            .and_then(|kind| match kind {
+                SpanKind::Small(span) => Some(span),
+                SpanKind::LargeOwner(_) | SpanKind::LargeContinuation(_) => None,
+            })
         else {
             return false;
         };
@@ -302,14 +508,71 @@ impl SpanTable {
         true
     }
 
+    /// Releases a complete already-dropped large owner/continuation range for exact reuse.
+    pub fn reclaim_large_after_drop(
+        &mut self,
+        reference: RawHeapRef,
+    ) -> Result<LargeReclaim, SpanTableError> {
+        let owner = reference.span_id();
+        if reference.span_offset().get() != crate::MINIMUM_SLOT_SIZE_BYTES as u16 {
+            return Err(SpanTableError::LargeOwnerSpan(owner));
+        }
+        let (span_count, object_bytes) = match self
+            .entries
+            .get(owner.index() as usize)
+            .and_then(|entry| entry.kind.as_ref())
+        {
+            Some(SpanKind::LargeOwner(span)) if span.metadata.is_allocated() => (
+                span.metadata.span_count() as usize,
+                span.metadata.object_bytes(),
+            ),
+            Some(SpanKind::LargeContinuation(continuation)) => {
+                return Err(SpanTableError::LargeContinuationSpan {
+                    span: owner,
+                    owner: continuation.owner,
+                });
+            }
+            Some(SpanKind::Small(_)) => return Err(SpanTableError::LargeOwnerSpan(owner)),
+            Some(SpanKind::LargeOwner(_)) | None => return Err(SpanTableError::VacantSpan(owner)),
+        };
+        self.reserve_free_range_if_needed(owner.index())?;
+        if let Some(SpanKind::LargeOwner(span)) = self.entries[owner.index() as usize].kind.as_mut()
+        {
+            span.metadata.reclaim();
+        }
+        for ordinal in 0..span_count {
+            let entry = &mut self.entries[owner.index() as usize + ordinal];
+            if ordinal != 0 {
+                debug_assert!(matches!(
+                    &entry.kind,
+                    Some(SpanKind::LargeContinuation(continuation))
+                        if continuation.owner == owner && continuation.ordinal as usize == ordinal
+                ));
+            }
+            entry.kind = None;
+            entry.generation = entry.generation.next();
+            self.insert_free_span(owner.index() + ordinal as u16);
+        }
+        self.live_spans -= span_count;
+        Ok(LargeReclaim {
+            span_count: span_count as u32,
+            storage_bytes: span_count * crate::SPAN_SIZE_BYTES,
+            object_bytes,
+        })
+    }
+
     /// Advances the epoch, physically resetting every live span bitmap on the forced-wrap path.
     pub fn advance_collection_epoch(&mut self, current: CollectionEpoch) -> CollectionEpoch {
         match current.next() {
             Ok(next) => next,
             Err(_) => {
                 for entry in &mut self.entries {
-                    if let Some(span) = &mut entry.span {
-                        span.metadata.marks_mut().reset_for_epoch_overflow();
+                    match &mut entry.kind {
+                        Some(SpanKind::Small(span)) => {
+                            span.metadata.marks_mut().reset_for_epoch_overflow();
+                        }
+                        Some(SpanKind::LargeOwner(span)) => span.metadata.reset_mark_epoch(),
+                        Some(SpanKind::LargeContinuation(_)) | None => {}
                     }
                 }
                 CollectionEpoch::INITIAL
@@ -317,12 +580,7 @@ impl SpanTable {
         }
     }
 
-    fn install_new(
-        &mut self,
-        storage: SpanStorage,
-        size_class: SizeClass,
-        space: SpanSpace,
-    ) -> Result<SpanId, SpanTableError> {
+    fn install_new(&mut self, mut span: SmallSpan) -> Result<SpanId, SpanTableError> {
         if self.entries.len() == MAX_LOGICAL_SPANS {
             return Err(SpanTableError::AddressSpaceExhausted);
         }
@@ -334,42 +592,123 @@ impl SpanTable {
         )?;
         let index = u16::try_from(self.entries.len()).expect("logical span limit checked above");
         let generation = SpanReuseGeneration::INITIAL;
+        span.metadata.set_reuse_generation(generation);
         self.entries.push(SpanEntry {
             generation,
-            span: Some(SmallSpan {
-                storage,
-                metadata: SmallSpanMetadata::new(size_class, space, generation),
-            }),
+            kind: Some(SpanKind::Small(span)),
         });
         self.live_spans += 1;
         Ok(SpanId::new(index))
     }
 
-    fn install_reused(
-        &mut self,
-        span_id: SpanId,
-        storage: SpanStorage,
-        size_class: SizeClass,
-        space: SpanSpace,
-    ) {
+    fn install_reused(&mut self, span_id: SpanId, mut span: SmallSpan) {
         let entry = &mut self.entries[span_id.index() as usize];
-        debug_assert!(entry.span.is_none());
-        entry.span = Some(SmallSpan {
-            storage,
-            metadata: SmallSpanMetadata::new(size_class, space, entry.generation),
-        });
+        debug_assert!(entry.kind.is_none());
+        span.metadata.set_reuse_generation(entry.generation);
+        entry.kind = Some(SpanKind::Small(span));
         self.live_spans += 1;
     }
 
-    fn take_free_span(&mut self) -> Option<SpanId> {
-        let range = self.free_ranges.last_mut()?;
-        let index = range.end;
-        if range.start == range.end {
-            self.free_ranges.pop();
-        } else {
-            range.end -= 1;
+    /// Reserves either a free contiguous range or append capacity without publishing entries.
+    fn reserve_span_range(
+        &mut self,
+        span_count: usize,
+    ) -> Result<SpanRangePlacement, LargeAllocationError> {
+        if let Some(owner) = self.take_free_span_range(span_count) {
+            return Ok(SpanRangePlacement::Reused { owner });
         }
-        Some(SpanId::new(index))
+        let end = self
+            .entries
+            .len()
+            .checked_add(span_count)
+            .ok_or(LargeAllocationError::AddressSpaceExhausted)?;
+        if end > MAX_LOGICAL_SPANS {
+            return Err(LargeAllocationError::AddressSpaceExhausted);
+        }
+        reserve_for_additional(
+            &mut self.entries,
+            span_count,
+            INITIAL_SPAN_TABLE_CAPACITY,
+            MAX_LOGICAL_SPANS,
+            SpanTableError::TableAllocationFailed,
+        )
+        .map_err(|_| LargeAllocationError::TableAllocationFailed)?;
+        let owner = SpanId::new(
+            u16::try_from(self.entries.len())
+                .expect("range end was bounded by logical address space"),
+        );
+        Ok(SpanRangePlacement::Append { owner })
+    }
+
+    /// Installs owner and continuation metadata after storage and logical range reservation succeed.
+    fn install_large(
+        &mut self,
+        placement: SpanRangePlacement,
+        storage: SpanStorage,
+        object_bytes: usize,
+        span_count: usize,
+    ) {
+        let owner = placement.owner();
+        match placement {
+            SpanRangePlacement::Reused { .. } => {
+                let generation = self.entries[owner.index() as usize].generation;
+                self.entries[owner.index() as usize].kind = Some(SpanKind::LargeOwner(LargeSpan {
+                    storage,
+                    metadata: LargeSpanMetadata::new(span_count as u32, object_bytes, generation),
+                }));
+                for ordinal in 1..span_count {
+                    self.entries[owner.index() as usize + ordinal].kind =
+                        Some(SpanKind::LargeContinuation(LargeContinuation {
+                            owner,
+                            ordinal: ordinal as u32,
+                        }));
+                }
+            }
+            SpanRangePlacement::Append { .. } => {
+                let generation = SpanReuseGeneration::INITIAL;
+                self.entries.push(SpanEntry {
+                    generation,
+                    kind: Some(SpanKind::LargeOwner(LargeSpan {
+                        storage,
+                        metadata: LargeSpanMetadata::new(
+                            span_count as u32,
+                            object_bytes,
+                            generation,
+                        ),
+                    })),
+                });
+                for ordinal in 1..span_count {
+                    self.entries.push(SpanEntry {
+                        generation: SpanReuseGeneration::INITIAL,
+                        kind: Some(SpanKind::LargeContinuation(LargeContinuation {
+                            owner,
+                            ordinal: ordinal as u32,
+                        })),
+                    });
+                }
+            }
+        }
+        self.live_spans += span_count;
+    }
+
+    fn take_free_span(&mut self) -> Option<SpanId> {
+        self.take_free_span_range(1)
+    }
+
+    fn take_free_span_range(&mut self, span_count: usize) -> Option<SpanId> {
+        let position = self.free_ranges.iter().rposition(|range| {
+            usize::from(range.end) - usize::from(range.start) + 1 >= span_count
+        })?;
+        let range = &mut self.free_ranges[position];
+        let owner = usize::from(range.end) + 1 - span_count;
+        if owner == usize::from(range.start) {
+            self.free_ranges.remove(position);
+        } else {
+            range.end = u16::try_from(owner - 1).expect("owner remains inside a u16 range");
+        }
+        Some(SpanId::new(
+            u16::try_from(owner).expect("free range contains only logical span IDs"),
+        ))
     }
 
     fn reserve_free_range_if_needed(&mut self, index: u16) -> Result<(), SpanTableError> {
@@ -461,7 +800,19 @@ fn reserve_for_push<T>(
     maximum_capacity: usize,
     error: SpanTableError,
 ) -> Result<(), SpanTableError> {
-    if values.len() < values.capacity() {
+    reserve_for_additional(values, 1, initial_capacity, maximum_capacity, error)
+}
+
+/// Reserves a bounded centralized growth step large enough for one transactional range append.
+fn reserve_for_additional<T>(
+    values: &mut Vec<T>,
+    additional_values: usize,
+    initial_capacity: usize,
+    maximum_capacity: usize,
+    error: SpanTableError,
+) -> Result<(), SpanTableError> {
+    let required = values.len().checked_add(additional_values).ok_or(error)?;
+    if required <= values.capacity() {
         return Ok(());
     }
     let target = if values.capacity() == 0 {
@@ -472,9 +823,30 @@ fn reserve_for_push<T>(
             .saturating_mul(CAPACITY_GROWTH_NUMERATOR)
             .div_ceil(CAPACITY_GROWTH_DENOMINATOR)
     };
-    let target = target.max(values.len() + 1).min(maximum_capacity);
+    let target = target.max(required).min(maximum_capacity);
+    if target < required {
+        return Err(error);
+    }
     let additional = target - values.len();
     values.try_reserve_exact(additional).map_err(|_| error)
+}
+
+fn verify_small_span(
+    span: &SmallSpan,
+    reference: RawHeapRef,
+) -> Result<GcHeader, HeapReferenceError> {
+    let slot = span
+        .metadata
+        .size_class()
+        .slot_for_offset(reference.span_offset())
+        .ok_or(HeapReferenceError::InvalidSlotBoundary(reference))?;
+    if !span.metadata.allocations().is_allocated(slot) {
+        return Err(HeapReferenceError::UnallocatedSlot(reference));
+    }
+    Ok(span
+        .storage
+        .header(reference.span_offset())
+        .expect("validated small-object slots always contain a complete header"))
 }
 
 #[cfg(test)]
@@ -635,7 +1007,7 @@ mod tests {
             .unwrap();
 
         let header = table
-            .verify_small_reference(reference.raw(), Some(type_id))
+            .verify_reference(reference.raw(), Some(type_id))
             .unwrap();
         assert_eq!(header.type_id(), Some(type_id));
         assert_eq!(header.flags(), 0x55aa);
@@ -645,7 +1017,7 @@ mod tests {
 
         let wrong_type = GcTypeId::new(10).unwrap();
         assert_eq!(
-            table.verify_small_reference(reference.raw(), Some(wrong_type)),
+            table.verify_reference(reference.raw(), Some(wrong_type)),
             Err(HeapReferenceError::TypeMismatch {
                 expected: wrong_type,
                 actual: type_id,
@@ -653,12 +1025,12 @@ mod tests {
         );
         let unallocated = RawHeapRef::from_parts(span, SpanOffset::new(32).unwrap());
         assert_eq!(
-            table.verify_small_reference(unallocated, None),
+            table.verify_reference(unallocated, None),
             Err(HeapReferenceError::UnallocatedSlot(unallocated))
         );
         let misaligned = RawHeapRef::from_parts(span, SpanOffset::new(17).unwrap());
         assert_eq!(
-            table.verify_small_reference(misaligned, None),
+            table.verify_reference(misaligned, None),
             Err(HeapReferenceError::InvalidSlotBoundary(misaligned))
         );
     }

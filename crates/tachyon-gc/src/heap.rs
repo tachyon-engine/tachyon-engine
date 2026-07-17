@@ -1,9 +1,9 @@
 //! Small-object allocation policy over fixed logical spans.
 
 use crate::{
-    GcHeader, GcRef, GcType, GcTypeId, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES,
-    SmallAllocationError, SmallObjectLayout, SmallObjectLayoutError, SpanId, SpanSpace, SpanTable,
-    SpanTableError, Trace, TypeRegistry, tuning::SMALL_SIZE_CLASSES,
+    GcHeader, GcRef, GcType, GcTypeId, HeapReferenceError, LargeAllocationError, LargeReclaim,
+    ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId,
+    SpanSpace, SpanTable, SpanTableError, Trace, TypeRegistry, tuning::SMALL_SIZE_CLASSES,
 };
 
 /// Whether an object enters the young bump path or is allocated directly in old space.
@@ -13,23 +13,21 @@ pub enum AllocationSpace {
     Old,
 }
 
-/// A host-configured cap for native small-span storage; broader isolate accounting arrives with buffers.
+/// A host-configured hard cap shared by native spans and external backing stores.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SmallHeapLimit {
-    max_span_storage_bytes: usize,
+pub struct HeapLimit {
+    max_heap_bytes: usize,
 }
 
-impl SmallHeapLimit {
+impl HeapLimit {
     #[must_use]
-    pub const fn new(max_span_storage_bytes: usize) -> Self {
-        Self {
-            max_span_storage_bytes,
-        }
+    pub const fn new(max_heap_bytes: usize) -> Self {
+        Self { max_heap_bytes }
     }
 
     #[must_use]
-    pub const fn max_span_storage_bytes(self) -> usize {
-        self.max_span_storage_bytes
+    pub const fn max_heap_bytes(self) -> usize {
+        self.max_heap_bytes
     }
 }
 
@@ -39,34 +37,31 @@ pub enum HeapAllocationError {
     UnregisteredOrMismatchedType {
         type_id: GcTypeId,
     },
-    LargeObjectRequired {
-        required: usize,
-        alignment: usize,
-        largest_small_class: usize,
-    },
-    SmallSpanLimitExceeded {
+    HeapLimitExceeded {
         limit: usize,
         committed: usize,
         requested: usize,
     },
     SpanTable(SpanTableError),
     SpanAllocation(SmallAllocationError),
+    LargeAllocation(LargeAllocationError),
 }
 
-/// A single-mutator small-object heap with fixed per-size-class active-span slots.
-pub struct SmallHeap {
+/// A single-mutator heap with fixed small-size-class slots and direct-old large ranges.
+pub struct Heap {
     types: TypeRegistry,
     table: SpanTable,
     active_eden: [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
     active_old: [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
-    limit: SmallHeapLimit,
+    limit: HeapLimit,
     committed_span_storage_bytes: usize,
+    external_bytes: usize,
 }
 
-impl SmallHeap {
+impl Heap {
     /// Creates an empty heap without allocating a span or active-size-class side container.
     #[must_use]
-    pub const fn new(limit: SmallHeapLimit, types: TypeRegistry) -> Self {
+    pub const fn new(limit: HeapLimit, types: TypeRegistry) -> Self {
         Self {
             types,
             table: SpanTable::new(),
@@ -74,6 +69,7 @@ impl SmallHeap {
             active_old: [None; SMALL_SIZE_CLASSES.len()],
             limit,
             committed_span_storage_bytes: 0,
+            external_bytes: 0,
         }
     }
 
@@ -91,25 +87,19 @@ impl SmallHeap {
                 type_id: object_type.type_id(),
             });
         }
-        let layout = match SmallObjectLayout::for_type::<T>() {
-            Ok(layout) => layout,
-            Err(SmallObjectLayoutError::AlignmentTooLarge { alignment }) => {
-                return Err(large_object_required(
-                    core::mem::size_of::<T>() + core::mem::size_of::<crate::GcHeader>(),
-                    alignment,
-                ));
-            }
-            Err(SmallObjectLayoutError::SizeTooLarge { size }) => {
-                return Err(large_object_required(size, core::mem::align_of::<T>()));
-            }
-        };
-        let Some(class_index) = size_class_index(layout.slot_size()) else {
-            return Err(large_object_required(
-                usize::from(layout.slot_size()),
-                core::mem::align_of::<T>(),
-            ));
-        };
-        self.try_allocate_class(class_index, object_type.type_id(), flags, aux, value, space)
+        if let Ok(layout) = SmallObjectLayout::for_type::<T>()
+            && let Some(class_index) = size_class_index(layout.slot_size())
+        {
+            return self.try_allocate_class(
+                class_index,
+                object_type.type_id(),
+                flags,
+                aux,
+                value,
+                space,
+            );
+        }
+        self.allocate_large(object_type.type_id(), flags, aux, value)
     }
 
     /// Returns the logical table for collection and exact verifier operations.
@@ -136,15 +126,50 @@ impl SmallHeap {
         self.committed_span_storage_bytes
     }
 
+    /// Returns separately tracked host-backed bytes charged to the same hard heap limit.
+    #[must_use]
+    pub const fn external_bytes(&self) -> usize {
+        self.external_bytes
+    }
+
+    /// Returns all currently charged backing bytes; side-table capacity accounting is separate.
+    #[must_use]
+    pub const fn committed_heap_bytes(&self) -> usize {
+        self.committed_span_storage_bytes
+            .saturating_add(self.external_bytes)
+    }
+
+    /// Charges an external string/buffer backing before the host publishes it to JavaScript.
+    pub fn try_charge_external(&mut self, bytes: usize) -> Result<(), HeapAllocationError> {
+        let committed = self.committed_heap_bytes();
+        let total = committed.saturating_add(bytes);
+        if total > self.limit.max_heap_bytes() {
+            return Err(HeapAllocationError::HeapLimitExceeded {
+                limit: self.limit.max_heap_bytes(),
+                committed,
+                requested: bytes,
+            });
+        }
+        self.external_bytes = self.external_bytes.saturating_add(bytes);
+        Ok(())
+    }
+
+    /// Releases a previously charged external backing allocation.
+    pub fn release_external(&mut self, bytes: usize) -> bool {
+        let Some(remaining) = self.external_bytes.checked_sub(bytes) else {
+            return false;
+        };
+        self.external_bytes = remaining;
+        true
+    }
+
     /// Verifies side metadata and rejects non-zero header IDs absent from this heap's registry.
     pub fn verify_reference(
         &self,
         reference: RawHeapRef,
         expected_type: Option<GcTypeId>,
     ) -> Result<GcHeader, HeapReferenceError> {
-        let header = self
-            .table
-            .verify_small_reference(reference, expected_type)?;
+        let header = self.table.verify_reference(reference, expected_type)?;
         let type_id = header
             .type_id()
             .expect("table verification already rejected a zero type ID");
@@ -152,6 +177,16 @@ impl SmallHeap {
             return Err(HeapReferenceError::UnregisteredTypeId { reference, type_id });
         }
         Ok(header)
+    }
+
+    /// Updates committed storage after the collector has dropped a large payload and releases its range.
+    pub fn reclaim_large_after_drop(
+        &mut self,
+        reference: RawHeapRef,
+    ) -> Result<LargeReclaim, SpanTableError> {
+        let reclaimed = self.table.reclaim_large_after_drop(reference)?;
+        self.committed_span_storage_bytes -= reclaimed.storage_bytes();
+        Ok(reclaimed)
     }
 
     #[inline(always)]
@@ -191,13 +226,12 @@ impl SmallHeap {
         value: T,
         space: AllocationSpace,
     ) -> Result<GcRef<T>, HeapAllocationError> {
-        let requested = self
-            .committed_span_storage_bytes
-            .saturating_add(SPAN_SIZE_BYTES);
-        if requested > self.limit.max_span_storage_bytes() {
-            return Err(HeapAllocationError::SmallSpanLimitExceeded {
-                limit: self.limit.max_span_storage_bytes(),
-                committed: self.committed_span_storage_bytes,
+        let committed = self.committed_heap_bytes();
+        let total = committed.saturating_add(SPAN_SIZE_BYTES);
+        if total > self.limit.max_heap_bytes() {
+            return Err(HeapAllocationError::HeapLimitExceeded {
+                limit: self.limit.max_heap_bytes(),
+                committed,
                 requested: SPAN_SIZE_BYTES,
             });
         }
@@ -211,7 +245,7 @@ impl SmallHeap {
             .table
             .try_allocate_small(size_class, span_space)
             .map_err(HeapAllocationError::SpanTable)?;
-        self.committed_span_storage_bytes = requested;
+        self.committed_span_storage_bytes += SPAN_SIZE_BYTES;
         match space {
             AllocationSpace::Young => self.active_eden[class_index] = Some(span_id),
             AllocationSpace::Old => self.active_old[class_index] = Some(span_id),
@@ -219,6 +253,46 @@ impl SmallHeap {
         self.table
             .try_allocate_in_span(span_id, type_id, flags, aux, value)
             .map_err(HeapAllocationError::SpanAllocation)
+    }
+
+    /// Allocates every large, pinned-size payload directly in old space after one limit check.
+    fn allocate_large<T: Trace>(
+        &mut self,
+        type_id: GcTypeId,
+        flags: u16,
+        aux: u32,
+        value: T,
+    ) -> Result<GcRef<T>, HeapAllocationError> {
+        let layout = ObjectLayout::for_type::<T>().map_err(|_| {
+            HeapAllocationError::LargeAllocation(LargeAllocationError::AddressSpaceExhausted)
+        })?;
+        let logical_bytes = crate::MINIMUM_SLOT_SIZE_BYTES
+            .checked_add(layout.allocation_size())
+            .ok_or(HeapAllocationError::LargeAllocation(
+                LargeAllocationError::AddressSpaceExhausted,
+            ))?;
+        let requested = logical_bytes
+            .div_ceil(SPAN_SIZE_BYTES)
+            .checked_mul(SPAN_SIZE_BYTES)
+            .ok_or(HeapAllocationError::LargeAllocation(
+                LargeAllocationError::AddressSpaceExhausted,
+            ))?;
+        let current = self.committed_heap_bytes();
+        let committed = current.saturating_add(requested);
+        if committed > self.limit.max_heap_bytes() {
+            return Err(HeapAllocationError::HeapLimitExceeded {
+                limit: self.limit.max_heap_bytes(),
+                committed: current,
+                requested,
+            });
+        }
+        let (reference, actual_bytes) = self
+            .table
+            .try_allocate_large(type_id, flags, aux, value)
+            .map_err(HeapAllocationError::LargeAllocation)?;
+        debug_assert_eq!(actual_bytes, requested);
+        self.committed_span_storage_bytes += requested;
+        Ok(reference)
     }
 }
 
@@ -228,27 +302,24 @@ fn size_class_index(required: u16) -> Option<usize> {
     (index < SMALL_SIZE_CLASSES.len()).then_some(index)
 }
 
-fn large_object_required(required: usize, alignment: usize) -> HeapAllocationError {
-    HeapAllocationError::LargeObjectRequired {
-        required,
-        alignment,
-        largest_small_class: usize::from(
-            *SMALL_SIZE_CLASSES
-                .last()
-                .expect("small size-class table is non-empty"),
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{AllocationSpace, HeapAllocationError, SmallHeap, SmallHeapLimit};
-    use crate::{SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry};
+    use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
+    use crate::{HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry};
     use tachyon_value::Value;
 
     struct OtherPayload;
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct LargePayload {
+        _bytes: [u8; 70_000],
+    }
+
     impl Trace for OtherPayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Trace for LargePayload {
         fn trace(&mut self, _: &mut dyn Tracer) {}
     }
 
@@ -256,7 +327,7 @@ mod tests {
     fn first_allocation_uses_slow_path_then_reuses_the_active_eden_span() {
         let mut types = TypeRegistry::new();
         let object_type = types.try_register::<Value>("Value").unwrap();
-        let mut heap = SmallHeap::new(SmallHeapLimit::new(SPAN_SIZE_BYTES), types);
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
         let first = heap
             .try_allocate(
                 object_type,
@@ -293,7 +364,7 @@ mod tests {
     fn full_active_span_obeys_the_configured_storage_limit() {
         let mut types = TypeRegistry::new();
         let object_type = types.try_register::<Value>("Value").unwrap();
-        let mut heap = SmallHeap::new(SmallHeapLimit::new(SPAN_SIZE_BYTES), types);
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
         let first = heap
             .try_allocate(
                 object_type,
@@ -329,7 +400,7 @@ mod tests {
                 Value::from_i32(-1),
                 AllocationSpace::Young
             ),
-            Err(HeapAllocationError::SmallSpanLimitExceeded {
+            Err(HeapAllocationError::HeapLimitExceeded {
                 limit: SPAN_SIZE_BYTES,
                 committed: SPAN_SIZE_BYTES,
                 requested: SPAN_SIZE_BYTES,
@@ -347,7 +418,7 @@ mod tests {
             .try_register::<OtherPayload>("OtherPayload")
             .unwrap();
         assert_eq!(object_type.type_id(), conflicting_type.type_id());
-        let mut heap = SmallHeap::new(SmallHeapLimit::new(SPAN_SIZE_BYTES), conflicting_registry);
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), conflicting_registry);
 
         assert_eq!(
             heap.try_allocate(
@@ -362,5 +433,137 @@ mod tests {
             })
         );
         assert_eq!(heap.committed_span_storage_bytes(), 0);
+    }
+
+    #[test]
+    /// Spans a continuation ID, verifies the owner, and rejects an interior logical reference.
+    fn large_objects_allocate_directly_in_contiguous_old_ranges() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<LargePayload>("LargePayload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                object_type,
+                7,
+                11,
+                LargePayload {
+                    _bytes: [0; 70_000],
+                },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+
+        assert_eq!(reference.raw().span_id().index(), 0);
+        assert_eq!(reference.raw().span_offset().get(), 16);
+        assert_eq!(heap.committed_span_storage_bytes(), 2 * SPAN_SIZE_BYTES);
+        assert_eq!(heap.span_table().live_spans(), 2);
+        assert_eq!(
+            heap.span_table()
+                .large_metadata(reference.raw().span_id())
+                .unwrap()
+                .span_count(),
+            2
+        );
+        let header = heap
+            .verify_reference(reference.raw(), Some(object_type.type_id()))
+            .unwrap();
+        assert_eq!(header.flags(), 7);
+        assert_eq!(header.aux(), 11);
+
+        let continuation =
+            RawHeapRef::from_parts(crate::SpanId::new(1), crate::SpanOffset::new(16).unwrap());
+        assert_eq!(
+            heap.verify_reference(continuation, None),
+            Err(HeapReferenceError::LargeContinuationReference {
+                reference: continuation,
+                owner: reference.raw().span_id(),
+                ordinal: 1,
+            })
+        );
+        assert_eq!(
+            heap.span_table()
+                .base_address(crate::SpanId::new(1))
+                .unwrap() as usize
+                - heap
+                    .span_table()
+                    .base_address(reference.raw().span_id())
+                    .unwrap() as usize,
+            SPAN_SIZE_BYTES
+        );
+
+        let reclaimed = heap.reclaim_large_after_drop(reference.raw()).unwrap();
+        assert_eq!(reclaimed.span_count(), 2);
+        assert_eq!(reclaimed.storage_bytes(), 2 * SPAN_SIZE_BYTES);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+        assert_eq!(heap.span_table().live_spans(), 0);
+        let reused = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                LargePayload {
+                    _bytes: [0; 70_000],
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        assert_eq!(reused.raw(), reference.raw());
+        assert_eq!(heap.span_table().historical_span_count(), 2);
+    }
+
+    #[test]
+    fn large_object_limit_failure_does_not_publish_owner_or_continuations() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<LargePayload>("LargePayload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        assert_eq!(
+            heap.try_allocate(
+                object_type,
+                0,
+                0,
+                LargePayload {
+                    _bytes: [0; 70_000],
+                },
+                AllocationSpace::Old,
+            ),
+            Err(HeapAllocationError::HeapLimitExceeded {
+                limit: SPAN_SIZE_BYTES,
+                committed: 0,
+                requested: 2 * SPAN_SIZE_BYTES,
+            })
+        );
+        assert_eq!(heap.span_table().live_spans(), 0);
+        assert_eq!(heap.span_table().historical_span_count(), 0);
+    }
+
+    #[test]
+    /// Proves host backing charges cannot bypass spans and invalid releases do not underflow.
+    fn external_backing_bytes_share_the_hard_limit_and_release_exactly() {
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<Value>("Value").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES + 32), types);
+        heap.try_charge_external(32).unwrap();
+        heap.try_allocate(
+            object_type,
+            0,
+            0,
+            Value::from_i32(1),
+            AllocationSpace::Young,
+        )
+        .unwrap();
+
+        assert_eq!(heap.external_bytes(), 32);
+        assert_eq!(heap.committed_heap_bytes(), SPAN_SIZE_BYTES + 32);
+        assert_eq!(
+            heap.try_charge_external(1),
+            Err(HeapAllocationError::HeapLimitExceeded {
+                limit: SPAN_SIZE_BYTES + 32,
+                committed: SPAN_SIZE_BYTES + 32,
+                requested: 1,
+            })
+        );
+        assert!(!heap.release_external(33));
+        assert!(heap.release_external(32));
+        assert_eq!(heap.external_bytes(), 0);
     }
 }

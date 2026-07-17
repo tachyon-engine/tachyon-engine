@@ -44,6 +44,51 @@ pub enum SmallObjectLayoutError {
     SizeTooLarge { size: usize },
 }
 
+/// Header-plus-payload layout before small-size-class narrowing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectLayout {
+    payload_offset: usize,
+    allocation_size: usize,
+    alignment: usize,
+}
+
+impl ObjectLayout {
+    /// Computes native header/payload placement without imposing a small-object size threshold.
+    pub fn for_type<T>() -> Result<Self, SmallObjectLayoutError> {
+        let payload = Layout::new::<T>();
+        let (combined, payload_offset) =
+            Layout::new::<GcHeader>().extend(payload).map_err(|_| {
+                SmallObjectLayoutError::SizeTooLarge {
+                    size: payload.size(),
+                }
+            })?;
+        let combined = combined.pad_to_align();
+        Ok(Self {
+            payload_offset,
+            allocation_size: combined
+                .size()
+                .max(MINIMUM_SLOT_SIZE_BYTES)
+                .next_multiple_of(MINIMUM_SLOT_SIZE_BYTES),
+            alignment: combined.align(),
+        })
+    }
+
+    #[must_use]
+    pub const fn payload_offset(self) -> usize {
+        self.payload_offset
+    }
+
+    #[must_use]
+    pub const fn allocation_size(self) -> usize {
+        self.allocation_size
+    }
+
+    #[must_use]
+    pub const fn alignment(self) -> usize {
+        self.alignment
+    }
+}
+
 /// Header-plus-payload placement within one homogeneous small-object slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SmallObjectLayout {
@@ -54,27 +99,22 @@ pub struct SmallObjectLayout {
 impl SmallObjectLayout {
     /// Computes the aligned payload position and rounds the complete object to a 16-byte size class.
     pub fn for_type<T>() -> Result<Self, SmallObjectLayoutError> {
-        let payload = Layout::new::<T>();
-        if payload.align() > MINIMUM_SLOT_SIZE_BYTES {
+        let layout = ObjectLayout::for_type::<T>()?;
+        if layout.alignment() > MINIMUM_SLOT_SIZE_BYTES {
             return Err(SmallObjectLayoutError::AlignmentTooLarge {
-                alignment: payload.align(),
+                alignment: layout.alignment(),
             });
         }
-        let (combined, payload_offset) =
-            Layout::new::<GcHeader>().extend(payload).map_err(|_| {
-                SmallObjectLayoutError::SizeTooLarge {
-                    size: payload.size(),
-                }
-            })?;
-        let size = combined
-            .pad_to_align()
-            .size()
-            .max(MINIMUM_SLOT_SIZE_BYTES)
-            .next_multiple_of(MINIMUM_SLOT_SIZE_BYTES);
-        let payload_offset = u16::try_from(payload_offset)
-            .map_err(|_| SmallObjectLayoutError::SizeTooLarge { size })?;
-        let slot_size =
-            u16::try_from(size).map_err(|_| SmallObjectLayoutError::SizeTooLarge { size })?;
+        let payload_offset = u16::try_from(layout.payload_offset()).map_err(|_| {
+            SmallObjectLayoutError::SizeTooLarge {
+                size: layout.allocation_size(),
+            }
+        })?;
+        let slot_size = u16::try_from(layout.allocation_size()).map_err(|_| {
+            SmallObjectLayoutError::SizeTooLarge {
+                size: layout.allocation_size(),
+            }
+        })?;
         Ok(Self {
             payload_offset,
             slot_size,
@@ -166,7 +206,8 @@ const _: [(); 4] = [(); core::mem::align_of::<GcHeader>()];
 mod tests {
     use super::{
         GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_SPANS,
-        MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
+        MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SPAN_SIZE_BYTES, SmallObjectLayout,
+        SmallObjectLayoutError,
     };
 
     #[test]
@@ -207,6 +248,12 @@ mod tests {
         assert_eq!(aligned.payload_offset(), 16);
         assert_eq!(aligned.slot_size(), 32);
         assert_eq!(core::mem::size_of::<AlignedPayload>(), 16);
+        assert_eq!(
+            ObjectLayout::for_type::<AlignedPayload>()
+                .unwrap()
+                .alignment(),
+            16
+        );
         assert_eq!(
             SmallObjectLayout::for_type::<OverAlignedPayload>(),
             Err(SmallObjectLayoutError::AlignmentTooLarge { alignment: 32 })
