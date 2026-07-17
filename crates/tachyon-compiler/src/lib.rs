@@ -9,6 +9,7 @@
 //!
 //! Source loading remains a host responsibility; this crate intentionally has no host I/O surface.
 
+mod bytecode;
 mod diagnostic;
 mod hir;
 mod parser;
@@ -36,6 +37,10 @@ pub enum CompileError {
         span: SourceSpan,
         syntax: &'static str,
     },
+    Builder(tachyon_bytecode::BuilderError),
+    Module(tachyon_bytecode::ModuleBuildError),
+    ConstantOverflow,
+    RegisterOverflow,
 }
 
 /// The stateless frontend boundary; source and all host configuration must be supplied per call.
@@ -60,6 +65,16 @@ impl Compiler {
     ) -> Result<HirProgram, CompileError> {
         let (_, hir) = parser::parse_with(source, options, hir::lower)?;
         Ok(hir)
+    }
+
+    /// Compiles the supported HIR subset into a verified immutable module without accessing host I/O.
+    pub fn compile(
+        &self,
+        source: SourceText,
+        options: CompileOptions,
+    ) -> Result<tachyon_bytecode::CompiledModule, CompileError> {
+        let (parsed, hir) = parser::parse_with(source, options, hir::lower)?;
+        bytecode::lower(parsed.source(), &hir)
     }
 }
 
@@ -170,6 +185,26 @@ mod tests {
         assert_eq!(left.kind, HirExpressionKind::Number(1.0_f64.to_bits()));
         assert_eq!(right.kind, HirExpressionKind::Number(2.0_f64.to_bits()));
         assert_eq!(statement.completion, StatementCompletion::Value);
+    }
+
+    #[test]
+    fn compiler_emits_verified_bytecode_for_one_plus_two() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "1 + 2;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("LoadImmediate r0, imm=1"));
+        assert!(disassembly.contains("LoadImmediate r1, imm=2"));
+        assert!(disassembly.contains("Add r2, r0, r1"));
+        assert!(disassembly.contains("Return r2"));
     }
 
     proptest! {

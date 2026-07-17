@@ -84,6 +84,11 @@ impl SourceText {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    #[must_use]
+    pub(crate) fn shared_text(&self) -> Arc<str> {
+        Arc::clone(&self.text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
