@@ -26,6 +26,10 @@ pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 pub(crate) const CAPACITY_GROWTH_DENOMINATOR: usize = 2;
 /// Initial whole-span promotion age; corpus and pause/fragmentation benchmarks may retune it.
 pub(crate) const YOUNG_PROMOTION_AGE: u8 = 2;
+/// Live-slot occupancy that promotes a span before its normal age threshold, in percent.
+pub(crate) const EARLY_PROMOTION_OCCUPANCY_PERCENT: u8 = 80;
+/// Initial young backing cap before another growing allocation requests a minor collection.
+pub(crate) const DEFAULT_YOUNG_STORAGE_CAP_BYTES: usize = 8 * 1024 * 1024;
 /// Young allocation bytes repaid by one minor collection; initial value awaits corpus tuning.
 pub(crate) const DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES: usize = 1024 * 1024;
 /// Old allocation bytes repaid by one major collection; initial value awaits corpus tuning.
@@ -40,3 +44,21 @@ pub(crate) const SMALL_SIZE_CLASSES: [u16; 28] = [
     16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
     1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096,
 ];
+
+/// Applies the centralized integer occupancy threshold without division or floating point.
+#[inline(always)]
+pub(crate) const fn should_promote_early(live_slots: u16, total_slots: u16) -> bool {
+    live_slots != 0
+        && (live_slots as u32) * 100
+            >= (total_slots as u32) * (EARLY_PROMOTION_OCCUPANCY_PERCENT as u32)
+}
+
+/// Predicts the normal age transition so mark and sweep prepare exactly the same candidates.
+#[inline(always)]
+pub(crate) const fn promotion_due_to_age(space: crate::SpanSpace, promotion_age: u8) -> bool {
+    match space {
+        crate::SpanSpace::Eden => promotion_age <= 1,
+        crate::SpanSpace::Survivor { age } => age.saturating_add(1) >= promotion_age,
+        crate::SpanSpace::Old => false,
+    }
+}

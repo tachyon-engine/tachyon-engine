@@ -19,6 +19,7 @@ mod handle;
 mod heap;
 mod layout;
 mod mark;
+mod pause;
 mod persistent;
 mod registry;
 mod roots;
@@ -52,6 +53,7 @@ pub use layout::{
     SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
 };
 pub use mark::{MarkError, MarkStats, YoungMarkStats};
+pub use pause::{CollectionKind, GcPauseStats, PauseHistogramStats};
 pub use persistent::{PersistentRootError, PersistentRootId, PersistentRootStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
 pub use roots::{KeptObjectError, KeptObjectStats, TemporaryRootError, TemporaryRootStats};

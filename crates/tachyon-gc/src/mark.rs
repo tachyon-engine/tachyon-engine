@@ -796,9 +796,15 @@ impl YoungMarker<'_> {
         let mut current = self.table.young_head();
         while let Some(span_id) = current {
             let next = self.table.young_next(span_id);
-            if self.table.young_space(span_id).is_some_and(|space| {
-                matches!(space, crate::SpanSpace::Survivor { age } if age.saturating_add(1) >= promotion_age)
-            }) {
+            let due_by_age = self
+                .table
+                .young_space(span_id)
+                .is_some_and(|space| crate::tuning::promotion_due_to_age(space, promotion_age));
+            let due_by_occupancy = self
+                .table
+                .young_live_occupancy(span_id, self.epoch)
+                .is_some_and(|(live, total)| crate::tuning::should_promote_early(live, total));
+            if due_by_age || due_by_occupancy {
                 self.prepare_promotion_span(span_id, types);
             }
             current = next;

@@ -11,6 +11,7 @@ use crate::{
     finalization::PendingFinalizations,
     gray::GrayQueue,
     mark::{mark_strong_roots, mark_young_roots},
+    pause::GcPauses,
     persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
     roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
@@ -117,6 +118,7 @@ pub struct Heap {
     kept_objects: KeptObjects,
     pending_finalizations: PendingFinalizations,
     eden_pool: EdenPool,
+    pauses: GcPauses,
     trigger: GcTrigger,
 }
 
@@ -184,6 +186,7 @@ impl Heap {
             kept_objects: KeptObjects::new(max_reference_entries),
             pending_finalizations: PendingFinalizations::new(max_reference_entries),
             eden_pool: EdenPool::new(),
+            pauses: GcPauses::new(),
             trigger: GcTrigger::new(trigger_config),
         }
     }
@@ -238,6 +241,7 @@ impl Heap {
             plan.space,
             plan.allocation_bytes,
             plan.required_storage_bytes,
+            self.table.young_storage_bytes(),
             self.committed_heap_bytes(),
             self.limit,
         );
@@ -290,6 +294,20 @@ impl Heap {
     #[must_use]
     pub const fn eden_pool_stats(&self) -> crate::EdenPoolStats {
         self.eden_pool.stats()
+    }
+
+    /// Records a caller-measured stop-the-world duration from its injected monotonic clock.
+    pub fn record_collection_pause(
+        &mut self,
+        kind: crate::CollectionKind,
+        elapsed: core::time::Duration,
+    ) {
+        self.pauses.record(kind, elapsed);
+    }
+
+    #[must_use]
+    pub fn pause_stats(&self) -> crate::GcPauseStats {
+        self.pauses.stats()
     }
 
     /// Releases every retained empty Eden backing span, stopping at the first typed table error.
@@ -1375,6 +1393,46 @@ mod tests {
     }
 
     #[test]
+    /// Young backing growth beyond the typed cap triggers minor before publishing the next class.
+    fn young_storage_cap_triggers_minor_only_when_backing_would_grow() {
+        let mut types = TypeRegistry::new();
+        let value_type = types.try_register::<Value>("Value").unwrap();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100)
+            .unwrap()
+            .with_young_storage_cap_bytes(SPAN_SIZE_BYTES)
+            .unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(4 * SPAN_SIZE_BYTES), types, config);
+        let dead = heap
+            .try_allocate(value_type, 0, 0, Value::from_i32(1), AllocationSpace::Young)
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let allocated = heap
+            .try_allocate_with_gc(
+                fanout_type,
+                0,
+                0,
+                Fanout { edges: [None; 300] },
+                AllocationSpace::Young,
+                &mut no_roots,
+            )
+            .unwrap();
+
+        assert!(heap.verify_reference(allocated.raw(), None).is_ok());
+        assert_eq!(
+            heap.verify_reference(dead.raw(), None),
+            Err(HeapReferenceError::UnallocatedSlot(dead.raw()))
+        );
+        let stats = heap.trigger_stats();
+        assert_eq!(stats.minor_attempts, 1);
+        assert_eq!(stats.young_storage_cap_attempts, 1);
+        assert_eq!(heap.eden_pool_stats().retained_spans, 1);
+        assert_eq!(heap.span_table().young_storage_bytes(), SPAN_SIZE_BYTES);
+    }
+
+    #[test]
     /// A hard-limit major rebuilds holes in the full active Old span before the single retry.
     fn managed_allocation_reuses_old_holes_after_hard_limit_collection() {
         let mut types = TypeRegistry::new();
@@ -1447,6 +1505,26 @@ mod tests {
         assert_eq!(stats.memory_pressure_requests, 2);
         assert_eq!(stats.memory_pressure_commands_consumed, 1);
         assert_eq!(stats.major_attempts, 1);
+    }
+
+    #[test]
+    /// Public heap wiring preserves separately bucketed host durations without reading a clock.
+    fn heap_pause_api_keeps_host_measured_minor_and_major_samples_separate() {
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), TypeRegistry::new());
+        heap.record_collection_pause(
+            crate::CollectionKind::Minor,
+            core::time::Duration::from_nanos(3),
+        );
+        heap.record_collection_pause(
+            crate::CollectionKind::Major,
+            core::time::Duration::from_nanos(17),
+        );
+
+        let stats = heap.pause_stats();
+        assert_eq!(stats.minor.samples, 1);
+        assert_eq!(stats.minor.p99_upper_nanos, Some(4));
+        assert_eq!(stats.major.samples, 1);
+        assert_eq!(stats.major.p99_upper_nanos, Some(32));
     }
 
     #[test]
@@ -2892,6 +2970,63 @@ mod tests {
             Some(base_address)
         );
         assert_eq!(heap.eden_pool_stats().spans_reused, 1);
+    }
+
+    #[test]
+    /// Current-epoch live occupancy promotes a dense Eden span before its normal cohort age.
+    fn dense_live_eden_span_promotes_early_with_cards_prepared() {
+        let mut types = TypeRegistry::new();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let first = heap
+            .try_allocate(
+                fanout_type,
+                0,
+                0,
+                Fanout { edges: [None; 300] },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let span_id = first.raw().span_id();
+        let total_slots = heap
+            .span_table()
+            .metadata(span_id)
+            .unwrap()
+            .size_class()
+            .slot_count() as usize;
+        let required_live = total_slots
+            .saturating_mul(usize::from(
+                crate::tuning::EARLY_PROMOTION_OCCUPANCY_PERCENT,
+            ))
+            .div_ceil(100);
+        let mut roots = Vec::with_capacity(required_live);
+        roots.push(first);
+        for _ in 1..required_live {
+            roots.push(
+                heap.try_allocate(
+                    fanout_type,
+                    0,
+                    0,
+                    Fanout { edges: [None; 300] },
+                    AllocationSpace::Young,
+                )
+                .unwrap(),
+            );
+        }
+
+        let stats = heap.collect_minor(&mut roots).unwrap();
+
+        assert_eq!(stats.sweep.whole_span_promotions, 1);
+        assert_eq!(stats.sweep.early_whole_span_promotions, 1);
+        assert_eq!(stats.mark.promotion_objects_scanned, required_live);
+        assert_eq!(
+            heap.span_table().metadata(span_id).unwrap().space(),
+            SpanSpace::Old
+        );
+        assert_eq!(heap.span_table().young_storage_bytes(), 0);
+        for root in roots {
+            assert!(heap.verify_reference(root.raw(), None).is_ok());
+        }
     }
 
     #[test]

@@ -244,6 +244,7 @@ pub struct SpanTable {
     live_spans: usize,
     remembered_head: Option<SpanId>,
     young_head: Option<SpanId>,
+    active_young_spans: usize,
 }
 
 impl SpanTable {
@@ -256,6 +257,7 @@ impl SpanTable {
             live_spans: 0,
             remembered_head: None,
             young_head: None,
+            active_young_spans: 0,
         }
     }
 
@@ -275,6 +277,10 @@ impl SpanTable {
         };
         if space != SpanSpace::Old {
             self.link_young_span(span_id);
+            self.active_young_spans = self
+                .active_young_spans
+                .checked_add(1)
+                .expect("active young spans cannot exceed the logical span table");
         }
         Ok(span_id)
     }
@@ -303,12 +309,23 @@ impl SpanTable {
         }
         self.reserve_free_range_if_needed(span_id.index())?;
 
+        let was_active_young = self.entries[index].kind.as_ref().is_some_and(|kind| {
+            matches!(
+                kind,
+                SpanKind::Small(span)
+                    if matches!(span.metadata.space(), SpanSpace::Eden | SpanSpace::Survivor { .. })
+            ) && !self.entries[index].in_eden_pool
+        });
         let entry = &mut self.entries[index];
         entry.kind = None;
         entry.generation = entry.generation.next();
         entry.in_eden_pool = false;
         self.insert_free_span(span_id.index());
         self.live_spans -= 1;
+        self.active_young_spans = self
+            .active_young_spans
+            .checked_sub(usize::from(was_active_young))
+            .expect("release cannot underflow active young span accounting");
         Ok(())
     }
 
@@ -549,11 +566,37 @@ impl SpanTable {
         }
     }
 
+    /// Returns current-epoch live occupancy for a young span without scanning object payloads.
+    pub(crate) fn young_live_occupancy(
+        &self,
+        span_id: SpanId,
+        epoch: CollectionEpoch,
+    ) -> Option<(u16, u16)> {
+        let metadata = self.metadata(span_id)?;
+        matches!(
+            metadata.space(),
+            SpanSpace::Eden | SpanSpace::Survivor { .. }
+        )
+        .then(|| {
+            (
+                metadata.marks().marked_count(epoch),
+                metadata.size_class().slot_count(),
+            )
+        })
+    }
+
+    /// Returns active Eden/Survivor backing in O(1), excluding detached empty pool spans.
+    pub(crate) fn young_storage_bytes(&self) -> usize {
+        self.active_young_spans
+            .saturating_mul(crate::SPAN_SIZE_BYTES)
+    }
+
     /// Ages a non-empty young span and activates prepared cards on whole-span promotion.
     pub(crate) fn advance_young_cohort(
         &mut self,
         span_id: SpanId,
         promotion_age: u8,
+        promote_early: bool,
     ) -> YoungSpanTransition {
         let transition = {
             let Some(SpanKind::Small(span)) = self
@@ -563,28 +606,33 @@ impl SpanTable {
             else {
                 unreachable!("young chain contains a live small span");
             };
-            match span.metadata.space() {
-                SpanSpace::Eden => {
-                    span.metadata.set_space(SpanSpace::Survivor { age: 1 });
-                    YoungSpanTransition::EdenToSurvivor
-                }
-                SpanSpace::Survivor { age } => {
-                    let next_age = age.saturating_add(1);
-                    if next_age >= promotion_age {
-                        span.metadata.set_space(SpanSpace::Old);
-                        YoungSpanTransition::Promoted
-                    } else {
+            let space = span.metadata.space();
+            if promote_early || crate::tuning::promotion_due_to_age(space, promotion_age) {
+                span.metadata.set_space(SpanSpace::Old);
+                YoungSpanTransition::Promoted
+            } else {
+                match space {
+                    SpanSpace::Eden => {
+                        span.metadata.set_space(SpanSpace::Survivor { age: 1 });
+                        YoungSpanTransition::EdenToSurvivor
+                    }
+                    SpanSpace::Survivor { age } => {
+                        let next_age = age.saturating_add(1);
                         span.metadata
                             .set_space(SpanSpace::Survivor { age: next_age });
                         YoungSpanTransition::SurvivorAged
                     }
+                    SpanSpace::Old => unreachable!("young chain excludes Old spans"),
                 }
-                SpanSpace::Old => unreachable!("young chain excludes Old spans"),
             }
         };
         if transition == YoungSpanTransition::Promoted && self.dirty_old_card_count(span_id) != 0 {
             self.link_remembered_source(span_id);
         }
+        self.active_young_spans = self
+            .active_young_spans
+            .checked_sub(usize::from(transition == YoungSpanTransition::Promoted))
+            .expect("promotion cannot underflow active young span accounting");
         transition
     }
 
@@ -630,6 +678,10 @@ impl SpanTable {
             entry.generation,
         );
         entry.in_eden_pool = true;
+        self.active_young_spans = self
+            .active_young_spans
+            .checked_sub(1)
+            .expect("pooling requires one active young span");
     }
 
     /// Reattaches a retained empty Eden span to allocation and young-collection ownership.
@@ -642,6 +694,10 @@ impl SpanTable {
         assert_eq!(span.metadata.space(), SpanSpace::Eden);
         assert_eq!(span.metadata.allocated_slots(), 0);
         entry.in_eden_pool = false;
+        self.active_young_spans = self
+            .active_young_spans
+            .checked_add(1)
+            .expect("pool activation cannot exceed the logical span table");
         self.link_young_span(span_id);
     }
 

@@ -1,10 +1,10 @@
 //! Isolate-local allocation-debt and memory-pressure collection policy.
 
-use crate::{AllocationSpace, HeapLimit};
+use crate::{AllocationSpace, HeapLimit, SPAN_SIZE_BYTES};
 
 use crate::tuning::{
     DEFAULT_HEAP_PRESSURE_PERCENT, DEFAULT_MAJOR_ALLOCATION_DEBT_BYTES,
-    DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES,
+    DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES, DEFAULT_YOUNG_STORAGE_CAP_BYTES,
 };
 
 /// Rejects trigger thresholds that would collect continuously or exceed a percentage boundary.
@@ -13,6 +13,7 @@ pub enum GcTriggerConfigError {
     ZeroYoungAllocationDebt,
     ZeroMajorAllocationDebt,
     InvalidHeapPressurePercent { percent: u8 },
+    YoungStorageCapBelowSpan { bytes: usize, minimum: usize },
 }
 
 /// Host policy for byte-debt and committed-storage collection triggers.
@@ -21,6 +22,7 @@ pub struct GcTriggerConfig {
     young_allocation_debt_bytes: usize,
     major_allocation_debt_bytes: usize,
     heap_pressure_percent: u8,
+    young_storage_cap_bytes: usize,
 }
 
 impl GcTriggerConfig {
@@ -28,6 +30,7 @@ impl GcTriggerConfig {
         young_allocation_debt_bytes: DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES,
         major_allocation_debt_bytes: DEFAULT_MAJOR_ALLOCATION_DEBT_BYTES,
         heap_pressure_percent: DEFAULT_HEAP_PRESSURE_PERCENT,
+        young_storage_cap_bytes: DEFAULT_YOUNG_STORAGE_CAP_BYTES,
     };
 
     /// Validates all policy knobs before they enter an isolate-local heap.
@@ -51,7 +54,23 @@ impl GcTriggerConfig {
             young_allocation_debt_bytes,
             major_allocation_debt_bytes,
             heap_pressure_percent,
+            young_storage_cap_bytes: DEFAULT_YOUNG_STORAGE_CAP_BYTES,
         })
+    }
+
+    /// Overrides the default young backing cap while preserving all other validated thresholds.
+    pub const fn with_young_storage_cap_bytes(
+        mut self,
+        young_storage_cap_bytes: usize,
+    ) -> Result<Self, GcTriggerConfigError> {
+        if young_storage_cap_bytes < SPAN_SIZE_BYTES {
+            return Err(GcTriggerConfigError::YoungStorageCapBelowSpan {
+                bytes: young_storage_cap_bytes,
+                minimum: SPAN_SIZE_BYTES,
+            });
+        }
+        self.young_storage_cap_bytes = young_storage_cap_bytes;
+        Ok(self)
     }
 
     #[must_use]
@@ -67,6 +86,11 @@ impl GcTriggerConfig {
     #[must_use]
     pub const fn heap_pressure_percent(self) -> u8 {
         self.heap_pressure_percent
+    }
+
+    #[must_use]
+    pub const fn young_storage_cap_bytes(self) -> usize {
+        self.young_storage_cap_bytes
     }
 }
 
@@ -102,6 +126,7 @@ pub enum CollectionReason {
     HeapLimit,
     HeapPressure,
     YoungAllocationDebt,
+    YoungStorageCap,
     OldAllocationDebt,
 }
 
@@ -122,6 +147,7 @@ pub struct GcTriggerStats {
     pub heap_pressure_attempts: usize,
     pub forced_attempts: usize,
     pub young_debt_attempts: usize,
+    pub young_storage_cap_attempts: usize,
     pub old_debt_attempts: usize,
 }
 
@@ -160,6 +186,7 @@ impl GcTrigger {
                 heap_pressure_attempts: 0,
                 forced_attempts: 0,
                 young_debt_attempts: 0,
+                young_storage_cap_attempts: 0,
                 old_debt_attempts: 0,
             },
         }
@@ -192,6 +219,7 @@ impl GcTrigger {
         space: AllocationSpace,
         allocation_bytes: usize,
         required_storage_bytes: usize,
+        young_storage_bytes: usize,
         committed_bytes: usize,
         limit: HeapLimit,
     ) -> Option<CollectionDecision> {
@@ -230,6 +258,16 @@ impl GcTrigger {
             return Some(CollectionDecision {
                 action: CollectionAction::Major,
                 reason: CollectionReason::HeapPressure,
+            });
+        }
+        if space == AllocationSpace::Young
+            && required_storage_bytes != 0
+            && young_storage_bytes.saturating_add(required_storage_bytes)
+                > self.config.young_storage_cap_bytes
+        {
+            return Some(CollectionDecision {
+                action: CollectionAction::Minor,
+                reason: CollectionReason::YoungStorageCap,
             });
         }
 
@@ -290,6 +328,10 @@ impl GcTrigger {
             CollectionReason::YoungAllocationDebt => {
                 self.stats.young_debt_attempts = self.stats.young_debt_attempts.saturating_add(1);
             }
+            CollectionReason::YoungStorageCap => {
+                self.stats.young_storage_cap_attempts =
+                    self.stats.young_storage_cap_attempts.saturating_add(1);
+            }
             CollectionReason::OldAllocationDebt => {
                 self.stats.old_debt_attempts = self.stats.old_debt_attempts.saturating_add(1);
             }
@@ -341,8 +383,10 @@ fn percentage_threshold(bytes: usize, percent: u8) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{GcTriggerConfig, GcTriggerConfigError};
+    use crate::SPAN_SIZE_BYTES;
 
     #[test]
+    /// Every invalid policy threshold is rejected before trigger state enters a heap.
     fn trigger_configuration_rejects_continuous_or_invalid_thresholds() {
         assert_eq!(
             GcTriggerConfig::new(0, 1, 90),
@@ -355,6 +399,15 @@ mod tests {
         assert_eq!(
             GcTriggerConfig::new(1, 1, 101),
             Err(GcTriggerConfigError::InvalidHeapPressurePercent { percent: 101 })
+        );
+        assert_eq!(
+            GcTriggerConfig::new(1, 1, 90)
+                .unwrap()
+                .with_young_storage_cap_bytes(0),
+            Err(GcTriggerConfigError::YoungStorageCapBelowSpan {
+                bytes: 0,
+                minimum: SPAN_SIZE_BYTES,
+            })
         );
     }
 }

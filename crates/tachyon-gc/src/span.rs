@@ -299,6 +299,15 @@ impl MarkBitmap {
         self.bits.clear();
         self.epoch = None;
     }
+
+    /// Counts current-epoch marks without treating stale bitmap words as live.
+    #[must_use]
+    pub(crate) fn marked_count(&self, epoch: CollectionEpoch) -> u16 {
+        if self.epoch != Some(epoch) {
+            return 0;
+        }
+        self.bits.count()
+    }
 }
 
 impl Default for MarkBitmap {
@@ -605,6 +614,11 @@ impl SlotBitmap {
 
     fn clear(&mut self) {
         self.words.fill(0);
+    }
+
+    fn count(&self) -> u16 {
+        let count: u32 = self.words.iter().map(|word| word.count_ones()).sum();
+        u16::try_from(count).expect("one span bitmap count fits u16")
     }
 }
 

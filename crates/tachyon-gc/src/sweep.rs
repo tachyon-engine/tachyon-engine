@@ -70,6 +70,7 @@ pub struct MinorSweepStats {
     pub eden_to_survivor: usize,
     pub survivor_spans_aged: usize,
     pub whole_span_promotions: usize,
+    pub early_whole_span_promotions: usize,
     pub eden_spans_pooled: usize,
     pub eden_pool_overflow_spans_released: usize,
     pub eden_pool_retained_bytes: usize,
@@ -257,12 +258,18 @@ fn sweep_young_span(
         stats.eden_pool_overflow_spans_released += 1;
         return Ok(());
     }
-    let transition = table.advance_young_cohort(span_id, crate::tuning::YOUNG_PROMOTION_AGE);
+    let due_by_age =
+        crate::tuning::promotion_due_to_age(before.space, crate::tuning::YOUNG_PROMOTION_AGE);
+    let promote_early = !due_by_age
+        && crate::tuning::should_promote_early(live_slots, before.size_class.slot_count());
+    let transition =
+        table.advance_young_cohort(span_id, crate::tuning::YOUNG_PROMOTION_AGE, promote_early);
     match transition {
         YoungSpanTransition::EdenToSurvivor => stats.eden_to_survivor += 1,
         YoungSpanTransition::SurvivorAged => stats.survivor_spans_aged += 1,
         YoungSpanTransition::Promoted => {
             stats.whole_span_promotions += 1;
+            stats.early_whole_span_promotions += usize::from(promote_early);
             table.rebuild_old_free_list(span_id);
             if table.can_allocate_in_span(span_id) {
                 promoted_active_old[class_index] = Some(span_id);
