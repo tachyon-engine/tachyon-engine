@@ -154,6 +154,15 @@ impl Isolate {
                 operands[0],
                 Value::from_immediate(Immediate::Undefined),
             )?,
+            Opcode::LoadNull => {
+                self.write(base, operands[0], Value::from_immediate(Immediate::Null))?
+            }
+            Opcode::LoadFalse => {
+                self.write(base, operands[0], Value::from_immediate(Immediate::False))?
+            }
+            Opcode::LoadTrue => {
+                self.write(base, operands[0], Value::from_immediate(Immediate::True))?
+            }
             Opcode::LoadImmediate => {
                 self.write(base, operands[0], Value::from_i32(operands[1] as i32))?
             }

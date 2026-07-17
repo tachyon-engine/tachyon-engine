@@ -125,6 +125,9 @@ pub enum Opcode {
     Await = 17,
     Yield = 18,
     LoadUndefined = 19,
+    LoadNull = 20,
+    LoadFalse = 21,
+    LoadTrue = 22,
 }
 
 impl Opcode {
@@ -132,7 +135,13 @@ impl Opcode {
     pub const fn operand_count(self) -> usize {
         match self {
             Self::Nop => 0,
-            Self::LoadUndefined | Self::Jump | Self::Return | Self::Throw => 1,
+            Self::LoadUndefined
+            | Self::LoadNull
+            | Self::LoadFalse
+            | Self::LoadTrue
+            | Self::Jump
+            | Self::Return
+            | Self::Throw => 1,
             Self::LoadImmediate
             | Self::LoadConstant
             | Self::Move
@@ -178,6 +187,9 @@ impl Opcode {
             17 => Some(Self::Await),
             18 => Some(Self::Yield),
             19 => Some(Self::LoadUndefined),
+            20 => Some(Self::LoadNull),
+            21 => Some(Self::LoadFalse),
+            22 => Some(Self::LoadTrue),
             _ => None,
         }
     }
@@ -626,6 +638,9 @@ impl BytecodeBuilder {
         let indexes: &[usize] = match opcode {
             Opcode::Nop | Opcode::Jump => &[],
             Opcode::LoadUndefined
+            | Opcode::LoadNull
+            | Opcode::LoadFalse
+            | Opcode::LoadTrue
             | Opcode::LoadImmediate
             | Opcode::LoadConstant
             | Opcode::LoadScope
@@ -1408,6 +1423,9 @@ fn verify_instruction(
     match instruction.opcode {
         Opcode::Nop | Opcode::Jump => {}
         Opcode::LoadUndefined
+        | Opcode::LoadNull
+        | Opcode::LoadFalse
+        | Opcode::LoadTrue
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
@@ -1539,6 +1557,17 @@ mod tests {
         assert_eq!(decoded.operand_count, 1);
         assert_eq!(decoded.operands[0], 7);
         assert_eq!(MAX_ENCODED_INSTRUCTION_WORDS, 4);
+    }
+
+    #[test]
+    fn non_numeric_immediate_loads_use_one_register_operand() {
+        for opcode in [Opcode::LoadNull, Opcode::LoadFalse, Opcode::LoadTrue] {
+            let words = encode_instruction(opcode, &[7]).unwrap();
+            let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+            assert_eq!(decoded.opcode, opcode);
+            assert_eq!(decoded.operand_count, 1);
+            assert_eq!(decoded.operands[0], 7);
+        }
     }
 
     #[test]

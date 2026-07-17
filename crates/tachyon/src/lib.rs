@@ -144,4 +144,49 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
     }
+
+    #[test]
+    fn boolean_and_null_literals_remain_non_numeric_immediates() {
+        let source = SourceText::new(
+            SourceId::new(6),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("true === false;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value) if value.as_immediate() == Some(tachyon_value::Immediate::False)
+        ));
+
+        let source = SourceText::new(
+            SourceId::new(7),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("null === null;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value) if value.as_immediate() == Some(tachyon_value::Immediate::True)
+        ));
+    }
 }

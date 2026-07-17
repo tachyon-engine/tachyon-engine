@@ -153,6 +153,8 @@ impl Lowerer {
                     Ok(register)
                 }
             }
+            HirExpressionKind::Boolean(value) => self.load_boolean(*value, expression.span),
+            HirExpressionKind::Null => self.load_null(expression.span),
             HirExpressionKind::Binary {
                 operator,
                 left,
@@ -282,6 +284,23 @@ impl Lowerer {
     fn load_undefined(&mut self, span: SourceSpan) -> Result<RegisterId, CompileError> {
         let register = self.register()?;
         self.emit(Opcode::LoadUndefined, &[register.index()], span)?;
+        Ok(register)
+    }
+
+    fn load_null(&mut self, span: SourceSpan) -> Result<RegisterId, CompileError> {
+        let register = self.register()?;
+        self.emit(Opcode::LoadNull, &[register.index()], span)?;
+        Ok(register)
+    }
+
+    fn load_boolean(&mut self, value: bool, span: SourceSpan) -> Result<RegisterId, CompileError> {
+        let register = self.register()?;
+        let opcode = if value {
+            Opcode::LoadTrue
+        } else {
+            Opcode::LoadFalse
+        };
+        self.emit(opcode, &[register.index()], span)?;
         Ok(register)
     }
 
