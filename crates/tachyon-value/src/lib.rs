@@ -369,8 +369,8 @@ impl fmt::Debug for Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        CANONICAL_NAN_BITS, DecodeError, Immediate, RawHeapRef, SpanId, SpanOffset, Value,
-        ValueKind,
+        CANONICAL_NAN_BITS, DecodeError, Immediate, LOW_U32_MASK, PAYLOAD_MASK, RawHeapRef, SpanId,
+        SpanOffset, TAG_MASK, TAG_SHIFT, TAGGED_MASK, TAGGED_PREFIX, Value, ValueKind,
     };
     use proptest::prelude::*;
 
@@ -456,6 +456,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn int32_extremes_and_malformed_upper_payloads_are_distinct() {
+        for integer in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+            let value = Value::from_i32(integer);
+            assert_eq!(value.as_i32(), Some(integer));
+            assert_eq!(value.decode(), Ok(ValueKind::Int32(integer)));
+        }
+
+        for upper_payload in [1_u64 << 32, 1_u64 << 40, 0xffff_u64 << 32] {
+            let bits = TAGGED_PREFIX | (1_u64 << TAG_SHIFT) | upper_payload;
+            assert_eq!(Value::from_bits(bits).as_i32(), None);
+            assert_eq!(
+                Value::from_bits(bits).decode(),
+                Err(DecodeError::InvalidInt32Payload(upper_payload))
+            );
+        }
+    }
+
+    /// Exercises provenance-free bit conversion and both logical heap-reference boundaries in Miri.
+    #[test]
+    fn miri_bit_and_raw_ref_contract() {
+        for bits in [
+            0_u64,
+            (-0.0_f64).to_bits(),
+            f64::INFINITY.to_bits(),
+            f64::NEG_INFINITY.to_bits(),
+            1.5_f64.to_bits(),
+        ] {
+            assert_eq!(Value::from_f64(f64::from_bits(bits)).bits(), bits);
+            assert_decode_matches_bits(bits);
+        }
+        for nan_bits in [
+            f64::NAN.to_bits(),
+            0x7ff0_0000_0000_0001,
+            0xfff8_0000_0000_0001,
+        ] {
+            assert_eq!(
+                Value::from_f64(f64::from_bits(nan_bits)).bits(),
+                CANONICAL_NAN_BITS
+            );
+        }
+
+        let first = RawHeapRef::from_parts(
+            SpanId::new(0),
+            SpanOffset::new(1).expect("non-zero first offset"),
+        );
+        let last = RawHeapRef::from_parts(
+            SpanId::new(u16::MAX),
+            SpanOffset::new(u16::MAX).expect("non-zero last offset"),
+        );
+        for reference in [first, last] {
+            assert_eq!(RawHeapRef::new(reference.offset()), Some(reference));
+            assert_eq!(
+                Value::from_heap_ref(reference).decode(),
+                Ok(ValueKind::HeapRef(reference))
+            );
+        }
+    }
+
     proptest! {
         #[test]
         fn arbitrary_f64_roundtrips_or_canonicalizes_nan(bits in any::<u64>()) {
@@ -486,8 +545,44 @@ mod tests {
         }
 
         #[test]
-        fn arbitrary_bits_decode_without_panicking(bits in any::<u64>()) {
-            let _ = Value::from_bits(bits).decode();
+        fn arbitrary_bits_match_independent_classification_oracle(bits in any::<u64>()) {
+            assert_decode_matches_bits(bits);
+        }
+    }
+
+    /// Classifies raw bits without calling any production fast-path helper used by `Value::decode`.
+    fn assert_decode_matches_bits(bits: u64) {
+        let decoded = Value::from_bits(bits).decode();
+        if bits & TAGGED_MASK != TAGGED_PREFIX {
+            let ValueKind::Number(number) = decoded.expect("non-tagged bits are numbers") else {
+                panic!("non-tagged bits must decode as Number");
+            };
+            assert_eq!(number.to_bits(), bits);
+            return;
+        }
+
+        let payload = bits & PAYLOAD_MASK;
+        let raw_tag = ((bits & TAG_MASK) >> TAG_SHIFT) as u8;
+        match raw_tag {
+            0 if payload <= LOW_U32_MASK && payload as u16 != 0 => {
+                let reference = RawHeapRef::new(payload as u32).expect("oracle checked reference");
+                assert_eq!(decoded, Ok(ValueKind::HeapRef(reference)));
+            }
+            0 => assert_eq!(decoded, Err(DecodeError::InvalidHeapRefPayload(payload))),
+            1 if payload <= LOW_U32_MASK => {
+                assert_eq!(decoded, Ok(ValueKind::Int32(payload as u32 as i32)));
+            }
+            1 => assert_eq!(decoded, Err(DecodeError::InvalidInt32Payload(payload))),
+            2 => match payload {
+                0 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::Undefined))),
+                1 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::Null))),
+                2 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::False))),
+                3 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::True))),
+                4 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::Hole))),
+                5 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::Uninitialized))),
+                _ => assert_eq!(decoded, Err(DecodeError::InvalidImmediatePayload(payload))),
+            },
+            reserved => assert_eq!(decoded, Err(DecodeError::ReservedTag(reserved))),
         }
     }
 }
