@@ -124,6 +124,7 @@ pub struct Value(u64);
 impl Value {
     /// Builds a Number value, canonicalizing every NaN to prevent it from aliasing the tagged domain.
     #[must_use]
+    #[inline(always)]
     pub fn from_f64(number: f64) -> Self {
         let bits = if number.is_nan() {
             CANONICAL_NAN_BITS
@@ -135,6 +136,7 @@ impl Value {
 
     /// Builds a signed 32-bit integer value without allocating.
     #[must_use]
+    #[inline(always)]
     pub const fn from_i32(value: i32) -> Self {
         Self::from_tagged(Tag::Int32, value as u32 as u64)
     }
@@ -165,6 +167,7 @@ impl Value {
 
     /// Returns the Number payload when this value is outside the tagged domain.
     #[must_use]
+    #[inline(always)]
     pub const fn as_f64(self) -> Option<f64> {
         if self.is_tagged() {
             None
@@ -175,12 +178,14 @@ impl Value {
 
     /// Returns whether this value is a Number without validating any tagged payload.
     #[must_use]
+    #[inline(always)]
     pub const fn is_number(self) -> bool {
         !self.is_tagged()
     }
 
     /// Returns the integer payload when its tag and upper payload bits are valid.
     #[must_use]
+    #[inline(always)]
     pub const fn as_i32(self) -> Option<i32> {
         if self.is_tagged()
             && self.tag_bits() == Tag::Int32 as u8
@@ -233,18 +238,22 @@ impl Value {
     }
 
     #[must_use]
+    #[inline(always)]
     pub const fn is_tagged(self) -> bool {
         self.0 & TAGGED_MASK == TAGGED_PREFIX
     }
 
+    #[inline(always)]
     const fn from_tagged(tag: Tag, payload: u64) -> Self {
         Self(TAGGED_PREFIX | ((tag as u64) << TAG_SHIFT) | payload)
     }
 
+    #[inline(always)]
     const fn payload(self) -> u64 {
         self.0 & PAYLOAD_MASK
     }
 
+    #[inline(always)]
     const fn tag_bits(self) -> u8 {
         ((self.0 & TAG_MASK) >> TAG_SHIFT) as u8
     }

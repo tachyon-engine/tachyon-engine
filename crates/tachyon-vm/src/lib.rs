@@ -204,6 +204,7 @@ impl Isolate {
         Ok(())
     }
 
+    #[inline(always)]
     fn read(&self, base: u32, register: u32) -> Result<Value, ExecutionError> {
         self.fiber
             .registers
@@ -212,6 +213,7 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidRegister(RegisterId::new(register)))
     }
 
+    #[inline(always)]
     fn write(&mut self, base: u32, register: u32, value: Value) -> Result<(), ExecutionError> {
         let slot = self
             .fiber
@@ -223,6 +225,7 @@ impl Isolate {
     }
 }
 
+#[inline(always)]
 fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
     if let (Some(left), Some(right)) = (left.as_i32(), right.as_i32()) {
         let integer = match opcode {
@@ -251,6 +254,7 @@ fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
     })
 }
 
+#[inline(always)]
 fn strict_equal(left: Value, right: Value) -> bool {
     match (numeric_value(left), numeric_value(right)) {
         (Some(left), Some(right)) => left == right,
@@ -258,6 +262,7 @@ fn strict_equal(left: Value, right: Value) -> bool {
     }
 }
 
+#[inline(always)]
 fn numeric_value(value: Value) -> Option<f64> {
     value.as_i32().map(f64::from).or_else(|| value.as_f64())
 }

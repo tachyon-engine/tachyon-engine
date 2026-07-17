@@ -279,6 +279,7 @@ pub fn encode_instruction(opcode: Opcode, operands: &[u32]) -> Result<Vec<u32>, 
 }
 
 /// Decodes exactly one instruction and validates all format-level invariants before returning it.
+#[inline(always)]
 pub fn decode_instruction(
     words: &[u32],
     offset: WordOffset,
