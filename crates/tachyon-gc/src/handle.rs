@@ -50,11 +50,23 @@ impl<T: ?Sized> Hash for GcRef<T> {
 impl<T: ?Sized> GcRef<T> {
     /// Retypes a validated logical address at a descriptor-checked allocation or trace boundary.
     #[must_use]
-    pub const fn from_raw(raw: RawHeapRef) -> Self {
+    pub(crate) const fn from_raw(raw: RawHeapRef) -> Self {
         Self {
             raw,
             marker: PhantomData,
         }
+    }
+
+    /// Retypes an encoded address at an external low-level boundary.
+    ///
+    /// # Safety
+    ///
+    /// Before this reference can be dereferenced, the caller must validate that it belongs to the
+    /// target heap and that its registered descriptor is exactly `T`. Prefer allocator-produced
+    /// `GcRef<T>` or `RunningScope` APIs whenever possible.
+    #[must_use]
+    pub const unsafe fn from_raw_unchecked(raw: RawHeapRef) -> Self {
+        Self::from_raw(raw)
     }
 
     /// Returns the encoded logical address without resolving it to a native pointer.

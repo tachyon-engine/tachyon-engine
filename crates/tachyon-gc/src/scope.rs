@@ -8,7 +8,7 @@ use core::{
 use std::rc::Rc;
 
 use crate::{
-    AllocationSpace, GcRef, GcType, Heap, HeapAllocationError, HeapReferenceError,
+    AllocationSpace, GcRef, GcType, GcTypeId, Heap, HeapAllocationError, HeapReferenceError,
     MajorCollectionError, MajorCollectionStats, TemporaryRootError, Trace,
 };
 
@@ -157,6 +157,15 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         callback(&mut nested)
     }
 
+    /// Enters a phase where payloads may be borrowed because allocation and collection APIs vanish.
+    pub fn with_no_gc_scope<R>(
+        &mut self,
+        callback: impl for<'no_gc> FnOnce(&mut NoGcScope<'_, 'scope, 'no_gc>) -> R,
+    ) -> R {
+        let mut no_gc = NoGcScope::new(&mut *self.heap);
+        callback(&mut no_gc)
+    }
+
     /// Returns root-stack capacity evidence without exposing mutable storage.
     #[must_use]
     pub fn temporary_root_stats(&self) -> crate::TemporaryRootStats {
@@ -175,6 +184,106 @@ impl Drop for RunningScope<'_, '_> {
 pub enum ScopedAllocationError {
     Allocation(HeapAllocationError),
     Root(RootError),
+}
+
+/// A descriptor token or live logical reference failed before native payload dereference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoGcBorrowError {
+    UnregisteredOrMismatchedType { type_id: GcTypeId },
+    InvalidReference(HeapReferenceError),
+}
+
+/// An exclusive heap phase that can lend payload references but exposes no GC-capable operation.
+///
+/// Allocation is rejected at compile time because `NoGcScope` deliberately has no allocation or
+/// collection method:
+///
+/// ```compile_fail
+/// use tachyon_gc::{AllocationSpace, GcType, NoGcScope, Trace, Tracer};
+/// struct Object;
+/// impl Trace for Object { fn trace(&mut self, _: &mut dyn Tracer) {} }
+/// fn cannot_allocate(scope: &mut NoGcScope<'_, '_, '_>, object_type: GcType<Object>) {
+///     scope.try_allocate(object_type, 0, 0, Object, AllocationSpace::Old);
+/// }
+/// ```
+///
+/// Payload borrows cannot escape the generative no-GC callback lifetime:
+///
+/// ```compile_fail
+/// use tachyon_gc::{GcType, Local, NoGcScope, Trace, Tracer};
+/// struct Object;
+/// impl Trace for Object { fn trace(&mut self, _: &mut dyn Tracer) {} }
+/// fn escape<'scope>(
+///     scope: &NoGcScope<'_, 'scope, '_>,
+///     local: Local<'scope, Object>,
+///     object_type: GcType<Object>,
+/// ) -> &'static Object {
+///     scope.borrow(local, object_type).unwrap()
+/// }
+/// ```
+///
+/// An exclusive scope borrow prevents overlapping mutable payload references:
+///
+/// ```compile_fail
+/// use tachyon_gc::{GcType, Local, NoGcScope, Trace, Tracer};
+/// struct Object(u32);
+/// impl Trace for Object { fn trace(&mut self, _: &mut dyn Tracer) {} }
+/// fn alias<'scope>(
+///     scope: &mut NoGcScope<'_, 'scope, '_>,
+///     local: Local<'scope, Object>,
+///     object_type: GcType<Object>,
+/// ) {
+///     let first = scope.borrow_mut(local, object_type).unwrap();
+///     let second = scope.borrow_mut(local, object_type).unwrap();
+///     first.0 += second.0;
+/// }
+/// ```
+pub struct NoGcScope<'heap, 'scope, 'no_gc> {
+    heap: &'heap mut Heap,
+    scope: PhantomData<&'scope mut &'scope ()>,
+    no_gc: PhantomData<&'no_gc mut &'no_gc ()>,
+    not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
+    fn new(heap: &'heap mut Heap) -> Self {
+        Self {
+            heap,
+            scope: PhantomData,
+            no_gc: PhantomData,
+            not_send_or_sync: PhantomData,
+        }
+    }
+
+    /// Borrows a validated payload for no longer than this no-GC scope borrow.
+    pub fn borrow<T: Trace + 'static>(
+        &self,
+        local: Local<'scope, T>,
+        object_type: GcType<T>,
+    ) -> Result<&T, NoGcBorrowError> {
+        let payload = self
+            .heap
+            .checked_payload_shared(local.as_gc_ref(), object_type)?;
+        // SAFETY: checked resolution matched this heap's Rust TypeId, header descriptor, payload
+        // layout, allocation bit, and owner address. `NoGcScope` exclusively borrows the heap and
+        // exposes no allocation/collection API for the returned reference's borrow lifetime.
+        Ok(unsafe { &*payload })
+    }
+
+    /// Exclusively borrows a validated payload while the mutable scope borrow prevents aliases.
+    pub fn borrow_mut<T: Trace + 'static>(
+        &mut self,
+        local: Local<'scope, T>,
+        object_type: GcType<T>,
+    ) -> Result<&mut T, NoGcBorrowError> {
+        let mut payload = self
+            .heap
+            .checked_payload_mut(local.as_gc_ref(), object_type)?;
+        // SAFETY: checked resolution proves the concrete `T`; the exclusive borrow of this
+        // `NoGcScope` prevents any second shared/mutable payload borrow or heap operation until the
+        // returned reference expires.
+        Ok(unsafe { payload.as_mut() })
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +308,18 @@ mod tests {
         drops: Arc<AtomicUsize>,
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct Payload {
+        value: u32,
+    }
+
+    struct OtherPayload;
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct LargePayload {
+        bytes: [u8; 70_000],
+    }
+
     impl Trace for DropProbe {
         fn trace(&mut self, _: &mut dyn Tracer) {}
     }
@@ -207,6 +328,18 @@ mod tests {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    impl Trace for Payload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Trace for OtherPayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Trace for LargePayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
     }
 
     fn heap_and_type() -> (Heap, crate::GcType<DropProbe>, Arc<AtomicUsize>) {
@@ -392,5 +525,105 @@ mod tests {
         let mut no_roots = Vec::<Value>::new();
         heap.collect_major(&mut no_roots).unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    /// Shared and exclusive borrows resolve the same small payload without exposing heap operations.
+    fn no_gc_scope_borrows_and_mutates_validated_small_payloads() {
+        let mut types = TypeRegistry::new();
+        let payload_type = types.try_register::<Payload>("Payload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+
+        heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    payload_type,
+                    0,
+                    0,
+                    Payload { value: 7 },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            running.with_no_gc_scope(|no_gc| {
+                assert_eq!(no_gc.borrow(local, payload_type).unwrap().value, 7);
+                no_gc.borrow_mut(local, payload_type).unwrap().value = 11;
+                assert_eq!(no_gc.borrow(local, payload_type).unwrap().value, 11);
+            });
+            let mut no_other_roots = Vec::<Value>::new();
+            assert_eq!(
+                running
+                    .collect_major(&mut no_other_roots)
+                    .unwrap()
+                    .sweep
+                    .live_objects,
+                1
+            );
+            running.with_no_gc_scope(|no_gc| {
+                assert_eq!(
+                    no_gc.borrow(local, payload_type).unwrap(),
+                    &Payload { value: 11 }
+                );
+            });
+        });
+    }
+
+    #[test]
+    /// Large owner/continuation storage uses the same descriptor-checked borrow boundary.
+    fn no_gc_scope_borrows_large_payloads_at_the_owner_offset() {
+        let mut types = TypeRegistry::new();
+        let payload_type = types.try_register::<LargePayload>("LargePayload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+
+        heap.with_running_scope(|running| {
+            let local = running
+                .try_allocate(
+                    payload_type,
+                    0,
+                    0,
+                    LargePayload {
+                        bytes: [0x5a; 70_000],
+                    },
+                    AllocationSpace::Old,
+                )
+                .unwrap();
+            running.with_no_gc_scope(|no_gc| {
+                let payload = no_gc.borrow(local, payload_type).unwrap();
+                assert_eq!(payload.bytes[0], 0x5a);
+                assert_eq!(payload.bytes[69_999], 0x5a);
+            });
+        });
+    }
+
+    #[test]
+    /// Unsafe raw retyping still cannot cross the checked descriptor boundary into a Rust borrow.
+    fn no_gc_scope_rejects_a_forged_payload_type_before_dereference() {
+        let mut types = TypeRegistry::new();
+        let payload_type = types.try_register::<Payload>("Payload").unwrap();
+        let other_type = types.try_register::<OtherPayload>("OtherPayload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                payload_type,
+                0,
+                0,
+                Payload { value: 7 },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        // SAFETY: this deliberately violates the pointee type only to exercise the checked NoGc
+        // boundary; the forged reference is never dereferenced without descriptor validation.
+        let forged = unsafe { GcRef::<OtherPayload>::from_raw_unchecked(reference.raw()) };
+
+        heap.with_running_scope(|running| {
+            let local = running.root(forged).unwrap();
+            running.with_no_gc_scope(|no_gc| {
+                assert!(matches!(
+                    no_gc.borrow(local, other_type),
+                    Err(super::NoGcBorrowError::InvalidReference(
+                        HeapReferenceError::TypeMismatch { expected, actual }
+                    )) if expected == other_type.type_id() && actual == payload_type.type_id()
+                ));
+            });
+        });
     }
 }

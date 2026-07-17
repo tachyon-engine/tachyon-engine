@@ -139,6 +139,38 @@ impl SpanStorage {
         offset: SpanOffset,
         payload_layout: Layout,
     ) -> Result<NonNull<u8>, SpanStorageAccessError> {
+        let payload_offset = self.checked_payload_offset(offset, payload_layout)?;
+        let payload = self
+            .blocks
+            .as_mut_ptr()
+            .cast::<u8>()
+            .wrapping_add(payload_offset);
+        debug_assert_eq!(payload.addr() % payload_layout.align(), 0);
+        NonNull::new(payload).ok_or(SpanStorageAccessError::ObjectCrossesSpanEnd(offset))
+    }
+
+    /// Resolves a shared erased payload pointer without creating a Rust reference or mutable alias.
+    pub(crate) fn payload_address_shared(
+        &self,
+        offset: SpanOffset,
+        payload_layout: Layout,
+    ) -> Result<*const u8, SpanStorageAccessError> {
+        let payload_offset = self.checked_payload_offset(offset, payload_layout)?;
+        let payload = self
+            .blocks
+            .as_ptr()
+            .cast::<u8>()
+            .wrapping_add(payload_offset);
+        debug_assert_eq!(payload.addr() % payload_layout.align(), 0);
+        Ok(payload)
+    }
+
+    /// Validates descriptor layout and returns a byte offset shared by const/mutable resolution.
+    fn checked_payload_offset(
+        &self,
+        offset: SpanOffset,
+        payload_layout: Layout,
+    ) -> Result<usize, SpanStorageAccessError> {
         let layout = ObjectLayout::for_payload_layout(payload_layout)
             .map_err(SpanStorageAccessError::InvalidPayloadLayout)?;
         if layout.alignment() > MINIMUM_SLOT_SIZE_BYTES {
@@ -153,13 +185,7 @@ impl SpanStorage {
         if object_offset + layout.allocation_size() > self.len() {
             return Err(SpanStorageAccessError::ObjectCrossesSpanEnd(offset));
         }
-        let payload = self
-            .blocks
-            .as_mut_ptr()
-            .cast::<u8>()
-            .wrapping_add(object_offset + layout.payload_offset());
-        debug_assert_eq!(payload.addr() % payload_layout.align(), 0);
-        NonNull::new(payload).ok_or(SpanStorageAccessError::ObjectCrossesSpanEnd(offset))
+        Ok(object_offset + layout.payload_offset())
     }
 
     /// Stores a free-list link in dead slot bytes without typed pointer access.

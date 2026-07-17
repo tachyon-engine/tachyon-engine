@@ -639,6 +639,27 @@ impl SpanTable {
             .map_err(|_| HeapReferenceError::PayloadAccess(reference))
     }
 
+    /// Resolves a descriptor-checked shared payload without lending table storage directly.
+    pub(crate) fn payload_address_shared(
+        &self,
+        reference: RawHeapRef,
+        descriptor: TypeDescriptor,
+    ) -> Result<*const u8, HeapReferenceError> {
+        self.verify_reference(reference, Some(descriptor.type_id()))?;
+        let kind = self.entries[reference.span_id().index() as usize]
+            .kind
+            .as_ref()
+            .expect("verified references have occupied entries");
+        let storage = match kind {
+            SpanKind::Small(span) => &span.storage,
+            SpanKind::LargeOwner(span) => &span.storage,
+            SpanKind::LargeContinuation(_) => unreachable!("verifier rejects continuations"),
+        };
+        storage
+            .payload_address_shared(reference.span_offset(), descriptor.layout())
+            .map_err(|_| HeapReferenceError::PayloadAccess(reference))
+    }
+
     /// Reclaims an object after its descriptor drop callback has completed.
     ///
     /// The collector owns sequencing: calling this early leaks Rust resources when the slot is

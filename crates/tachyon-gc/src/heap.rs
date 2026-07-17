@@ -9,7 +9,7 @@ use crate::{
     gray::GrayQueue,
     mark::mark_strong_roots,
     roots::{RootComposition, TemporaryRoots},
-    scope::{RootError, RunningScope},
+    scope::{NoGcBorrowError, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full},
     tuning::SMALL_SIZE_CLASSES,
 };
@@ -238,7 +238,8 @@ impl Heap {
     /// ```compile_fail
     /// use tachyon_gc::{GcRef, Heap, HeapLimit, RawHeapRef, TypeRegistry};
     /// let mut heap = Heap::new(HeapLimit::new(64 * 1024), TypeRegistry::new());
-    /// let reference = GcRef::<()>::from_raw(RawHeapRef::new(16).unwrap());
+    /// // SAFETY: compile-fail fixture only needs a typed token; no dereference is performed.
+    /// let reference = unsafe { GcRef::<()>::from_raw_unchecked(RawHeapRef::new(16).unwrap()) };
     /// let escaped = heap.with_running_scope(|scope| scope.root(reference));
     /// ```
     pub fn with_running_scope<R>(
@@ -311,6 +312,48 @@ impl Heap {
         self.temporary_roots
             .try_push(reference)
             .map_err(RootError::Capacity)
+    }
+
+    /// Revalidates heap registry, header type, layout, and liveness before a shared payload borrow.
+    pub(crate) fn checked_payload_shared<T: Trace + 'static>(
+        &self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<*const T, NoGcBorrowError> {
+        if !self.types.matches(object_type) {
+            return Err(NoGcBorrowError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        let descriptor = self
+            .types
+            .descriptor(object_type.type_id())
+            .expect("matching type tokens have immutable descriptors");
+        self.table
+            .payload_address_shared(reference.raw(), descriptor)
+            .map(|payload| payload.cast::<T>())
+            .map_err(NoGcBorrowError::InvalidReference)
+    }
+
+    /// Revalidates heap registry, header type, layout, and liveness before an exclusive borrow.
+    pub(crate) fn checked_payload_mut<T: Trace + 'static>(
+        &mut self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<core::ptr::NonNull<T>, NoGcBorrowError> {
+        if !self.types.matches(object_type) {
+            return Err(NoGcBorrowError::UnregisteredOrMismatchedType {
+                type_id: object_type.type_id(),
+            });
+        }
+        let descriptor = self
+            .types
+            .descriptor(object_type.type_id())
+            .expect("matching type tokens have immutable descriptors");
+        self.table
+            .payload_address(reference.raw(), descriptor)
+            .map(core::ptr::NonNull::cast)
+            .map_err(NoGcBorrowError::InvalidReference)
     }
 
     /// Updates committed storage after the collector has dropped a large payload and releases its range.

@@ -583,7 +583,9 @@ mod tests {
         let raw = RawHeapRef::new(16).expect("valid logical address");
         isolate.fiber.registers[0] = Value::from_heap_ref(raw);
         let frame = isolate.fiber.frames.last_mut().expect("entry frame exists");
-        frame.environment = Some(GcRef::from_raw(raw));
+        // SAFETY: this test never dereferences the synthetic environment reference; it only checks
+        // that the exact tracing contract rewrites every encoded fiber edge.
+        frame.environment = Some(unsafe { GcRef::from_raw_unchecked(raw) });
         frame.return_register = Some(RegisterId::new(0));
         frame.this_value = Value::from_heap_ref(raw);
         frame.new_target = Value::from_heap_ref(raw);
