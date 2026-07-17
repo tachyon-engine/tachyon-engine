@@ -1417,6 +1417,7 @@ impl fmt::Display for Opcode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     fn context() -> VerifyContext {
         VerifyContext {
             register_count: 4,
@@ -1647,5 +1648,41 @@ mod tests {
     fn compiled_module_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<CompiledModule>();
+    }
+
+    #[test]
+    fn decoder_preserves_maximum_logical_operand() {
+        let words = encode_instruction(Opcode::Jump, &[u32::MAX]).unwrap();
+        assert_eq!(
+            decode_instruction(&words, WordOffset::new(0))
+                .unwrap()
+                .operand(0),
+            Some(u32::MAX)
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn add_roundtrips_all_encoding_widths(
+            compact in 0_u32..=u8::MAX as u32,
+            normal in (u8::MAX as u32 + 1)..=u16::MAX as u32,
+            wide in (u16::MAX as u32 + 1)..=u32::MAX,
+        ) {
+            for operands in [[compact, 1, 2], [normal, 1, 2], [wide, 1, 2]] {
+                let words = encode_instruction(Opcode::Add, &operands).unwrap();
+                let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+                prop_assert_eq!(decoded.operands, operands);
+                prop_assert_eq!(decoded.operand_count, 3);
+            }
+        }
+
+        #[test]
+        fn arbitrary_word_streams_never_panic(
+            words in proptest::collection::vec(any::<u32>(), 0..64),
+            offset in 0_u32..70,
+        ) {
+            let _ = decode_instruction(&words, WordOffset::new(offset));
+            let _ = Bytecode::from_words(words).verify(context());
+        }
     }
 }

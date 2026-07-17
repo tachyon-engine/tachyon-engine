@@ -262,6 +262,9 @@ dependencies = [
 [[package]]
 name = "tachyon-bytecode"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "tachyon-cli"
