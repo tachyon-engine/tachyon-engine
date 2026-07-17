@@ -7,6 +7,7 @@ members = [
     "crates/tachyon-vm",
     "crates/tachyon",
     "tools/tachyon-cli",
+    "tools/test262-runner",
     "tools/xtask",
 ]
 default-members = [

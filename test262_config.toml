@@ -1,0 +1,20 @@
+schema_version = 1
+repository = "https://github.com/tc39/test262.git"
+commit = "9e61c12835c5e4a3bdba93850427e6742c4f64c4"
+
+[release_target]
+ecma262 = "ECMA-262 16th edition (2025)"
+ecma402 = "ECMA-402 12th edition (2025)"
+annex_b = true
+intl = true
+
+[feature_policy]
+standardized = "applicable"
+proposal = "non-applicable"
+unknown = "error"
+
+[[feature_policy.pinned_proposals]]
+name = "proposal-signals"
+commit = "9124ed91b24bb02ff7408b2fcf5abb6e18b095d7"
+included_in_test262_denominator = false
+required_pass_rate = 1.0
