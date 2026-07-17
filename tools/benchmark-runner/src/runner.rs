@@ -7,6 +7,9 @@ use crate::{
     EngineIdentity, SampleSummary, StatisticsError, summarize_samples,
 };
 
+/// Current JSON contract for benchmark reports and derived comparisons.
+pub const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 2;
+
 /// Mutually exclusive benchmark timing boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +80,8 @@ pub struct BenchmarkCaseResult {
     pub engine: EngineIdentity,
     /// Raw post-warmup durations.
     pub samples_ns: Vec<u64>,
+    /// Exact JavaScript executions represented by every raw sample.
+    pub iterations_per_sample: u64,
     /// Maximum adapter-reported resident bytes.
     pub peak_rss_bytes: Option<u64>,
     /// Robust retained-sample summary.
@@ -107,6 +112,13 @@ pub enum RunError {
     Statistics(StatisticsError),
     /// Fixed-capacity sample/result storage could not be allocated.
     AllocationFailed,
+    /// An adapter returned zero or changed its work count across samples.
+    IterationCount {
+        /// First nonzero count, or zero before the first valid sample.
+        expected: u64,
+        /// Invalid count returned by the adapter.
+        actual: u64,
+    },
 }
 
 /// Performs warmup, collects the configured fixed sample count, and marks noisy cases invalid.
@@ -131,8 +143,19 @@ pub fn run_case(
         .try_reserve_exact(config.collected_samples)
         .map_err(|_| RunError::AllocationFailed)?;
     let mut peak_rss_bytes: Option<u64> = None;
+    let mut iterations_per_sample = None;
     for _ in 0..config.collected_samples {
         let metrics = adapter.sample(&request).map_err(RunError::Adapter)?;
+        match iterations_per_sample {
+            None if metrics.iterations != 0 => iterations_per_sample = Some(metrics.iterations),
+            Some(expected) if metrics.iterations == expected => {}
+            expected => {
+                return Err(RunError::IterationCount {
+                    expected: expected.unwrap_or(0),
+                    actual: metrics.iterations,
+                });
+            }
+        }
         samples.push(metrics.elapsed_ns);
         peak_rss_bytes = match (peak_rss_bytes, metrics.peak_rss_bytes) {
             (Some(current), Some(sample)) => Some(current.max(sample)),
@@ -164,6 +187,7 @@ pub fn run_case(
         mode,
         engine: adapter.identity().clone(),
         samples_ns: samples,
+        iterations_per_sample: iterations_per_sample.unwrap_or(0),
         peak_rss_bytes,
         summary,
         validity: Validity {
@@ -369,6 +393,7 @@ mod tests {
     struct FixtureAdapter {
         identity: EngineIdentity,
         samples: VecDeque<u64>,
+        iterations: VecDeque<u64>,
     }
 
     impl BenchmarkAdapter for FixtureAdapter {
@@ -386,6 +411,7 @@ mod tests {
         ) -> Result<SampleMetrics, crate::AdapterError> {
             Ok(SampleMetrics {
                 elapsed_ns: self.samples.pop_front().unwrap_or(100),
+                iterations: self.iterations.pop_front().unwrap_or(1),
                 peak_rss_bytes: Some(4096),
             })
         }
@@ -408,6 +434,7 @@ mod tests {
                 binary_size_bytes: None,
             },
             samples: [1, 2, 3].into_iter().chain([100; 15]).collect(),
+            iterations: [1; 18].into(),
         };
         let host = HostMetadata {
             os: "test".into(),
@@ -437,9 +464,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.samples_ns, [100; 15]);
+        assert_eq!(result.iterations_per_sample, 1);
         assert_eq!(result.summary.median_ns, 100);
         assert_eq!(result.peak_rss_bytes, Some(4096));
         assert!(result.validity.valid);
+    }
+
+    #[test]
+    /// Rejects zero and changing execution counts before statistics can make workloads look comparable.
+    fn case_runner_rejects_invalid_iteration_counts() {
+        let mut config = BenchmarkConfig::parse(CONFIG).unwrap();
+        config.warmup_iterations = 0;
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let corpus = load_corpus(&workspace, &config).unwrap();
+        let identity = EngineIdentity {
+            name: "fixture".into(),
+            kind: EngineKind::Fixture,
+            version: "1".into(),
+            commit: "fixture".into(),
+            features: "none".into(),
+            build_flags: "fixture".into(),
+            binary_size_bytes: None,
+        };
+        let host = HostMetadata {
+            os: "test".into(),
+            architecture: "test".into(),
+            cpu: "test".into(),
+            rustc: "test".into(),
+            cpu_affinity: EnvironmentCheck {
+                satisfied: true,
+                detail: "fixture".into(),
+            },
+            performance_governor: EnvironmentCheck {
+                satisfied: true,
+                detail: "fixture".into(),
+            },
+            background_noise: None,
+            validity: super::Validity {
+                valid: true,
+                reasons: Vec::new(),
+            },
+        };
+        let mut changing = FixtureAdapter {
+            identity: identity.clone(),
+            samples: [100; 15].into(),
+            iterations: [1, 2].into(),
+        };
+        assert!(matches!(
+            run_case(
+                &mut changing,
+                &corpus[0],
+                MeasurementMode::SteadyState,
+                &config,
+                &host,
+            ),
+            Err(super::RunError::IterationCount {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        let mut zero = FixtureAdapter {
+            identity,
+            samples: [100; 15].into(),
+            iterations: [0].into(),
+        };
+        assert!(matches!(
+            run_case(
+                &mut zero,
+                &corpus[0],
+                MeasurementMode::SteadyState,
+                &config,
+                &host,
+            ),
+            Err(super::RunError::IterationCount {
+                expected: 0,
+                actual: 0
+            })
+        ));
     }
 
     #[test]

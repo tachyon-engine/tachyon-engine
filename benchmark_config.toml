@@ -12,6 +12,13 @@ maximum_background_relative_mad = 0.05
 external_process_timeout_millis = 10000
 maximum_process_output_bytes = 65536
 
+[tachyon]
+atom_max_entries = 1024
+atom_max_bytes = 1048576
+atom_hash_seed_0 = 7640891576956012809
+atom_hash_seed_1 = 4354685564936845355
+steady_state_iterations = 1000
+
 [[external_engines]]
 id = "boa-macos-aarch64"
 name = "Boa"
@@ -87,6 +94,17 @@ lto = "thin"
 codegen_units = 1
 target_cpu = "default"
 features = "default"
+
+[[scripts]]
+id = "tachyon/foundation-arithmetic"
+path = "benches/scripts/tachyon/foundation/arithmetic.js"
+category = "arithmetic"
+suite = "micro"
+source_repository = "https://github.com/lemonhx/tachyon-js"
+source_commit = "99ce3407b8923368ee73d933ab09192b688cb5f7"
+source_path = "benches/scripts/tachyon/foundation/arithmetic.js"
+sha256 = "08ac9b9e26481bbf3b9f42f77d6edf849939d328d0e90373b72e39361427b804"
+license = "Apache-2.0"
 
 [[scripts]]
 id = "basic/call-loop"

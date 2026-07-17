@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::BENCHMARK_REPORT_SCHEMA_VERSION;
 use crate::{BenchmarkCaseResult, BenchmarkCategory, BenchmarkReport, MeasurementMode, SuiteKind};
 
 /// Stable identity shared by baseline and candidate engines.
@@ -26,6 +27,10 @@ pub struct CaseRatio {
     pub baseline_median_ns: u64,
     /// Candidate retained median nanoseconds.
     pub candidate_median_ns: u64,
+    /// Baseline median normalized by explicit executions per sample.
+    pub baseline_ns_per_iteration: f64,
+    /// Candidate median normalized by explicit executions per sample.
+    pub candidate_ns_per_iteration: f64,
     /// `baseline / candidate`; above one is faster.
     pub speed_ratio: f64,
 }
@@ -75,6 +80,8 @@ pub enum CompareError {
     ScriptHashMismatch(CaseKey),
     /// Matched keys disagree about their aggregate category or suite.
     ClassificationMismatch(CaseKey),
+    /// Matched keys represent different execution counts per sample.
+    IterationCountMismatch(CaseKey),
 }
 
 /// Matches script/mode keys, excludes invalid cases, and computes explicit baseline/candidate ratios.
@@ -109,25 +116,33 @@ pub fn compare_reports(
         {
             return Err(CompareError::ClassificationMismatch(key));
         }
+        if baseline_case.iterations_per_sample != candidate_case.iterations_per_sample {
+            return Err(CompareError::IterationCountMismatch(key));
+        }
         if !baseline_case.validity.valid || !candidate_case.validity.valid {
             invalid_cases.push(key);
             continue;
         }
+        let baseline_ns_per_iteration =
+            baseline_case.summary.median_ns as f64 / baseline_case.iterations_per_sample as f64;
+        let candidate_ns_per_iteration =
+            candidate_case.summary.median_ns as f64 / candidate_case.iterations_per_sample as f64;
         ratios.push(CaseRatio {
             key,
             category: candidate_case.category,
             suite: candidate_case.suite,
             baseline_median_ns: baseline_case.summary.median_ns,
             candidate_median_ns: candidate_case.summary.median_ns,
-            speed_ratio: baseline_case.summary.median_ns as f64
-                / candidate_case.summary.median_ns as f64,
+            baseline_ns_per_iteration,
+            candidate_ns_per_iteration,
+            speed_ratio: baseline_ns_per_iteration / candidate_ns_per_iteration,
         });
     }
     let missing_candidate = baseline_cases.into_keys().collect::<Vec<_>>();
     let by_category = grouped_geomean(&ratios, |ratio| ratio.category);
     let by_suite = grouped_geomean(&ratios, |ratio| ratio.suite);
     Ok(BenchmarkComparison {
-        schema_version: 1,
+        schema_version: BENCHMARK_REPORT_SCHEMA_VERSION,
         baseline_engine: report_engine_name(baseline),
         candidate_engine: report_engine_name(candidate),
         valid: missing_candidate.is_empty()
@@ -225,8 +240,9 @@ impl std::error::Error for CompareError {}
 #[cfg(test)]
 mod tests {
     use crate::{
-        BenchmarkCaseResult, BenchmarkCategory, BenchmarkReport, BuildConfig, EngineIdentity,
-        EngineKind, HostMetadata, MeasurementMode, SampleSummary, SuiteKind, Validity,
+        BENCHMARK_REPORT_SCHEMA_VERSION, BenchmarkCaseResult, BenchmarkCategory, BenchmarkReport,
+        BuildConfig, EngineIdentity, EngineKind, HostMetadata, MeasurementMode, SampleSummary,
+        SuiteKind, Validity,
     };
 
     use super::{CompareError, compare_reports};
@@ -248,6 +264,7 @@ mod tests {
                 binary_size_bytes: None,
             },
             samples_ns: vec![median; 10],
+            iterations_per_sample: 1,
             peak_rss_bytes: None,
             summary: SampleSummary {
                 collected: 10,
@@ -269,7 +286,7 @@ mod tests {
 
     fn report(cases: Vec<BenchmarkCaseResult>) -> BenchmarkReport {
         BenchmarkReport {
-            schema_version: 1,
+            schema_version: BENCHMARK_REPORT_SCHEMA_VERSION,
             host: HostMetadata {
                 os: "test".into(),
                 architecture: "test".into(),
@@ -308,6 +325,8 @@ mod tests {
         let comparison = compare_reports(&baseline, &candidate).unwrap();
         assert!(comparison.valid);
         assert_eq!(comparison.cases[0].speed_ratio, 2.0);
+        assert_eq!(comparison.cases[0].baseline_ns_per_iteration, 200.0);
+        assert_eq!(comparison.cases[0].candidate_ns_per_iteration, 100.0);
         assert_eq!(comparison.cases[1].speed_ratio, 4.0);
         assert!((comparison.geometric_mean.unwrap() - 8.0_f64.sqrt()).abs() < 1e-12);
         assert!(comparison.to_markdown().contains("2.828427"));
@@ -345,6 +364,17 @@ mod tests {
         assert!(matches!(
             compare_reports(&baseline, &report(vec![changed])),
             Err(CompareError::ClassificationMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn comparison_rejects_iteration_count_drift() {
+        let baseline = report(vec![case("a", 200)]);
+        let mut changed = case("a", 100);
+        changed.iterations_per_sample = 10;
+        assert!(matches!(
+            compare_reports(&baseline, &report(vec![changed])),
+            Err(CompareError::IterationCountMismatch(_))
         ));
     }
 }

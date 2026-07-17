@@ -42,10 +42,28 @@ pub struct BenchmarkConfig {
     pub maximum_process_output_bytes: usize,
     /// Reproducible Tachyon/Rust build settings.
     pub build: BuildConfig,
+    /// In-process Tachyon benchmark-only isolate and throughput settings.
+    pub tachyon: TachyonBenchmarkConfig,
     /// Pinned release CLI profiles used for cross-engine smoke reports.
     pub external_engines: Vec<ExternalEngineProfile>,
     /// Approved content-addressed corpus entries.
     pub scripts: Vec<ScriptConfig>,
+}
+
+/// Central in-process harness constants; engine tuning constants remain in engine `tuning` modules.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TachyonBenchmarkConfig {
+    /// Maximum atom entries available to one benchmark isolate.
+    pub atom_max_entries: u32,
+    /// Maximum atom backing bytes available to one benchmark isolate.
+    pub atom_max_bytes: usize,
+    /// Deterministic benchmark-only atom hash seed low word.
+    pub atom_hash_seed_0: u64,
+    /// Deterministic benchmark-only atom hash seed high word.
+    pub atom_hash_seed_1: u64,
+    /// Executions represented by one steady-state timing sample.
+    pub steady_state_iterations: u64,
 }
 
 /// Pinned source, build, and executable identity for one external engine on one platform.
@@ -242,6 +260,14 @@ impl BenchmarkConfig {
         if self.external_process_timeout_millis == 0 || self.maximum_process_output_bytes == 0 {
             return Err("external process timeout and output limit must be nonzero");
         }
+        if self.tachyon.atom_max_entries == 0
+            || self.tachyon.atom_max_bytes == 0
+            || self.tachyon.steady_state_iterations < 2
+        {
+            return Err(
+                "Tachyon benchmark capacities must be nonzero and steady state must repeat",
+            );
+        }
         validate_external_engines(&self.external_engines)?;
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();
@@ -408,7 +434,7 @@ mod tests {
         config.validate().unwrap();
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let corpus = load_corpus(&workspace, &config).unwrap();
-        assert_eq!(corpus.len(), 3);
+        assert_eq!(corpus.len(), 4);
         assert!(corpus.iter().all(|script| !script.source.is_empty()));
         assert_eq!(config.external_engines.len(), 3);
         assert!(config.external_engine("boa-macos-aarch64").is_some());

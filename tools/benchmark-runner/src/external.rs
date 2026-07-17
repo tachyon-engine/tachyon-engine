@@ -153,6 +153,7 @@ impl ExternalProcessAdapter {
         if status.success() {
             return Ok(SampleMetrics {
                 elapsed_ns,
+                iterations: 1,
                 peak_rss_bytes: None,
             });
         }

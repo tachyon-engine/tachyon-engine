@@ -11,8 +11,9 @@ use std::{
 };
 
 use benchmark_runner::{
-    BenchmarkConfig, BenchmarkReport, CorpusScript, EngineIdentity, EngineKind,
-    ExternalProcessAdapter, ExternalProcessConfig, HostMetadata, MeasurementMode,
+    BENCHMARK_REPORT_SCHEMA_VERSION, BenchmarkAdapter, BenchmarkConfig, BenchmarkReport,
+    CorpusScript, EngineIdentity, EngineKind, ExternalProcessAdapter, ExternalProcessConfig,
+    HostMetadata, MeasurementMode, TachyonInProcessAdapter, TachyonInProcessConfig,
     compare_reports as compare_benchmarks, load_corpus, run_case,
 };
 use test262_runner::{
@@ -88,6 +89,16 @@ fn main() {
         [command, subcommand, profile] if command == "bench" && subcommand == "build-profile" => {
             build_benchmark_profile(profile)
         }
+        [command, subcommand, mode, script]
+            if command == "bench" && subcommand == "run-tachyon" =>
+        {
+            launch_release_tachyon_benchmark(mode, script)
+        }
+        [command, subcommand, mode, script]
+            if command == "bench" && subcommand == "run-tachyon-internal" =>
+        {
+            run_tachyon_benchmark(mode, script)
+        }
         _ => Err(USAGE.to_owned()),
     };
 
@@ -97,7 +108,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-tachyon <parse-compile-execute|precompiled-execute|steady-state> <script-id>\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -392,7 +403,6 @@ fn execute_external_benchmarks(
     config: BenchmarkConfig,
     corpus: Vec<CorpusScript>,
 ) -> Result<(), String> {
-    let host = HostMetadata::collect(&config);
     let identity = EngineIdentity {
         name: options.name,
         kind: options.kind,
@@ -412,36 +422,103 @@ fn execute_external_benchmarks(
         },
     )
     .map_err(|error| error.to_string())?;
+    execute_adapter_benchmarks(
+        &mut adapter,
+        MeasurementMode::ColdStart,
+        options.script.as_deref(),
+        config,
+        corpus,
+    )
+}
+
+/// Re-executes the in-process benchmark in the configured Cargo release profile outside the timer.
+fn launch_release_tachyon_benchmark(mode: &str, script: &str) -> Result<(), String> {
+    let workspace = workspace_root();
+    verify_clean_checkout(&workspace)?;
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(&workspace)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "xtask",
+            "--",
+            "bench",
+            "run-tachyon-internal",
+            mode,
+            script,
+        ])
+        .env("TACHYON_BENCH_RELEASE_CHILD", "1");
+    run_streaming_command(&mut command)
+}
+
+/// Runs one mode inside the release child after binding report identity to a clean revision.
+fn run_tachyon_benchmark(mode: &str, script: &str) -> Result<(), String> {
+    if env::var_os("TACHYON_BENCH_RELEASE_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Err("internal Tachyon benchmark must be launched through run-tachyon".to_owned());
+    }
+    let mode = match mode {
+        "parse-compile-execute" => MeasurementMode::ParseCompileExecute,
+        "precompiled-execute" => MeasurementMode::PrecompiledExecute,
+        "steady-state" => MeasurementMode::SteadyState,
+        _ => return Err(USAGE.to_owned()),
+    };
+    let workspace = workspace_root();
+    let commit = verify_clean_checkout(&workspace)?;
+    let (config, corpus) = benchmark_config_and_corpus()?;
+    let build_flags = format!(
+        "profile={}; panic={}; lto={}; codegen-units={}; target-cpu={}",
+        config.build.profile,
+        config.build.panic,
+        config.build.lto,
+        config.build.codegen_units,
+        config.build.target_cpu
+    );
+    let identity = EngineIdentity {
+        name: "Tachyon".into(),
+        kind: EngineKind::TachyonInProcess,
+        version: env!("CARGO_PKG_VERSION").into(),
+        commit: commit.into(),
+        features: config.build.features.clone(),
+        build_flags: build_flags.into(),
+        binary_size_bytes: None,
+    };
+    let mut adapter = TachyonInProcessAdapter::new(
+        identity,
+        TachyonInProcessConfig::from_benchmark(config.tachyon),
+    )
+    .map_err(|error| error.to_string())?;
+    execute_adapter_benchmarks(&mut adapter, mode, Some(script), config, corpus)
+}
+
+/// Applies one adapter/mode to a selected approved corpus and serializes a complete report.
+fn execute_adapter_benchmarks(
+    adapter: &mut dyn BenchmarkAdapter,
+    mode: MeasurementMode,
+    selected_script: Option<&str>,
+    config: BenchmarkConfig,
+    corpus: Vec<CorpusScript>,
+) -> Result<(), String> {
+    let host = HostMetadata::collect(&config);
     let selected = corpus
         .iter()
-        .filter(|script| {
-            options
-                .script
-                .as_deref()
-                .is_none_or(|id| id == &*script.config.id)
-        })
+        .filter(|script| selected_script.is_none_or(|id| id == &*script.config.id))
         .collect::<Vec<_>>();
     if selected.is_empty() {
-        return Err("external benchmark script selection matched nothing".to_owned());
+        return Err("benchmark script selection matched nothing".to_owned());
     }
     let mut cases = Vec::new();
     cases
         .try_reserve_exact(selected.len())
-        .map_err(|_| "cannot reserve external benchmark results".to_owned())?;
+        .map_err(|_| "cannot reserve benchmark results".to_owned())?;
     for script in selected {
         cases.push(
-            run_case(
-                &mut adapter,
-                script,
-                MeasurementMode::ColdStart,
-                &config,
-                &host,
-            )
-            .map_err(|error| error.to_string())?,
+            run_case(adapter, script, mode, &config, &host).map_err(|error| error.to_string())?,
         );
     }
     let report = BenchmarkReport {
-        schema_version: 1,
+        schema_version: BENCHMARK_REPORT_SCHEMA_VERSION,
         host,
         build: config.build,
         cases,
@@ -450,6 +527,30 @@ fn execute_external_benchmarks(
         .map_err(|error| error.to_string())?;
     println!();
     Ok(())
+}
+
+/// Returns HEAD only when tracked files match it, so report provenance never names stale source.
+fn verify_clean_checkout(checkout: &Path) -> Result<String, String> {
+    let commit = command_output(
+        Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["rev-parse", "HEAD"]),
+    )?;
+    let cleanliness = Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .map_err(|error| format!("failed to inspect {}: {error}", checkout.display()))?;
+    if cleanliness.success() {
+        Ok(commit.trim().to_owned())
+    } else {
+        Err(format!(
+            "benchmark checkout has tracked modifications: {}",
+            checkout.display()
+        ))
+    }
 }
 
 fn parse_profile_run_options(arguments: &[String]) -> Result<(String, Option<Box<str>>), String> {

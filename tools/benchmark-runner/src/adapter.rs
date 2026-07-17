@@ -57,6 +57,8 @@ pub struct BenchmarkRequest {
 pub struct SampleMetrics {
     /// Complete sample duration in nanoseconds.
     pub elapsed_ns: u64,
+    /// Exact JavaScript executions represented by this duration.
+    pub iterations: u64,
     /// Peak resident bytes, when the adapter can measure it.
     pub peak_rss_bytes: Option<u64>,
 }
@@ -68,6 +70,8 @@ pub enum AdapterError {
     UnsupportedMode(MeasurementMode),
     /// Parse/compile/process preparation failed.
     Setup(Box<str>),
+    /// In-process compilation or execution failed inside the timed boundary.
+    Engine(Box<str>),
     /// JavaScript execution returned a normal nonzero exit status.
     Execution {
         /// Numeric exit status.
