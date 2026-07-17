@@ -19,8 +19,9 @@ use std::sync::Arc;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
-    BindingId, FunctionStencilId, HirBinaryOperator, HirExpression, HirExpressionKind, HirProgram,
-    HirStatement, HirStatementKind, HirUnaryOperator, ReferenceId, ScopeId, StatementCompletion,
+    BindingId, FunctionStencilId, HirBinaryOperator, HirBinding, HirExpression, HirExpressionKind,
+    HirProgram, HirStatement, HirStatementKind, HirUnaryOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -41,6 +42,10 @@ pub enum CompileError {
     Module(tachyon_bytecode::ModuleBuildError),
     ConstantOverflow,
     RegisterOverflow,
+    BindingOverflow,
+    LoweringCapacityOverflow {
+        collection: &'static str,
+    },
 }
 
 /// The stateless frontend boundary; source and all host configuration must be supplied per call.
@@ -185,6 +190,34 @@ mod tests {
         assert_eq!(left.kind, HirExpressionKind::Number(1.0_f64.to_bits()));
         assert_eq!(right.kind, HirExpressionKind::Number(2.0_f64.to_bits()));
         assert_eq!(statement.completion, StatementCompletion::Value);
+    }
+
+    #[test]
+    fn hir_lowering_copies_local_binding_without_oxc_values() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, "let answer = 42;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [statement] = hir.statements() else {
+            panic!("expected one HIR statement");
+        };
+        let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
+            panic!("expected owned variable declaration");
+        };
+        assert_eq!(declaration.kind, HirVariableDeclarationKind::Let);
+        let [declarator] = declaration.declarators.as_ref() else {
+            panic!("expected one owned declarator");
+        };
+        assert_eq!(declarator.binding.name.as_ref(), "answer");
+        assert!(matches!(
+            declarator.initializer.as_ref(),
+            Some(HirExpression {
+                kind: HirExpressionKind::Number(bits),
+                ..
+            }) if *bits == 42.0_f64.to_bits()
+        ));
     }
 
     #[test]

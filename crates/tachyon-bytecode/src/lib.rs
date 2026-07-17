@@ -22,6 +22,9 @@ const FORMAT_MASK: u8 = 0xc0;
 const NORMAL_FORMAT: u8 = 0x40;
 const WIDE_FORMAT: u8 = 0x80;
 
+/// The largest physical encoding: one header plus three wide operands.
+pub const MAX_ENCODED_INSTRUCTION_WORDS: usize = 4;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct RegisterId(u32);
@@ -120,6 +123,7 @@ pub enum Opcode {
     StoreScope = 16,
     Await = 17,
     Yield = 18,
+    LoadUndefined = 19,
 }
 
 impl Opcode {
@@ -127,6 +131,7 @@ impl Opcode {
     pub const fn operand_count(self) -> usize {
         match self {
             Self::Nop => 0,
+            Self::LoadUndefined | Self::Jump | Self::Return | Self::Throw => 1,
             Self::LoadImmediate
             | Self::LoadConstant
             | Self::Move
@@ -142,7 +147,6 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
-            Self::Jump | Self::Return | Self::Throw => 1,
         }
     }
 
@@ -172,6 +176,7 @@ impl Opcode {
             16 => Some(Self::StoreScope),
             17 => Some(Self::Await),
             18 => Some(Self::Yield),
+            19 => Some(Self::LoadUndefined),
             _ => None,
         }
     }
@@ -619,7 +624,8 @@ impl BytecodeBuilder {
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
             Opcode::Nop | Opcode::Jump => &[],
-            Opcode::LoadImmediate
+            Opcode::LoadUndefined
+            | Opcode::LoadImmediate
             | Opcode::LoadConstant
             | Opcode::LoadScope
             | Opcode::CreateClosure
@@ -1400,9 +1406,10 @@ fn verify_instruction(
     };
     match instruction.opcode {
         Opcode::Nop | Opcode::Jump => {}
-        Opcode::LoadImmediate | Opcode::LoadConstant | Opcode::LoadScope => {
-            check_register(operands[0])?
-        }
+        Opcode::LoadUndefined
+        | Opcode::LoadImmediate
+        | Opcode::LoadConstant
+        | Opcode::LoadScope => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1521,6 +1528,16 @@ mod tests {
         let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap();
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         assert!(Bytecode::from_words(words).verify(context()).is_ok());
+    }
+
+    #[test]
+    fn load_undefined_uses_one_register_operand() {
+        let words = encode_instruction(Opcode::LoadUndefined, &[7]).unwrap();
+        let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        assert_eq!(decoded.opcode, Opcode::LoadUndefined);
+        assert_eq!(decoded.operand_count, 1);
+        assert_eq!(decoded.operands[0], 7);
+        assert_eq!(MAX_ENCODED_INSTRUCTION_WORDS, 4);
     }
 
     #[test]

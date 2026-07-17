@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use oxc::{
-    ast::ast::{Expression, Program, Statement},
+    ast::ast::{
+        BindingPattern, Expression, Program, Statement, VariableDeclaration,
+        VariableDeclarationKind,
+    },
     span::GetSpan,
     syntax::operator::{BinaryOperator, UnaryOperator},
 };
@@ -66,7 +69,38 @@ pub struct HirStatement {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirStatementKind {
     Expression(HirExpression),
+    VariableDeclaration(HirVariableDeclaration),
     Empty,
+}
+
+/// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirBinding {
+    pub id: BindingId,
+    pub span: SourceSpan,
+    pub name: Arc<str>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirVariableDeclarator {
+    pub span: SourceSpan,
+    pub binding: HirBinding,
+    pub initializer: Option<HirExpression>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirVariableDeclarationKind {
+    Var,
+    Let,
+    Const,
+    Using,
+    AwaitUsing,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirVariableDeclaration {
+    pub kind: HirVariableDeclarationKind,
+    pub declarators: Arc<[HirVariableDeclarator]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -137,8 +171,9 @@ pub(crate) fn lower(
     source: &SourceText,
 ) -> Result<HirProgram, CompileError> {
     let mut statements = Vec::with_capacity(program.body.len());
+    let mut next_binding = 0;
     for statement in &program.body {
-        statements.push(lower_statement(statement, source)?);
+        statements.push(lower_statement(statement, source, &mut next_binding)?);
     }
     Ok(HirProgram {
         source_id: source.id(),
@@ -150,6 +185,7 @@ pub(crate) fn lower(
 fn lower_statement(
     statement: &Statement<'_>,
     source: &SourceText,
+    next_binding: &mut u32,
 ) -> Result<HirStatement, CompileError> {
     match statement {
         Statement::ExpressionStatement(statement) => Ok(HirStatement {
@@ -162,11 +198,69 @@ fn lower_statement(
             completion: StatementCompletion::Empty,
             kind: HirStatementKind::Empty,
         }),
+        Statement::VariableDeclaration(declaration) => Ok(HirStatement {
+            span: source_span(declaration.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::VariableDeclaration(lower_variable_declaration(
+                declaration,
+                source,
+                next_binding,
+            )?),
+        }),
         _ => Err(unsupported(
             source.name(),
             source_span(statement.span()),
             "statement",
         )),
+    }
+}
+
+/// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.
+fn lower_variable_declaration(
+    declaration: &VariableDeclaration<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+) -> Result<HirVariableDeclaration, CompileError> {
+    let mut declarators = Vec::with_capacity(declaration.declarations.len());
+    for declarator in &declaration.declarations {
+        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+            return Err(unsupported(
+                source.name(),
+                source_span(declarator.id.span()),
+                "binding pattern",
+            ));
+        };
+        let binding = HirBinding {
+            id: BindingId(*next_binding),
+            span: source_span(identifier.span),
+            name: Arc::from(identifier.name.as_str()),
+        };
+        *next_binding = next_binding
+            .checked_add(1)
+            .ok_or(CompileError::BindingOverflow)?;
+        declarators.push(HirVariableDeclarator {
+            span: source_span(declarator.span),
+            binding,
+            initializer: declarator
+                .init
+                .as_ref()
+                .map(|initializer| lower_expression(initializer, source))
+                .transpose()?,
+        });
+    }
+    Ok(HirVariableDeclaration {
+        kind: lower_variable_declaration_kind(declaration.kind),
+        declarators: declarators.into(),
+    })
+}
+
+fn lower_variable_declaration_kind(kind: VariableDeclarationKind) -> HirVariableDeclarationKind {
+    match kind {
+        VariableDeclarationKind::Var => HirVariableDeclarationKind::Var,
+        VariableDeclarationKind::Let => HirVariableDeclarationKind::Let,
+        VariableDeclarationKind::Const => HirVariableDeclarationKind::Const,
+        VariableDeclarationKind::Using => HirVariableDeclarationKind::Using,
+        VariableDeclarationKind::AwaitUsing => HirVariableDeclarationKind::AwaitUsing,
     }
 }
 

@@ -149,6 +149,11 @@ impl Isolate {
         base: u32,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         match opcode {
+            Opcode::LoadUndefined => self.write(
+                base,
+                operands[0],
+                Value::from_immediate(Immediate::Undefined),
+            )?,
             Opcode::LoadImmediate => {
                 self.write(base, operands[0], Value::from_i32(operands[1] as i32))?
             }

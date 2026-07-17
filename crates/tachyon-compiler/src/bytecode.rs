@@ -2,36 +2,58 @@
 
 use tachyon_bytecode::{
     BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule, FunctionId,
-    FunctionKind, FunctionLayout, FunctionMetadata, Opcode, RegisterId,
-    SourceSpan as BytecodeSourceSpan,
+    FunctionKind, FunctionLayout, FunctionMetadata, MAX_ENCODED_INSTRUCTION_WORDS, Opcode,
+    RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirProgram,
-    HirStatementKind, ProgramKind, SourceName, SourceSpan, SourceText,
+    HirStatementKind, HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName,
+    SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
 pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
-    let instruction_upper_bound = hir_instruction_count(hir).saturating_add(1);
+    let has_expression = hir
+        .statements()
+        .iter()
+        .any(|statement| matches!(&statement.kind, HirStatementKind::Expression(_)));
+    let result_instruction_count = if has_expression { 1 } else { 2 };
+    let instruction_upper_bound = hir_instruction_count(hir)?
+        .checked_add(result_instruction_count)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "bytecode instructions",
+        })?;
+    let word_capacity = instruction_upper_bound
+        .checked_mul(MAX_ENCODED_INSTRUCTION_WORDS)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "bytecode words",
+        })?;
     let mut lowerer = Lowerer {
-        builder: BytecodeBuilder::with_capacity(instruction_upper_bound.saturating_mul(4), 0),
-        constants: Vec::with_capacity(hir_literal_count(hir)),
+        builder: BytecodeBuilder::with_capacity(word_capacity, 0),
+        constants: Vec::with_capacity(hir_literal_count(hir)?),
+        locals: Vec::with_capacity(hir_binding_count(hir)?),
         next_register: 0,
         source_name: source.name().clone(),
     };
     let result = match hir.statements() {
-        [] => lowerer.load_immediate(0, SourceSpan { start: 0, end: 0 })?,
+        [] => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
         statements => {
             let mut result = None;
             for statement in statements {
-                if let HirStatementKind::Expression(expression) = &statement.kind {
-                    result = Some(lowerer.expression(expression)?);
+                match &statement.kind {
+                    HirStatementKind::Expression(expression) => {
+                        result = Some(lowerer.expression(expression)?);
+                    }
+                    HirStatementKind::VariableDeclaration(declaration) => {
+                        lowerer.variable_declaration(declaration)?;
+                    }
+                    HirStatementKind::Empty => {}
                 }
             }
             match result {
                 Some(result) => result,
-                None => lowerer.load_immediate(0, SourceSpan { start: 0, end: 0 })?,
+                None => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
             }
         }
     };
@@ -74,8 +96,15 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
 struct Lowerer {
     builder: BytecodeBuilder,
     constants: Vec<BytecodeConstant>,
+    locals: Vec<LocalBinding>,
     next_register: u32,
     source_name: SourceName,
+}
+
+#[derive(Clone, Debug)]
+struct LocalBinding {
+    name: std::sync::Arc<str>,
+    register: RegisterId,
 }
 
 impl Lowerer {
@@ -151,6 +180,14 @@ impl Lowerer {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Identifier(name) => {
+                self.local(name)
+                    .ok_or_else(|| CompileError::UnsupportedSyntax {
+                        source_name: self.source_name.clone(),
+                        span: expression.span,
+                        syntax: "unresolved identifier",
+                    })
+            }
             _ => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span: expression.span,
@@ -159,9 +196,63 @@ impl Lowerer {
         }
     }
 
+    /// Lowers one declaration list in source order so initializers can use preceding local bindings.
+    fn variable_declaration(
+        &mut self,
+        declaration: &HirVariableDeclaration,
+    ) -> Result<(), CompileError> {
+        if !matches!(
+            declaration.kind,
+            HirVariableDeclarationKind::Let | HirVariableDeclarationKind::Const
+        ) {
+            return Err(CompileError::UnsupportedSyntax {
+                source_name: self.source_name.clone(),
+                span: declaration
+                    .declarators
+                    .first()
+                    .map_or(SourceSpan { start: 0, end: 0 }, |declarator| {
+                        declarator.span
+                    }),
+                syntax: "variable declaration kind",
+            });
+        }
+        for declarator in declaration.declarators.iter() {
+            let initializer =
+                declarator
+                    .initializer
+                    .as_ref()
+                    .ok_or_else(|| CompileError::UnsupportedSyntax {
+                        source_name: self.source_name.clone(),
+                        span: declarator.span,
+                        syntax: "variable declaration without initializer",
+                    })?;
+            let register = self.expression(initializer)?;
+            self.locals.push(LocalBinding {
+                name: declarator.binding.name.clone(),
+                register,
+            });
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn local(&self, name: &str) -> Option<RegisterId> {
+        self.locals
+            .iter()
+            .rev()
+            .find(|binding| binding.name.as_ref() == name)
+            .map(|binding| binding.register)
+    }
+
     fn load_immediate(&mut self, value: u32, span: SourceSpan) -> Result<RegisterId, CompileError> {
         let register = self.register()?;
         self.emit(Opcode::LoadImmediate, &[register.index(), value], span)?;
+        Ok(register)
+    }
+
+    fn load_undefined(&mut self, span: SourceSpan) -> Result<RegisterId, CompileError> {
+        let register = self.register()?;
+        self.emit(Opcode::LoadUndefined, &[register.index()], span)?;
         Ok(register)
     }
 
@@ -175,41 +266,108 @@ impl Lowerer {
     }
 }
 
-fn hir_instruction_count(hir: &HirProgram) -> usize {
-    hir.statements()
-        .iter()
-        .map(|statement| match &statement.kind {
-            HirStatementKind::Expression(expression) => expression_instruction_count(expression),
+fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in hir.statements() {
+        let statement_count = match &statement.kind {
+            HirStatementKind::Expression(expression) => expression_instruction_count(expression)?,
+            HirStatementKind::VariableDeclaration(declaration) => {
+                declaration_instruction_count(declaration)?
+            }
             HirStatementKind::Empty => 0,
-        })
-        .sum()
+        };
+        count = checked_count_add(count, statement_count, "bytecode instructions")?;
+    }
+    Ok(count)
 }
 
-fn expression_instruction_count(expression: &HirExpression) -> usize {
+fn declaration_instruction_count(
+    declaration: &HirVariableDeclaration,
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for declarator in declaration.declarators.iter() {
+        let initializer_count = declarator
+            .initializer
+            .as_ref()
+            .map(expression_instruction_count)
+            .transpose()?
+            .unwrap_or(0);
+        count = checked_count_add(count, initializer_count, "bytecode instructions")?;
+    }
+    Ok(count)
+}
+
+fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Binary { left, right, .. } => {
-            1 + expression_instruction_count(left) + expression_instruction_count(right)
+            let operands = checked_count_add(
+                expression_instruction_count(left)?,
+                expression_instruction_count(right)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(1, operands, "bytecode instructions")
         }
-        _ => 1,
+        _ => Ok(1),
     }
 }
 
-fn hir_literal_count(hir: &HirProgram) -> usize {
-    hir.statements()
-        .iter()
-        .map(|statement| match &statement.kind {
-            HirStatementKind::Expression(expression) => expression_literal_count(expression),
+fn hir_literal_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in hir.statements() {
+        let statement_count = match &statement.kind {
+            HirStatementKind::Expression(expression) => expression_literal_count(expression)?,
+            HirStatementKind::VariableDeclaration(declaration) => {
+                declaration_literal_count(declaration)?
+            }
             HirStatementKind::Empty => 0,
-        })
-        .sum()
+        };
+        count = checked_count_add(count, statement_count, "bytecode constants")?;
+    }
+    Ok(count)
 }
 
-fn expression_literal_count(expression: &HirExpression) -> usize {
-    match &expression.kind {
-        HirExpressionKind::Number(_) => 1,
-        HirExpressionKind::Binary { left, right, .. } => {
-            expression_literal_count(left) + expression_literal_count(right)
-        }
-        _ => 0,
+fn declaration_literal_count(declaration: &HirVariableDeclaration) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for declarator in declaration.declarators.iter() {
+        let initializer_count = declarator
+            .initializer
+            .as_ref()
+            .map(expression_literal_count)
+            .transpose()?
+            .unwrap_or(0);
+        count = checked_count_add(count, initializer_count, "bytecode constants")?;
     }
+    Ok(count)
+}
+
+fn hir_binding_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in hir.statements() {
+        if let HirStatementKind::VariableDeclaration(declaration) = &statement.kind {
+            count = checked_count_add(count, declaration.declarators.len(), "local bindings")?;
+        }
+    }
+    Ok(count)
+}
+
+fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
+    match &expression.kind {
+        HirExpressionKind::Number(_) => Ok(1),
+        HirExpressionKind::Binary { left, right, .. } => checked_count_add(
+            expression_literal_count(left)?,
+            expression_literal_count(right)?,
+            "bytecode constants",
+        ),
+        _ => Ok(0),
+    }
+}
+
+fn checked_count_add(
+    total: usize,
+    next: usize,
+    collection: &'static str,
+) -> Result<usize, CompileError> {
+    total
+        .checked_add(next)
+        .ok_or(CompileError::LoweringCapacityOverflow { collection })
 }
