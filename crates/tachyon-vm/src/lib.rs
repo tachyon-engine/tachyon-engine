@@ -9,6 +9,13 @@
 //!
 //! This crate intentionally has no host I/O surface.
 
+mod finalization;
+
+pub use finalization::{
+    FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
+    FinalizationSafepointStats,
+};
+
 use core::cell::Cell;
 
 use tachyon_bytecode::{
@@ -137,6 +144,7 @@ impl Fiber {
 #[derive(Debug)]
 pub struct Isolate {
     fiber: Fiber,
+    finalization_jobs: finalization::FinalizationJobs,
     _not_sync: Cell<()>,
 }
 
@@ -144,6 +152,7 @@ impl Default for Isolate {
     fn default() -> Self {
         Self {
             fiber: Fiber::default(),
+            finalization_jobs: finalization::FinalizationJobs::new(),
             _not_sync: Cell::new(()),
         }
     }
@@ -156,6 +165,7 @@ impl Isolate {
     /// or borrow heap objects, so it remains valid across non-moving collection phases.
     pub fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
+        self.finalization_jobs.trace(tracer);
     }
 
     /// Starts the module entry function with one checked register reservation before opcode dispatch.
@@ -394,6 +404,13 @@ impl Isolate {
             .last_mut()
             .expect("frame remains active while jumping")
             .pc = pc;
+    }
+}
+
+impl Trace for Isolate {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.trace_roots(tracer);
     }
 }
 
