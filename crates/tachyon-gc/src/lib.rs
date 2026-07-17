@@ -41,7 +41,7 @@ pub use layout::{
     MAX_LOGICAL_SPANS, MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout,
     SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
 };
-pub use mark::{MarkError, MarkStats};
+pub use mark::{MarkError, MarkStats, YoungMarkStats};
 pub use persistent::{PersistentRootError, PersistentRootId, PersistentRootStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
 pub use roots::{TemporaryRootError, TemporaryRootStats};

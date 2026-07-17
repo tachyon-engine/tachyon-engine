@@ -50,6 +50,7 @@ pub struct LargeSpanMetadata {
     object_bytes: usize,
     allocated: bool,
     mark_epoch: Option<CollectionEpoch>,
+    remembered: bool,
     reuse_generation: SpanReuseGeneration,
 }
 
@@ -65,6 +66,7 @@ impl LargeSpanMetadata {
             object_bytes,
             allocated: true,
             mark_epoch: None,
+            remembered: true,
             reuse_generation,
         }
     }
@@ -92,6 +94,17 @@ impl LargeSpanMetadata {
     #[must_use]
     pub const fn reuse_generation(self) -> SpanReuseGeneration {
         self.reuse_generation
+    }
+
+    /// Returns whether minor GC must inspect this direct-old owner for young edges.
+    #[must_use]
+    pub const fn is_remembered(self) -> bool {
+        self.remembered
+    }
+
+    /// Conservatively retains or clears owner-level remembered state after an exact rescan.
+    pub(crate) fn set_remembered(&mut self, remembered: bool) {
+        self.remembered = remembered;
     }
 
     #[must_use]
@@ -295,7 +308,7 @@ impl Default for MarkBitmap {
 }
 
 /// Fixed 512-byte-granularity remembered-set cards for one logical span.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CardBitmap {
     words: [u64; CARD_BITMAP_WORDS],
 }
@@ -329,6 +342,15 @@ impl CardBitmap {
     /// Clears all remembered cards after their edges have been rebuilt or proven young-free.
     pub fn clear(&mut self) {
         self.words.fill(0);
+    }
+
+    /// Counts dirty cards without scanning clean cards individually.
+    #[must_use]
+    pub fn dirty_count(&self) -> usize {
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 }
 
@@ -451,6 +473,17 @@ impl SmallSpanMetadata {
     #[must_use]
     pub const fn cards(&self) -> &CardBitmap {
         &self.cards
+    }
+
+    /// Marks the source card for an Old object initialization or pointer store.
+    #[inline(always)]
+    pub(crate) fn remember_card(&mut self, offset: SpanOffset) -> bool {
+        self.cards.mark(offset)
+    }
+
+    /// Replaces the remembered snapshot after a successful exact source rescan.
+    pub(crate) fn replace_cards(&mut self, cards: CardBitmap) {
+        self.cards = cards;
     }
 
     /// Reports whether the cohort can satisfy one allocation without a span slow path.

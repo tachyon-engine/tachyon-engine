@@ -148,6 +148,25 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         self.heap.collect_major(additional_roots)
     }
 
+    /// Runs young-only marking with all current locals plus caller-owned subsystem roots.
+    pub fn mark_young(
+        &mut self,
+        additional_roots: &mut dyn Trace,
+    ) -> Result<crate::YoungMarkStats, crate::MarkError> {
+        self.heap.mark_young(additional_roots)
+    }
+
+    /// Publishes a completed local-to-local heap pointer store to the generational barrier.
+    #[inline(always)]
+    pub fn write_barrier<S: ?Sized, T: ?Sized>(
+        &mut self,
+        source: Local<'scope, S>,
+        target: Local<'scope, T>,
+    ) -> Result<bool, crate::HeapReferenceError> {
+        self.heap
+            .write_barrier(source.as_gc_ref().raw(), target.as_gc_ref().raw())
+    }
+
     /// Creates a nested checkpoint whose locals are removed before the outer scope resumes.
     pub fn with_nested_scope<R>(
         &mut self,

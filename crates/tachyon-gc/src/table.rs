@@ -68,6 +68,14 @@ pub(crate) enum SweepTarget {
     LargeOwner,
 }
 
+/// Generation classification used by the stop-the-world young marker and write barrier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReferenceSpace {
+    Young,
+    OldSmall,
+    OldLarge,
+}
+
 /// Stable small-span accounting captured between collector mutation steps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SmallSweepSnapshot {
@@ -192,6 +200,8 @@ enum SpanKind {
 struct SpanEntry {
     generation: SpanReuseGeneration,
     kind: Option<SpanKind>,
+    remembered_next: Option<SpanId>,
+    in_remembered_set: bool,
 }
 
 /// A coalesced inclusive range of vacant logical span IDs.
@@ -221,6 +231,7 @@ pub struct SpanTable {
     entries: Vec<SpanEntry>,
     free_ranges: Vec<FreeSpanRange>,
     live_spans: usize,
+    remembered_head: Option<SpanId>,
 }
 
 impl SpanTable {
@@ -231,6 +242,7 @@ impl SpanTable {
             entries: Vec::new(),
             free_ranges: Vec::new(),
             live_spans: 0,
+            remembered_head: None,
         }
     }
 
@@ -394,6 +406,180 @@ impl SpanTable {
         Some(RawHeapRef::from_parts(span_id, offset))
     }
 
+    /// Classifies a verified object without exposing its native storage address.
+    pub(crate) fn reference_space(
+        &self,
+        reference: RawHeapRef,
+    ) -> Result<ReferenceSpace, HeapReferenceError> {
+        self.verify_reference(reference, None)?;
+        let kind = self.entries[reference.span_id().index() as usize]
+            .kind
+            .as_ref()
+            .expect("verified references have occupied entries");
+        Ok(match kind {
+            SpanKind::Small(span) => match span.metadata.space() {
+                SpanSpace::Eden | SpanSpace::Survivor { .. } => ReferenceSpace::Young,
+                SpanSpace::Old => ReferenceSpace::OldSmall,
+            },
+            SpanKind::LargeOwner(_) => ReferenceSpace::OldLarge,
+            SpanKind::LargeContinuation(_) => unreachable!("verifier rejects continuations"),
+        })
+    }
+
+    /// Records the only Phase 1B remembered-set transition: an Old source storing a young target.
+    #[inline(always)]
+    pub(crate) fn remember_old_to_young(
+        &mut self,
+        source: RawHeapRef,
+        target: RawHeapRef,
+    ) -> Result<bool, HeapReferenceError> {
+        let source_space = self.reference_space(source)?;
+        if self.reference_space(target)? != ReferenceSpace::Young {
+            return Ok(false);
+        }
+        let kind = self.entries[source.span_id().index() as usize]
+            .kind
+            .as_mut()
+            .expect("verified source has an occupied entry");
+        let changed = match (source_space, kind) {
+            (ReferenceSpace::Young, _) => false,
+            (ReferenceSpace::OldSmall, SpanKind::Small(span)) => {
+                span.metadata.remember_card(source.span_offset())
+            }
+            (ReferenceSpace::OldLarge, SpanKind::LargeOwner(span)) => {
+                let changed = !span.metadata.is_remembered();
+                span.metadata.set_remembered(true);
+                changed
+            }
+            _ => unreachable!("source classification matches its occupied entry"),
+        };
+        if changed {
+            self.link_remembered_source(source.span_id());
+        }
+        Ok(changed)
+    }
+
+    /// Returns the first owner in the allocation-free remembered-source chain.
+    #[must_use]
+    pub(crate) const fn remembered_head(&self) -> Option<SpanId> {
+        self.remembered_head
+    }
+
+    /// Advances through only sources that have entered the remembered set.
+    #[must_use]
+    pub(crate) fn remembered_next(&self, span_id: SpanId) -> Option<SpanId> {
+        self.entries
+            .get(span_id.index() as usize)
+            .and_then(|entry| entry.remembered_next)
+    }
+
+    /// Returns dirty-card count only for an Old small span.
+    #[must_use]
+    pub(crate) fn dirty_old_card_count(&self, span_id: SpanId) -> usize {
+        let Some(SpanKind::Small(span)) = self
+            .entries
+            .get(span_id.index() as usize)
+            .and_then(|entry| entry.kind.as_ref())
+        else {
+            return 0;
+        };
+        if span.metadata.space() == SpanSpace::Old {
+            span.metadata.cards().dirty_count()
+        } else {
+            0
+        }
+    }
+
+    /// Returns the next allocated Old object whose source card is dirty.
+    #[must_use]
+    pub(crate) fn next_dirty_old_reference(
+        &self,
+        span_id: SpanId,
+        start: u16,
+    ) -> Option<RawHeapRef> {
+        let span = match self.entries.get(span_id.index() as usize)?.kind.as_ref()? {
+            SpanKind::Small(span) if span.metadata.space() == SpanSpace::Old => span,
+            _ => return None,
+        };
+        let mut next = start;
+        while let Some(slot) = span.metadata.allocations().next_allocated(next) {
+            let offset = span
+                .metadata
+                .size_class()
+                .offset_for_slot(slot)
+                .expect("allocated slots belong to their size class");
+            if span.metadata.cards().is_dirty(offset) {
+                return Some(RawHeapRef::from_parts(span_id, offset));
+            }
+            next = slot.index().checked_add(1)?;
+        }
+        None
+    }
+
+    /// Replaces one Old span's card snapshot after all source traces succeeded.
+    pub(crate) fn replace_old_cards(&mut self, span_id: SpanId, cards: crate::CardBitmap) {
+        let Some(SpanKind::Small(span)) = self
+            .entries
+            .get_mut(span_id.index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+        else {
+            return;
+        };
+        debug_assert_eq!(span.metadata.space(), SpanSpace::Old);
+        span.metadata.replace_cards(cards);
+    }
+
+    /// Returns the canonical reference when a large owner remains in the remembered set.
+    #[must_use]
+    pub(crate) fn remembered_large_reference(&self, span_id: SpanId) -> Option<RawHeapRef> {
+        let SpanKind::LargeOwner(span) =
+            self.entries.get(span_id.index() as usize)?.kind.as_ref()?
+        else {
+            return None;
+        };
+        span.metadata.is_remembered().then(|| {
+            RawHeapRef::from_parts(
+                span_id,
+                crate::SpanOffset::new(crate::MINIMUM_SLOT_SIZE_BYTES as u16)
+                    .expect("large owner offset is non-zero"),
+            )
+        })
+    }
+
+    /// Replaces conservative owner-level remembered state after a direct-edge rescan.
+    pub(crate) fn set_large_remembered(&mut self, span_id: SpanId, remembered: bool) {
+        let Some(SpanKind::LargeOwner(span)) = self
+            .entries
+            .get_mut(span_id.index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+        else {
+            return;
+        };
+        span.metadata.set_remembered(remembered);
+    }
+
+    /// Removes clean and released owners from the intrusive chain without allocating a side vector.
+    pub(crate) fn compact_remembered_sources(&mut self) {
+        let mut current = self.remembered_head.take();
+        while let Some(span_id) = current {
+            let index = span_id.index() as usize;
+            let next = self.entries[index].remembered_next.take();
+            self.entries[index].in_remembered_set = false;
+            let retain = match self.entries[index].kind.as_ref() {
+                Some(SpanKind::Small(span)) => {
+                    span.metadata.space() == SpanSpace::Old
+                        && span.metadata.cards().dirty_count() != 0
+                }
+                Some(SpanKind::LargeOwner(span)) => span.metadata.is_remembered(),
+                Some(SpanKind::LargeContinuation(_)) | None => false,
+            };
+            if retain {
+                self.link_remembered_source(span_id);
+            }
+            current = next;
+        }
+    }
+
     /// Ensures a later whole-span/range release cannot fail after payload destruction.
     pub(crate) fn prepare_release(&mut self, span_id: SpanId) -> Result<(), SpanTableError> {
         self.reserve_free_range_if_needed(span_id.index())
@@ -518,7 +704,13 @@ impl SpanTable {
             .initialize(offset, GcHeader::new(type_id, flags, aux), value)
             .expect("size-class validation guarantees an aligned in-span write");
         span.metadata.commit_allocation(slot);
-        Ok(GcRef::from_raw(RawHeapRef::from_parts(span_id, offset)))
+        let remember =
+            span.metadata.space() == SpanSpace::Old && span.metadata.remember_card(offset);
+        let reference = GcRef::from_raw(RawHeapRef::from_parts(span_id, offset));
+        if remember {
+            self.link_remembered_source(span_id);
+        }
+        Ok(reference)
     }
 
     /// Verifies a live small or large owner without native page faults or cached pointers.
@@ -851,6 +1043,8 @@ impl SpanTable {
         self.entries.push(SpanEntry {
             generation,
             kind: Some(SpanKind::Small(span)),
+            remembered_next: None,
+            in_remembered_set: false,
         });
         self.live_spans += 1;
         Ok(SpanId::new(index))
@@ -931,6 +1125,8 @@ impl SpanTable {
                             generation,
                         ),
                     })),
+                    remembered_next: None,
+                    in_remembered_set: false,
                 });
                 for ordinal in 1..span_count {
                     self.entries.push(SpanEntry {
@@ -939,11 +1135,26 @@ impl SpanTable {
                             owner,
                             ordinal: ordinal as u32,
                         })),
+                        remembered_next: None,
+                        in_remembered_set: false,
                     });
                 }
             }
         }
+        self.link_remembered_source(owner);
         self.live_spans += span_count;
+    }
+
+    /// Links a stable entry at most once; pointer stores never allocate remembered-set storage.
+    #[inline(always)]
+    fn link_remembered_source(&mut self, span_id: SpanId) {
+        let entry = &mut self.entries[span_id.index() as usize];
+        if entry.in_remembered_set {
+            return;
+        }
+        entry.remembered_next = self.remembered_head;
+        entry.in_remembered_set = true;
+        self.remembered_head = Some(span_id);
     }
 
     fn take_free_span(&mut self) -> Option<SpanId> {
