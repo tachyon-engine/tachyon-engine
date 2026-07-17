@@ -3,7 +3,7 @@
 //! These values are layout invariants, not performance tuning knobs. Changing one changes the
 //! on-heap ABI and requires a representation migration.
 
-use core::num::NonZeroU16;
+use core::{alloc::Layout, num::NonZeroU16};
 
 /// The representable logical heap address space; it is not a native reservation or allocation.
 pub const LOGICAL_ADDRESS_SPACE_BYTES: u64 = 1_u64 << 32;
@@ -36,6 +36,63 @@ const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES));
 const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(CARD_SIZE_BYTES));
 const _: () =
     assert!(MAX_LOGICAL_SPANS as u64 * SPAN_SIZE_BYTES as u64 == LOGICAL_ADDRESS_SPACE_BYTES);
+
+/// Why a Rust payload cannot use the inline small-object representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmallObjectLayoutError {
+    AlignmentTooLarge { alignment: usize },
+    SizeTooLarge { size: usize },
+}
+
+/// Header-plus-payload placement within one homogeneous small-object slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SmallObjectLayout {
+    payload_offset: u16,
+    slot_size: u16,
+}
+
+impl SmallObjectLayout {
+    /// Computes the aligned payload position and rounds the complete object to a 16-byte size class.
+    pub fn for_type<T>() -> Result<Self, SmallObjectLayoutError> {
+        let payload = Layout::new::<T>();
+        if payload.align() > MINIMUM_SLOT_SIZE_BYTES {
+            return Err(SmallObjectLayoutError::AlignmentTooLarge {
+                alignment: payload.align(),
+            });
+        }
+        let (combined, payload_offset) =
+            Layout::new::<GcHeader>().extend(payload).map_err(|_| {
+                SmallObjectLayoutError::SizeTooLarge {
+                    size: payload.size(),
+                }
+            })?;
+        let size = combined
+            .pad_to_align()
+            .size()
+            .max(MINIMUM_SLOT_SIZE_BYTES)
+            .next_multiple_of(MINIMUM_SLOT_SIZE_BYTES);
+        let payload_offset = u16::try_from(payload_offset)
+            .map_err(|_| SmallObjectLayoutError::SizeTooLarge { size })?;
+        let slot_size =
+            u16::try_from(size).map_err(|_| SmallObjectLayoutError::SizeTooLarge { size })?;
+        Ok(Self {
+            payload_offset,
+            slot_size,
+        })
+    }
+
+    /// Returns the byte displacement from the object header to the Rust payload.
+    #[must_use]
+    pub const fn payload_offset(self) -> u16 {
+        self.payload_offset
+    }
+
+    /// Returns the complete 16-byte-rounded allocation size.
+    #[must_use]
+    pub const fn slot_size(self) -> u16 {
+        self.slot_size
+    }
+}
 
 /// A non-zero index into the isolate's static GC type-descriptor table.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -109,7 +166,7 @@ const _: [(); 4] = [(); core::mem::align_of::<GcHeader>()];
 mod tests {
     use super::{
         GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_SPANS,
-        MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES,
+        MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
     };
 
     #[test]
@@ -130,5 +187,29 @@ mod tests {
         assert_eq!(header.flags(), 0x55aa);
         assert_eq!(header.aux(), u32::MAX);
         assert_eq!(GcTypeId::new(0), None);
+    }
+
+    #[test]
+    /// Covers ordinary payload packing, padding for 16-byte payloads, and the small-space limit.
+    fn small_object_layout_places_eight_and_sixteen_byte_aligned_payloads() {
+        #[repr(align(16))]
+        struct AlignedPayload {
+            _bytes: [u8; 16],
+        }
+        #[repr(align(32))]
+        struct OverAlignedPayload;
+
+        let ordinary = SmallObjectLayout::for_type::<u64>().unwrap();
+        assert_eq!(ordinary.payload_offset(), 8);
+        assert_eq!(ordinary.slot_size(), 16);
+
+        let aligned = SmallObjectLayout::for_type::<AlignedPayload>().unwrap();
+        assert_eq!(aligned.payload_offset(), 16);
+        assert_eq!(aligned.slot_size(), 32);
+        assert_eq!(core::mem::size_of::<AlignedPayload>(), 16);
+        assert_eq!(
+            SmallObjectLayout::for_type::<OverAlignedPayload>(),
+            Err(SmallObjectLayoutError::AlignmentTooLarge { alignment: 32 })
+        );
     }
 }

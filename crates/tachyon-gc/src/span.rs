@@ -366,6 +366,64 @@ impl SmallSpanMetadata {
     pub const fn cards(&self) -> &CardBitmap {
         &self.cards
     }
+
+    /// Reports whether the cohort can satisfy one allocation without a span slow path.
+    #[must_use]
+    #[inline(always)]
+    pub(crate) fn has_allocation_capacity(&self) -> bool {
+        match self.space {
+            SpanSpace::Survivor { .. } => false,
+            SpanSpace::Eden => self.bump_cursor < self.size_class.slot_count(),
+            SpanSpace::Old => {
+                self.free_list_head.is_some() || self.bump_cursor < self.size_class.slot_count()
+            }
+        }
+    }
+
+    /// Takes the next never-used slot without touching the allocation bitmap until initialization.
+    #[inline(always)]
+    pub(crate) fn take_bump_slot(&mut self) -> Option<SlotIndex> {
+        if self.bump_cursor >= self.size_class.slot_count() {
+            return None;
+        }
+        let slot = SlotIndex::new(self.bump_cursor).expect("size-class count fits the slot bitmap");
+        self.bump_cursor += 1;
+        Some(slot)
+    }
+
+    /// Updates the old-space free-list head after its dead-slot link has been read or written.
+    #[inline(always)]
+    pub(crate) fn set_free_list_head(&mut self, head: Option<SlotIndex>) {
+        self.free_list_head = head;
+    }
+
+    /// Publishes a fully initialized object to tracing and accounting.
+    #[inline(always)]
+    pub(crate) fn commit_allocation(&mut self, slot: SlotIndex) {
+        assert!(
+            self.allocations.allocate(slot),
+            "allocator cannot initialize an already-live slot"
+        );
+        self.allocated_slots = self
+            .allocated_slots
+            .checked_add(1)
+            .expect("allocated slot count cannot exceed size-class capacity");
+        self.allocated_bytes = self
+            .allocated_bytes
+            .checked_add(u32::from(self.size_class.slot_size()))
+            .expect("one span's allocated bytes fit u32");
+    }
+
+    /// Removes one already-dropped object from lifetime and accounting metadata.
+    #[inline(always)]
+    pub(crate) fn reclaim_allocation(&mut self, slot: SlotIndex) -> bool {
+        if !self.allocations.free(slot) {
+            return false;
+        }
+        self.allocated_slots -= 1;
+        self.allocated_bytes -= u32::from(self.size_class.slot_size());
+        true
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

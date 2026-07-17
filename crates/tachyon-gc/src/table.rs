@@ -1,8 +1,9 @@
 //! Stable logical span indexing over independently allocated native storage.
 
 use crate::{
-    CollectionEpoch, MAX_LOGICAL_SPANS, SizeClass, SmallSpanMetadata, SpanId, SpanReuseGeneration,
-    SpanSpace, SpanStorage, SpanStorageAllocationError,
+    CollectionEpoch, GcHeader, GcRef, GcTypeId, MAX_LOGICAL_SPANS, RawHeapRef, SizeClass,
+    SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata, SpanId, SpanReuseGeneration,
+    SpanSpace, SpanStorage, SpanStorageAllocationError, Trace,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_FREE_RANGE_CAPACITY,
         INITIAL_SPAN_TABLE_CAPACITY,
@@ -20,6 +21,36 @@ pub enum SpanTableError {
     StorageAllocationFailed,
     UnknownSpan(SpanId),
     VacantSpan(SpanId),
+    LiveSpan(SpanId),
+}
+
+/// A rejected object allocation that leaves every published allocation bit unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmallAllocationError {
+    UnknownSpan(SpanId),
+    VacantSpan(SpanId),
+    SurvivorIsNotAllocatable(SpanId),
+    SpanFull(SpanId),
+    InvalidInlineLayout(SmallObjectLayoutError),
+    SizeClassTooSmall { required: u16, actual: u16 },
+}
+
+/// A failed exact-reference check at the collector/debug boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeapReferenceError {
+    UnknownSpan(SpanId),
+    VacantSpan(SpanId),
+    InvalidSlotBoundary(RawHeapRef),
+    UnallocatedSlot(RawHeapRef),
+    InvalidTypeId(RawHeapRef),
+    UnregisteredTypeId {
+        reference: RawHeapRef,
+        type_id: GcTypeId,
+    },
+    TypeMismatch {
+        expected: GcTypeId,
+        actual: GcTypeId,
+    },
 }
 
 impl From<SpanStorageAllocationError> for SpanTableError {
@@ -88,6 +119,13 @@ impl SpanTable {
         if entry.span.is_none() {
             return Err(SpanTableError::VacantSpan(span_id));
         }
+        if entry
+            .span
+            .as_ref()
+            .is_some_and(|span| span.metadata.allocated_slots() != 0)
+        {
+            return Err(SpanTableError::LiveSpan(span_id));
+        }
         self.reserve_free_range_if_needed(span_id.index())?;
 
         let entry = &mut self.entries[index];
@@ -144,6 +182,124 @@ impl SpanTable {
     #[must_use]
     pub fn retained_entry_capacity(&self) -> usize {
         self.entries.capacity()
+    }
+
+    /// Checks the active-span fast path without consuming the value that a slow path may need.
+    #[must_use]
+    #[inline(always)]
+    pub fn can_allocate_in_span(&self, span_id: SpanId) -> bool {
+        self.entries
+            .get(span_id.index() as usize)
+            .and_then(|entry| entry.span.as_ref())
+            .is_some_and(|span| span.metadata.has_allocation_capacity())
+    }
+
+    /// Initializes one typed object in a selected span without invoking a table/GC slow path.
+    #[inline(always)]
+    pub(crate) fn try_allocate_in_span<T: Trace>(
+        &mut self,
+        span_id: SpanId,
+        type_id: GcTypeId,
+        flags: u16,
+        aux: u32,
+        value: T,
+    ) -> Result<GcRef<T>, SmallAllocationError> {
+        let layout = SmallObjectLayout::for_type::<T>()
+            .map_err(SmallAllocationError::InvalidInlineLayout)?;
+        let span = self
+            .entries
+            .get_mut(span_id.index() as usize)
+            .ok_or(SmallAllocationError::UnknownSpan(span_id))?
+            .span
+            .as_mut()
+            .ok_or(SmallAllocationError::VacantSpan(span_id))?;
+        let actual = span.metadata.size_class().slot_size();
+        if layout.slot_size() > actual {
+            return Err(SmallAllocationError::SizeClassTooSmall {
+                required: layout.slot_size(),
+                actual,
+            });
+        }
+        let slot = span.take_allocation_slot(span_id)?;
+        let offset = span
+            .metadata
+            .size_class()
+            .offset_for_slot(slot)
+            .expect("allocation candidates belong to the span size class");
+        span.storage
+            .initialize(offset, GcHeader::new(type_id, flags, aux), value)
+            .expect("size-class validation guarantees an aligned in-span write");
+        span.metadata.commit_allocation(slot);
+        Ok(GcRef::from_raw(RawHeapRef::from_parts(span_id, offset)))
+    }
+
+    /// Verifies a live small object without relying on native page faults or cached pointers.
+    pub fn verify_small_reference(
+        &self,
+        reference: RawHeapRef,
+        expected_type: Option<GcTypeId>,
+    ) -> Result<GcHeader, HeapReferenceError> {
+        let span_id = reference.span_id();
+        let entry = self
+            .entries
+            .get(span_id.index() as usize)
+            .ok_or(HeapReferenceError::UnknownSpan(span_id))?;
+        let span = entry
+            .span
+            .as_ref()
+            .ok_or(HeapReferenceError::VacantSpan(span_id))?;
+        let slot = span
+            .metadata
+            .size_class()
+            .slot_for_offset(reference.span_offset())
+            .ok_or(HeapReferenceError::InvalidSlotBoundary(reference))?;
+        if !span.metadata.allocations().is_allocated(slot) {
+            return Err(HeapReferenceError::UnallocatedSlot(reference));
+        }
+        let header = span
+            .storage
+            .header(reference.span_offset())
+            .expect("validated small-object slots always contain a complete header");
+        let actual = header
+            .type_id()
+            .ok_or(HeapReferenceError::InvalidTypeId(reference))?;
+        if let Some(expected) = expected_type
+            && actual != expected
+        {
+            return Err(HeapReferenceError::TypeMismatch { expected, actual });
+        }
+        Ok(header)
+    }
+
+    /// Reclaims an object after its descriptor drop callback has completed.
+    ///
+    /// The collector owns sequencing: calling this early leaks Rust resources when the slot is
+    /// overwritten, but cannot expose a safe typed borrow because resolution remains scope-owned.
+    pub fn reclaim_small_after_drop(&mut self, reference: RawHeapRef) -> bool {
+        let Some(span) = self
+            .entries
+            .get_mut(reference.span_id().index() as usize)
+            .and_then(|entry| entry.span.as_mut())
+        else {
+            return false;
+        };
+        let Some(slot) = span
+            .metadata
+            .size_class()
+            .slot_for_offset(reference.span_offset())
+        else {
+            return false;
+        };
+        if !span.metadata.reclaim_allocation(slot) {
+            return false;
+        }
+        if span.metadata.space() == SpanSpace::Old {
+            let previous = span.metadata.free_list_head();
+            span.storage
+                .write_free_next(reference.span_offset(), previous);
+            span.metadata.set_free_list_head(Some(slot));
+        }
+        true
     }
 
     /// Advances the epoch, physically resetting every live span bitmap on the forced-wrap path.
@@ -263,6 +419,41 @@ impl SpanTable {
     }
 }
 
+impl SmallSpan {
+    /// Selects a cohort-legal slot while keeping free-list bytes and metadata synchronized.
+    #[inline(always)]
+    fn take_allocation_slot(
+        &mut self,
+        span_id: SpanId,
+    ) -> Result<crate::SlotIndex, SmallAllocationError> {
+        match self.metadata.space() {
+            SpanSpace::Survivor { .. } => {
+                Err(SmallAllocationError::SurvivorIsNotAllocatable(span_id))
+            }
+            SpanSpace::Eden => self
+                .metadata
+                .take_bump_slot()
+                .ok_or(SmallAllocationError::SpanFull(span_id)),
+            SpanSpace::Old => {
+                if let Some(slot) = self.metadata.free_list_head() {
+                    let offset = self
+                        .metadata
+                        .size_class()
+                        .offset_for_slot(slot)
+                        .expect("free-list slot belongs to this size class");
+                    let next = self.storage.read_free_next(offset);
+                    self.metadata.set_free_list_head(next);
+                    Ok(slot)
+                } else {
+                    self.metadata
+                        .take_bump_slot()
+                        .ok_or(SmallAllocationError::SpanFull(span_id))
+                }
+            }
+        }
+    }
+}
+
 /// Reserves a centralized 1.5x capacity step before a push can mutate container state.
 fn reserve_for_push<T>(
     values: &mut Vec<T>,
@@ -289,7 +480,11 @@ fn reserve_for_push<T>(
 #[cfg(test)]
 mod tests {
     use super::{SpanTable, SpanTableError};
-    use crate::{CollectionEpoch, SizeClass, SlotIndex, SpanId, SpanReuseGeneration, SpanSpace};
+    use crate::{
+        CollectionEpoch, GcTypeId, HeapReferenceError, RawHeapRef, SizeClass, SlotIndex,
+        SmallAllocationError, SpanId, SpanOffset, SpanReuseGeneration, SpanSpace,
+    };
+    use tachyon_value::{Immediate, Value};
 
     fn size_class() -> SizeClass {
         SizeClass::new(16).expect("minimum size class")
@@ -419,5 +614,107 @@ mod tests {
                 .marks_mut()
                 .mark(slot, next)
         );
+    }
+
+    #[test]
+    /// Publishes only initialized objects and covers verifier boundary/type/allocation failures.
+    fn typed_small_allocation_and_reference_verification_agree() {
+        let mut table = SpanTable::new();
+        let span = table
+            .try_allocate_small(size_class(), SpanSpace::Eden)
+            .unwrap();
+        let type_id = GcTypeId::new(9).unwrap();
+        let reference = table
+            .try_allocate_in_span(
+                span,
+                type_id,
+                0x55aa,
+                17,
+                Value::from_immediate(Immediate::Null),
+            )
+            .unwrap();
+
+        let header = table
+            .verify_small_reference(reference.raw(), Some(type_id))
+            .unwrap();
+        assert_eq!(header.type_id(), Some(type_id));
+        assert_eq!(header.flags(), 0x55aa);
+        assert_eq!(header.aux(), 17);
+        assert_eq!(table.metadata(span).unwrap().allocated_slots(), 1);
+        assert_eq!(table.release(span), Err(SpanTableError::LiveSpan(span)));
+
+        let wrong_type = GcTypeId::new(10).unwrap();
+        assert_eq!(
+            table.verify_small_reference(reference.raw(), Some(wrong_type)),
+            Err(HeapReferenceError::TypeMismatch {
+                expected: wrong_type,
+                actual: type_id,
+            })
+        );
+        let unallocated = RawHeapRef::from_parts(span, SpanOffset::new(32).unwrap());
+        assert_eq!(
+            table.verify_small_reference(unallocated, None),
+            Err(HeapReferenceError::UnallocatedSlot(unallocated))
+        );
+        let misaligned = RawHeapRef::from_parts(span, SpanOffset::new(17).unwrap());
+        assert_eq!(
+            table.verify_small_reference(misaligned, None),
+            Err(HeapReferenceError::InvalidSlotBoundary(misaligned))
+        );
+    }
+
+    #[test]
+    /// Proves Survivor rejects allocation and Old reuses reclaimed slots before bumping.
+    fn cohort_allocation_paths_enforce_survivor_and_old_free_list_rules() {
+        let mut table = SpanTable::new();
+        let type_id = GcTypeId::new(1).unwrap();
+        let survivor = table
+            .try_allocate_small(size_class(), SpanSpace::Survivor { age: 1 })
+            .unwrap();
+        assert_eq!(
+            table.try_allocate_in_span(survivor, type_id, 0, 0, Value::from_i32(1)),
+            Err(SmallAllocationError::SurvivorIsNotAllocatable(survivor))
+        );
+
+        let old = table
+            .try_allocate_small(size_class(), SpanSpace::Old)
+            .unwrap();
+        let first = table
+            .try_allocate_in_span(old, type_id, 0, 0, Value::from_i32(1))
+            .unwrap();
+        let second = table
+            .try_allocate_in_span(old, type_id, 0, 0, Value::from_i32(2))
+            .unwrap();
+        assert!(table.reclaim_small_after_drop(first.raw()));
+        let reused = table
+            .try_allocate_in_span(old, type_id, 0, 0, Value::from_i32(3))
+            .unwrap();
+        assert_eq!(reused.raw(), first.raw());
+        assert_ne!(reused.raw(), second.raw());
+        assert_eq!(table.metadata(old).unwrap().allocated_slots(), 2);
+    }
+
+    #[test]
+    fn selected_span_rejects_payloads_larger_than_its_size_class() {
+        #[derive(Debug, Eq, PartialEq)]
+        struct Payload([u8; 16]);
+
+        impl crate::Trace for Payload {
+            fn trace(&mut self, _: &mut dyn crate::Tracer) {}
+        }
+
+        let mut table = SpanTable::new();
+        let span = table
+            .try_allocate_small(size_class(), SpanSpace::Eden)
+            .unwrap();
+        assert_eq!(
+            table.try_allocate_in_span(span, GcTypeId::new(1).unwrap(), 0, 0, Payload([0; 16])),
+            Err(SmallAllocationError::SizeClassTooSmall {
+                required: 32,
+                actual: 16,
+            })
+        );
+        assert_eq!(core::mem::size_of::<Payload>(), 16);
+        assert_eq!(table.metadata(span).unwrap().allocated_slots(), 0);
     }
 }

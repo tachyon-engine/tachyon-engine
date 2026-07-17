@@ -4,7 +4,15 @@
 pub(crate) const INITIAL_SPAN_TABLE_CAPACITY: usize = 8;
 /// First free-range reservation; most heaps retain one or two coalesced ranges.
 pub(crate) const INITIAL_FREE_RANGE_CAPACITY: usize = 4;
+/// First immutable descriptor reservation; builtins and a modest extension set fit without regrowth.
+pub(crate) const INITIAL_TYPE_DESCRIPTOR_CAPACITY: usize = 64;
 /// Numerator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 /// Denominator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_DENOMINATOR: usize = 2;
+
+/// Initial 1.0 size classes; benchmark evidence may refine spacing without changing `GcRef`.
+pub(crate) const SMALL_SIZE_CLASSES: [u16; 28] = [
+    16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024,
+    1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096,
+];

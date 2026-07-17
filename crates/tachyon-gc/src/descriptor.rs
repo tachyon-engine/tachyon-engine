@@ -1,6 +1,6 @@
 //! Static object descriptors used by the collector instead of per-object Rust trait objects.
 
-use core::{alloc::Layout, ptr::NonNull};
+use core::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{GcTypeId, Trace, Tracer};
 
@@ -28,6 +28,43 @@ pub struct TypeDescriptor {
     layout: Layout,
     trace: TraceObjectFn,
     drop: DropObjectFn,
+}
+
+/// A descriptor registration token statically paired with its concrete Rust payload type.
+pub struct GcType<T: Trace> {
+    descriptor: TypeDescriptor,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: Trace> Copy for GcType<T> {}
+
+impl<T: Trace> Clone for GcType<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Trace> GcType<T> {
+    /// Registers monomorphized callbacks and prevents safe allocation under another type ID.
+    #[must_use]
+    pub(crate) fn new(type_id: GcTypeId, name: &'static str) -> Self {
+        Self {
+            descriptor: TypeDescriptor::for_type::<T>(type_id, name),
+            marker: PhantomData,
+        }
+    }
+
+    /// Returns the compact header ID paired with `T`.
+    #[must_use]
+    pub const fn type_id(self) -> GcTypeId {
+        self.descriptor.type_id()
+    }
+
+    /// Erases only the compile-time token after preserving its concrete callback pairing.
+    #[must_use]
+    pub const fn descriptor(self) -> TypeDescriptor {
+        self.descriptor
+    }
 }
 
 impl TypeDescriptor {
