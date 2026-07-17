@@ -123,4 +123,25 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(9)));
     }
+
+    #[test]
+    fn assignment_updates_an_initialized_or_uninitialized_let_binding() {
+        let source = SourceText::new(
+            SourceId::new(5),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("let x; x = 1; x = x + 2;"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = Isolate::default()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 7,
+                    quantum: 7,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
 }

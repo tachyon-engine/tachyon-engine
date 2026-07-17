@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        BindingPattern, Expression, Program, Statement, VariableDeclaration,
+        AssignmentTarget, BindingPattern, Expression, Program, Statement, VariableDeclaration,
         VariableDeclarationKind,
     },
     span::GetSpan,
-    syntax::operator::{BinaryOperator, UnaryOperator},
+    syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator},
 };
 
 use crate::{CompileError, ProgramKind, SourceId, SourceName, SourceSpan, SourceText};
@@ -124,6 +124,10 @@ pub enum HirExpressionKind {
         operator: HirBinaryOperator,
         left: Box<HirExpression>,
         right: Box<HirExpression>,
+    },
+    Assignment {
+        target: Arc<str>,
+        value: Box<HirExpression>,
     },
 }
 
@@ -289,6 +293,10 @@ fn lower_expression(
             left: Box::new(lower_expression(&expression.left, source)?),
             right: Box::new(lower_expression(&expression.right, source)?),
         },
+        Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
+            target: lower_assignment_target(&expression.left, expression.operator, source)?,
+            value: Box::new(lower_expression(&expression.right, source)?),
+        },
         Expression::ParenthesizedExpression(expression) => {
             let mut lowered = lower_expression(&expression.expression, source)?;
             lowered.span = span;
@@ -297,6 +305,29 @@ fn lower_expression(
         _ => return Err(unsupported(source.name(), span, "expression")),
     };
     Ok(HirExpression { span, kind })
+}
+
+/// Retains only an identifier target because member and pattern assignments need object/iterator semantics.
+fn lower_assignment_target(
+    target: &AssignmentTarget<'_>,
+    operator: AssignmentOperator,
+    source: &SourceText,
+) -> Result<Arc<str>, CompileError> {
+    if !operator.is_assign() {
+        return Err(unsupported(
+            source.name(),
+            source_span(target.span()),
+            "assignment operator",
+        ));
+    }
+    let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target else {
+        return Err(unsupported(
+            source.name(),
+            source_span(target.span()),
+            "assignment target",
+        ));
+    };
+    Ok(Arc::from(identifier.name.as_str()))
 }
 
 fn lower_unary_operator(operator: UnaryOperator) -> HirUnaryOperator {

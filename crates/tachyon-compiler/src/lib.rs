@@ -240,6 +240,23 @@ mod tests {
         assert!(disassembly.contains("Return r2"));
     }
 
+    #[test]
+    fn compiler_rejects_assignment_to_immutable_local_until_throw_lowering_exists() {
+        let error = Compiler
+            .compile(
+                source(MediaType::JavaScript, "const answer = 42; answer = 0;"),
+                CompileOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnsupportedSyntax {
+                syntax: "assignment to immutable local",
+                ..
+            }
+        ));
+    }
+
     proptest! {
         #[test]
         fn arbitrary_utf8_input_never_escapes_the_frontend(

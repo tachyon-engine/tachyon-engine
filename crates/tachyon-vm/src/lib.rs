@@ -168,6 +168,10 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::Move => {
+                let value = self.read(base, operands[1])?;
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;

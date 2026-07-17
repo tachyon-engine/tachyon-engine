@@ -105,6 +105,7 @@ struct Lowerer {
 struct LocalBinding {
     name: std::sync::Arc<str>,
     register: RegisterId,
+    mutable: bool,
 }
 
 impl Lowerer {
@@ -128,6 +129,7 @@ impl Lowerer {
             .map_err(CompileError::Builder)
     }
 
+    /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     fn expression(&mut self, expression: &HirExpression) -> Result<RegisterId, CompileError> {
         match &expression.kind {
             HirExpressionKind::Number(bits) => {
@@ -180,13 +182,37 @@ impl Lowerer {
                 )?;
                 Ok(destination)
             }
-            HirExpressionKind::Identifier(name) => {
-                self.local(name)
-                    .ok_or_else(|| CompileError::UnsupportedSyntax {
+            HirExpressionKind::Identifier(name) => self
+                .local(name)
+                .map(|binding| binding.register)
+                .ok_or_else(|| CompileError::UnsupportedSyntax {
+                    source_name: self.source_name.clone(),
+                    span: expression.span,
+                    syntax: "unresolved identifier",
+                }),
+            HirExpressionKind::Assignment { target, value } => {
+                let binding =
+                    self.local(target)
+                        .cloned()
+                        .ok_or_else(|| CompileError::UnsupportedSyntax {
+                            source_name: self.source_name.clone(),
+                            span: expression.span,
+                            syntax: "unresolved assignment target",
+                        })?;
+                if !binding.mutable {
+                    return Err(CompileError::UnsupportedSyntax {
                         source_name: self.source_name.clone(),
                         span: expression.span,
-                        syntax: "unresolved identifier",
-                    })
+                        syntax: "assignment to immutable local",
+                    });
+                }
+                let value = self.expression(value)?;
+                self.emit(
+                    Opcode::Move,
+                    &[binding.register.index(), value.index()],
+                    expression.span,
+                )?;
+                Ok(value)
             }
             _ => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
@@ -217,31 +243,34 @@ impl Lowerer {
             });
         }
         for declarator in declaration.declarators.iter() {
-            let initializer =
-                declarator
-                    .initializer
-                    .as_ref()
-                    .ok_or_else(|| CompileError::UnsupportedSyntax {
+            let register = match declarator.initializer.as_ref() {
+                Some(initializer) => self.expression(initializer)?,
+                None if declaration.kind == HirVariableDeclarationKind::Let => {
+                    self.load_undefined(declarator.span)?
+                }
+                None => {
+                    return Err(CompileError::UnsupportedSyntax {
                         source_name: self.source_name.clone(),
                         span: declarator.span,
                         syntax: "variable declaration without initializer",
-                    })?;
-            let register = self.expression(initializer)?;
+                    });
+                }
+            };
             self.locals.push(LocalBinding {
                 name: declarator.binding.name.clone(),
                 register,
+                mutable: declaration.kind == HirVariableDeclarationKind::Let,
             });
         }
         Ok(())
     }
 
     #[inline(always)]
-    fn local(&self, name: &str) -> Option<RegisterId> {
+    fn local(&self, name: &str) -> Option<&LocalBinding> {
         self.locals
             .iter()
             .rev()
             .find(|binding| binding.name.as_ref() == name)
-            .map(|binding| binding.register)
     }
 
     fn load_immediate(&mut self, value: u32, span: SourceSpan) -> Result<RegisterId, CompileError> {
@@ -291,7 +320,7 @@ fn declaration_instruction_count(
             .as_ref()
             .map(expression_instruction_count)
             .transpose()?
-            .unwrap_or(0);
+            .unwrap_or(1);
         count = checked_count_add(count, initializer_count, "bytecode instructions")?;
     }
     Ok(count)
@@ -307,6 +336,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             )?;
             checked_count_add(1, operands, "bytecode instructions")
         }
+        HirExpressionKind::Assignment { value, .. } => checked_count_add(
+            expression_instruction_count(value)?,
+            1,
+            "bytecode instructions",
+        ),
         _ => Ok(1),
     }
 }
@@ -358,6 +392,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             expression_literal_count(right)?,
             "bytecode constants",
         ),
+        HirExpressionKind::Assignment { value, .. } => expression_literal_count(value),
         _ => Ok(0),
     }
 }

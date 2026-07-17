@@ -107,6 +107,7 @@ pub enum Opcode {
     Nop = 0,
     LoadImmediate = 1,
     LoadConstant = 2,
+    /// Copies register operand 1 into destination register operand 0.
     Move = 3,
     Add = 4,
     Sub = 5,
