@@ -1,12 +1,13 @@
 //! Small-object allocation policy over fixed logical spans.
 
 use crate::{
-    BarrierVerificationError, CollectionEpoch, FinalizationQueueStats, GcAllocationPolicy,
-    GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError, KeptObjectStats,
-    LargeAllocationError, LargeReclaim, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError,
-    MarkStats, MinorSweepStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError,
-    SmallObjectLayout, SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats,
-    SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
+    BarrierVerificationError, CollectionEpoch, FinalizationQueueStats,
+    GC_HEADER_EXTERNAL_BYTES_FLAG, GcAllocationPolicy, GcHeader, GcRef, GcType, GcTypeId,
+    GrayQueueStats, HeapReferenceError, KeptObjectStats, LargeAllocationError, LargeReclaim,
+    MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError, MarkStats, MinorSweepStats,
+    ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId,
+    SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats,
+    TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
     eden::EdenPool,
     finalization::PendingFinalizations,
     gray::GrayQueue,
@@ -16,7 +17,7 @@ use crate::{
     roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full, sweep_young},
-    trigger::{CollectionAction, GcTrigger},
+    trigger::{CollectionAction, CollectionRequest, GcTrigger},
     tuning::SMALL_SIZE_CLASSES,
     weak::WeakOwners,
 };
@@ -26,6 +27,14 @@ use crate::{
 pub enum AllocationSpace {
     Young,
     Old,
+}
+
+/// Reports immutable out-of-line storage owned and dropped by one GC payload.
+///
+/// The value must remain exact for the allocation's lifetime. External-backed payloads therefore
+/// expose immutable backing or route any replacement through a future heap accounting API.
+pub trait GcExternalMemory {
+    fn external_memory_bytes(&self) -> usize;
 }
 
 /// A host-configured hard cap shared by native spans and external backing stores.
@@ -56,6 +65,13 @@ pub enum HeapAllocationError {
         limit: usize,
         committed: usize,
         requested: usize,
+    },
+    ReservedHeaderFlag {
+        flags: u16,
+    },
+    ExternalBytesTooLarge {
+        bytes: usize,
+        maximum: usize,
     },
     SpanTable(SpanTableError),
     SpanAllocation(SmallAllocationError),
@@ -108,7 +124,8 @@ pub struct Heap {
     active_old: [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
     limit: HeapLimit,
     committed_span_storage_bytes: usize,
-    external_bytes: usize,
+    host_external_bytes: usize,
+    object_external_bytes: usize,
     collection_epoch: CollectionEpoch,
     gray: GrayQueue,
     sweep_worklist: SweepWorklist,
@@ -127,7 +144,24 @@ struct AllocationPlan {
     space: AllocationSpace,
     class_index: Option<usize>,
     allocation_bytes: usize,
-    required_storage_bytes: usize,
+    required_span_storage_bytes: usize,
+    external_bytes: usize,
+}
+
+struct AllocationRequest<T: Trace> {
+    object_type: GcType<T>,
+    flags: u16,
+    aux: u32,
+    value: T,
+    space: AllocationSpace,
+    external_bytes: usize,
+}
+
+impl AllocationPlan {
+    fn required_commit_bytes(self) -> usize {
+        self.required_span_storage_bytes
+            .saturating_add(self.external_bytes)
+    }
 }
 
 struct AllocationRoots<'a, T> {
@@ -176,7 +210,8 @@ impl Heap {
             active_old: [None; SMALL_SIZE_CLASSES.len()],
             limit,
             committed_span_storage_bytes: 0,
-            external_bytes: 0,
+            host_external_bytes: 0,
+            object_external_bytes: 0,
             collection_epoch: CollectionEpoch::INITIAL,
             gray: GrayQueue::new(max_reference_entries),
             sweep_worklist: SweepWorklist::new(max_sweep_entries),
@@ -200,20 +235,67 @@ impl Heap {
         value: T,
         space: AllocationSpace,
     ) -> Result<GcRef<T>, HeapAllocationError> {
-        let plan = self.allocation_plan(object_type, space)?;
+        self.try_allocate_accounted(AllocationRequest {
+            object_type,
+            flags,
+            aux,
+            value,
+            space,
+            external_bytes: 0,
+        })
+    }
+
+    /// Publishes an immutable external-backed payload and charges its exact owned backing bytes.
+    pub fn try_allocate_external<T: Trace + GcExternalMemory + 'static>(
+        &mut self,
+        object_type: GcType<T>,
+        flags: u16,
+        value: T,
+        space: AllocationSpace,
+    ) -> Result<GcRef<T>, HeapAllocationError> {
+        let external_bytes = checked_external_bytes(value.external_memory_bytes())?;
+        let (flags, aux) = external_header_fields(flags, external_bytes)?;
+        self.try_allocate_accounted(AllocationRequest {
+            object_type,
+            flags,
+            aux,
+            value,
+            space,
+            external_bytes,
+        })
+    }
+
+    /// Performs the one publication path after header ownership and combined quota are validated.
+    fn try_allocate_accounted<T: Trace + 'static>(
+        &mut self,
+        request: AllocationRequest<T>,
+    ) -> Result<GcRef<T>, HeapAllocationError> {
+        validate_header_charge(request.flags, request.external_bytes)?;
+        let plan =
+            self.allocation_plan(request.object_type, request.space, request.external_bytes)?;
+        self.ensure_commit_capacity(plan.required_commit_bytes())?;
         let result = if let Some(class_index) = plan.class_index {
             self.try_allocate_class(
                 class_index,
-                object_type.type_id(),
-                flags,
-                aux,
-                value,
+                request.object_type.type_id(),
+                request.flags,
+                request.aux,
+                request.value,
                 plan.space,
             )
         } else {
-            self.allocate_large(object_type.type_id(), flags, aux, value)
+            self.allocate_large(
+                request.object_type.type_id(),
+                request.flags,
+                request.aux,
+                request.value,
+            )
         };
         if result.is_ok() {
+            self.object_external_bytes = self
+                .object_external_bytes
+                .checked_add(plan.external_bytes)
+                .expect("heap-limit preflight prevents external accounting overflow");
             self.trigger
                 .record_allocation(plan.space, plan.allocation_bytes);
         }
@@ -230,26 +312,74 @@ impl Heap {
         object_type: GcType<T>,
         flags: u16,
         aux: u32,
-        mut value: T,
+        value: T,
         space: AllocationSpace,
         roots: &mut dyn Trace,
     ) -> Result<GcRef<T>, ManagedAllocationError> {
-        let plan = self
-            .allocation_plan(object_type, space)
+        self.try_allocate_accounted_with_gc(
+            AllocationRequest {
+                object_type,
+                flags,
+                aux,
+                value,
+                space,
+                external_bytes: 0,
+            },
+            roots,
+        )
+    }
+
+    /// Runs collection policy before publishing an immutable external-backed payload.
+    pub fn try_allocate_external_with_gc<T: Trace + GcExternalMemory + 'static>(
+        &mut self,
+        object_type: GcType<T>,
+        flags: u16,
+        value: T,
+        space: AllocationSpace,
+        roots: &mut dyn Trace,
+    ) -> Result<GcRef<T>, ManagedAllocationError> {
+        let external_bytes = checked_external_bytes(value.external_memory_bytes())
             .map_err(ManagedAllocationError::Allocation)?;
-        let decision = self.trigger.decide(
-            plan.space,
-            plan.allocation_bytes,
-            plan.required_storage_bytes,
-            self.table.young_storage_bytes(),
-            self.committed_heap_bytes(),
-            self.limit,
-        );
+        let (flags, aux) = external_header_fields(flags, external_bytes)
+            .map_err(ManagedAllocationError::Allocation)?;
+        self.try_allocate_accounted_with_gc(
+            AllocationRequest {
+                object_type,
+                flags,
+                aux,
+                value,
+                space,
+                external_bytes,
+            },
+            roots,
+        )
+    }
+
+    /// Keeps a pending payload rooted across at most one combined span/backing pressure collection.
+    fn try_allocate_accounted_with_gc<T: Trace + 'static>(
+        &mut self,
+        mut request: AllocationRequest<T>,
+        roots: &mut dyn Trace,
+    ) -> Result<GcRef<T>, ManagedAllocationError> {
+        validate_header_charge(request.flags, request.external_bytes)
+            .map_err(ManagedAllocationError::Allocation)?;
+        let plan = self
+            .allocation_plan(request.object_type, request.space, request.external_bytes)
+            .map_err(ManagedAllocationError::Allocation)?;
+        let decision = self.trigger.decide(CollectionRequest {
+            space: plan.space,
+            allocation_bytes: plan.allocation_bytes,
+            required_commit_bytes: plan.required_commit_bytes(),
+            required_young_storage_bytes: plan.required_span_storage_bytes,
+            young_storage_bytes: self.table.young_storage_bytes(),
+            committed_bytes: self.committed_heap_bytes(),
+            limit: self.limit,
+        });
         if let Some(decision) = decision {
             self.trigger.record_attempt(decision);
             let mut allocation_roots = AllocationRoots {
                 subsystem_roots: roots,
-                pending_value: &mut value,
+                pending_value: &mut request.value,
             };
             match decision.action {
                 CollectionAction::None => {}
@@ -263,7 +393,8 @@ impl Heap {
                     .map_err(ManagedAllocationError::MajorCollection)?,
             }
         }
-        self.try_allocate(object_type, flags, aux, value, plan.space)
+        request.space = plan.space;
+        self.try_allocate_accounted(request)
             .map_err(ManagedAllocationError::Allocation)
     }
 
@@ -353,14 +484,15 @@ impl Heap {
     /// Returns separately tracked host-backed bytes charged to the same hard heap limit.
     #[must_use]
     pub const fn external_bytes(&self) -> usize {
-        self.external_bytes
+        self.host_external_bytes
+            .saturating_add(self.object_external_bytes)
     }
 
     /// Returns all currently charged backing bytes; side-table capacity accounting is separate.
     #[must_use]
     pub const fn committed_heap_bytes(&self) -> usize {
         self.committed_span_storage_bytes
-            .saturating_add(self.external_bytes)
+            .saturating_add(self.external_bytes())
     }
 
     /// Charges an external string/buffer backing before the host publishes it to JavaScript.
@@ -374,16 +506,16 @@ impl Heap {
                 requested: bytes,
             });
         }
-        self.external_bytes = self.external_bytes.saturating_add(bytes);
+        self.host_external_bytes = self.host_external_bytes.saturating_add(bytes);
         Ok(())
     }
 
     /// Releases a previously charged external backing allocation.
     pub fn release_external(&mut self, bytes: usize) -> bool {
-        let Some(remaining) = self.external_bytes.checked_sub(bytes) else {
+        let Some(remaining) = self.host_external_bytes.checked_sub(bytes) else {
             return false;
         };
-        self.external_bytes = remaining;
+        self.host_external_bytes = remaining;
         true
     }
 
@@ -497,13 +629,14 @@ impl Heap {
             &self.types,
             &mut self.sweep_worklist,
             self.collection_epoch,
+            &mut self.object_external_bytes,
             &mut sweep,
         );
         self.committed_span_storage_bytes = self
             .committed_span_storage_bytes
             .checked_sub(sweep.released_storage_bytes)
             .expect("sweep cannot release more storage than the heap committed");
-        sweep.external_bytes = self.external_bytes;
+        sweep.external_bytes = self.external_bytes();
         sweep.spans_released += pool_trimmed_bytes / SPAN_SIZE_BYTES;
         sweep.released_storage_bytes += pool_trimmed_bytes;
         self.populate_sweep_accounting(&mut sweep);
@@ -531,13 +664,14 @@ impl Heap {
             self.collection_epoch,
             &mut promoted_active_old,
             &mut self.eden_pool,
+            &mut self.object_external_bytes,
             &mut sweep,
         );
         self.committed_span_storage_bytes = self
             .committed_span_storage_bytes
             .checked_sub(sweep.sweep.released_storage_bytes)
             .expect("minor sweep cannot release more storage than the heap committed");
-        sweep.sweep.external_bytes = self.external_bytes;
+        sweep.sweep.external_bytes = self.external_bytes();
         self.populate_sweep_accounting(&mut sweep.sweep);
         self.repair_active_spans_after_minor(promoted_active_old);
         result.map_err(MinorCollectionError::Sweep)?;
@@ -732,6 +866,7 @@ impl Heap {
         &self,
         object_type: GcType<T>,
         requested_space: AllocationSpace,
+        external_bytes: usize,
     ) -> Result<AllocationPlan, HeapAllocationError> {
         if !self.types.matches(object_type) {
             return Err(HeapAllocationError::UnregisteredOrMismatchedType {
@@ -761,17 +896,33 @@ impl Heap {
             return Ok(AllocationPlan {
                 space,
                 class_index: Some(class_index),
-                allocation_bytes: usize::from(SMALL_SIZE_CLASSES[class_index]),
-                required_storage_bytes,
+                allocation_bytes: usize::from(SMALL_SIZE_CLASSES[class_index])
+                    .saturating_add(external_bytes),
+                required_span_storage_bytes: required_storage_bytes,
+                external_bytes,
             });
         }
         let required_storage_bytes = large_storage_bytes::<T>()?;
         Ok(AllocationPlan {
             space: AllocationSpace::Old,
             class_index: None,
-            allocation_bytes: required_storage_bytes,
-            required_storage_bytes,
+            allocation_bytes: required_storage_bytes.saturating_add(external_bytes),
+            required_span_storage_bytes: required_storage_bytes,
+            external_bytes,
         })
+    }
+
+    /// Rejects a combined span/backing publication before either ownership domain mutates.
+    fn ensure_commit_capacity(&self, requested: usize) -> Result<(), HeapAllocationError> {
+        let committed = self.committed_heap_bytes();
+        if committed.saturating_add(requested) > self.limit.max_heap_bytes() {
+            return Err(HeapAllocationError::HeapLimitExceeded {
+                limit: self.limit.max_heap_bytes(),
+                committed,
+                requested,
+            });
+        }
+        Ok(())
     }
 
     /// Revalidates heap registry, header type, layout, and liveness before an exclusive borrow.
@@ -934,6 +1085,37 @@ impl Heap {
     }
 }
 
+fn checked_external_bytes(bytes: usize) -> Result<usize, HeapAllocationError> {
+    if bytes > u32::MAX as usize {
+        return Err(HeapAllocationError::ExternalBytesTooLarge {
+            bytes,
+            maximum: u32::MAX as usize,
+        });
+    }
+    Ok(bytes)
+}
+
+fn external_header_fields(
+    flags: u16,
+    external_bytes: usize,
+) -> Result<(u16, u32), HeapAllocationError> {
+    if flags & GC_HEADER_EXTERNAL_BYTES_FLAG != 0 {
+        return Err(HeapAllocationError::ReservedHeaderFlag { flags });
+    }
+    if external_bytes == 0 {
+        return Ok((flags, 0));
+    }
+    Ok((flags | GC_HEADER_EXTERNAL_BYTES_FLAG, external_bytes as u32))
+}
+
+fn validate_header_charge(flags: u16, external_bytes: usize) -> Result<(), HeapAllocationError> {
+    let has_external_charge = flags & GC_HEADER_EXTERNAL_BYTES_FLAG != 0;
+    if has_external_charge != (external_bytes != 0) {
+        return Err(HeapAllocationError::ReservedHeaderFlag { flags });
+    }
+    Ok(())
+}
+
 /// Rounds a large object's header/payload layout to its contiguous logical span charge.
 fn large_storage_bytes<T>() -> Result<usize, HeapAllocationError> {
     let layout = ObjectLayout::for_type::<T>().map_err(|_| {
@@ -968,12 +1150,12 @@ mod tests {
         },
     };
 
-    use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
+    use super::{AllocationSpace, GcExternalMemory, Heap, HeapAllocationError, HeapLimit};
     use crate::{
         BarrierVerificationError, CardBitmap, Ephemeron, FinalizationRegistration,
-        ForcedCollectionMode, GcRef, GcTriggerConfig, HeapReferenceError, ManagedAllocationError,
-        MinorCollectionError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer,
-        TypeRegistrationError, TypeRegistry, WeakGcRef,
+        ForcedCollectionMode, GC_HEADER_EXTERNAL_BYTES_FLAG, GcRef, GcTriggerConfig,
+        HeapReferenceError, ManagedAllocationError, MinorCollectionError, RawHeapRef,
+        SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer, TypeRegistrationError, TypeRegistry, WeakGcRef,
     };
     use tachyon_value::Value;
 
@@ -1013,6 +1195,17 @@ mod tests {
 
     struct PinnedPayload;
 
+    struct ExternalPayload {
+        backing: Box<[u8]>,
+    }
+
+    struct LargeExternalPayload {
+        _inline: [u8; 70_000],
+        backing: Box<[u8]>,
+    }
+
+    struct ReportedExternalBytes(usize);
+
     struct DropNode {
         next: Option<GcRef<DropNode>>,
         drops: Arc<AtomicUsize>,
@@ -1029,6 +1222,11 @@ mod tests {
 
     struct LargePanicOnDrop {
         _bytes: [u8; 70_000],
+        drops: Arc<AtomicUsize>,
+    }
+
+    struct ExternalPanicOnDrop {
+        backing: Box<[u8]>,
         drops: Arc<AtomicUsize>,
     }
 
@@ -1117,6 +1315,36 @@ mod tests {
         fn trace(&mut self, _: &mut dyn Tracer) {}
     }
 
+    impl Trace for ExternalPayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl GcExternalMemory for ExternalPayload {
+        fn external_memory_bytes(&self) -> usize {
+            self.backing.len()
+        }
+    }
+
+    impl Trace for LargeExternalPayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl GcExternalMemory for LargeExternalPayload {
+        fn external_memory_bytes(&self) -> usize {
+            self.backing.len()
+        }
+    }
+
+    impl Trace for ReportedExternalBytes {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl GcExternalMemory for ReportedExternalBytes {
+        fn external_memory_bytes(&self) -> usize {
+            self.0
+        }
+    }
+
     impl Trace for DropNode {
         fn trace(&mut self, tracer: &mut dyn Tracer) {
             self.next.trace(tracer);
@@ -1158,6 +1386,23 @@ mod tests {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::Relaxed);
             panic!("intentional large destructor unwind");
+        }
+    }
+
+    impl Trace for ExternalPanicOnDrop {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl GcExternalMemory for ExternalPanicOnDrop {
+        fn external_memory_bytes(&self) -> usize {
+            self.backing.len()
+        }
+    }
+
+    impl Drop for ExternalPanicOnDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            panic!("intentional external destructor unwind");
         }
     }
 
@@ -1986,6 +2231,150 @@ mod tests {
         assert!(!heap.release_external(33));
         assert!(heap.release_external(32));
         assert_eq!(heap.external_bytes(), 0);
+    }
+
+    #[test]
+    /// Header-owned charges survive while rooted and are removed before young payload drop.
+    fn gc_owned_external_backing_is_charged_and_released_by_minor_sweep() {
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<ExternalPayload>("ExternalPayload")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES + 48), types);
+        let mut reference = heap
+            .try_allocate_external(
+                object_type,
+                0,
+                ExternalPayload {
+                    backing: vec![0; 32].into_boxed_slice(),
+                },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+
+        let header = heap.verify_reference(reference.raw(), None).unwrap();
+        assert_eq!(header.external_bytes(), Some(32));
+        assert_ne!(header.flags() & GC_HEADER_EXTERNAL_BYTES_FLAG, 0);
+        assert_eq!(heap.external_bytes(), 32);
+        heap.try_charge_external(16).unwrap();
+        assert!(!heap.release_external(32));
+        assert_eq!(heap.external_bytes(), 48);
+        assert!(heap.release_external(16));
+        assert_eq!(heap.external_bytes(), 32);
+        heap.collect_minor(&mut reference).unwrap();
+        assert_eq!(heap.external_bytes(), 32);
+
+        let mut no_roots = Vec::<Value>::new();
+        let stats = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(stats.sweep.sweep.reclaimed_objects, 1);
+        assert_eq!(stats.sweep.sweep.external_bytes, 0);
+        assert_eq!(heap.external_bytes(), 0);
+    }
+
+    #[test]
+    /// Large owners use the same header charge and release it with their continuation range.
+    fn gc_owned_external_backing_is_released_by_large_major_sweep() {
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<LargeExternalPayload>("LargeExternalPayload")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(3 * SPAN_SIZE_BYTES), types);
+        heap.try_allocate_external(
+            object_type,
+            0,
+            LargeExternalPayload {
+                _inline: [0; 70_000],
+                backing: vec![0; 48].into_boxed_slice(),
+            },
+            AllocationSpace::Old,
+        )
+        .unwrap();
+        assert_eq!(heap.external_bytes(), 48);
+
+        let mut no_roots = Vec::<Value>::new();
+        let stats = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(stats.sweep.reclaimed_objects, 1);
+        assert_eq!(stats.sweep.external_bytes, 0);
+        assert_eq!(heap.external_bytes(), 0);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+    }
+
+    #[test]
+    /// Reserved header ownership and unrepresentable charges fail before any object publication.
+    fn external_allocation_rejects_forged_flags_and_unrepresentable_backing() {
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<ReportedExternalBytes>("ReportedExternalBytes")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        assert_eq!(
+            heap.try_allocate(
+                object_type,
+                GC_HEADER_EXTERNAL_BYTES_FLAG,
+                1,
+                ReportedExternalBytes(0),
+                AllocationSpace::Old,
+            ),
+            Err(HeapAllocationError::ReservedHeaderFlag {
+                flags: GC_HEADER_EXTERNAL_BYTES_FLAG,
+            })
+        );
+        let too_large = u32::MAX as usize + 1;
+        assert_eq!(
+            heap.try_allocate_external(
+                object_type,
+                0,
+                ReportedExternalBytes(too_large),
+                AllocationSpace::Old,
+            ),
+            Err(HeapAllocationError::ExternalBytesTooLarge {
+                bytes: too_large,
+                maximum: u32::MAX as usize,
+            })
+        );
+        assert_eq!(heap.span_table().live_spans(), 0);
+        assert_eq!(heap.external_bytes(), 0);
+    }
+
+    #[test]
+    /// Combined backing pressure performs one major and retries after reclaiming the old charge.
+    fn managed_external_allocation_reclaims_backing_before_single_retry() {
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<ExternalPayload>("ExternalPayload")
+            .unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(SPAN_SIZE_BYTES + 64), types, config);
+        let dead = heap
+            .try_allocate_external(
+                object_type,
+                0,
+                ExternalPayload {
+                    backing: vec![0; 64].into_boxed_slice(),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let replacement = heap
+            .try_allocate_external_with_gc(
+                object_type,
+                0,
+                ExternalPayload {
+                    backing: vec![0; 64].into_boxed_slice(),
+                },
+                AllocationSpace::Old,
+                &mut no_roots,
+            )
+            .unwrap();
+
+        assert_eq!(heap.external_bytes(), 64);
+        assert!(heap.verify_reference(replacement.raw(), None).is_ok());
+        assert_eq!(replacement.raw(), dead.raw());
+        assert_eq!(heap.trigger_stats().major_attempts, 1);
+        assert_eq!(heap.trigger_stats().heap_limit_attempts, 1);
     }
 
     #[test]
@@ -3489,6 +3878,41 @@ mod tests {
         let retry = heap.collect_major(&mut no_roots).unwrap();
         assert_eq!(retry.sweep.reclaimed_objects, 0);
         assert_eq!(retry.sweep.spans_released, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    /// External charge is removed before a destructor unwind and is never charged twice on retry.
+    fn external_destructor_unwind_preserves_exact_accounting() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<ExternalPanicOnDrop>("ExternalPanicOnDrop")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES + 32), types);
+        heap.try_allocate_external(
+            object_type,
+            0,
+            ExternalPanicOnDrop {
+                backing: vec![0; 32].into_boxed_slice(),
+                drops: Arc::clone(&drops),
+            },
+            AllocationSpace::Old,
+        )
+        .unwrap();
+        assert_eq!(heap.external_bytes(), 32);
+        let mut no_roots = Vec::<Value>::new();
+
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _ = heap.collect_major(&mut no_roots);
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.external_bytes(), 0);
+
+        let retry = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(retry.sweep.reclaimed_objects, 0);
+        assert_eq!(retry.sweep.external_bytes, 0);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 

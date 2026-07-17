@@ -31,6 +31,8 @@ pub const CARDS_PER_SPAN: usize = SPAN_SIZE_BYTES / CARD_SIZE_BYTES;
 pub const CARD_BITMAP_WORDS: usize = CARDS_PER_SPAN.div_ceil(u64::BITS as usize);
 /// The byte size of every object header in the phase-1 heap.
 pub const GC_HEADER_SIZE_BYTES: usize = 8;
+/// Reserves `GcHeader::aux` for the exact external backing charge of this object.
+pub const GC_HEADER_EXTERNAL_BYTES_FLAG: u16 = 1 << 15;
 
 const _: () = assert!(LOGICAL_ADDRESS_SPACE_BYTES == u32::MAX as u64 + 1);
 const _: () = assert!(SPAN_SIZE_BYTES.is_power_of_two());
@@ -205,6 +207,16 @@ impl GcHeader {
     pub const fn aux(self) -> u32 {
         self.aux
     }
+
+    /// Returns the immutable external backing charge encoded at object publication.
+    #[must_use]
+    pub const fn external_bytes(self) -> Option<usize> {
+        if self.flags & GC_HEADER_EXTERNAL_BYTES_FLAG == 0 {
+            None
+        } else {
+            Some(self.aux as usize)
+        }
+    }
 }
 
 const _: [(); GC_HEADER_SIZE_BYTES] = [(); core::mem::size_of::<GcHeader>()];
@@ -239,6 +251,9 @@ mod tests {
         assert_eq!(header.type_id(), Some(type_id));
         assert_eq!(header.flags(), 0x55aa);
         assert_eq!(header.aux(), u32::MAX);
+        assert_eq!(header.external_bytes(), None);
+        let external = GcHeader::new(type_id, super::GC_HEADER_EXTERNAL_BYTES_FLAG, 4_096);
+        assert_eq!(external.external_bytes(), Some(4_096));
         assert_eq!(GcTypeId::new(0), None);
     }
 

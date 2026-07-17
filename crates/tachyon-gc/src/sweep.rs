@@ -36,6 +36,11 @@ pub enum SweepError {
     UnknownTypeId(RawHeapRef),
     SpanTable(SpanTableError),
     AllocationStateChanged(RawHeapRef),
+    ExternalAccountingUnderflow {
+        reference: RawHeapRef,
+        charged: usize,
+        available: usize,
+    },
 }
 
 /// Deterministic object, byte, span, and retained-fragmentation counters for one full sweep.
@@ -153,6 +158,7 @@ pub(crate) fn sweep_full(
     types: &TypeRegistry,
     worklist: &mut SweepWorklist,
     epoch: CollectionEpoch,
+    external_bytes: &mut usize,
     stats: &mut SweepStats,
 ) -> Result<(), SweepError> {
     worklist.clear();
@@ -166,14 +172,25 @@ pub(crate) fn sweep_full(
     while let Some(span_id) = worklist.pop() {
         stats.spans_processed += 1;
         match table.sweep_target(span_id) {
-            Some(SweepTarget::Small) => sweep_small(table, types, span_id, epoch, stats)?,
+            Some(SweepTarget::Small) => {
+                sweep_small(table, types, span_id, epoch, external_bytes, stats)?;
+            }
             Some(SweepTarget::LargeOwner) => {
-                sweep_large(table, types, span_id, epoch, stats)?;
+                sweep_large(table, types, span_id, epoch, external_bytes, stats)?;
             }
             None => {}
         }
     }
     Ok(())
+}
+
+struct YoungSweepContext<'a> {
+    types: &'a TypeRegistry,
+    epoch: CollectionEpoch,
+    promoted_active_old: &'a mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    eden_pool: &'a mut EdenPool,
+    external_bytes: &'a mut usize,
+    stats: &'a mut MinorSweepStats,
 }
 
 /// Sweeps only the intrusive Eden/Survivor chain and transitions every retained whole span.
@@ -183,44 +200,41 @@ pub(crate) fn sweep_young(
     epoch: CollectionEpoch,
     promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
     eden_pool: &mut EdenPool,
+    external_bytes: &mut usize,
     stats: &mut MinorSweepStats,
 ) -> Result<(), SweepError> {
+    let mut context = YoungSweepContext {
+        types,
+        epoch,
+        promoted_active_old,
+        eden_pool,
+        external_bytes,
+        stats,
+    };
     let mut current = table.young_head();
     while let Some(span_id) = current {
         let next = table.young_next(span_id);
         if let Some(space) = table.young_space(span_id) {
-            stats.sweep.spans_processed += 1;
+            context.stats.sweep.spans_processed += 1;
             match space {
-                SpanSpace::Eden => stats.eden_spans_processed += 1,
-                SpanSpace::Survivor { .. } => stats.survivor_spans_processed += 1,
+                SpanSpace::Eden => context.stats.eden_spans_processed += 1,
+                SpanSpace::Survivor { .. } => context.stats.survivor_spans_processed += 1,
                 SpanSpace::Old => unreachable!("young_space excludes Old"),
             }
-            sweep_young_span(
-                table,
-                types,
-                span_id,
-                epoch,
-                promoted_active_old,
-                eden_pool,
-                stats,
-            )?;
+            sweep_young_span(table, span_id, &mut context)?;
         }
         current = next;
     }
     table.compact_young_spans();
-    stats.eden_pool_retained_bytes = eden_pool.stats().retained_bytes;
+    context.stats.eden_pool_retained_bytes = context.eden_pool.stats().retained_bytes;
     Ok(())
 }
 
 /// Drops white young slots, releases empty storage, then ages or promotes the retained span.
 fn sweep_young_span(
     table: &mut SpanTable,
-    types: &TypeRegistry,
     span_id: SpanId,
-    epoch: CollectionEpoch,
-    promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
-    eden_pool: &mut EdenPool,
-    stats: &mut MinorSweepStats,
+    context: &mut YoungSweepContext<'_>,
 ) -> Result<(), SweepError> {
     let before = table
         .small_sweep_snapshot(span_id)
@@ -230,7 +244,7 @@ fn sweep_young_span(
     while let Some(reference) = table.next_allocated_reference(span_id, cursor) {
         cursor = reference_slot_successor(before, reference);
         if table
-            .is_marked(reference, epoch)
+            .is_marked(reference, context.epoch)
             .map_err(SweepError::InvalidReference)?
         {
             live_slots += 1;
@@ -240,22 +254,30 @@ fn sweep_young_span(
         .iter()
         .position(|&size| size == before.size_class.slot_size())
         .expect("every allocated small span uses a tuning size class");
-    if live_slots == 0 && !eden_pool.has_capacity(class_index) {
+    if live_slots == 0 && !context.eden_pool.has_capacity(class_index) {
         table
             .prepare_release(span_id)
             .map_err(SweepError::SpanTable)?;
     }
-    sweep_young_objects(table, types, span_id, epoch, before, stats)?;
+    sweep_young_objects(
+        table,
+        context.types,
+        span_id,
+        context.epoch,
+        before,
+        context.external_bytes,
+        context.stats,
+    )?;
     if live_slots == 0 {
-        if eden_pool.retain(class_index, span_id) {
+        if context.eden_pool.retain(class_index, span_id) {
             table.pool_empty_young(span_id);
-            stats.eden_spans_pooled += 1;
+            context.stats.eden_spans_pooled += 1;
             return Ok(());
         }
         table.release(span_id).map_err(SweepError::SpanTable)?;
-        stats.sweep.spans_released += 1;
-        stats.sweep.released_storage_bytes += SPAN_SIZE_BYTES;
-        stats.eden_pool_overflow_spans_released += 1;
+        context.stats.sweep.spans_released += 1;
+        context.stats.sweep.released_storage_bytes += SPAN_SIZE_BYTES;
+        context.stats.eden_pool_overflow_spans_released += 1;
         return Ok(());
     }
     let due_by_age =
@@ -265,14 +287,14 @@ fn sweep_young_span(
     let transition =
         table.advance_young_cohort(span_id, crate::tuning::YOUNG_PROMOTION_AGE, promote_early);
     match transition {
-        YoungSpanTransition::EdenToSurvivor => stats.eden_to_survivor += 1,
-        YoungSpanTransition::SurvivorAged => stats.survivor_spans_aged += 1,
+        YoungSpanTransition::EdenToSurvivor => context.stats.eden_to_survivor += 1,
+        YoungSpanTransition::SurvivorAged => context.stats.survivor_spans_aged += 1,
         YoungSpanTransition::Promoted => {
-            stats.whole_span_promotions += 1;
-            stats.early_whole_span_promotions += usize::from(promote_early);
+            context.stats.whole_span_promotions += 1;
+            context.stats.early_whole_span_promotions += usize::from(promote_early);
             table.rebuild_old_free_list(span_id);
             if table.can_allocate_in_span(span_id) {
-                promoted_active_old[class_index] = Some(span_id);
+                context.promoted_active_old[class_index] = Some(span_id);
             }
         }
     }
@@ -280,7 +302,7 @@ fn sweep_young_span(
         .small_sweep_snapshot(span_id)
         .expect("retained young span remains installed after transition");
     debug_assert_eq!(after.allocated_slots, live_slots);
-    account_retained_small(after, &mut stats.sweep);
+    account_retained_small(after, &mut context.stats.sweep);
     Ok(())
 }
 
@@ -291,6 +313,7 @@ fn sweep_young_objects(
     span_id: SpanId,
     epoch: CollectionEpoch,
     snapshot: SmallSweepSnapshot,
+    external_bytes: &mut usize,
     stats: &mut MinorSweepStats,
 ) -> Result<(), SweepError> {
     let mut cursor = 0;
@@ -305,7 +328,7 @@ fn sweep_young_objects(
             stats.sweep.live_objects += 1;
             stats.sweep.live_bytes += usize::from(snapshot.size_class.slot_size());
         } else {
-            drop_small(table, types, reference)?;
+            drop_small(table, types, reference, external_bytes)?;
             stats.sweep.reclaimed_objects += 1;
             stats.sweep.reclaimed_bytes += usize::from(snapshot.size_class.slot_size());
         }
@@ -319,6 +342,7 @@ fn sweep_small(
     types: &TypeRegistry,
     span_id: SpanId,
     epoch: CollectionEpoch,
+    external_bytes: &mut usize,
     stats: &mut SweepStats,
 ) -> Result<(), SweepError> {
     let before = table
@@ -354,7 +378,7 @@ fn sweep_small(
             stats.live_bytes += usize::from(before.size_class.slot_size());
             continue;
         }
-        drop_small(table, types, reference)?;
+        drop_small(table, types, reference, external_bytes)?;
         stats.reclaimed_objects += 1;
         stats.reclaimed_bytes += usize::from(before.size_class.slot_size());
     }
@@ -379,6 +403,7 @@ fn drop_small(
     table: &mut SpanTable,
     types: &TypeRegistry,
     reference: RawHeapRef,
+    external_bytes: &mut usize,
 ) -> Result<(), SweepError> {
     let header = table
         .verify_reference(reference, None)
@@ -392,9 +417,12 @@ fn drop_small(
     let payload = table
         .payload_address(reference, descriptor)
         .map_err(SweepError::InvalidReference)?;
+    let charged = header.external_bytes().unwrap_or(0);
+    ensure_external_charge_available(reference, charged, *external_bytes)?;
     if !table.unpublish_small_for_drop(reference) {
         return Err(SweepError::AllocationStateChanged(reference));
     }
+    *external_bytes -= charged;
     // SAFETY: descriptor/header identity and payload placement were revalidated immediately above;
     // unpublishing changed only side metadata, backing storage remains installed and exclusively
     // owned by this single-mutator table, and a panic cannot republish or double-drop this slot.
@@ -408,6 +436,7 @@ fn sweep_large(
     types: &TypeRegistry,
     span_id: SpanId,
     epoch: CollectionEpoch,
+    external_bytes: &mut usize,
     stats: &mut SweepStats,
 ) -> Result<(), SweepError> {
     let metadata = table
@@ -458,9 +487,12 @@ fn sweep_large(
     let payload = table
         .payload_address(reference, descriptor)
         .map_err(SweepError::InvalidReference)?;
+    let charged = header.external_bytes().unwrap_or(0);
+    ensure_external_charge_available(reference, charged, *external_bytes)?;
     table
         .unpublish_large_for_drop(reference)
         .map_err(SweepError::SpanTable)?;
+    *external_bytes -= charged;
     // SAFETY: the verified owner header selects this immutable descriptor and payload layout;
     // unpublishing retains the whole owner/continuation backing range until callback completion.
     unsafe { descriptor.drop(payload) };
@@ -471,6 +503,21 @@ fn sweep_large(
     stats.reclaimed_bytes += reclaimed.object_bytes();
     stats.spans_released += reclaimed.span_count() as usize;
     stats.released_storage_bytes += reclaimed.storage_bytes();
+    Ok(())
+}
+
+fn ensure_external_charge_available(
+    reference: RawHeapRef,
+    charged: usize,
+    available: usize,
+) -> Result<(), SweepError> {
+    if charged > available {
+        return Err(SweepError::ExternalAccountingUnderflow {
+            reference,
+            charged,
+            available,
+        });
+    }
     Ok(())
 }
 

@@ -43,14 +43,15 @@ pub use finalization::{
 pub use gray::{GrayQueueError, GrayQueueStats};
 pub use handle::GcRef;
 pub use heap::{
-    AllocationSpace, Heap, HeapAllocationError, HeapLimit, MajorCollectionError,
+    AllocationSpace, GcExternalMemory, Heap, HeapAllocationError, HeapLimit, MajorCollectionError,
     MajorCollectionStats, ManagedAllocationError, MinorCollectionError, MinorCollectionStats,
 };
 pub use layout::{
-    CARD_BITMAP_WORDS, CARD_SIZE_BYTES, CARDS_PER_SPAN, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId,
-    LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_OBJECT_COUNT,
-    MAX_LOGICAL_SPANS, MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout,
-    SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
+    CARD_BITMAP_WORDS, CARD_SIZE_BYTES, CARDS_PER_SPAN, GC_HEADER_EXTERNAL_BYTES_FLAG,
+    GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES,
+    MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MAX_SMALL_OBJECT_SLOTS,
+    MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES, SmallObjectLayout,
+    SmallObjectLayoutError,
 };
 pub use mark::{MarkError, MarkStats, YoungMarkStats};
 pub use pause::{CollectionKind, GcPauseStats, PauseHistogramStats};

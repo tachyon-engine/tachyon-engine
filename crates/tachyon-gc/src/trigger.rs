@@ -151,6 +151,16 @@ pub struct GcTriggerStats {
     pub old_debt_attempts: usize,
 }
 
+pub(crate) struct CollectionRequest {
+    pub space: AllocationSpace,
+    pub allocation_bytes: usize,
+    pub required_commit_bytes: usize,
+    pub required_young_storage_bytes: usize,
+    pub young_storage_bytes: usize,
+    pub committed_bytes: usize,
+    pub limit: HeapLimit,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CollectionDecision {
     pub action: CollectionAction,
@@ -214,22 +224,16 @@ impl GcTrigger {
     }
 
     /// Selects one bounded action; pressure checks only fire when allocation needs new storage.
-    pub fn decide(
-        &self,
-        space: AllocationSpace,
-        allocation_bytes: usize,
-        required_storage_bytes: usize,
-        young_storage_bytes: usize,
-        committed_bytes: usize,
-        limit: HeapLimit,
-    ) -> Option<CollectionDecision> {
+    pub fn decide(&self, request: CollectionRequest) -> Option<CollectionDecision> {
         if self.forced_mode == ForcedCollectionMode::Major {
             return Some(CollectionDecision {
                 action: CollectionAction::Major,
                 reason: CollectionReason::Forced,
             });
         }
-        if self.forced_mode == ForcedCollectionMode::Minor && space == AllocationSpace::Young {
+        if self.forced_mode == ForcedCollectionMode::Minor
+            && request.space == AllocationSpace::Young
+        {
             return Some(CollectionDecision {
                 action: CollectionAction::Minor,
                 reason: CollectionReason::Forced,
@@ -242,17 +246,21 @@ impl GcTrigger {
             });
         }
 
-        let prospective_storage = committed_bytes.saturating_add(required_storage_bytes);
-        if prospective_storage > limit.max_heap_bytes() {
+        let prospective_storage = request
+            .committed_bytes
+            .saturating_add(request.required_commit_bytes);
+        if prospective_storage > request.limit.max_heap_bytes() {
             return Some(CollectionDecision {
                 action: CollectionAction::Major,
                 reason: CollectionReason::HeapLimit,
             });
         }
-        let pressure_threshold =
-            percentage_threshold(limit.max_heap_bytes(), self.config.heap_pressure_percent);
-        if committed_bytes != 0
-            && required_storage_bytes != 0
+        let pressure_threshold = percentage_threshold(
+            request.limit.max_heap_bytes(),
+            self.config.heap_pressure_percent,
+        );
+        if request.committed_bytes != 0
+            && request.required_commit_bytes != 0
             && prospective_storage >= pressure_threshold
         {
             return Some(CollectionDecision {
@@ -260,9 +268,11 @@ impl GcTrigger {
                 reason: CollectionReason::HeapPressure,
             });
         }
-        if space == AllocationSpace::Young
-            && required_storage_bytes != 0
-            && young_storage_bytes.saturating_add(required_storage_bytes)
+        if request.space == AllocationSpace::Young
+            && request.required_young_storage_bytes != 0
+            && request
+                .young_storage_bytes
+                .saturating_add(request.required_young_storage_bytes)
                 > self.config.young_storage_cap_bytes
         {
             return Some(CollectionDecision {
@@ -271,9 +281,12 @@ impl GcTrigger {
             });
         }
 
-        match space {
+        match request.space {
             AllocationSpace::Young
-                if self.stats.young_debt_bytes.saturating_add(allocation_bytes)
+                if self
+                    .stats
+                    .young_debt_bytes
+                    .saturating_add(request.allocation_bytes)
                     >= self.config.young_allocation_debt_bytes =>
             {
                 Some(CollectionDecision {
@@ -282,7 +295,10 @@ impl GcTrigger {
                 })
             }
             AllocationSpace::Old
-                if self.stats.old_debt_bytes.saturating_add(allocation_bytes)
+                if self
+                    .stats
+                    .old_debt_bytes
+                    .saturating_add(request.allocation_bytes)
                     >= self.config.major_allocation_debt_bytes =>
             {
                 Some(CollectionDecision {
