@@ -10,12 +10,17 @@
 //! Source loading remains a host responsibility; this crate intentionally has no host I/O surface.
 
 mod diagnostic;
+mod hir;
 mod parser;
 mod source;
 
 use std::sync::Arc;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
+pub use hir::{
+    BindingId, FunctionStencilId, HirBinaryOperator, HirExpression, HirExpressionKind, HirProgram,
+    HirStatement, HirStatementKind, HirUnaryOperator, ReferenceId, ScopeId, StatementCompletion,
+};
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
 
@@ -26,6 +31,11 @@ pub enum CompileError {
         byte_len: usize,
     },
     Diagnostics(Arc<[Diagnostic]>),
+    UnsupportedSyntax {
+        source_name: SourceName,
+        span: SourceSpan,
+        syntax: &'static str,
+    },
 }
 
 /// The stateless frontend boundary; source and all host configuration must be supplied per call.
@@ -40,6 +50,16 @@ impl Compiler {
         options: CompileOptions,
     ) -> Result<ParsedSource, CompileError> {
         parser::parse(source, options)
+    }
+
+    /// Builds an owned HIR while Oxc's arena is alive, then drops the AST and allocator before returning.
+    pub fn lower_to_hir(
+        &self,
+        source: SourceText,
+        options: CompileOptions,
+    ) -> Result<HirProgram, CompileError> {
+        let (_, hir) = parser::parse_with(source, options, hir::lower)?;
+        Ok(hir)
     }
 }
 
@@ -122,6 +142,34 @@ mod tests {
             ),
             Err(CompileError::Diagnostics(_))
         ));
+    }
+
+    #[test]
+    fn hir_lowering_copies_binary_expression_without_oxc_values() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, "1 + 2;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [statement] = hir.statements() else {
+            panic!("expected one HIR statement");
+        };
+        let HirStatementKind::Expression(HirExpression {
+            kind:
+                HirExpressionKind::Binary {
+                    operator: HirBinaryOperator::Add,
+                    left,
+                    right,
+                },
+            ..
+        }) = &statement.kind
+        else {
+            panic!("expected owned binary expression");
+        };
+        assert_eq!(left.kind, HirExpressionKind::Number(1.0_f64.to_bits()));
+        assert_eq!(right.kind, HirExpressionKind::Number(2.0_f64.to_bits()));
+        assert_eq!(statement.completion, StatementCompletion::Value);
     }
 
     proptest! {

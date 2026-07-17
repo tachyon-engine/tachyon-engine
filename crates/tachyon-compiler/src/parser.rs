@@ -55,6 +55,16 @@ pub(crate) fn parse(
     source: SourceText,
     options: CompileOptions,
 ) -> Result<ParsedSource, CompileError> {
+    let (parsed_source, ()) = parse_with(source, options, |_, _, _| Ok(()))?;
+    Ok(parsed_source)
+}
+
+/// Parses and semantically validates source, then invokes a lowering closure while the Oxc arena is alive.
+pub(crate) fn parse_with<T>(
+    source: SourceText,
+    options: CompileOptions,
+    lower: impl FnOnce(&oxc::ast::ast::Program<'_>, ProgramKind, &SourceText) -> Result<T, CompileError>,
+) -> Result<(ParsedSource, T), CompileError> {
     if source.text().len() > u32::MAX as usize {
         return Err(CompileError::SourceTooLarge {
             source_name: source.name().clone(),
@@ -97,12 +107,16 @@ pub(crate) fn parse(
         return Err(CompileError::Diagnostics(diagnostics.into()));
     }
 
-    Ok(ParsedSource {
-        source,
-        kind,
-        top_level_spans: top_level_spans.into(),
-        diagnostics: diagnostics.into(),
-    })
+    let lowered = lower(&parsed.program, kind, &source)?;
+    Ok((
+        ParsedSource {
+            source,
+            kind,
+            top_level_spans: top_level_spans.into(),
+            diagnostics: diagnostics.into(),
+        },
+        lowered,
+    ))
 }
 
 fn source_type(media_type: MediaType, mode: SourceMode) -> SourceType {
