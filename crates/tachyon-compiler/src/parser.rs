@@ -65,7 +65,7 @@ pub(crate) fn parse(
     let source_type = source_type(source.media_type(), options.source_mode);
     let parsed = Parser::new(&allocator, source.text(), source_type).parse();
     let mut diagnostics: Vec<_> = parsed
-        .errors
+        .diagnostics
         .into_iter()
         .map(|diagnostic| Diagnostic::from_oxc(diagnostic, &source))
         .collect();
@@ -89,7 +89,7 @@ pub(crate) fn parse(
         .build(&parsed.program);
     diagnostics.extend(
         semantic
-            .errors
+            .diagnostics
             .into_iter()
             .map(|diagnostic| Diagnostic::from_oxc(diagnostic, &source)),
     );

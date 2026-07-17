@@ -52,7 +52,7 @@ impl Diagnostic {
     pub(crate) fn from_oxc(diagnostic: OxcDiagnostic, source: &SourceText) -> Self {
         let mut primary = None;
         let mut secondary = Vec::new();
-        for label in diagnostic.labels.as_deref().unwrap_or_default() {
+        for label in diagnostic.labels.as_slice() {
             let Some(span) = source_span(label.offset(), label.len(), source.text().len()) else {
                 continue;
             };
@@ -89,13 +89,10 @@ impl Diagnostic {
 }
 
 /// Converts arbitrary diagnostic offsets defensively so malformed third-party diagnostics never escape bounds.
-fn source_span(offset: usize, length: usize, source_length: usize) -> Option<SourceSpan> {
+fn source_span(offset: u32, length: u32, source_length: usize) -> Option<SourceSpan> {
     let end = offset.checked_add(length)?;
-    if end > source_length {
+    if usize::try_from(end).ok()? > source_length {
         return None;
     }
-    Some(SourceSpan {
-        start: u32::try_from(offset).ok()?,
-        end: u32::try_from(end).ok()?,
-    })
+    Some(SourceSpan { start: offset, end })
 }
