@@ -920,6 +920,15 @@ pub enum ModuleBuildError {
         function: FunctionId,
         handler: HandlerEntry,
     },
+    HandlerTargetInsideProtectedRange {
+        function: FunctionId,
+        handler: HandlerEntry,
+    },
+    HandlerTableNotProperlyNested {
+        function: FunctionId,
+        previous: HandlerEntry,
+        current: HandlerEntry,
+    },
     FeedbackSiteOffsetNotInstructionStart {
         function: FunctionId,
         offset: WordOffset,
@@ -1001,11 +1010,6 @@ impl CompiledModule {
                     actual: template.id,
                 });
             }
-            validate_function_layout(
-                template.id,
-                template.metadata.layout,
-                &template.metadata.handlers,
-            )?;
             let bytecode = template
                 .bytecode
                 .verify(VerifyContext {
@@ -1022,7 +1026,9 @@ impl CompiledModule {
                 &bytecode,
                 source_len,
             )?;
-            validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
+            let handler_depth =
+                validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
+            validate_function_layout(template.id, template.metadata.layout, handler_depth)?;
             validate_feedback_sites(
                 template.id,
                 &template.metadata.feedback_sites,
@@ -1080,19 +1086,22 @@ impl CompiledModule {
 fn validate_function_layout(
     function: FunctionId,
     layout: FunctionLayout,
-    handlers: &[HandlerEntry],
+    handler_depth: HandlerDepth,
 ) -> Result<(), ModuleBuildError> {
-    let has_finally = handlers
-        .iter()
-        .any(|handler| handler.kind == HandlerKind::Finally);
     if layout.argument_count > layout.register_count
         || layout.temporary_register_count > layout.register_count - layout.argument_count
-        || (!handlers.is_empty() && layout.max_handler_depth == 0)
-        || (has_finally && layout.max_completion_depth == 0)
+        || layout.max_handler_depth < handler_depth.handlers
+        || layout.max_completion_depth < handler_depth.finally_handlers
     {
         return Err(ModuleBuildError::InvalidFunctionLayout { function, layout });
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct HandlerDepth {
+    handlers: u32,
+    finally_handlers: u32,
 }
 
 /// Source maps may omit instructions but each retained entry must be an ordered valid instruction start.
@@ -1135,7 +1144,7 @@ fn validate_handlers(
     function: FunctionId,
     handlers: &[HandlerEntry],
     bytecode: &VerifiedBytecode,
-) -> Result<(), ModuleBuildError> {
+) -> Result<HandlerDepth, ModuleBuildError> {
     let code_len = bytecode.bytecode().words().len() as u32;
     for &handler in handlers {
         let start_is_valid = bytecode.is_instruction_start(handler.protected_start);
@@ -1148,8 +1157,52 @@ fn validate_handlers(
         {
             return Err(ModuleBuildError::InvalidHandlerRange { function, handler });
         }
+        if handler.protected_start.index() <= handler.handler.index()
+            && handler.handler.index() < handler.protected_end.index()
+        {
+            return Err(ModuleBuildError::HandlerTargetInsideProtectedRange { function, handler });
+        }
     }
-    Ok(())
+    let mut max_depth = HandlerDepth::default();
+    for (index, &current) in handlers.iter().enumerate() {
+        for &previous in &handlers[..index] {
+            if previous.protected_start.index() > current.protected_start.index()
+                || (previous.protected_start == current.protected_start
+                    && previous.protected_end.index() <= current.protected_end.index())
+                || crosses_handler_ranges(previous, current)
+            {
+                return Err(ModuleBuildError::HandlerTableNotProperlyNested {
+                    function,
+                    previous,
+                    current,
+                });
+            }
+        }
+        let mut depth = 0u32;
+        let mut finally_depth = 0u32;
+        for &candidate in &handlers[..=index] {
+            if handler_contains(candidate, current) {
+                depth += 1;
+                if candidate.kind == HandlerKind::Finally {
+                    finally_depth += 1;
+                }
+            }
+        }
+        max_depth.handlers = max_depth.handlers.max(depth);
+        max_depth.finally_handlers = max_depth.finally_handlers.max(finally_depth);
+    }
+    Ok(max_depth)
+}
+
+fn handler_contains(outer: HandlerEntry, inner: HandlerEntry) -> bool {
+    outer.protected_start.index() <= inner.protected_start.index()
+        && inner.protected_end.index() <= outer.protected_end.index()
+}
+
+fn crosses_handler_ranges(left: HandlerEntry, right: HandlerEntry) -> bool {
+    left.protected_start.index() < right.protected_start.index()
+        && right.protected_start.index() < left.protected_end.index()
+        && left.protected_end.index() < right.protected_end.index()
 }
 
 /// Feedback sites have stable ordering and bounds, while their mutable feedback stays isolate-local.
@@ -1641,6 +1694,86 @@ mod tests {
         assert!(matches!(
             error,
             ModuleBuildError::SuspendPointMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn compiled_module_rejects_crossing_and_underreserved_handler_tables() {
+        let mut words = encode_instruction(Opcode::Nop, &[]).unwrap();
+        words.extend(encode_instruction(Opcode::Nop, &[]).unwrap());
+        words.extend(encode_instruction(Opcode::Nop, &[]).unwrap());
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let crossing_handlers: Arc<[HandlerEntry]> = vec![
+            HandlerEntry {
+                protected_start: WordOffset::new(0),
+                protected_end: WordOffset::new(2),
+                handler: WordOffset::new(3),
+                kind: HandlerKind::Catch,
+                environment_depth: 0,
+            },
+            HandlerEntry {
+                protected_start: WordOffset::new(1),
+                protected_end: WordOffset::new(3),
+                handler: WordOffset::new(3),
+                kind: HandlerKind::Catch,
+                environment_depth: 0,
+            },
+        ]
+        .into();
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 1,
+                max_handler_depth: 2,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.handlers = crossing_handlers;
+        let error = CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words.clone()),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ModuleBuildError::HandlerTableNotProperlyNested { .. }
+        ));
+
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.handlers = vec![HandlerEntry {
+            protected_start: WordOffset::new(0),
+            protected_end: WordOffset::new(1),
+            handler: WordOffset::new(3),
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        let error = CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ModuleBuildError::InvalidFunctionLayout { .. }
         ));
     }
 
