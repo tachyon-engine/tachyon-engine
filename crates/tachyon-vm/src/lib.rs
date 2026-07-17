@@ -333,8 +333,8 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_bytecode::{
-        Bytecode, CompiledFunctionTemplate, CompiledModule, FunctionId, FunctionKind,
-        FunctionLayout, FunctionMetadata, encode_instruction,
+        Bytecode, BytecodeBuilder, CompiledFunctionTemplate, CompiledModule, FunctionId,
+        FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
     };
 
     use super::*;
@@ -382,6 +382,15 @@ mod tests {
         assert_batch_budget::<16>();
     }
 
+    #[test]
+    fn interpreter_restarts_dispatch_after_conditional_jumps() {
+        assert_conditional_batch::<1>();
+        assert_conditional_batch::<2>();
+        assert_conditional_batch::<4>();
+        assert_conditional_batch::<8>();
+        assert_conditional_batch::<16>();
+    }
+
     fn assert_batch_result<const N: usize>() {
         let outcome = Isolate::default()
             .execute_with_batch::<N>(
@@ -406,5 +415,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(outcome, RunOutcome::BudgetExhausted);
+    }
+
+    fn assert_conditional_batch<const N: usize>() {
+        for (test, expected) in [(Opcode::LoadTrue, 1), (Opcode::LoadFalse, 2)] {
+            let outcome = Isolate::default()
+                .execute_with_batch::<N>(
+                    &conditional_module(test),
+                    ExecutionBudget {
+                        fuel: 6,
+                        quantum: 6,
+                    },
+                )
+                .unwrap();
+            assert!(
+                matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(expected))
+            );
+        }
+    }
+
+    /// Builds a verified branch program with explicit labels to exercise PC changes inside one dispatch batch.
+    fn conditional_module(test: Opcode) -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(8, 2);
+        let alternate = builder.new_label().unwrap();
+        let end = builder.new_label().unwrap();
+        builder.emit(test, &[0], span).unwrap();
+        builder
+            .emit_jump_if_false(RegisterId::new(0), alternate, span)
+            .unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+        builder.emit_jump(end, span).unwrap();
+        builder.bind_label(alternate).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 2], span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("conditional"),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
     }
 }
