@@ -1,11 +1,14 @@
 //! Stable logical span indexing over independently allocated native storage.
 
-use core::ops::{Deref, DerefMut};
+use core::{
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 use crate::{
     CollectionEpoch, GcHeader, GcRef, GcTypeId, LargeSpanMetadata, MAX_LOGICAL_SPANS, ObjectLayout,
     RawHeapRef, SizeClass, SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata, SpanId,
-    SpanReuseGeneration, SpanSpace, SpanStorage, SpanStorageAllocationError, Trace,
+    SpanReuseGeneration, SpanSpace, SpanStorage, SpanStorageAllocationError, Trace, TypeDescriptor,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_FREE_RANGE_CAPACITY,
         INITIAL_SPAN_TABLE_CAPACITY,
@@ -96,6 +99,7 @@ pub enum HeapReferenceError {
         owner: SpanId,
         ordinal: u32,
     },
+    PayloadAccess(RawHeapRef),
 }
 
 impl From<SpanStorageAllocationError> for SpanTableError {
@@ -471,6 +475,77 @@ impl SpanTable {
             return Err(HeapReferenceError::TypeMismatch { expected, actual });
         }
         Ok(header)
+    }
+
+    /// Returns mark state after the same exact live-reference checks used by the debug verifier.
+    pub(crate) fn is_marked(
+        &self,
+        reference: RawHeapRef,
+        epoch: CollectionEpoch,
+    ) -> Result<bool, HeapReferenceError> {
+        self.verify_reference(reference, None)?;
+        let kind = self.entries[reference.span_id().index() as usize]
+            .kind
+            .as_ref()
+            .expect("verified references have occupied entries");
+        Ok(match kind {
+            SpanKind::Small(span) => {
+                let slot = span
+                    .metadata
+                    .size_class()
+                    .slot_for_offset(reference.span_offset())
+                    .expect("verified small reference is on a slot boundary");
+                span.metadata.marks().is_marked(slot, epoch)
+            }
+            SpanKind::LargeOwner(span) => span.metadata.is_marked(epoch),
+            SpanKind::LargeContinuation(_) => unreachable!("verifier rejects continuation roots"),
+        })
+    }
+
+    /// Changes white to gray after the caller has reserved queue capacity.
+    pub(crate) fn mark_reference(
+        &mut self,
+        reference: RawHeapRef,
+        epoch: CollectionEpoch,
+    ) -> Result<bool, HeapReferenceError> {
+        self.verify_reference(reference, None)?;
+        let kind = self.entries[reference.span_id().index() as usize]
+            .kind
+            .as_mut()
+            .expect("verified references have occupied entries");
+        Ok(match kind {
+            SpanKind::Small(span) => {
+                let slot = span
+                    .metadata
+                    .size_class()
+                    .slot_for_offset(reference.span_offset())
+                    .expect("verified small reference is on a slot boundary");
+                span.metadata.marks_mut().mark(slot, epoch)
+            }
+            SpanKind::LargeOwner(span) => span.metadata.mark(epoch),
+            SpanKind::LargeContinuation(_) => unreachable!("verifier rejects continuation roots"),
+        })
+    }
+
+    /// Resolves the descriptor-checked payload immediately before a trace callback invocation.
+    pub(crate) fn payload_address(
+        &mut self,
+        reference: RawHeapRef,
+        descriptor: TypeDescriptor,
+    ) -> Result<NonNull<u8>, HeapReferenceError> {
+        self.verify_reference(reference, Some(descriptor.type_id()))?;
+        let kind = self.entries[reference.span_id().index() as usize]
+            .kind
+            .as_mut()
+            .expect("verified references have occupied entries");
+        let storage = match kind {
+            SpanKind::Small(span) => &mut span.storage,
+            SpanKind::LargeOwner(span) => &mut span.storage,
+            SpanKind::LargeContinuation(_) => unreachable!("verifier rejects continuations"),
+        };
+        storage
+            .payload_address(reference.span_offset(), descriptor.layout())
+            .map_err(|_| HeapReferenceError::PayloadAccess(reference))
     }
 
     /// Reclaims an object after its descriptor drop callback has completed.

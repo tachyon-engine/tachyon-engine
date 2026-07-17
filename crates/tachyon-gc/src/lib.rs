@@ -11,9 +11,11 @@
 
 mod descriptor;
 mod epoch;
+mod gray;
 mod handle;
 mod heap;
 mod layout;
+mod mark;
 mod registry;
 mod span;
 mod storage;
@@ -23,6 +25,7 @@ mod tuning;
 
 pub use descriptor::{DropObjectFn, GcType, TraceObjectFn, TypeDescriptor};
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
+pub use gray::{GrayQueueError, GrayQueueStats};
 pub use handle::GcRef;
 pub use heap::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
 pub use layout::{
@@ -31,6 +34,7 @@ pub use layout::{
     MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SLOT_BITMAP_WORDS,
     SPAN_SIZE_BYTES, SmallObjectLayout, SmallObjectLayoutError,
 };
+pub use mark::{MarkError, MarkStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
 pub use span::{
     AllocationBitmap, CardBitmap, LargeSpanMetadata, MarkBitmap, SizeClass, SlotIndex,

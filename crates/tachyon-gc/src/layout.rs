@@ -55,7 +55,11 @@ pub struct ObjectLayout {
 impl ObjectLayout {
     /// Computes native header/payload placement without imposing a small-object size threshold.
     pub fn for_type<T>() -> Result<Self, SmallObjectLayoutError> {
-        let payload = Layout::new::<T>();
+        Self::for_payload_layout(Layout::new::<T>())
+    }
+
+    /// Reconstructs native placement from an erased descriptor payload layout.
+    pub fn for_payload_layout(payload: Layout) -> Result<Self, SmallObjectLayoutError> {
         let (combined, payload_offset) =
             Layout::new::<GcHeader>().extend(payload).map_err(|_| {
                 SmallObjectLayoutError::SizeTooLarge {

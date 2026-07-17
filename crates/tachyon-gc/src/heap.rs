@@ -1,9 +1,11 @@
 //! Small-object allocation policy over fixed logical spans.
 
 use crate::{
-    GcHeader, GcRef, GcType, GcTypeId, HeapReferenceError, LargeAllocationError, LargeReclaim,
-    ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId,
-    SpanSpace, SpanTable, SpanTableError, Trace, TypeRegistry, tuning::SMALL_SIZE_CLASSES,
+    CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
+    LargeAllocationError, LargeReclaim, MarkError, MarkStats, ObjectLayout, RawHeapRef,
+    SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId, SpanSpace, SpanTable,
+    SpanTableError, Trace, TypeRegistry, gray::GrayQueue, mark::mark_strong_roots,
+    tuning::SMALL_SIZE_CLASSES,
 };
 
 /// Whether an object enters the young bump path or is allocated directly in old space.
@@ -56,6 +58,8 @@ pub struct Heap {
     limit: HeapLimit,
     committed_span_storage_bytes: usize,
     external_bytes: usize,
+    collection_epoch: CollectionEpoch,
+    gray: GrayQueue,
 }
 
 impl Heap {
@@ -70,6 +74,8 @@ impl Heap {
             limit,
             committed_span_storage_bytes: 0,
             external_bytes: 0,
+            collection_epoch: CollectionEpoch::INITIAL,
+            gray: GrayQueue::new(limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES),
         }
     }
 
@@ -177,6 +183,24 @@ impl Heap {
             return Err(HeapReferenceError::UnregisteredTypeId { reference, type_id });
         }
         Ok(header)
+    }
+
+    /// Starts a fresh epoch and reaches the exact strong-root fixed point iteratively.
+    pub fn mark_strong(&mut self, roots: &mut dyn Trace) -> Result<MarkStats, MarkError> {
+        self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
+        mark_strong_roots(
+            &mut self.table,
+            &self.types,
+            &mut self.gray,
+            self.collection_epoch,
+            roots,
+        )
+    }
+
+    /// Returns retained gray high-water evidence for tuning and quota tests.
+    #[must_use]
+    pub fn gray_queue_stats(&self) -> GrayQueueStats {
+        self.gray.stats()
     }
 
     /// Updates committed storage after the collector has dropped a large payload and releases its range.
@@ -305,7 +329,9 @@ fn size_class_index(required: u16) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
-    use crate::{HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry};
+    use crate::{
+        GcRef, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry,
+    };
     use tachyon_value::Value;
 
     struct OtherPayload;
@@ -315,12 +341,38 @@ mod tests {
         _bytes: [u8; 70_000],
     }
 
+    struct ChainNode {
+        next: Option<GcRef<ChainNode>>,
+    }
+
+    struct Leaf;
+
+    struct Fanout {
+        edges: [Option<GcRef<Leaf>>; 300],
+    }
+
     impl Trace for OtherPayload {
         fn trace(&mut self, _: &mut dyn Tracer) {}
     }
 
     impl Trace for LargePayload {
         fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Trace for ChainNode {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.next.trace(tracer);
+        }
+    }
+
+    impl Trace for Leaf {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Trace for Fanout {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.edges.trace(tracer);
+        }
     }
 
     #[test]
@@ -565,5 +617,67 @@ mod tests {
         assert!(!heap.release_external(33));
         assert!(heap.release_external(32));
         assert_eq!(heap.external_bytes(), 0);
+    }
+
+    #[test]
+    /// A 10,000-object chain reaches its fixed point with a gray peak of one, proving iteration.
+    fn strong_marking_does_not_recurse_through_the_native_stack() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(1024 * 1024), types);
+        let mut tail = None;
+        for _ in 0..10_000 {
+            tail = Some(
+                heap.try_allocate(
+                    node_type,
+                    0,
+                    0,
+                    ChainNode { next: tail },
+                    AllocationSpace::Old,
+                )
+                .unwrap(),
+            );
+        }
+        let mut root = tail.expect("chain is non-empty");
+
+        let stats = heap.mark_strong(&mut root).unwrap();
+
+        assert_eq!(stats.marked_objects, 10_000);
+        assert_eq!(stats.traced_objects, 10_000);
+        assert_eq!(stats.traced_edges, 10_000);
+        assert_eq!(heap.gray_queue_stats().peak_len, 1);
+        assert_eq!(heap.gray_queue_stats().initial_capacity, 256);
+        assert_eq!(heap.gray_queue_stats().growth_count, 0);
+    }
+
+    #[test]
+    /// A broad graph crosses the initial queue guess once and retains the measured high water.
+    fn strong_marking_records_bounded_gray_queue_growth() {
+        let mut types = TypeRegistry::new();
+        let leaf_type = types.try_register::<Leaf>("Leaf").unwrap();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(1024 * 1024), types);
+        let mut edges = [None; 300];
+        for edge in &mut edges[..299] {
+            *edge = Some(
+                heap.try_allocate(leaf_type, 0, 0, Leaf, AllocationSpace::Old)
+                    .unwrap(),
+            );
+        }
+        edges[299] = edges[0];
+        let mut root = heap
+            .try_allocate(fanout_type, 0, 0, Fanout { edges }, AllocationSpace::Old)
+            .unwrap();
+
+        let stats = heap.mark_strong(&mut root).unwrap();
+        let queue = heap.gray_queue_stats();
+
+        assert_eq!(stats.marked_objects, 300);
+        assert_eq!(stats.traced_objects, 300);
+        assert_eq!(stats.traced_edges, 301);
+        assert_eq!(queue.initial_capacity, 256);
+        assert_eq!(queue.growth_count, 1);
+        assert_eq!(queue.peak_len, 299);
+        assert!(queue.retained_capacity >= queue.peak_len);
     }
 }

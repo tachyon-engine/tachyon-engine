@@ -94,6 +94,21 @@ impl LargeSpanMetadata {
         self.reuse_generation
     }
 
+    #[must_use]
+    #[inline(always)]
+    pub fn is_marked(self, epoch: CollectionEpoch) -> bool {
+        self.mark_epoch == Some(epoch)
+    }
+
+    #[inline(always)]
+    pub(crate) fn mark(&mut self, epoch: CollectionEpoch) -> bool {
+        if self.mark_epoch == Some(epoch) {
+            return false;
+        }
+        self.mark_epoch = Some(epoch);
+        true
+    }
+
     pub(crate) fn reclaim(&mut self) {
         self.allocated = false;
         self.mark_epoch = None;

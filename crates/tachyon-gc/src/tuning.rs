@@ -6,6 +6,8 @@ pub(crate) const INITIAL_SPAN_TABLE_CAPACITY: usize = 8;
 pub(crate) const INITIAL_FREE_RANGE_CAPACITY: usize = 4;
 /// First immutable descriptor reservation; builtins and a modest extension set fit without regrowth.
 pub(crate) const INITIAL_TYPE_DESCRIPTOR_CAPACITY: usize = 64;
+/// First gray reservation balances tiny-script footprint against common graph breadth.
+pub(crate) const INITIAL_GRAY_QUEUE_CAPACITY: usize = 256;
 /// Numerator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 /// Denominator for bounded 1.5x metadata-container growth.

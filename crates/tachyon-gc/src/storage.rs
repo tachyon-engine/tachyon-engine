@@ -1,5 +1,7 @@
 //! Rust-allocator-backed native storage for logical spans.
 
+use core::{alloc::Layout, ptr::NonNull};
+
 use crate::{
     GcHeader, MINIMUM_SLOT_SIZE_BYTES, ObjectLayout, SPAN_SIZE_BYTES, SlotIndex,
     SmallObjectLayoutError, SpanOffset,
@@ -129,6 +131,35 @@ impl SpanStorage {
             .wrapping_add(object_offset);
         // SAFETY: the checked offset is in bounds and 16-byte alignment satisfies `GcHeader`.
         Ok(unsafe { object.cast::<GcHeader>().read() })
+    }
+
+    /// Resolves an erased descriptor payload pointer after repeating layout and tail validation.
+    pub(crate) fn payload_address(
+        &mut self,
+        offset: SpanOffset,
+        payload_layout: Layout,
+    ) -> Result<NonNull<u8>, SpanStorageAccessError> {
+        let layout = ObjectLayout::for_payload_layout(payload_layout)
+            .map_err(SpanStorageAccessError::InvalidPayloadLayout)?;
+        if layout.alignment() > MINIMUM_SLOT_SIZE_BYTES {
+            return Err(SpanStorageAccessError::PayloadAlignmentTooLarge {
+                alignment: layout.alignment(),
+            });
+        }
+        let object_offset = offset.get() as usize;
+        if !object_offset.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES) {
+            return Err(SpanStorageAccessError::MisalignedObjectOffset(offset));
+        }
+        if object_offset + layout.allocation_size() > self.len() {
+            return Err(SpanStorageAccessError::ObjectCrossesSpanEnd(offset));
+        }
+        let payload = self
+            .blocks
+            .as_mut_ptr()
+            .cast::<u8>()
+            .wrapping_add(object_offset + layout.payload_offset());
+        debug_assert_eq!(payload.addr() % payload_layout.align(), 0);
+        NonNull::new(payload).ok_or(SpanStorageAccessError::ObjectCrossesSpanEnd(offset))
     }
 
     /// Stores a free-list link in dead slot bytes without typed pointer access.
