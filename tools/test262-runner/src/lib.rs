@@ -1,5 +1,5 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
-//! Engine-neutral Test262 metadata, harness, execution, and result infrastructure.
+//! Test262 metadata, harness, execution, and result infrastructure.
 //!
 //! Host filesystem traversal belongs to [`suite`]. Engine adapters consume only owned or borrowed
 //! in-memory inputs, so Tachyon's engine crates never depend on this tool or perform ambient I/O.
@@ -11,6 +11,7 @@ mod harness;
 mod metadata;
 mod runner;
 pub mod suite;
+mod tachyon;
 
 pub use compare::{CompareError, ReportDiff, ResultChange, TestKey, TestState, compare_reports};
 pub use config::{
@@ -30,3 +31,4 @@ pub use runner::{
     TestResult, run_test,
 };
 pub use suite::{RunOptions, RunReport, RunSummary, SuiteError, run_checkout};
+pub use tachyon::TachyonAdapter;

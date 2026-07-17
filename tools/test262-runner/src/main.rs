@@ -3,7 +3,7 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use test262_runner::{
-    RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
+    RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
 };
 
 /// Reads explicit config/checkout arguments and emits a versioned JSON report to stdout.
@@ -22,14 +22,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or(USAGE)?;
     match command.to_str() {
-        Some("run-stub") => run_stub(args),
+        Some("run-tachyon") => run_tachyon(args),
         Some("compare") => compare(args),
         _ => Err(USAGE.into()),
     }
 }
 
-/// Parses suite selection/scheduling flags and emits a complete versioned stub report.
-fn run_stub(
+/// Parses suite selection/scheduling flags and emits a complete versioned Tachyon report.
+fn run_tachyon(
     mut args: impl Iterator<Item = std::ffi::OsString>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = PathBuf::from(args.next().ok_or(USAGE)?);
@@ -58,7 +58,7 @@ fn run_stub(
     }
     let config_source = fs::read_to_string(config_path)?;
     let config = Test262Config::parse(&config_source)?;
-    let report = run_checkout(&checkout, &config, &StubAdapter::unsupported(), &options)?;
+    let report = run_checkout(&checkout, &config, &TachyonAdapter, &options)?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
     println!();
     Ok(())
@@ -90,4 +90,4 @@ fn compare(
     Ok(())
 }
 
-const USAGE: &str = "usage:\n  test262-runner run-stub <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  test262-runner compare <base.json> <new.json> [--markdown]";
+const USAGE: &str = "usage:\n  test262-runner run-tachyon <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  test262-runner compare <base.json> <new.json> [--markdown]";

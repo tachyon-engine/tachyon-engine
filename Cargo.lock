@@ -1083,6 +1083,9 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2",
+ "tachyon-bytecode",
+ "tachyon-compiler",
+ "tachyon-vm",
  "tempfile",
  "toml",
 ]

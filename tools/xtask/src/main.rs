@@ -17,7 +17,7 @@ use benchmark_runner::{
     compare_reports as compare_benchmarks, load_corpus, run_case,
 };
 use test262_runner::{
-    RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
+    RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
 };
 
 const ENGINE_CRATES: [&str; 6] = [
@@ -205,7 +205,7 @@ fn fetch_test262() -> Result<(), String> {
     }
 }
 
-/// Runs the engine-neutral adapter with deterministic selection flags and writes JSON to stdout.
+/// Runs Tachyon with deterministic selection flags and writes a phase-aware JSON report to stdout.
 fn run_test262(arguments: &[String]) -> Result<(), String> {
     let mut options = RunOptions::default();
     let mut index = 0;
@@ -231,7 +231,7 @@ fn run_test262(arguments: &[String]) -> Result<(), String> {
     let report = run_checkout(
         &workspace_root().join("test262"),
         &test262_config()?,
-        &StubAdapter::unsupported(),
+        &TachyonAdapter,
         &options,
     )
     .map_err(|error| error.to_string())?;
