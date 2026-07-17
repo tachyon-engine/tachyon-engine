@@ -212,6 +212,7 @@ struct SpanEntry {
     in_remembered_set: bool,
     young_next: Option<SpanId>,
     in_young_set: bool,
+    in_eden_pool: bool,
 }
 
 /// A coalesced inclusive range of vacant logical span IDs.
@@ -305,6 +306,7 @@ impl SpanTable {
         let entry = &mut self.entries[index];
         entry.kind = None;
         entry.generation = entry.generation.next();
+        entry.in_eden_pool = false;
         self.insert_free_span(span_id.index());
         self.live_spans -= 1;
         Ok(())
@@ -381,6 +383,29 @@ impl SpanTable {
     #[must_use]
     pub fn retained_entry_capacity(&self) -> usize {
         self.entries.capacity()
+    }
+
+    /// Counts only non-empty object backing spans, excluding retained empty Eden pool storage.
+    pub(crate) fn live_object_span_counts(&self) -> (usize, usize) {
+        let mut young = 0_usize;
+        let mut old = 0_usize;
+        for entry in &self.entries {
+            match entry.kind.as_ref() {
+                Some(SpanKind::Small(span)) if span.metadata.allocated_slots() != 0 => {
+                    match span.metadata.space() {
+                        SpanSpace::Eden | SpanSpace::Survivor { .. } => young += 1,
+                        SpanSpace::Old => old += 1,
+                    }
+                }
+                Some(SpanKind::LargeOwner(span)) if span.metadata.is_allocated() => {
+                    old += span.metadata.span_count() as usize;
+                }
+                Some(SpanKind::Small(_) | SpanKind::LargeOwner(_))
+                | Some(SpanKind::LargeContinuation(_))
+                | None => {}
+            }
+        }
+        (young, old)
     }
 
     /// Classifies an occupied owner entry while excluding vacant and continuation IDs.
@@ -583,11 +608,41 @@ impl SpanTable {
             let index = span_id.index() as usize;
             let next = self.entries[index].young_next.take();
             self.entries[index].in_young_set = false;
-            if self.young_space(span_id).is_some() {
+            if self.young_space(span_id).is_some() && !self.entries[index].in_eden_pool {
                 self.link_young_span(span_id);
             }
             current = next;
         }
+    }
+
+    /// Resets an empty young span for pool retention without releasing its allocator backing.
+    pub(crate) fn pool_empty_young(&mut self, span_id: SpanId) {
+        let entry = &mut self.entries[span_id.index() as usize];
+        let Some(SpanKind::Small(span)) = entry.kind.as_mut() else {
+            unreachable!("young sweep only pools a live small span");
+        };
+        assert_eq!(span.metadata.allocated_slots(), 0);
+        assert_ne!(span.metadata.space(), SpanSpace::Old);
+        entry.generation = entry.generation.next();
+        *span.metadata = SmallSpanMetadata::new(
+            span.metadata.size_class(),
+            SpanSpace::Eden,
+            entry.generation,
+        );
+        entry.in_eden_pool = true;
+    }
+
+    /// Reattaches a retained empty Eden span to allocation and young-collection ownership.
+    pub(crate) fn activate_pooled_eden(&mut self, span_id: SpanId) {
+        let entry = &mut self.entries[span_id.index() as usize];
+        let Some(SpanKind::Small(span)) = entry.kind.as_ref() else {
+            unreachable!("pool IDs name retained small spans");
+        };
+        assert!(entry.in_eden_pool);
+        assert_eq!(span.metadata.space(), SpanSpace::Eden);
+        assert_eq!(span.metadata.allocated_slots(), 0);
+        entry.in_eden_pool = false;
+        self.link_young_span(span_id);
     }
 
     /// Returns dirty-card count only for an Old small span.
@@ -1164,6 +1219,7 @@ impl SpanTable {
             in_remembered_set: false,
             young_next: None,
             in_young_set: false,
+            in_eden_pool: false,
         });
         self.live_spans += 1;
         Ok(SpanId::new(index))
@@ -1174,6 +1230,7 @@ impl SpanTable {
         debug_assert!(entry.kind.is_none());
         span.metadata.set_reuse_generation(entry.generation);
         entry.kind = Some(SpanKind::Small(span));
+        entry.in_eden_pool = false;
         self.live_spans += 1;
     }
 
@@ -1248,6 +1305,7 @@ impl SpanTable {
                     in_remembered_set: false,
                     young_next: None,
                     in_young_set: false,
+                    in_eden_pool: false,
                 });
                 for ordinal in 1..span_count {
                     self.entries.push(SpanEntry {
@@ -1260,6 +1318,7 @@ impl SpanTable {
                         in_remembered_set: false,
                         young_next: None,
                         in_young_set: false,
+                        in_eden_pool: false,
                     });
                 }
             }

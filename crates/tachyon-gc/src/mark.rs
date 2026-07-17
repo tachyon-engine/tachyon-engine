@@ -50,6 +50,7 @@ pub struct YoungMarkStats {
     pub old_objects_scanned: usize,
     pub remembered_large_owners_scanned: usize,
     pub promotion_objects_scanned: usize,
+    pub card_false_positive_cards: usize,
 }
 
 /// Reaches the strong fixed point without recursively tracing through the native stack.
@@ -772,6 +773,7 @@ impl YoungMarker<'_> {
     }
 
     fn rebuild_small_span(&mut self, span_id: SpanId, types: &TypeRegistry) {
+        let dirty_before = self.table.dirty_old_card_count(span_id);
         let mut rebuilt = CardBitmap::new();
         let mut start = 0;
         while let Some(reference) = self.table.next_dirty_old_reference(span_id, start) {
@@ -783,6 +785,8 @@ impl YoungMarker<'_> {
             };
             start = next;
         }
+        let dirty_after = rebuilt.dirty_count();
+        self.stats.card_false_positive_cards += dirty_before.saturating_sub(dirty_after);
         self.table.replace_old_cards(span_id, rebuilt);
     }
 

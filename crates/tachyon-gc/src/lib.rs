@@ -11,6 +11,7 @@
 
 mod barrier;
 mod descriptor;
+mod eden;
 mod epoch;
 mod finalization;
 mod gray;
@@ -33,6 +34,7 @@ mod weak;
 
 pub use barrier::{BarrierVerificationError, BarrierVerificationStats};
 pub use descriptor::{DropObjectFn, GcAllocationPolicy, GcType, TraceObjectFn, TypeDescriptor};
+pub use eden::EdenPoolStats;
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
 pub use finalization::{
     FinalizationQueueError, FinalizationQueueStats, FinalizationRegistration, PendingFinalization,

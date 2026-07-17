@@ -7,6 +7,7 @@ use crate::{
     MarkStats, MinorSweepStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError,
     SmallObjectLayout, SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats,
     SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
+    eden::EdenPool,
     finalization::PendingFinalizations,
     gray::GrayQueue,
     mark::{mark_strong_roots, mark_young_roots},
@@ -63,6 +64,7 @@ pub enum HeapAllocationError {
 /// A full-major collection fails before sweep or leaves any partial sweep exactly accounted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MajorCollectionError {
+    PoolTrim(SpanTableError),
     Mark(MarkError),
     Sweep(SweepError),
 }
@@ -114,6 +116,7 @@ pub struct Heap {
     weak_owners: WeakOwners,
     kept_objects: KeptObjects,
     pending_finalizations: PendingFinalizations,
+    eden_pool: EdenPool,
     trigger: GcTrigger,
 }
 
@@ -180,6 +183,7 @@ impl Heap {
             weak_owners: WeakOwners::new(max_reference_entries),
             kept_objects: KeptObjects::new(max_reference_entries),
             pending_finalizations: PendingFinalizations::new(max_reference_entries),
+            eden_pool: EdenPool::new(),
             trigger: GcTrigger::new(trigger_config),
         }
     }
@@ -281,6 +285,27 @@ impl Heap {
     #[must_use]
     pub const fn trigger_stats(&self) -> crate::GcTriggerStats {
         self.trigger.stats()
+    }
+
+    #[must_use]
+    pub const fn eden_pool_stats(&self) -> crate::EdenPoolStats {
+        self.eden_pool.stats()
+    }
+
+    /// Releases every retained empty Eden backing span, stopping at the first typed table error.
+    pub fn trim_eden_pool_storage(&mut self) -> Result<usize, SpanTableError> {
+        let mut released_bytes = 0_usize;
+        for class_index in 0..SMALL_SIZE_CLASSES.len() {
+            while let Some((pool_index, span_id)) = self.eden_pool.first_retained(class_index) {
+                self.table.prepare_release(span_id)?;
+                self.table.release(span_id)?;
+                self.eden_pool
+                    .record_trimmed(class_index, pool_index, span_id);
+                self.committed_span_storage_bytes -= SPAN_SIZE_BYTES;
+                released_bytes += SPAN_SIZE_BYTES;
+            }
+        }
+        Ok(released_bytes)
     }
 
     /// Returns the logical table for collection and exact verifier operations.
@@ -442,6 +467,9 @@ impl Heap {
         &mut self,
         roots: &mut dyn Trace,
     ) -> Result<MajorCollectionStats, MajorCollectionError> {
+        let pool_trimmed_bytes = self
+            .trim_eden_pool_storage()
+            .map_err(MajorCollectionError::PoolTrim)?;
         let mark = self
             .mark_strong(roots)
             .map_err(MajorCollectionError::Mark)?;
@@ -458,6 +486,9 @@ impl Heap {
             .checked_sub(sweep.released_storage_bytes)
             .expect("sweep cannot release more storage than the heap committed");
         sweep.external_bytes = self.external_bytes;
+        sweep.spans_released += pool_trimmed_bytes / SPAN_SIZE_BYTES;
+        sweep.released_storage_bytes += pool_trimmed_bytes;
+        self.populate_sweep_accounting(&mut sweep);
         self.clear_released_active_spans();
         result.map_err(MajorCollectionError::Sweep)?;
         self.trigger
@@ -481,6 +512,7 @@ impl Heap {
             &self.types,
             self.collection_epoch,
             &mut promoted_active_old,
+            &mut self.eden_pool,
             &mut sweep,
         );
         self.committed_span_storage_bytes = self
@@ -488,6 +520,7 @@ impl Heap {
             .checked_sub(sweep.sweep.released_storage_bytes)
             .expect("minor sweep cannot release more storage than the heap committed");
         sweep.sweep.external_bytes = self.external_bytes;
+        self.populate_sweep_accounting(&mut sweep.sweep);
         self.repair_active_spans_after_minor(promoted_active_old);
         result.map_err(MinorCollectionError::Sweep)?;
         self.trigger
@@ -665,6 +698,17 @@ impl Heap {
             .map_err(PersistentRootError::InvalidReference)
     }
 
+    /// Copies cumulative allocation and current live-span accounting into one collection result.
+    fn populate_sweep_accounting(&self, sweep: &mut SweepStats) {
+        let trigger = self.trigger.stats();
+        let (young_live_spans, old_live_spans) = self.table.live_object_span_counts();
+        sweep.allocated_young_bytes_total = trigger.young_allocated_bytes;
+        sweep.allocated_old_bytes_total = trigger.old_allocated_bytes;
+        sweep.young_live_spans = young_live_spans;
+        sweep.old_live_spans = old_live_spans;
+        sweep.eden_pool_retained_bytes = self.eden_pool.stats().retained_bytes;
+    }
+
     /// Computes effective generation, charged object bytes, and storage growth without mutation.
     fn allocation_plan<T: Trace + 'static>(
         &self,
@@ -688,12 +732,14 @@ impl Heap {
                 AllocationSpace::Young => self.active_eden[class_index],
                 AllocationSpace::Old => self.active_old[class_index],
             };
-            let required_storage_bytes =
-                if active.is_some_and(|span_id| self.table.can_allocate_in_span(span_id)) {
-                    0
-                } else {
-                    SPAN_SIZE_BYTES
-                };
+            let required_storage_bytes = if active
+                .is_some_and(|span_id| self.table.can_allocate_in_span(span_id))
+                || (space == AllocationSpace::Young && self.eden_pool.has_retained(class_index))
+            {
+                0
+            } else {
+                SPAN_SIZE_BYTES
+            };
             return Ok(AllocationPlan {
                 space,
                 class_index: Some(class_index),
@@ -803,6 +849,16 @@ impl Heap {
         value: T,
         space: AllocationSpace,
     ) -> Result<GcRef<T>, HeapAllocationError> {
+        if space == AllocationSpace::Young
+            && let Some(span_id) = self.eden_pool.take_for_reuse(class_index)
+        {
+            self.table.activate_pooled_eden(span_id);
+            self.active_eden[class_index] = Some(span_id);
+            return self
+                .table
+                .try_allocate_in_span(span_id, type_id, flags, aux, value)
+                .map_err(HeapAllocationError::SpanAllocation);
+        }
         let committed = self.committed_heap_bytes();
         let total = committed.saturating_add(SPAN_SIZE_BYTES);
         if total > self.limit.max_heap_bytes() {
@@ -1946,6 +2002,7 @@ mod tests {
         assert_eq!(retained.mark.marked_objects, 1);
         assert_eq!(retained.dirty_cards_scanned, 1);
         assert_eq!(retained.old_objects_scanned, 1);
+        assert_eq!(retained.card_false_positive_cards, 0);
 
         heap.with_running_scope(|scope| {
             let old = scope.root(old).unwrap();
@@ -1957,6 +2014,7 @@ mod tests {
         assert_eq!(cleared.dirty_cards_scanned, 1);
         assert_eq!(cleared.old_objects_scanned, 1);
         assert_eq!(cleared.mark.marked_objects, 0);
+        assert_eq!(cleared.card_false_positive_cards, 1);
         let skipped = heap.mark_young(&mut no_roots).unwrap();
         assert_eq!(skipped.dirty_cards_scanned, 0);
         assert_eq!(skipped.old_objects_scanned, 0);
@@ -2793,8 +2851,8 @@ mod tests {
     }
 
     #[test]
-    /// Releasing an empty Eden span repairs its active cache and permits stable logical ID reuse.
-    fn minor_collection_releases_empty_eden_and_repairs_active_cache() {
+    /// Pooling an empty Eden span repairs its active cache and reuses logical and native storage.
+    fn minor_collection_pools_empty_eden_and_repairs_active_cache() {
         let mut types = TypeRegistry::new();
         let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
         let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
@@ -2807,12 +2865,18 @@ mod tests {
                 AllocationSpace::Young,
             )
             .unwrap();
+        let base_address = heap
+            .span_table()
+            .base_address(dead.raw().span_id())
+            .unwrap();
         let mut no_roots = Vec::<Value>::new();
 
         let stats = heap.collect_minor(&mut no_roots).unwrap();
         assert_eq!(stats.sweep.sweep.reclaimed_objects, 1);
-        assert_eq!(stats.sweep.sweep.spans_released, 1);
-        assert_eq!(heap.committed_span_storage_bytes(), 0);
+        assert_eq!(stats.sweep.sweep.spans_released, 0);
+        assert_eq!(stats.sweep.eden_spans_pooled, 1);
+        assert_eq!(stats.sweep.eden_pool_retained_bytes, SPAN_SIZE_BYTES);
+        assert_eq!(heap.committed_span_storage_bytes(), SPAN_SIZE_BYTES);
         let reused = heap
             .try_allocate(
                 node_type,
@@ -2823,6 +2887,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reused.raw(), dead.raw());
+        assert_eq!(
+            heap.span_table().base_address(reused.raw().span_id()),
+            Some(base_address)
+        );
+        assert_eq!(heap.eden_pool_stats().spans_reused, 1);
+    }
+
+    #[test]
+    /// Only one empty span per class is retained; overflow releases and major trim remain exact.
+    fn eden_pool_bounds_each_size_class_and_major_trims_retained_storage() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let mut first = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.collect_minor(&mut first).unwrap();
+        heap.try_allocate(
+            node_type,
+            0,
+            0,
+            ChainNode { next: None },
+            AllocationSpace::Young,
+        )
+        .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let minor = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(minor.sweep.eden_spans_pooled, 1);
+        assert_eq!(minor.sweep.eden_pool_overflow_spans_released, 1);
+        assert_eq!(minor.sweep.sweep.spans_released, 1);
+        assert_eq!(minor.sweep.eden_pool_retained_bytes, SPAN_SIZE_BYTES);
+        assert_eq!(heap.eden_pool_stats().overflow_releases, 1);
+        assert_eq!(heap.committed_span_storage_bytes(), SPAN_SIZE_BYTES);
+
+        let major = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(major.sweep.spans_released, 1);
+        assert_eq!(major.sweep.released_storage_bytes, SPAN_SIZE_BYTES);
+        assert_eq!(major.sweep.eden_pool_retained_bytes, 0);
+        assert_eq!(heap.eden_pool_stats().spans_trimmed, 1);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+    }
+
+    #[test]
+    /// A retained class cannot hide storage from a one-span hard limit needed by another class.
+    fn hard_limit_major_trims_pool_before_allocating_a_different_size_class() {
+        let mut types = TypeRegistry::new();
+        let value_type = types.try_register::<Value>("Value").unwrap();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        heap.try_allocate(value_type, 0, 0, Value::from_i32(1), AllocationSpace::Young)
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+        heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(heap.eden_pool_stats().retained_bytes, SPAN_SIZE_BYTES);
+
+        let fanout = heap
+            .try_allocate_with_gc(
+                fanout_type,
+                0,
+                0,
+                Fanout { edges: [None; 300] },
+                AllocationSpace::Young,
+                &mut no_roots,
+            )
+            .unwrap();
+
+        assert!(heap.verify_reference(fanout.raw(), None).is_ok());
+        assert_eq!(heap.trigger_stats().heap_limit_attempts, 1);
+        assert_eq!(heap.eden_pool_stats().spans_trimmed, 1);
+        assert_eq!(heap.eden_pool_stats().retained_spans, 0);
+        assert_eq!(heap.committed_span_storage_bytes(), SPAN_SIZE_BYTES);
     }
 
     #[test]
@@ -2921,8 +3063,23 @@ mod tests {
         assert_eq!(minor.sweep.sweep.scanned_objects, 1);
         assert_eq!(minor.sweep.sweep.reclaimed_objects, 1);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+        let allocation = heap.trigger_stats();
+        assert_eq!(
+            minor.sweep.sweep.allocated_young_bytes_total,
+            allocation.young_allocated_bytes
+        );
+        assert_eq!(
+            minor.sweep.sweep.allocated_old_bytes_total,
+            allocation.old_allocated_bytes
+        );
+        assert_eq!(minor.sweep.sweep.young_live_spans, 0);
+        assert_eq!(minor.sweep.sweep.old_live_spans, 1);
+        assert_eq!(minor.sweep.sweep.eden_pool_retained_bytes, SPAN_SIZE_BYTES);
         assert!(heap.verify_reference(old.raw(), None).is_ok());
-        heap.collect_major(&mut no_roots).unwrap();
+        let major = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(major.sweep.young_live_spans, 0);
+        assert_eq!(major.sweep.old_live_spans, 0);
+        assert_eq!(major.sweep.eden_pool_retained_bytes, 0);
         assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
@@ -2948,10 +3105,16 @@ mod tests {
             assert_eq!(reference.raw(), expected);
             let stats = heap.collect_minor(&mut no_roots).unwrap();
             assert_eq!(stats.sweep.sweep.spans_processed, 1);
-            assert_eq!(stats.sweep.sweep.spans_released, 1);
+            assert_eq!(stats.sweep.sweep.spans_released, 0);
+            assert_eq!(stats.sweep.eden_spans_pooled, 1);
+            assert_eq!(stats.sweep.eden_pool_retained_bytes, SPAN_SIZE_BYTES);
         }
         assert_eq!(heap.span_table().historical_span_count(), 1);
+        assert_eq!(heap.span_table().live_spans(), 1);
+        assert_eq!(heap.eden_pool_stats().retained_spans, 1);
+        assert_eq!(heap.trim_eden_pool_storage().unwrap(), SPAN_SIZE_BYTES);
         assert_eq!(heap.span_table().live_spans(), 0);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
     }
 
     #[test]

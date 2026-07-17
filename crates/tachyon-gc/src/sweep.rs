@@ -3,6 +3,7 @@
 use crate::{
     CollectionEpoch, HeapReferenceError, MINIMUM_SLOT_SIZE_BYTES, RawHeapRef, SPAN_SIZE_BYTES,
     SpanId, SpanSpace, SpanTable, SpanTableError, TypeRegistry,
+    eden::EdenPool,
     table::{SmallSweepSnapshot, SweepTarget, YoungSpanTransition},
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_SWEEP_WORKLIST_CAPACITY,
@@ -53,6 +54,11 @@ pub struct SweepStats {
     pub retained_fragmentation_bytes: usize,
     pub reusable_old_free_bytes: usize,
     pub retained_tail_slack_bytes: usize,
+    pub allocated_young_bytes_total: usize,
+    pub allocated_old_bytes_total: usize,
+    pub young_live_spans: usize,
+    pub old_live_spans: usize,
+    pub eden_pool_retained_bytes: usize,
 }
 
 /// Young-only sweep and cohort-transition counters for one minor collection.
@@ -64,6 +70,9 @@ pub struct MinorSweepStats {
     pub eden_to_survivor: usize,
     pub survivor_spans_aged: usize,
     pub whole_span_promotions: usize,
+    pub eden_spans_pooled: usize,
+    pub eden_pool_overflow_spans_released: usize,
+    pub eden_pool_retained_bytes: usize,
 }
 
 /// LIFO owner IDs keep collection memory proportional to spans rather than objects.
@@ -172,6 +181,7 @@ pub(crate) fn sweep_young(
     types: &TypeRegistry,
     epoch: CollectionEpoch,
     promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    eden_pool: &mut EdenPool,
     stats: &mut MinorSweepStats,
 ) -> Result<(), SweepError> {
     let mut current = table.young_head();
@@ -184,11 +194,20 @@ pub(crate) fn sweep_young(
                 SpanSpace::Survivor { .. } => stats.survivor_spans_processed += 1,
                 SpanSpace::Old => unreachable!("young_space excludes Old"),
             }
-            sweep_young_span(table, types, span_id, epoch, promoted_active_old, stats)?;
+            sweep_young_span(
+                table,
+                types,
+                span_id,
+                epoch,
+                promoted_active_old,
+                eden_pool,
+                stats,
+            )?;
         }
         current = next;
     }
     table.compact_young_spans();
+    stats.eden_pool_retained_bytes = eden_pool.stats().retained_bytes;
     Ok(())
 }
 
@@ -199,6 +218,7 @@ fn sweep_young_span(
     span_id: SpanId,
     epoch: CollectionEpoch,
     promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    eden_pool: &mut EdenPool,
     stats: &mut MinorSweepStats,
 ) -> Result<(), SweepError> {
     let before = table
@@ -215,16 +235,26 @@ fn sweep_young_span(
             live_slots += 1;
         }
     }
-    if live_slots == 0 {
+    let class_index = SMALL_SIZE_CLASSES
+        .iter()
+        .position(|&size| size == before.size_class.slot_size())
+        .expect("every allocated small span uses a tuning size class");
+    if live_slots == 0 && !eden_pool.has_capacity(class_index) {
         table
             .prepare_release(span_id)
             .map_err(SweepError::SpanTable)?;
     }
     sweep_young_objects(table, types, span_id, epoch, before, stats)?;
     if live_slots == 0 {
+        if eden_pool.retain(class_index, span_id) {
+            table.pool_empty_young(span_id);
+            stats.eden_spans_pooled += 1;
+            return Ok(());
+        }
         table.release(span_id).map_err(SweepError::SpanTable)?;
         stats.sweep.spans_released += 1;
         stats.sweep.released_storage_bytes += SPAN_SIZE_BYTES;
+        stats.eden_pool_overflow_spans_released += 1;
         return Ok(());
     }
     let transition = table.advance_young_cohort(span_id, crate::tuning::YOUNG_PROMOTION_AGE);
@@ -234,10 +264,6 @@ fn sweep_young_span(
         YoungSpanTransition::Promoted => {
             stats.whole_span_promotions += 1;
             table.rebuild_old_free_list(span_id);
-            let class_index = SMALL_SIZE_CLASSES
-                .iter()
-                .position(|&size| size == before.size_class.slot_size())
-                .expect("every allocated small span uses a tuning size class");
             if table.can_allocate_in_span(span_id) {
                 promoted_active_old[class_index] = Some(span_id);
             }

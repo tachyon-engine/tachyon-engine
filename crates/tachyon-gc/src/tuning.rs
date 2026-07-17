@@ -32,6 +32,8 @@ pub(crate) const DEFAULT_YOUNG_ALLOCATION_DEBT_BYTES: usize = 1024 * 1024;
 pub(crate) const DEFAULT_MAJOR_ALLOCATION_DEBT_BYTES: usize = 8 * 1024 * 1024;
 /// Committed-storage percentage at which growth first requests a full major collection.
 pub(crate) const DEFAULT_HEAP_PRESSURE_PERCENT: u8 = 90;
+/// Empty Eden backing spans retained per size class; fixed storage avoids pool growth paths.
+pub(crate) const EDEN_POOL_SPANS_PER_SIZE_CLASS: usize = 1;
 
 /// Initial 1.0 size classes; benchmark evidence may refine spacing without changing `GcRef`.
 pub(crate) const SMALL_SIZE_CLASSES: [u16; 28] = [

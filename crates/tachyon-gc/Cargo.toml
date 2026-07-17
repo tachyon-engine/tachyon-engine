@@ -13,5 +13,9 @@ path = "src/lib.rs"
 [features]
 barrier-verifier = []
 
+[[bench]]
+name = "eden_pool"
+harness = false
+
 [dependencies]
 tachyon-value = { path = "../tachyon-value" }
