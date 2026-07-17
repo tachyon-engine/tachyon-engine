@@ -11,4 +11,8 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+oxc = { version = "=0.140.0", features = ["semantic"] }
 tachyon-bytecode = { path = "../tachyon-bytecode" }
+
+[dev-dependencies]
+proptest = "1.6"
