@@ -12,9 +12,10 @@
 use core::cell::Cell;
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, FunctionId, Opcode, RegisterId, WordOffset,
+    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, Opcode, RegisterId, WordOffset,
     decode_instruction,
 };
+use tachyon_gc::{GcRef, Trace, Tracer};
 use tachyon_value::{Immediate, Value};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
@@ -31,6 +32,7 @@ pub struct ExecutionBudget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunOutcome {
     Completed(Value),
+    Thrown(Value),
     BudgetExhausted,
 }
 
@@ -38,24 +40,97 @@ pub enum RunOutcome {
 pub enum ExecutionError {
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
+    HandlerStackTooLarge(u32),
+    CompletionStackTooLarge(u32),
+    FrameAllocationFailed,
     RegisterAllocationFailed,
+    HandlerAllocationFailed,
+    CompletionAllocationFailed,
     DecodeInvariant(WordOffset),
     UnsupportedOpcode(Opcode),
     UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
 }
 
+/// A future GC-managed lexical environment. Its concrete payload arrives with M5.
+#[derive(Debug)]
+struct Environment;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Strictness {
+    Sloppy,
+    Strict,
+}
+
+/// One explicit JavaScript activation. Rust stack frames never represent JavaScript calls.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
     function: FunctionId,
     pc: WordOffset,
     base: u32,
+    environment: Option<GcRef<Environment>>,
+    return_register: Option<RegisterId>,
+    this_value: Value,
+    new_target: Value,
+    strictness: Strictness,
+}
+
+/// The dynamic handler state selected from immutable bytecode handler metadata.
+#[derive(Clone, Copy, Debug)]
+struct ActiveHandler {
+    handler_index: u32,
+    frame_depth: u32,
+    environment_depth: u32,
+}
+
+/// Abrupt completions are data, so throw/finally never need Rust stack unwinding.
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Populated by Throw/finally lowering after handler dispatch is implemented.
+enum Completion {
+    Return(Value),
+    Throw(Value),
 }
 
 #[derive(Debug, Default)]
 struct Fiber {
     frames: Vec<Frame>,
     registers: Vec<Value>,
+    handlers: Vec<ActiveHandler>,
+    completions: Vec<Completion>,
+}
+
+impl Fiber {
+    /// Traces every mutable reference reachable from an active, yielded, or suspended fiber.
+    ///
+    /// Frame control indices are validated when handlers are installed. They do not themselves
+    /// own heap references, while registers, frame context, and abrupt completion payloads do.
+    fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
+        self.registers.trace(tracer);
+        for frame in &mut self.frames {
+            frame.environment.trace(tracer);
+            frame.this_value.trace(tracer);
+            frame.new_target.trace(tracer);
+            if let Some(return_register) = frame.return_register {
+                debug_assert!((return_register.index() as usize) < self.registers.len());
+            }
+            let _is_strict = matches!(frame.strictness, Strictness::Strict);
+        }
+        for handler in &self.handlers {
+            debug_assert!(
+                usize::try_from(handler.frame_depth).is_ok_and(|depth| depth <= self.frames.len())
+            );
+            debug_assert!(
+                usize::try_from(handler.environment_depth)
+                    .is_ok_and(|depth| depth <= self.frames.len())
+            );
+            let _ = handler.handler_index;
+        }
+        for completion in &mut self.completions {
+            match completion {
+                Completion::Return(value) | Completion::Throw(value) => value.trace(tracer),
+            }
+        }
+    }
 }
 
 /// A single-thread-owned ECMAScript execution state; `Cell` intentionally makes it `!Sync`.
@@ -75,6 +150,14 @@ impl Default for Isolate {
 }
 
 impl Isolate {
+    /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
+    ///
+    /// The collector supplies a rewrite-capable tracer. This API does not resolve cage offsets or
+    /// borrow heap objects, so it remains valid for both the phase-1 mark-sweep heap and moving GC.
+    pub fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
+        self.fiber.trace_roots(tracer);
+    }
+
     /// Starts the module entry function with one checked register reservation before opcode dispatch.
     pub fn execute(
         &mut self,
@@ -231,14 +314,9 @@ impl Isolate {
         })?;
         self.fiber.frames.clear();
         self.fiber.registers.clear();
-        self.fiber
-            .frames
-            .try_reserve_exact(1)
-            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
-        self.fiber
-            .registers
-            .try_reserve_exact(register_count)
-            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        self.fiber.handlers.clear();
+        self.fiber.completions.clear();
+        self.reserve_entry_state(function.layout(), register_count)?;
         self.fiber
             .registers
             .resize(register_count, Value::from_immediate(Immediate::Undefined));
@@ -246,7 +324,45 @@ impl Isolate {
             function: function_id,
             pc: WordOffset::new(0),
             base: 0,
+            environment: None,
+            return_register: None,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: Value::from_immediate(Immediate::Undefined),
+            strictness: strictness_for(function.kind()),
         });
+        Ok(())
+    }
+
+    /// Reserves the exact entry-function execution windows before any opcode can push into them.
+    ///
+    /// Calls will extend these windows from the callee's verified metadata in a later VM package.
+    /// Until then, reserving the handler and completion depths here proves the no-reallocation
+    /// contract without conflating bytecode decoding with collection growth policy.
+    fn reserve_entry_state(
+        &mut self,
+        layout: tachyon_bytecode::FunctionLayout,
+        register_count: usize,
+    ) -> Result<(), ExecutionError> {
+        let handler_depth = usize::try_from(layout.max_handler_depth)
+            .map_err(|_| ExecutionError::HandlerStackTooLarge(layout.max_handler_depth))?;
+        let completion_depth = usize::try_from(layout.max_completion_depth)
+            .map_err(|_| ExecutionError::CompletionStackTooLarge(layout.max_completion_depth))?;
+        self.fiber
+            .frames
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        self.fiber
+            .registers
+            .try_reserve_exact(register_count)
+            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        self.fiber
+            .handlers
+            .try_reserve_exact(handler_depth)
+            .map_err(|_| ExecutionError::HandlerAllocationFailed)?;
+        self.fiber
+            .completions
+            .try_reserve_exact(completion_depth)
+            .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
         Ok(())
     }
 
@@ -277,6 +393,16 @@ impl Isolate {
             .last_mut()
             .expect("frame remains active while jumping")
             .pc = pc;
+    }
+}
+
+/// Modules are intrinsically strict; other function kinds await lowering-provided strict metadata.
+#[inline]
+fn strictness_for(kind: FunctionKind) -> Strictness {
+    if matches!(kind, FunctionKind::Module) {
+        Strictness::Strict
+    } else {
+        Strictness::Sloppy
     }
 }
 
@@ -344,6 +470,8 @@ mod tests {
         Bytecode, BytecodeBuilder, CompiledFunctionTemplate, CompiledModule, FunctionId,
         FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
     };
+    use tachyon_gc::{GcRef, Tracer};
+    use tachyon_value::RawHeapRef;
 
     use super::*;
 
@@ -397,6 +525,100 @@ mod tests {
         assert_conditional_batch::<4>();
         assert_conditional_batch::<8>();
         assert_conditional_batch::<16>();
+    }
+
+    #[test]
+    /// Confirms verifier-produced stack depths become allocation reservations before dispatch.
+    fn entry_reserves_verified_execution_windows() {
+        let layout = FunctionLayout {
+            register_count: 2,
+            max_handler_depth: 3,
+            max_completion_depth: 4,
+            ..FunctionLayout::default()
+        };
+        let mut isolate = Isolate::default();
+        isolate
+            .enter(
+                &state_module(FunctionKind::Module, layout),
+                FunctionId::new(0),
+            )
+            .unwrap();
+
+        assert!(isolate.fiber.frames.capacity() >= 1);
+        assert!(isolate.fiber.registers.capacity() >= 2);
+        assert!(isolate.fiber.handlers.capacity() >= 3);
+        assert!(isolate.fiber.completions.capacity() >= 4);
+        assert_eq!(isolate.fiber.frames[0].strictness, Strictness::Strict);
+    }
+
+    #[test]
+    /// Exercises every fiber-owned GC edge with a tracer that simulates object relocation.
+    fn fiber_trace_roots_visits_execution_state_without_native_stack_scanning() {
+        let layout = FunctionLayout {
+            register_count: 1,
+            max_handler_depth: 1,
+            max_completion_depth: 2,
+            ..FunctionLayout::default()
+        };
+        let mut isolate = Isolate::default();
+        isolate
+            .enter(
+                &state_module(FunctionKind::Script, layout),
+                FunctionId::new(0),
+            )
+            .unwrap();
+        let raw = RawHeapRef::new(16).expect("non-zero cage offset");
+        isolate.fiber.registers[0] = Value::from_heap_ref(raw);
+        let frame = isolate.fiber.frames.last_mut().expect("entry frame exists");
+        frame.environment = Some(GcRef::from_raw(raw));
+        frame.return_register = Some(RegisterId::new(0));
+        frame.this_value = Value::from_heap_ref(raw);
+        frame.new_target = Value::from_heap_ref(raw);
+        isolate.fiber.handlers.push(ActiveHandler {
+            handler_index: 0,
+            frame_depth: 1,
+            environment_depth: 1,
+        });
+        isolate.fiber.completions.extend([
+            Completion::Return(Value::from_heap_ref(raw)),
+            Completion::Throw(Value::from_heap_ref(raw)),
+        ]);
+        let mut tracer = RewritingTracer;
+
+        isolate.trace_roots(&mut tracer);
+
+        let rewritten = RawHeapRef::new(32).expect("non-zero cage offset");
+        assert_eq!(isolate.fiber.registers[0].as_heap_ref(), Some(rewritten));
+        let frame = isolate.fiber.frames.last().expect("entry frame exists");
+        assert_eq!(frame.environment.map(GcRef::raw), Some(rewritten));
+        assert_eq!(frame.this_value.as_heap_ref(), Some(rewritten));
+        assert_eq!(frame.new_target.as_heap_ref(), Some(rewritten));
+        assert!(matches!(
+            isolate.fiber.completions[0],
+            Completion::Return(value) if value.as_heap_ref() == Some(rewritten)
+        ));
+        assert!(matches!(
+            isolate.fiber.completions[1],
+            Completion::Throw(value) if value.as_heap_ref() == Some(rewritten)
+        ));
+    }
+
+    struct RewritingTracer;
+
+    impl Tracer for RewritingTracer {
+        fn trace_value(&mut self, value: &mut Value) {
+            if let Some(reference) = value.as_heap_ref() {
+                *value = Value::from_heap_ref(rewrite(reference));
+            }
+        }
+
+        fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
+            *reference = rewrite(*reference);
+        }
+    }
+
+    fn rewrite(reference: RawHeapRef) -> RawHeapRef {
+        RawHeapRef::new(reference.offset() + 16).expect("test offset stays non-zero")
     }
 
     fn assert_batch_result<const N: usize>() {
@@ -474,6 +696,23 @@ mod tests {
                 FunctionId::new(0),
                 bytecode,
                 metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds the smallest executable module carrying a chosen entry-state layout contract.
+    fn state_module(kind: FunctionKind, layout: FunctionLayout) -> CompiledModule {
+        let mut words = encode_instruction(Opcode::LoadUndefined, &[0]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        CompiledModule::new(
+            Arc::from("state"),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                FunctionMetadata::new(kind, layout),
             )],
             FunctionId::new(0),
         )
