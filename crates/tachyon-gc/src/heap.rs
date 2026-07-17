@@ -1,12 +1,12 @@
 //! Small-object allocation policy over fixed logical spans.
 
 use crate::{
-    CollectionEpoch, FinalizationQueueStats, GcAllocationPolicy, GcHeader, GcRef, GcType, GcTypeId,
-    GrayQueueStats, HeapReferenceError, KeptObjectStats, LargeAllocationError, LargeReclaim,
-    MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError, MarkStats, MinorSweepStats,
-    ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId,
-    SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats,
-    TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
+    BarrierVerificationError, CollectionEpoch, FinalizationQueueStats, GcAllocationPolicy,
+    GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError, KeptObjectStats,
+    LargeAllocationError, LargeReclaim, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError,
+    MarkStats, MinorSweepStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError,
+    SmallObjectLayout, SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats,
+    SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
     finalization::PendingFinalizations,
     gray::GrayQueue,
     mark::{mark_strong_roots, mark_young_roots},
@@ -70,6 +70,7 @@ pub enum MajorCollectionError {
 /// A minor collection fails during young marking or a partially accounted young sweep.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MinorCollectionError {
+    Barrier(BarrierVerificationError),
     Mark(MarkError),
     Sweep(SweepError),
 }
@@ -469,6 +470,9 @@ impl Heap {
         &mut self,
         roots: &mut dyn Trace,
     ) -> Result<MinorCollectionStats, MinorCollectionError> {
+        #[cfg(any(test, feature = "barrier-verifier"))]
+        self.verify_generational_barriers()
+            .map_err(MinorCollectionError::Barrier)?;
         let mark = self.mark_young(roots).map_err(MinorCollectionError::Mark)?;
         let mut sweep = MinorSweepStats::default();
         let mut promoted_active_old = [None; SMALL_SIZE_CLASSES.len()];
@@ -489,6 +493,13 @@ impl Heap {
         self.trigger
             .record_collection_success(CollectionAction::Minor);
         Ok(MinorCollectionStats { mark, sweep })
+    }
+
+    /// Performs a diagnostic full-Old-heap scan without changing GC liveness or weak state.
+    pub fn verify_generational_barriers(
+        &mut self,
+    ) -> Result<crate::BarrierVerificationStats, crate::BarrierVerificationError> {
+        crate::barrier::verify_generational_barriers(&mut self.table, &self.types)
     }
 
     /// Returns retained span-worklist high water after successful or failed collection attempts.
@@ -885,8 +896,9 @@ mod tests {
 
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
     use crate::{
-        Ephemeron, FinalizationRegistration, ForcedCollectionMode, GcRef, GcTriggerConfig,
-        HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer,
+        BarrierVerificationError, CardBitmap, Ephemeron, FinalizationRegistration,
+        ForcedCollectionMode, GcRef, GcTriggerConfig, HeapReferenceError, ManagedAllocationError,
+        MinorCollectionError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer,
         TypeRegistrationError, TypeRegistry, WeakGcRef,
     };
     use tachyon_value::Value;
@@ -944,6 +956,39 @@ mod tests {
     struct LargePanicOnDrop {
         _bytes: [u8; 70_000],
         drops: Arc<AtomicUsize>,
+    }
+
+    struct StressRoots {
+        stable: Vec<Value>,
+        nodes: Vec<GcRef<ChainNode>>,
+    }
+
+    impl StressRoots {
+        fn new() -> Self {
+            Self {
+                stable: Vec::with_capacity(8),
+                nodes: Vec::with_capacity(16),
+            }
+        }
+    }
+
+    impl Trace for StressRoots {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.stable.trace(tracer);
+            self.nodes.trace(tracer);
+        }
+    }
+
+    struct DeterministicRng(u64);
+
+    impl DeterministicRng {
+        #[inline]
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
     }
 
     impl Trace for OtherPayload {
@@ -1349,6 +1394,259 @@ mod tests {
     }
 
     #[test]
+    /// Fixed-seed graph churn crosses every Phase 1B collection and lifetime boundary repeatedly.
+    fn randomized_forced_collection_stress_preserves_exact_graph_contracts() {
+        const STRESS_STEPS: usize = 96;
+        const STRESS_SEED: u64 = 0x6a09_e667_f3bc_c909;
+
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let weak_type = types.try_register::<WeakHolder>("WeakHolder").unwrap();
+        let ephemeron_type = types
+            .try_register::<EphemeronHolder>("EphemeronHolder")
+            .unwrap();
+        let finalization_type = types
+            .try_register::<FinalizationHolder>("FinalizationHolder")
+            .unwrap();
+        let fanout_type = types.try_register::<Fanout>("Fanout").unwrap();
+        let config = GcTriggerConfig::new(usize::MAX, usize::MAX, 100).unwrap();
+        let mut heap =
+            Heap::with_trigger_config(HeapLimit::new(128 * SPAN_SIZE_BYTES), types, config);
+        let mut roots = StressRoots::new();
+
+        let key = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let ephemeron_value = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let weak_target = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let finalization_target = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let held = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        roots
+            .nodes
+            .extend([key, ephemeron_value, weak_target, finalization_target, held]);
+        let weak_holder = heap
+            .try_allocate(
+                weak_type,
+                0,
+                0,
+                WeakHolder {
+                    target: WeakGcRef::new(weak_target),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let ephemeron_holder = heap
+            .try_allocate(
+                ephemeron_type,
+                0,
+                0,
+                EphemeronHolder {
+                    entry: Ephemeron::new(key, Value::from_heap_ref(ephemeron_value.raw())),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let finalization_holder = heap
+            .try_allocate(
+                finalization_type,
+                0,
+                0,
+                FinalizationHolder {
+                    registration: FinalizationRegistration::new(
+                        finalization_target,
+                        Value::from_heap_ref(held.raw()),
+                    ),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        roots.stable.extend([
+            Value::from_heap_ref(key.raw()),
+            Value::from_heap_ref(weak_holder.raw()),
+            Value::from_heap_ref(ephemeron_holder.raw()),
+            Value::from_heap_ref(finalization_holder.raw()),
+        ]);
+        roots.nodes.clear();
+
+        heap.set_forced_collection_mode(ForcedCollectionMode::Major);
+        let first_cycle_node = heap
+            .try_allocate_with_gc(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .unwrap();
+        roots.nodes.push(first_cycle_node);
+        assert_eq!(heap.finalization_queue_stats().pending, 1);
+
+        let weak_was_cleared = heap.with_running_scope(|scope| {
+            let holder = scope.root(weak_holder).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(holder, weak_type)
+                    .unwrap()
+                    .target
+                    .get()
+                    .is_none()
+            })
+        });
+        assert!(weak_was_cleared);
+        assert!(heap.verify_reference(ephemeron_value.raw(), None).is_ok());
+        assert!(heap.verify_reference(held.raw(), None).is_ok());
+
+        let mut rng = DeterministicRng(STRESS_SEED);
+        let attempts_before = heap.trigger_stats();
+        for _ in 0..STRESS_STEPS {
+            let mode = if rng.next().is_multiple_of(3) {
+                ForcedCollectionMode::Major
+            } else {
+                ForcedCollectionMode::Minor
+            };
+            heap.set_forced_collection_mode(mode);
+            let source = roots.nodes[(rng.next() as usize) % roots.nodes.len()];
+            let allocated = heap
+                .try_allocate_with_gc(
+                    node_type,
+                    0,
+                    0,
+                    ChainNode { next: Some(source) },
+                    AllocationSpace::Young,
+                    &mut roots,
+                )
+                .unwrap();
+            heap.with_running_scope(|scope| {
+                let source = scope.root(source).unwrap();
+                let allocated_local = scope.root(allocated).unwrap();
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc.borrow_mut(source, node_type).unwrap().next = Some(allocated);
+                });
+                scope.write_barrier(source, allocated_local).unwrap();
+            });
+            if roots.nodes.len() == roots.nodes.capacity() {
+                let remove = (rng.next() as usize) % roots.nodes.len();
+                roots.nodes.swap_remove(remove);
+            }
+            roots.nodes.push(allocated);
+            for root in &roots.nodes {
+                assert!(heap.verify_reference(root.raw(), None).is_ok());
+            }
+            heap.verify_generational_barriers().unwrap();
+        }
+        let attempts_after = heap.trigger_stats();
+        assert!(attempts_after.minor_attempts > attempts_before.minor_attempts);
+        assert!(attempts_after.major_attempts > attempts_before.major_attempts);
+
+        let anchor = roots.nodes[0];
+        heap.set_forced_collection_mode(ForcedCollectionMode::Minor);
+        for _ in 0..2 {
+            heap.try_allocate_with_gc(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            heap.span_table().reference_space(anchor.raw()).unwrap(),
+            crate::table::ReferenceSpace::OldSmall
+        );
+
+        heap.set_forced_collection_mode(ForcedCollectionMode::Major);
+        let released_span = heap
+            .try_allocate_with_gc(
+                fanout_type,
+                0,
+                0,
+                Fanout { edges: [None; 300] },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .unwrap()
+            .raw()
+            .span_id();
+        let reused_span = heap
+            .try_allocate_with_gc(
+                fanout_type,
+                0,
+                0,
+                Fanout { edges: [None; 300] },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .unwrap()
+            .raw()
+            .span_id();
+        assert_eq!(reused_span, released_span);
+
+        let mut low_types = TypeRegistry::new();
+        let large_type = low_types
+            .try_register::<LargePayload>("LargePayload")
+            .unwrap();
+        let mut low_heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), low_types);
+        let mut no_roots = Vec::<Value>::new();
+        assert!(matches!(
+            low_heap.try_allocate_with_gc(
+                large_type,
+                0,
+                0,
+                LargePayload {
+                    _bytes: [0; 70_000]
+                },
+                AllocationSpace::Old,
+                &mut no_roots,
+            ),
+            Err(ManagedAllocationError::Allocation(
+                HeapAllocationError::HeapLimitExceeded { .. }
+            ))
+        ));
+        assert_eq!(low_heap.trigger_stats().heap_limit_attempts, 1);
+    }
+
+    #[test]
     /// Fills the 16-byte class exactly and proves the next slow path returns a typed limit error.
     fn full_active_span_obeys_the_configured_storage_limit() {
         let mut types = TypeRegistry::new();
@@ -1708,6 +2006,134 @@ mod tests {
         assert_eq!(stats.dirty_cards_scanned, 1);
         assert_eq!(stats.old_objects_scanned, 1);
         assert_eq!(stats.mark.marked_objects, 1);
+    }
+
+    #[test]
+    /// Fault injection distinguishes a missing card from a dirty owner absent from the chain.
+    fn barrier_verifier_rejects_small_card_and_intrusive_chain_omissions() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(3 * SPAN_SIZE_BYTES), types);
+        let old = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+        heap.mark_young(&mut no_roots).unwrap();
+        let young = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.with_running_scope(|scope| {
+            let old = scope.root(old).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc.borrow_mut(old, node_type).unwrap().next = Some(young);
+            });
+        });
+
+        let missing_card = BarrierVerificationError::MissingSmallCard {
+            source: old.raw(),
+            target: young.raw(),
+        };
+        assert_eq!(heap.verify_generational_barriers(), Err(missing_card));
+        assert_eq!(
+            heap.collect_minor(&mut no_roots),
+            Err(MinorCollectionError::Barrier(missing_card))
+        );
+        assert!(heap.write_barrier(old.raw(), young.raw()).unwrap());
+        assert_eq!(
+            heap.verify_generational_barriers()
+                .unwrap()
+                .small_card_edges,
+            1
+        );
+
+        heap.with_running_scope(|scope| {
+            let old = scope.root(old).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc.borrow_mut(old, node_type).unwrap().next = None;
+            });
+        });
+        heap.mark_young(&mut no_roots).unwrap();
+        heap.with_running_scope(|scope| {
+            let old = scope.root(old).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc.borrow_mut(old, node_type).unwrap().next = Some(young);
+            });
+        });
+        let mut cards = CardBitmap::new();
+        cards.mark(old.raw().span_offset());
+        heap.span_table_mut()
+            .replace_old_cards(old.raw().span_id(), cards);
+        assert_eq!(
+            heap.verify_generational_barriers(),
+            Err(BarrierVerificationError::MissingRememberedSource {
+                source: old.raw(),
+                target: young.raw(),
+            })
+        );
+    }
+
+    #[test]
+    /// Large owners require both their conservative owner bit and remembered-chain membership.
+    fn barrier_verifier_rejects_missing_large_owner_state() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let large_type = types
+            .try_register::<LargeEdgeNode>("LargeEdgeNode")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(5 * SPAN_SIZE_BYTES), types);
+        let old = heap
+            .try_allocate(
+                large_type,
+                0,
+                0,
+                LargeEdgeNode {
+                    _bytes: [0; 70_000],
+                    next: None,
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+        heap.mark_young(&mut no_roots).unwrap();
+        let young = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.with_running_scope(|scope| {
+            let old = scope.root(old).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc.borrow_mut(old, large_type).unwrap().next = Some(young);
+            });
+        });
+
+        assert_eq!(
+            heap.verify_generational_barriers(),
+            Err(BarrierVerificationError::MissingLargeRememberedBit {
+                source: old.raw(),
+                target: young.raw(),
+            })
+        );
+        assert!(heap.write_barrier(old.raw(), young.raw()).unwrap());
+        let stats = heap.verify_generational_barriers().unwrap();
+        assert_eq!(stats.large_owner_edges, 1);
+        assert_eq!(stats.old_to_young_edges, 1);
     }
 
     #[test]

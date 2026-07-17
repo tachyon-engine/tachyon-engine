@@ -9,6 +9,7 @@
 //!
 //! This crate intentionally has no host I/O surface.
 
+mod barrier;
 mod descriptor;
 mod epoch;
 mod finalization;
@@ -30,6 +31,7 @@ mod trigger;
 mod tuning;
 mod weak;
 
+pub use barrier::{BarrierVerificationError, BarrierVerificationStats};
 pub use descriptor::{DropObjectFn, GcAllocationPolicy, GcType, TraceObjectFn, TypeDescriptor};
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
 pub use finalization::{

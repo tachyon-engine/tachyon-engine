@@ -489,6 +489,14 @@ impl SpanTable {
             .and_then(|entry| entry.remembered_next)
     }
 
+    /// Reports intrusive-chain membership independently from card/large remembered bits.
+    #[must_use]
+    pub(crate) fn is_in_remembered_set(&self, span_id: SpanId) -> bool {
+        self.entries
+            .get(span_id.index() as usize)
+            .is_some_and(|entry| entry.in_remembered_set)
+    }
+
     /// Returns the first Eden/Survivor owner in the allocation-free young-span chain.
     #[must_use]
     pub(crate) const fn young_head(&self) -> Option<SpanId> {

@@ -10,5 +10,8 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+barrier-verifier = []
+
 [dependencies]
 tachyon-value = { path = "../tachyon-value" }
