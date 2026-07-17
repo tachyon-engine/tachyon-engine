@@ -218,6 +218,7 @@ mod tests {
     };
 
     use super::{FinalizationSafepointError, Isolate};
+    use crate::{AtomHashSeed, AtomTableConfig, IsolateConfig};
     use tachyon_gc::Heap;
     use tachyon_value::{RawHeapRef, Value};
 
@@ -260,6 +261,14 @@ mod tests {
         expected: Vec<(RawHeapRef, Value)>,
         leaf_type: GcType<Leaf>,
         registry_type: GcType<Registry>,
+    }
+
+    fn test_isolate() -> Isolate {
+        Isolate::new(IsolateConfig::new(AtomTableConfig::new(
+            64,
+            4 * SPAN_SIZE_BYTES,
+            AtomHashSeed::new(1, 2),
+        )))
     }
 
     /// Builds live registries with dead targets, then runs the selected collector to publish jobs.
@@ -324,7 +333,7 @@ mod tests {
         let PendingFixture {
             mut heap, expected, ..
         } = heap_with_pending_finalizations(3, AllocationSpace::Old, HeldValueKind::HeapReference);
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
         let mut observed = Vec::new();
 
         let stats = isolate
@@ -357,7 +366,7 @@ mod tests {
     fn minor_cleanup_throw_keeps_older_jobs_ahead_of_new_gc_records() {
         let PendingFixture { mut heap, .. } =
             heap_with_pending_finalizations(3, AllocationSpace::Young, HeldValueKind::Integer);
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
         let mut observed = Vec::new();
 
         let error = isolate
@@ -399,7 +408,7 @@ mod tests {
     fn recursive_cleanup_safepoint_is_rejected_without_disturbing_the_front_job() {
         let PendingFixture { mut heap, .. } =
             heap_with_pending_finalizations(1, AllocationSpace::Old, HeldValueKind::Integer);
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
 
         let stats = isolate
             .run_finalization_cleanup_safepoint(&mut heap, |isolate, heap, _| {
@@ -419,7 +428,7 @@ mod tests {
     fn callback_panic_restores_scheduler_state_without_replaying_the_started_job() {
         let PendingFixture { mut heap, .. } =
             heap_with_pending_finalizations(2, AllocationSpace::Old, HeldValueKind::Integer);
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
         let mut started = None;
         let panic = catch_unwind(AssertUnwindSafe(|| {
             let _ = isolate.run_finalization_cleanup_safepoint(
@@ -454,7 +463,7 @@ mod tests {
             registry_type,
             ..
         } = heap_with_pending_finalizations(1, AllocationSpace::Old, HeldValueKind::Integer);
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
 
         let first = isolate
             .run_finalization_cleanup_safepoint(&mut heap, |isolate, heap, job| {

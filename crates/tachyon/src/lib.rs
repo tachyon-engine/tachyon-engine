@@ -14,7 +14,17 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
-    use tachyon_vm::{ExecutionBudget, Isolate, RunOutcome};
+    use tachyon_vm::{
+        AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome,
+    };
+
+    fn test_isolate() -> Isolate {
+        Isolate::new(IsolateConfig::new(AtomTableConfig::new(
+            1_024,
+            1024 * 1024,
+            AtomHashSeed::new(1, 2),
+        )))
+    }
 
     #[test]
     fn source_to_verified_module_to_int32_result() {
@@ -25,7 +35,7 @@ mod tests {
             Arc::from("1 + 2;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -46,7 +56,7 @@ mod tests {
             Arc::from("1.5 + 2.5;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -67,7 +77,7 @@ mod tests {
             Arc::from("let x = 1; x + 2;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -88,7 +98,7 @@ mod tests {
             Arc::from("let x = 1;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -112,7 +122,7 @@ mod tests {
             Arc::from("const one = 1, two = one + 2; two * 3;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -133,7 +143,7 @@ mod tests {
             Arc::from("let x; x = 1; x = x + 2;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -154,7 +164,7 @@ mod tests {
             Arc::from("true === false;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -175,7 +185,7 @@ mod tests {
             Arc::from("null === null;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -199,7 +209,7 @@ mod tests {
             Arc::from("true ? 1 : 2;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -217,7 +227,7 @@ mod tests {
             Arc::from("0 ? 1 : 2;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -238,7 +248,7 @@ mod tests {
             Arc::from("!0;"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {

@@ -9,12 +9,18 @@
 //!
 //! This crate intentionally has no host I/O surface.
 
+mod atom;
 mod finalization;
+mod string;
+mod tuning;
+
+pub use atom::{AtomHashSeed, AtomId, AtomTable, AtomTableConfig, AtomTableError, AtomTableStats};
 
 pub use finalization::{
     FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
     FinalizationSafepointStats,
 };
+pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
 
 use core::cell::Cell;
 
@@ -28,6 +34,19 @@ use tachyon_value::{Immediate, Value};
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Engine;
+
+/// Mandatory isolate resource and entropy configuration; production has no fixed hash seed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IsolateConfig {
+    atom_table: AtomTableConfig,
+}
+
+impl IsolateConfig {
+    #[must_use]
+    pub const fn new(atom_table: AtomTableConfig) -> Self {
+        Self { atom_table }
+    }
+}
 
 /// A per-execution bound; fuel is a hard cap while quantum bounds one synchronous interpreter turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,20 +164,30 @@ impl Fiber {
 pub struct Isolate {
     fiber: Fiber,
     finalization_jobs: finalization::FinalizationJobs,
+    atoms: AtomTable,
     _not_sync: Cell<()>,
 }
 
-impl Default for Isolate {
-    fn default() -> Self {
+impl Isolate {
+    #[must_use]
+    pub fn new(config: IsolateConfig) -> Self {
         Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
+            atoms: AtomTable::new(config.atom_table),
             _not_sync: Cell::new(()),
         }
     }
-}
 
-impl Isolate {
+    #[must_use]
+    pub const fn atoms(&self) -> &AtomTable {
+        &self.atoms
+    }
+
+    pub const fn atoms_mut(&mut self) -> &mut AtomTable {
+        &mut self.atoms
+    }
+
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
     /// The collector supplies a rewrite-capable tracer. This API does not resolve logical addresses
@@ -493,6 +522,14 @@ mod tests {
 
     use super::*;
 
+    fn test_isolate() -> Isolate {
+        Isolate::new(IsolateConfig::new(AtomTableConfig::new(
+            1_024,
+            1024 * 1024,
+            AtomHashSeed::new(1, 2),
+        )))
+    }
+
     fn arithmetic_module() -> CompiledModule {
         let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap();
         words.extend(encode_instruction(Opcode::LoadImmediate, &[1, 2]).unwrap());
@@ -528,6 +565,19 @@ mod tests {
     }
 
     #[test]
+    fn isolate_owns_the_atom_table_created_from_mandatory_host_config() {
+        let mut isolate = test_isolate();
+        let atom = isolate
+            .atoms_mut()
+            .try_intern(JsString::try_from_str("property").unwrap())
+            .unwrap();
+
+        assert_eq!(atom.index(), 0);
+        assert_eq!(isolate.atoms().get(atom).unwrap().len(), 8);
+        assert_eq!(isolate.atoms().stats().entries, 1);
+    }
+
+    #[test]
     fn interpreter_stops_at_exact_budget_boundary() {
         assert_batch_budget::<1>();
         assert_batch_budget::<2>();
@@ -539,7 +589,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "interpreter batch size must be non-zero")]
     fn interpreter_rejects_zero_batch_before_entering_dispatch_loop() {
-        let _ = Isolate::default().execute_with_batch::<0>(
+        let _ = test_isolate().execute_with_batch::<0>(
             &arithmetic_module(),
             ExecutionBudget {
                 fuel: 1,
@@ -566,7 +616,7 @@ mod tests {
             max_completion_depth: 4,
             ..FunctionLayout::default()
         };
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
         isolate
             .enter(
                 &state_module(FunctionKind::Module, layout),
@@ -590,7 +640,7 @@ mod tests {
             max_completion_depth: 2,
             ..FunctionLayout::default()
         };
-        let mut isolate = Isolate::default();
+        let mut isolate = test_isolate();
         isolate
             .enter(
                 &state_module(FunctionKind::Script, layout),
@@ -668,7 +718,7 @@ mod tests {
     }
 
     fn assert_batch_result<const N: usize>() {
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute_with_batch::<N>(
                 &arithmetic_module(),
                 ExecutionBudget {
@@ -681,7 +731,7 @@ mod tests {
     }
 
     fn assert_batch_budget<const N: usize>() {
-        let outcome = Isolate::default()
+        let outcome = test_isolate()
             .execute_with_batch::<N>(
                 &arithmetic_module(),
                 ExecutionBudget {
@@ -695,7 +745,7 @@ mod tests {
 
     fn assert_conditional_batch<const N: usize>() {
         for (test, expected) in [(Opcode::LoadTrue, 1), (Opcode::LoadFalse, 2)] {
-            let outcome = Isolate::default()
+            let outcome = test_isolate()
                 .execute_with_batch::<N>(
                     &conditional_module(test),
                     ExecutionBudget {
