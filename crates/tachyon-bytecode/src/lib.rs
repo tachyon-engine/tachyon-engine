@@ -114,6 +114,8 @@ pub enum Opcode {
     CreateClosure = 14,
     LoadScope = 15,
     StoreScope = 16,
+    Await = 17,
+    Yield = 18,
 }
 
 impl Opcode {
@@ -125,11 +127,17 @@ impl Opcode {
             | Self::LoadConstant
             | Self::Move
             | Self::JumpIfFalse
-            | Self::Call
             | Self::CreateClosure
             | Self::LoadScope
             | Self::StoreScope => 2,
-            Self::Add | Self::Sub | Self::Mul | Self::Div | Self::StrictEqual => 3,
+            Self::Add
+            | Self::Sub
+            | Self::Mul
+            | Self::Div
+            | Self::StrictEqual
+            | Self::Call
+            | Self::Await
+            | Self::Yield => 3,
             Self::Jump | Self::Return | Self::Throw => 1,
         }
     }
@@ -158,6 +166,8 @@ impl Opcode {
             14 => Some(Self::CreateClosure),
             15 => Some(Self::LoadScope),
             16 => Some(Self::StoreScope),
+            17 => Some(Self::Await),
+            18 => Some(Self::Yield),
             _ => None,
         }
     }
@@ -382,6 +392,9 @@ pub struct VerifyContext {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VerifyError {
     Decode(DecodeError),
+    CodeTooLarge {
+        word_count: usize,
+    },
     RegisterOutOfRange {
         offset: WordOffset,
         register: u32,
@@ -447,6 +460,8 @@ pub enum BuilderError {
     InvalidLabel(Label),
     LabelAlreadyBound(Label),
     UnboundLabel(Label),
+    LabelCountOverflow,
+    CodeSizeOverflow,
     RegisterCountOverflow,
 }
 
@@ -478,21 +493,22 @@ impl BytecodeBuilder {
         }
     }
 
-    #[must_use]
-    pub fn new_label(&mut self) -> Label {
-        let label = Label(self.labels.len() as u32);
+    pub fn new_label(&mut self) -> Result<Label, BuilderError> {
+        let label =
+            Label(u32::try_from(self.labels.len()).map_err(|_| BuilderError::LabelCountOverflow)?);
         self.labels.push(None);
-        label
+        Ok(label)
     }
 
     pub fn bind_label(&mut self, label: Label) -> Result<(), BuilderError> {
+        let offset = self.next_word_offset()?;
         let Some(slot) = self.labels.get_mut(label.0 as usize) else {
             return Err(BuilderError::InvalidLabel(label));
         };
         if slot.is_some() {
             return Err(BuilderError::LabelAlreadyBound(label));
         }
-        *slot = Some(WordOffset::new(self.words.len() as u32));
+        *slot = Some(offset);
         Ok(())
     }
 
@@ -503,10 +519,11 @@ impl BytecodeBuilder {
         operands: &[u32],
         span: SourceSpan,
     ) -> Result<WordOffset, BuilderError> {
+        let words = encode_instruction(opcode, operands).map_err(BuilderError::Encode)?;
+        self.ensure_word_capacity(words.len())?;
         self.note_registers(opcode, operands)?;
-        let offset = WordOffset::new(self.words.len() as u32);
-        self.words
-            .extend(encode_instruction(opcode, operands).map_err(BuilderError::Encode)?);
+        let offset = self.next_word_offset()?;
+        self.words.extend(words);
         self.source_map.push(SourceMapEntry { offset, span });
         Ok(offset)
     }
@@ -518,7 +535,8 @@ impl BytecodeBuilder {
         span: SourceSpan,
     ) -> Result<WordOffset, BuilderError> {
         self.ensure_label(label)?;
-        let offset = WordOffset::new(self.words.len() as u32);
+        self.ensure_word_capacity(2)?;
+        let offset = self.next_word_offset()?;
         self.words
             .extend([((Opcode::Jump as u8) | WIDE_FORMAT) as u32, 0]);
         self.patches.push(JumpPatch {
@@ -538,7 +556,8 @@ impl BytecodeBuilder {
     ) -> Result<WordOffset, BuilderError> {
         self.ensure_label(label)?;
         self.note_register(condition.index())?;
-        let offset = WordOffset::new(self.words.len() as u32);
+        self.ensure_word_capacity(3)?;
+        let offset = self.next_word_offset()?;
         self.words.extend([
             ((Opcode::JumpIfFalse as u8) | WIDE_FORMAT) as u32,
             condition.index(),
@@ -577,6 +596,21 @@ impl BytecodeBuilder {
         }
     }
 
+    fn next_word_offset(&self) -> Result<WordOffset, BuilderError> {
+        u32::try_from(self.words.len())
+            .map(WordOffset::new)
+            .map_err(|_| BuilderError::CodeSizeOverflow)
+    }
+
+    fn ensure_word_capacity(&self, additional: usize) -> Result<(), BuilderError> {
+        self.words
+            .len()
+            .checked_add(additional)
+            .and_then(|length| u32::try_from(length).ok())
+            .ok_or(BuilderError::CodeSizeOverflow)?;
+        Ok(())
+    }
+
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
             Opcode::Nop | Opcode::Jump => &[],
@@ -595,6 +629,7 @@ impl BytecodeBuilder {
             | Opcode::Div
             | Opcode::StrictEqual
             | Opcode::Call => &[0, 1, 2],
+            Opcode::Await | Opcode::Yield => &[0, 1],
         };
         for &index in indexes {
             if let Some(&register) = operands.get(index) {
@@ -633,9 +668,567 @@ impl VerifiedBytecode {
     }
 }
 
+/// An immutable constant-pool entry that is independent from every isolate and runtime heap.
+///
+/// Strings use owned UTF-16 code units so literals containing lone surrogate code points retain
+/// their ECMAScript representation without requiring a runtime string allocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BytecodeConstant {
+    NumberBits(u64),
+    String(Arc<[u16]>),
+    BigInt(Arc<str>),
+    RegExp { pattern: Arc<[u16]>, flags: u8 },
+}
+
+impl BytecodeConstant {
+    #[must_use]
+    pub fn string_from_utf16(code_units: Vec<u16>) -> Self {
+        Self::String(code_units.into())
+    }
+
+    #[must_use]
+    pub fn regexp_from_utf16(pattern: Vec<u16>, flags: u8) -> Self {
+        Self::RegExp {
+            pattern: pattern.into(),
+            flags,
+        }
+    }
+}
+
+/// An exception handler range, expressed exclusively as word offsets in one function.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandlerEntry {
+    pub protected_start: WordOffset,
+    pub protected_end: WordOffset,
+    pub handler: WordOffset,
+    pub kind: HandlerKind,
+    pub environment_depth: u32,
+}
+
+/// The distinct unwind behavior required when an abrupt completion reaches a protected range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandlerKind {
+    Catch,
+    Finally,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FunctionKind {
+    Script,
+    Module,
+    Ordinary,
+    Generator,
+    Async,
+    AsyncGenerator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct SuspendPointId(u32);
+
+impl SuspendPointId {
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// The immutable compiler-side contract for resuming a suspended generator or async fiber.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SuspendPoint {
+    pub id: SuspendPointId,
+    pub instruction: WordOffset,
+    pub resume_offset: WordOffset,
+    pub destination: RegisterId,
+    pub completion_depth: u32,
+}
+
+/// Register and stack-reservation requirements known before a function begins execution.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FunctionLayout {
+    pub register_count: u32,
+    pub argument_count: u32,
+    pub temporary_register_count: u32,
+    pub feedback_slot_count: u32,
+    pub max_handler_depth: u32,
+    pub max_completion_depth: u32,
+}
+
+/// Per-function metadata which the compiler owns until `CompiledModule::new` verifies and freezes it.
+#[derive(Clone, Debug)]
+pub struct FunctionMetadata {
+    pub kind: FunctionKind,
+    pub layout: FunctionLayout,
+    pub source_map: Arc<[SourceMapEntry]>,
+    pub handlers: Arc<[HandlerEntry]>,
+    pub suspend_points: Arc<[SuspendPoint]>,
+}
+
+impl FunctionMetadata {
+    #[must_use]
+    pub fn new(kind: FunctionKind, layout: FunctionLayout) -> Self {
+        Self {
+            kind,
+            layout,
+            source_map: Arc::default(),
+            handlers: Arc::default(),
+            suspend_points: Arc::default(),
+        }
+    }
+}
+
+/// Mutable-at-construction data that the compiler submits for module verification and freezing.
+#[derive(Clone, Debug)]
+pub struct CompiledFunctionTemplate {
+    id: FunctionId,
+    bytecode: Bytecode,
+    metadata: FunctionMetadata,
+}
+
+impl CompiledFunctionTemplate {
+    /// Creates an unverified compiler output; `CompiledModule::new` owns all validation and freezing.
+    #[must_use]
+    pub fn new(id: FunctionId, bytecode: Bytecode, metadata: FunctionMetadata) -> Self {
+        Self {
+            id,
+            bytecode,
+            metadata,
+        }
+    }
+}
+
+/// A verified function whose code and metadata can be shared across isolates.
+#[derive(Clone, Debug)]
+pub struct CompiledFunction {
+    id: FunctionId,
+    bytecode: VerifiedBytecode,
+    metadata: FunctionMetadata,
+}
+
+impl CompiledFunction {
+    #[must_use]
+    pub const fn id(&self) -> FunctionId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn bytecode(&self) -> &VerifiedBytecode {
+        &self.bytecode
+    }
+
+    #[must_use]
+    pub const fn layout(&self) -> FunctionLayout {
+        self.metadata.layout
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> FunctionKind {
+        self.metadata.kind
+    }
+
+    #[must_use]
+    pub fn source_map(&self) -> &[SourceMapEntry] {
+        &self.metadata.source_map
+    }
+
+    #[must_use]
+    pub fn handlers(&self) -> &[HandlerEntry] {
+        &self.metadata.handlers
+    }
+
+    #[must_use]
+    pub fn suspend_points(&self) -> &[SuspendPoint] {
+        &self.metadata.suspend_points
+    }
+}
+
+/// A fully verified, immutable compilation result with no isolate-local or runtime-heap state.
+#[derive(Clone, Debug)]
+pub struct CompiledModule {
+    source: Arc<str>,
+    constants: Arc<[BytecodeConstant]>,
+    functions: Arc<[CompiledFunction]>,
+    entry_function: FunctionId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModuleBuildError {
+    SourceTooLarge {
+        byte_len: usize,
+    },
+    TooManyConstants {
+        count: usize,
+    },
+    TooManyFunctions {
+        count: usize,
+    },
+    FunctionIdMismatch {
+        expected: FunctionId,
+        actual: FunctionId,
+    },
+    InvalidEntryFunction {
+        entry: FunctionId,
+        function_count: u32,
+    },
+    InvalidFunctionLayout {
+        function: FunctionId,
+        layout: FunctionLayout,
+    },
+    VerifyFunction {
+        function: FunctionId,
+        error: VerifyError,
+    },
+    SourceMapOffsetNotInstructionStart {
+        function: FunctionId,
+        offset: WordOffset,
+    },
+    SourceMapOutOfBounds {
+        function: FunctionId,
+        span: SourceSpan,
+        source_len: u32,
+    },
+    SourceMapNotMonotonic {
+        function: FunctionId,
+        previous: WordOffset,
+        current: WordOffset,
+    },
+    InvalidHandlerRange {
+        function: FunctionId,
+        handler: HandlerEntry,
+    },
+    SuspendPointIdMismatch {
+        function: FunctionId,
+        expected: SuspendPointId,
+        actual: SuspendPointId,
+    },
+    InvalidSuspendPoint {
+        function: FunctionId,
+        suspend_point: SuspendPoint,
+    },
+    SuspendPointMissing {
+        function: FunctionId,
+        offset: WordOffset,
+        id: SuspendPointId,
+    },
+    SuspendInIncompatibleFunction {
+        function: FunctionId,
+        kind: FunctionKind,
+        offset: WordOffset,
+        opcode: Opcode,
+    },
+    VerifiedBytecodeDecodeInvariant {
+        function: FunctionId,
+        offset: WordOffset,
+    },
+}
+
+impl CompiledModule {
+    /// Verifies every function against this module's pool sizes before freezing all data into shared slices.
+    pub fn new(
+        source: Arc<str>,
+        constants: Vec<BytecodeConstant>,
+        templates: Vec<CompiledFunctionTemplate>,
+        entry_function: FunctionId,
+    ) -> Result<Self, ModuleBuildError> {
+        let source_len =
+            u32::try_from(source.len()).map_err(|_| ModuleBuildError::SourceTooLarge {
+                byte_len: source.len(),
+            })?;
+        let constant_count =
+            u32::try_from(constants.len()).map_err(|_| ModuleBuildError::TooManyConstants {
+                count: constants.len(),
+            })?;
+        let function_count =
+            u32::try_from(templates.len()).map_err(|_| ModuleBuildError::TooManyFunctions {
+                count: templates.len(),
+            })?;
+        if entry_function.index() >= function_count {
+            return Err(ModuleBuildError::InvalidEntryFunction {
+                entry: entry_function,
+                function_count,
+            });
+        }
+
+        let context = VerifyContext {
+            register_count: 0,
+            constant_count,
+            function_count,
+        };
+        let mut functions = Vec::with_capacity(templates.len());
+        for (index, template) in templates.into_iter().enumerate() {
+            let expected = FunctionId::new(index as u32);
+            if template.id != expected {
+                return Err(ModuleBuildError::FunctionIdMismatch {
+                    expected,
+                    actual: template.id,
+                });
+            }
+            validate_function_layout(
+                template.id,
+                template.metadata.layout,
+                &template.metadata.handlers,
+            )?;
+            let bytecode = template
+                .bytecode
+                .verify(VerifyContext {
+                    register_count: template.metadata.layout.register_count,
+                    ..context
+                })
+                .map_err(|error| ModuleBuildError::VerifyFunction {
+                    function: template.id,
+                    error,
+                })?;
+            validate_source_map(
+                template.id,
+                &template.metadata.source_map,
+                &bytecode,
+                source_len,
+            )?;
+            validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
+            validate_suspend_points(
+                template.id,
+                &template.metadata.suspend_points,
+                &bytecode,
+                template.metadata.layout.register_count,
+                template.metadata.kind,
+            )?;
+            functions.push(CompiledFunction {
+                id: template.id,
+                bytecode,
+                metadata: template.metadata,
+            });
+        }
+        Ok(Self {
+            source,
+            constants: constants.into(),
+            functions: functions.into(),
+            entry_function,
+        })
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    #[must_use]
+    pub fn constants(&self) -> &[BytecodeConstant] {
+        &self.constants
+    }
+
+    #[must_use]
+    pub fn function(&self, id: FunctionId) -> Option<&CompiledFunction> {
+        self.functions.get(id.index() as usize)
+    }
+
+    #[must_use]
+    pub fn functions(&self) -> &[CompiledFunction] {
+        &self.functions
+    }
+
+    #[must_use]
+    pub const fn entry_function(&self) -> FunctionId {
+        self.entry_function
+    }
+}
+
+/// Layout metadata must permit the VM to reserve all function-local windows before dispatch starts.
+fn validate_function_layout(
+    function: FunctionId,
+    layout: FunctionLayout,
+    handlers: &[HandlerEntry],
+) -> Result<(), ModuleBuildError> {
+    let has_finally = handlers
+        .iter()
+        .any(|handler| handler.kind == HandlerKind::Finally);
+    if layout.argument_count > layout.register_count
+        || layout.temporary_register_count > layout.register_count - layout.argument_count
+        || (!handlers.is_empty() && layout.max_handler_depth == 0)
+        || (has_finally && layout.max_completion_depth == 0)
+    {
+        return Err(ModuleBuildError::InvalidFunctionLayout { function, layout });
+    }
+    Ok(())
+}
+
+/// Source maps may omit instructions but each retained entry must be an ordered valid instruction start.
+fn validate_source_map(
+    function: FunctionId,
+    source_map: &[SourceMapEntry],
+    bytecode: &VerifiedBytecode,
+    source_len: u32,
+) -> Result<(), ModuleBuildError> {
+    let mut previous: Option<WordOffset> = None;
+    for entry in source_map {
+        if !bytecode.is_instruction_start(entry.offset) {
+            return Err(ModuleBuildError::SourceMapOffsetNotInstructionStart {
+                function,
+                offset: entry.offset,
+            });
+        }
+        if entry.span.start > entry.span.end || entry.span.end > source_len {
+            return Err(ModuleBuildError::SourceMapOutOfBounds {
+                function,
+                span: entry.span,
+                source_len,
+            });
+        }
+        if let Some(previous) = previous.filter(|previous| entry.offset.index() <= previous.index())
+        {
+            return Err(ModuleBuildError::SourceMapNotMonotonic {
+                function,
+                previous,
+                current: entry.offset,
+            });
+        }
+        previous = Some(entry.offset);
+    }
+    Ok(())
+}
+
+/// Handler ranges are half-open and must refer only to decoded instruction boundaries in their function.
+fn validate_handlers(
+    function: FunctionId,
+    handlers: &[HandlerEntry],
+    bytecode: &VerifiedBytecode,
+) -> Result<(), ModuleBuildError> {
+    let code_len = bytecode.bytecode().words().len() as u32;
+    for &handler in handlers {
+        let start_is_valid = bytecode.is_instruction_start(handler.protected_start);
+        let end_is_valid = handler.protected_end.index() == code_len
+            || bytecode.is_instruction_start(handler.protected_end);
+        if !start_is_valid
+            || !end_is_valid
+            || !bytecode.is_instruction_start(handler.handler)
+            || handler.protected_start.index() >= handler.protected_end.index()
+        {
+            return Err(ModuleBuildError::InvalidHandlerRange { function, handler });
+        }
+    }
+    Ok(())
+}
+
+/// Suspend metadata gives a resumed fiber enough information to restore state without replaying bytecode.
+fn validate_suspend_points(
+    function: FunctionId,
+    suspend_points: &[SuspendPoint],
+    bytecode: &VerifiedBytecode,
+    register_count: u32,
+    kind: FunctionKind,
+) -> Result<(), ModuleBuildError> {
+    for (index, &suspend_point) in suspend_points.iter().enumerate() {
+        let expected = SuspendPointId::new(u32::try_from(index).map_err(|_| {
+            ModuleBuildError::InvalidSuspendPoint {
+                function,
+                suspend_point,
+            }
+        })?);
+        if suspend_point.id != expected {
+            return Err(ModuleBuildError::SuspendPointIdMismatch {
+                function,
+                expected,
+                actual: suspend_point.id,
+            });
+        }
+        if !bytecode.is_instruction_start(suspend_point.instruction)
+            || !bytecode.is_instruction_start(suspend_point.resume_offset)
+            || suspend_point.destination.index() >= register_count
+        {
+            return Err(ModuleBuildError::InvalidSuspendPoint {
+                function,
+                suspend_point,
+            });
+        }
+        let instruction =
+            decode_instruction(bytecode.bytecode().words(), suspend_point.instruction).map_err(
+                |_| ModuleBuildError::VerifiedBytecodeDecodeInvariant {
+                    function,
+                    offset: suspend_point.instruction,
+                },
+            )?;
+        if !matches!(instruction.opcode, Opcode::Await | Opcode::Yield)
+            || instruction.operands[1] != suspend_point.destination.index()
+            || instruction.operands[2] != suspend_point.id.index()
+            || suspend_point.resume_offset.index()
+                != suspend_point.instruction.index() + u32::from(instruction.word_len)
+        {
+            return Err(ModuleBuildError::InvalidSuspendPoint {
+                function,
+                suspend_point,
+            });
+        }
+    }
+    validate_suspend_opcodes(function, kind, bytecode, suspend_points)
+}
+
+/// Every suspend opcode must name metadata with a compatible function kind so resume is deterministic.
+fn validate_suspend_opcodes(
+    function: FunctionId,
+    kind: FunctionKind,
+    bytecode: &VerifiedBytecode,
+    suspend_points: &[SuspendPoint],
+) -> Result<(), ModuleBuildError> {
+    let words = bytecode.bytecode().words();
+    let mut offset = 0u32;
+    while (offset as usize) < words.len() {
+        let word_offset = WordOffset::new(offset);
+        let decoded = decode_instruction(words, word_offset).map_err(|_| {
+            ModuleBuildError::VerifiedBytecodeDecodeInvariant {
+                function,
+                offset: word_offset,
+            }
+        })?;
+        if matches!(decoded.opcode, Opcode::Await | Opcode::Yield) {
+            let is_compatible = match decoded.opcode {
+                Opcode::Await => matches!(
+                    kind,
+                    FunctionKind::Module | FunctionKind::Async | FunctionKind::AsyncGenerator
+                ),
+                Opcode::Yield => {
+                    matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
+                }
+                _ => false,
+            };
+            if !is_compatible {
+                return Err(ModuleBuildError::SuspendInIncompatibleFunction {
+                    function,
+                    kind,
+                    offset: word_offset,
+                    opcode: decoded.opcode,
+                });
+            }
+            let id = SuspendPointId::new(decoded.operands[2]);
+            if suspend_points
+                .get(id.index() as usize)
+                .map(|point| point.id)
+                != Some(id)
+            {
+                return Err(ModuleBuildError::SuspendPointMissing {
+                    function,
+                    offset: word_offset,
+                    id,
+                });
+            }
+        }
+        offset += u32::from(decoded.word_len);
+    }
+    Ok(())
+}
+
 /// Verifies the complete stream in two passes so jumps can only land on decoded instruction boundaries.
 fn verify(bytecode: Bytecode, context: VerifyContext) -> Result<VerifiedBytecode, VerifyError> {
     let words = bytecode.words();
+    if words.len() > u32::MAX as usize {
+        return Err(VerifyError::CodeTooLarge {
+            word_count: words.len(),
+        });
+    }
     let mut starts = vec![false; words.len()];
     let mut offsets = Vec::new();
     let mut offset = 0usize;
@@ -696,6 +1289,10 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
+        }
+        Opcode::Await | Opcode::Yield => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
         }
         Opcode::JumpIfFalse => check_register(operands[0])?,
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
@@ -802,7 +1399,7 @@ mod tests {
     fn builder_patches_forward_jump_and_freezes_metadata() {
         let span = SourceSpan { start: 0, end: 1 };
         let mut builder = BytecodeBuilder::with_capacity(4, 1);
-        let end = builder.new_label();
+        let end = builder.new_label().unwrap();
         builder.emit_jump(end, span).unwrap();
         builder.emit(Opcode::Nop, &[], span).unwrap();
         builder.bind_label(end).unwrap();
@@ -824,11 +1421,155 @@ mod tests {
     fn builder_rejects_unbound_labels() {
         let span = SourceSpan { start: 0, end: 0 };
         let mut builder = BytecodeBuilder::default();
-        let label = builder.new_label();
+        let label = builder.new_label().unwrap();
         builder.emit_jump(label, span).unwrap();
         assert!(matches!(
             builder.finish(),
             Err(BuilderError::UnboundLabel(found)) if found == label
         ));
+    }
+
+    #[test]
+    fn builder_tracks_call_register_window() {
+        let span = SourceSpan { start: 0, end: 0 };
+        let mut builder = BytecodeBuilder::default();
+        builder.emit(Opcode::Call, &[0, 1, 2], span).unwrap();
+        builder.emit(Opcode::Return, &[0], span).unwrap();
+        let (_, _, register_count) = builder.finish().unwrap();
+        assert_eq!(register_count, 3);
+    }
+
+    #[test]
+    fn compiled_module_freezes_async_metadata_without_runtime_values() {
+        let mut words = encode_instruction(Opcode::Await, &[0, 0, 0]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Async,
+            FunctionLayout {
+                register_count: 1,
+                feedback_slot_count: 3,
+                max_handler_depth: 1,
+                max_completion_depth: 2,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.source_map = vec![
+            SourceMapEntry {
+                offset: WordOffset::new(0),
+                span: SourceSpan { start: 0, end: 1 },
+            },
+            SourceMapEntry {
+                offset: WordOffset::new(1),
+                span: SourceSpan { start: 0, end: 1 },
+            },
+        ]
+        .into();
+        metadata.handlers = vec![HandlerEntry {
+            protected_start: WordOffset::new(0),
+            protected_end: WordOffset::new(1),
+            handler: WordOffset::new(1),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        }]
+        .into();
+        metadata.suspend_points = vec![SuspendPoint {
+            id: SuspendPointId::new(0),
+            instruction: WordOffset::new(0),
+            resume_offset: WordOffset::new(1),
+            destination: RegisterId::new(0),
+            completion_depth: 1,
+        }]
+        .into();
+
+        let module = CompiledModule::new(
+            Arc::from("x"),
+            vec![
+                BytecodeConstant::NumberBits(1.0_f64.to_bits()),
+                BytecodeConstant::string_from_utf16(vec![0xd800]),
+            ],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap();
+
+        assert_eq!(module.source(), "x");
+        assert_eq!(module.entry_function(), FunctionId::new(0));
+        assert_eq!(
+            module
+                .function(FunctionId::new(0))
+                .unwrap()
+                .suspend_points()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            &module.constants()[1],
+            BytecodeConstant::String(value) if value.as_ref() == [0xd800]
+        ));
+    }
+
+    #[test]
+    fn compiled_module_rejects_invalid_pool_and_suspend_references() {
+        let mut out_of_range_constant = encode_instruction(Opcode::LoadConstant, &[0, 1]).unwrap();
+        out_of_range_constant.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let metadata = FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        );
+        let error = CompiledModule::new(
+            Arc::from("x"),
+            vec![BytecodeConstant::NumberBits(0)],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(out_of_range_constant),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ModuleBuildError::VerifyFunction {
+                error: VerifyError::ConstantOutOfRange { .. },
+                ..
+            }
+        ));
+
+        let mut await_without_metadata = encode_instruction(Opcode::Await, &[0, 0, 0]).unwrap();
+        await_without_metadata.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let error = CompiledModule::new(
+            Arc::from("x"),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(await_without_metadata),
+                FunctionMetadata::new(
+                    FunctionKind::Async,
+                    FunctionLayout {
+                        register_count: 1,
+                        ..FunctionLayout::default()
+                    },
+                ),
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ModuleBuildError::SuspendPointMissing { .. }
+        ));
+    }
+
+    #[test]
+    fn compiled_module_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CompiledModule>();
     }
 }
