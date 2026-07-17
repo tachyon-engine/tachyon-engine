@@ -3,15 +3,15 @@
 use crate::{
     CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
     LargeAllocationError, LargeReclaim, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError,
-    MarkStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout,
-    SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats,
-    TemporaryRootStats, Trace, TypeRegistry, YoungMarkStats,
+    MarkStats, MinorSweepStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError,
+    SmallObjectLayout, SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats,
+    SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, YoungMarkStats,
     gray::GrayQueue,
     mark::{mark_strong_roots, mark_young_roots},
     persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
     roots::{RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
-    sweep::{SweepWorklist, sweep_full},
+    sweep::{SweepWorklist, sweep_full, sweep_young},
     tuning::SMALL_SIZE_CLASSES,
 };
 
@@ -63,11 +63,25 @@ pub enum MajorCollectionError {
     Sweep(SweepError),
 }
 
+/// A minor collection fails during young marking or a partially accounted young sweep.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MinorCollectionError {
+    Mark(MarkError),
+    Sweep(SweepError),
+}
+
 /// Combined fixed-point and sweep evidence for one stop-the-world full major collection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MajorCollectionStats {
     pub mark: MarkStats,
     pub sweep: SweepStats,
+}
+
+/// Combined remembered marking and non-moving cohort sweep evidence for one minor collection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MinorCollectionStats {
+    pub mark: YoungMarkStats,
+    pub sweep: MinorSweepStats,
 }
 
 /// A single-mutator heap with fixed small-size-class slots and direct-old large ranges.
@@ -315,6 +329,31 @@ impl Heap {
         Ok(MajorCollectionStats { mark, sweep })
     }
 
+    /// Marks and sweeps only young cohorts, preserving every surviving logical/native address.
+    pub fn collect_minor(
+        &mut self,
+        roots: &mut dyn Trace,
+    ) -> Result<MinorCollectionStats, MinorCollectionError> {
+        let mark = self.mark_young(roots).map_err(MinorCollectionError::Mark)?;
+        let mut sweep = MinorSweepStats::default();
+        let mut promoted_active_old = [None; SMALL_SIZE_CLASSES.len()];
+        let result = sweep_young(
+            &mut self.table,
+            &self.types,
+            self.collection_epoch,
+            &mut promoted_active_old,
+            &mut sweep,
+        );
+        self.committed_span_storage_bytes = self
+            .committed_span_storage_bytes
+            .checked_sub(sweep.sweep.released_storage_bytes)
+            .expect("minor sweep cannot release more storage than the heap committed");
+        sweep.sweep.external_bytes = self.external_bytes;
+        self.repair_active_spans_after_minor(promoted_active_old);
+        result.map_err(MinorCollectionError::Sweep)?;
+        Ok(MinorCollectionStats { mark, sweep })
+    }
+
     /// Returns retained span-worklist high water after successful or failed collection attempts.
     #[must_use]
     pub fn sweep_worklist_stats(&self) -> SweepWorklistStats {
@@ -480,6 +519,22 @@ impl Heap {
         }
     }
 
+    /// Drops stale Eden caches and adopts promoted Old spans with reusable holes by size class.
+    fn repair_active_spans_after_minor(
+        &mut self,
+        promoted_active_old: [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    ) {
+        self.active_eden.fill(None);
+        for (active, promoted) in self.active_old.iter_mut().zip(promoted_active_old) {
+            if active.is_some_and(|span_id| !self.table.can_allocate_in_span(span_id)) {
+                *active = None;
+            }
+            if active.is_none() {
+                *active = promoted;
+            }
+        }
+    }
+
     #[inline(always)]
     fn try_allocate_class<T: Trace>(
         &mut self,
@@ -605,7 +660,8 @@ mod tests {
 
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
     use crate::{
-        GcRef, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry,
+        GcRef, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer,
+        TypeRegistry,
     };
     use tachyon_value::Value;
 
@@ -1207,6 +1263,254 @@ mod tests {
         let repaired = heap.mark_young(&mut no_roots).unwrap();
         assert_eq!(repaired.dirty_cards_scanned, 1);
         assert_eq!(repaired.old_objects_scanned, 1);
+    }
+
+    #[test]
+    /// Minor sweep reclaims white slots, ages survivors, promotes in place, and exposes old holes.
+    fn minor_collection_promotes_without_moving_and_reuses_dead_holes() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<DropNode>("DropNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let mut root = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let dead = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let native_before = heap
+            .span_table()
+            .base_address(root.raw().span_id())
+            .unwrap()
+            .wrapping_add(usize::from(root.raw().span_offset().get()));
+
+        let first = heap.collect_minor(&mut root).unwrap();
+        assert_eq!(first.sweep.sweep.live_objects, 1);
+        assert_eq!(first.sweep.sweep.reclaimed_objects, 1);
+        assert_eq!(first.sweep.eden_to_survivor, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            heap.span_table()
+                .metadata(root.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Survivor { age: 1 }
+        );
+
+        let second = heap.collect_minor(&mut root).unwrap();
+        assert_eq!(second.mark.promotion_objects_scanned, 1);
+        assert_eq!(second.sweep.whole_span_promotions, 1);
+        assert_eq!(
+            heap.span_table()
+                .metadata(root.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Old
+        );
+        let native_after = heap
+            .span_table()
+            .base_address(root.raw().span_id())
+            .unwrap()
+            .wrapping_add(usize::from(root.raw().span_offset().get()));
+        assert_eq!(native_after, native_before);
+        assert_eq!(root.raw().span_id(), dead.raw().span_id());
+
+        let reused = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        assert_eq!(reused.raw(), dead.raw());
+        let mut no_roots = Vec::<Value>::new();
+        heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    /// Releasing an empty Eden span repairs its active cache and permits stable logical ID reuse.
+    fn minor_collection_releases_empty_eden_and_repairs_active_cache() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let dead = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let stats = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(stats.sweep.sweep.reclaimed_objects, 1);
+        assert_eq!(stats.sweep.sweep.spans_released, 1);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+        let reused = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        assert_eq!(reused.raw(), dead.raw());
+    }
+
+    #[test]
+    /// Promotion prepares remembered cards before the source becomes Old in the sweep phase.
+    fn promoted_span_remembers_edges_to_younger_spans() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let mut parent = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.collect_minor(&mut parent).unwrap();
+        let child = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        heap.with_running_scope(|scope| {
+            let parent = scope.root(parent).unwrap();
+            let child_local = scope.root(child).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc.borrow_mut(parent, node_type).unwrap().next = Some(child);
+            });
+            assert!(!scope.write_barrier(parent, child_local).unwrap());
+        });
+
+        let promotion = heap.collect_minor(&mut parent).unwrap();
+        assert_eq!(promotion.sweep.whole_span_promotions, 1);
+        assert_eq!(promotion.mark.promotion_objects_scanned, 1);
+        assert_eq!(
+            heap.span_table()
+                .metadata(parent.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Old
+        );
+        assert_eq!(
+            heap.span_table()
+                .metadata(child.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Survivor { age: 1 }
+        );
+
+        let mut no_roots = Vec::<Value>::new();
+        let remembered = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(remembered.mark.dirty_cards_scanned, 1);
+        assert_eq!(remembered.mark.old_objects_scanned, 1);
+        assert_eq!(remembered.mark.mark.marked_objects, 1);
+        assert!(heap.verify_reference(child.raw(), None).is_ok());
+    }
+
+    #[test]
+    /// Minor sweep never reclaims Old payloads even when no precise root reaches them.
+    fn minor_collection_sweeps_only_young_spans() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<DropNode>("DropNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let old = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        heap.try_allocate(
+            node_type,
+            0,
+            0,
+            DropNode {
+                next: None,
+                drops: Arc::clone(&drops),
+            },
+            AllocationSpace::Young,
+        )
+        .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let minor = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(minor.sweep.sweep.scanned_objects, 1);
+        assert_eq!(minor.sweep.sweep.reclaimed_objects, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(heap.verify_reference(old.raw(), None).is_ok());
+        heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    /// Repeated empty minors reuse one stable entry without duplicate intrusive-list membership.
+    fn repeated_empty_minor_collections_keep_young_chain_bounded() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let mut first = None;
+        let mut no_roots = Vec::<Value>::new();
+        for _ in 0..256 {
+            let reference = heap
+                .try_allocate(
+                    node_type,
+                    0,
+                    0,
+                    ChainNode { next: None },
+                    AllocationSpace::Young,
+                )
+                .unwrap();
+            let expected = *first.get_or_insert(reference.raw());
+            assert_eq!(reference.raw(), expected);
+            let stats = heap.collect_minor(&mut no_roots).unwrap();
+            assert_eq!(stats.sweep.sweep.spans_processed, 1);
+            assert_eq!(stats.sweep.sweep.spans_released, 1);
+        }
+        assert_eq!(heap.span_table().historical_span_count(), 1);
+        assert_eq!(heap.span_table().live_spans(), 0);
     }
 
     #[test]

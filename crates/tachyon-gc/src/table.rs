@@ -76,6 +76,14 @@ pub(crate) enum ReferenceSpace {
     OldLarge,
 }
 
+/// Whole-span transition selected after a successful young sweep.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum YoungSpanTransition {
+    EdenToSurvivor,
+    SurvivorAged,
+    Promoted,
+}
+
 /// Stable small-span accounting captured between collector mutation steps.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SmallSweepSnapshot {
@@ -202,6 +210,8 @@ struct SpanEntry {
     kind: Option<SpanKind>,
     remembered_next: Option<SpanId>,
     in_remembered_set: bool,
+    young_next: Option<SpanId>,
+    in_young_set: bool,
 }
 
 /// A coalesced inclusive range of vacant logical span IDs.
@@ -232,6 +242,7 @@ pub struct SpanTable {
     free_ranges: Vec<FreeSpanRange>,
     live_spans: usize,
     remembered_head: Option<SpanId>,
+    young_head: Option<SpanId>,
 }
 
 impl SpanTable {
@@ -243,6 +254,7 @@ impl SpanTable {
             free_ranges: Vec::new(),
             live_spans: 0,
             remembered_head: None,
+            young_head: None,
         }
     }
 
@@ -254,12 +266,16 @@ impl SpanTable {
     ) -> Result<SpanId, SpanTableError> {
         let storage = SpanStorage::try_new()?;
         let span = SmallSpan::try_new(storage, size_class, space, SpanReuseGeneration::INITIAL)?;
-        if let Some(span_id) = self.take_free_span() {
+        let span_id = if let Some(span_id) = self.take_free_span() {
             self.install_reused(span_id, span);
-            return Ok(span_id);
+            span_id
+        } else {
+            self.install_new(span)?
+        };
+        if space != SpanSpace::Old {
+            self.link_young_span(span_id);
         }
-
-        self.install_new(span)
+        Ok(span_id)
     }
 
     /// Releases native storage while retaining the table index and its incremented reuse generation.
@@ -471,6 +487,99 @@ impl SpanTable {
         self.entries
             .get(span_id.index() as usize)
             .and_then(|entry| entry.remembered_next)
+    }
+
+    /// Returns the first Eden/Survivor owner in the allocation-free young-span chain.
+    #[must_use]
+    pub(crate) const fn young_head(&self) -> Option<SpanId> {
+        self.young_head
+    }
+
+    /// Advances through only spans allocated into a young cohort.
+    #[must_use]
+    pub(crate) fn young_next(&self, span_id: SpanId) -> Option<SpanId> {
+        self.entries
+            .get(span_id.index() as usize)
+            .and_then(|entry| entry.young_next)
+    }
+
+    /// Returns a young cohort only for a currently live small span.
+    #[must_use]
+    pub(crate) fn young_space(&self, span_id: SpanId) -> Option<SpanSpace> {
+        let SpanKind::Small(span) = self.entries.get(span_id.index() as usize)?.kind.as_ref()?
+        else {
+            return None;
+        };
+        match span.metadata.space() {
+            space @ (SpanSpace::Eden | SpanSpace::Survivor { .. }) => Some(space),
+            SpanSpace::Old => None,
+        }
+    }
+
+    /// Ages a non-empty young span and activates prepared cards on whole-span promotion.
+    pub(crate) fn advance_young_cohort(
+        &mut self,
+        span_id: SpanId,
+        promotion_age: u8,
+    ) -> YoungSpanTransition {
+        let transition = {
+            let Some(SpanKind::Small(span)) = self
+                .entries
+                .get_mut(span_id.index() as usize)
+                .and_then(|entry| entry.kind.as_mut())
+            else {
+                unreachable!("young chain contains a live small span");
+            };
+            match span.metadata.space() {
+                SpanSpace::Eden => {
+                    span.metadata.set_space(SpanSpace::Survivor { age: 1 });
+                    YoungSpanTransition::EdenToSurvivor
+                }
+                SpanSpace::Survivor { age } => {
+                    let next_age = age.saturating_add(1);
+                    if next_age >= promotion_age {
+                        span.metadata.set_space(SpanSpace::Old);
+                        YoungSpanTransition::Promoted
+                    } else {
+                        span.metadata
+                            .set_space(SpanSpace::Survivor { age: next_age });
+                        YoungSpanTransition::SurvivorAged
+                    }
+                }
+                SpanSpace::Old => unreachable!("young chain excludes Old spans"),
+            }
+        };
+        if transition == YoungSpanTransition::Promoted && self.dirty_old_card_count(span_id) != 0 {
+            self.link_remembered_source(span_id);
+        }
+        transition
+    }
+
+    /// Installs exact cards prepared while a promotion candidate still had young mark state.
+    pub(crate) fn replace_promotion_cards(&mut self, span_id: SpanId, cards: crate::CardBitmap) {
+        let Some(SpanKind::Small(span)) = self
+            .entries
+            .get_mut(span_id.index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+        else {
+            return;
+        };
+        debug_assert!(matches!(span.metadata.space(), SpanSpace::Survivor { .. }));
+        span.metadata.replace_cards(cards);
+    }
+
+    /// Removes released and promoted entries from the intrusive young chain in one bounded pass.
+    pub(crate) fn compact_young_spans(&mut self) {
+        let mut current = self.young_head.take();
+        while let Some(span_id) = current {
+            let index = span_id.index() as usize;
+            let next = self.entries[index].young_next.take();
+            self.entries[index].in_young_set = false;
+            if self.young_space(span_id).is_some() {
+                self.link_young_span(span_id);
+            }
+            current = next;
+        }
     }
 
     /// Returns dirty-card count only for an Old small span.
@@ -1045,6 +1154,8 @@ impl SpanTable {
             kind: Some(SpanKind::Small(span)),
             remembered_next: None,
             in_remembered_set: false,
+            young_next: None,
+            in_young_set: false,
         });
         self.live_spans += 1;
         Ok(SpanId::new(index))
@@ -1127,6 +1238,8 @@ impl SpanTable {
                     })),
                     remembered_next: None,
                     in_remembered_set: false,
+                    young_next: None,
+                    in_young_set: false,
                 });
                 for ordinal in 1..span_count {
                     self.entries.push(SpanEntry {
@@ -1137,6 +1250,8 @@ impl SpanTable {
                         })),
                         remembered_next: None,
                         in_remembered_set: false,
+                        young_next: None,
+                        in_young_set: false,
                     });
                 }
             }
@@ -1155,6 +1270,17 @@ impl SpanTable {
         entry.remembered_next = self.remembered_head;
         entry.in_remembered_set = true;
         self.remembered_head = Some(span_id);
+    }
+
+    /// Links a stable young owner at most once without an auxiliary allocation.
+    fn link_young_span(&mut self, span_id: SpanId) {
+        let entry = &mut self.entries[span_id.index() as usize];
+        if entry.in_young_set {
+            return;
+        }
+        entry.young_next = self.young_head;
+        entry.in_young_set = true;
+        self.young_head = Some(span_id);
     }
 
     fn take_free_span(&mut self) -> Option<SpanId> {

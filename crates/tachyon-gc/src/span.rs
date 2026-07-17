@@ -411,6 +411,11 @@ impl SmallSpanMetadata {
         self.space
     }
 
+    /// Changes only cohort metadata; object storage and logical references remain untouched.
+    pub(crate) fn set_space(&mut self, space: SpanSpace) {
+        self.space = space;
+    }
+
     /// Returns the next never-used slot index for Eden bump allocation.
     #[must_use]
     pub const fn bump_cursor(&self) -> u16 {

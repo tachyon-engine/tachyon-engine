@@ -156,6 +156,14 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         self.heap.mark_young(additional_roots)
     }
 
+    /// Runs a complete young mark/sweep while retaining all locals in this running scope.
+    pub fn collect_minor(
+        &mut self,
+        additional_roots: &mut dyn Trace,
+    ) -> Result<crate::MinorCollectionStats, crate::MinorCollectionError> {
+        self.heap.collect_minor(additional_roots)
+    }
+
     /// Publishes a completed local-to-local heap pointer store to the generational barrier.
     #[inline(always)]
     pub fn write_barrier<S: ?Sized, T: ?Sized>(

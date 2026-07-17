@@ -29,6 +29,7 @@ pub struct YoungMarkStats {
     pub dirty_cards_scanned: usize,
     pub old_objects_scanned: usize,
     pub remembered_large_owners_scanned: usize,
+    pub promotion_objects_scanned: usize,
 }
 
 /// Reaches the strong fixed point without recursively tracing through the native stack.
@@ -82,6 +83,7 @@ pub(crate) fn mark_young_roots(
         return Err(error);
     }
     marker.rebuild_remembered(types);
+    marker.prepare_promotions(types);
     Ok(marker.stats)
 }
 
@@ -371,6 +373,41 @@ impl YoungMarker<'_> {
             start = next;
         }
         self.table.replace_old_cards(span_id, rebuilt);
+    }
+
+    /// Builds exact cards from marked survivors immediately before their possible promotion.
+    fn prepare_promotions(&mut self, types: &TypeRegistry) {
+        let promotion_age = crate::tuning::YOUNG_PROMOTION_AGE;
+        let mut current = self.table.young_head();
+        while let Some(span_id) = current {
+            let next = self.table.young_next(span_id);
+            if self.table.young_space(span_id).is_some_and(|space| {
+                matches!(space, crate::SpanSpace::Survivor { age } if age.saturating_add(1) >= promotion_age)
+            }) {
+                self.prepare_promotion_span(span_id, types);
+            }
+            current = next;
+        }
+    }
+
+    /// Scans only live objects in one candidate and records cards containing direct young sources.
+    fn prepare_promotion_span(&mut self, span_id: SpanId, types: &TypeRegistry) {
+        let mut cards = CardBitmap::new();
+        let mut start = 0;
+        while let Some(reference) = self.table.next_allocated_reference(span_id, start) {
+            let Some(next) = self.next_slot(reference) else {
+                break;
+            };
+            start = next;
+            if !self.table.is_marked(reference, self.epoch).unwrap_or(false) {
+                continue;
+            }
+            self.stats.promotion_objects_scanned += 1;
+            if self.trace_source(reference, types, true) {
+                cards.mark(reference.span_offset());
+            }
+        }
+        self.table.replace_promotion_cards(span_id, cards);
     }
 
     fn next_slot(&self, reference: RawHeapRef) -> Option<u16> {

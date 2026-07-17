@@ -18,6 +18,8 @@ pub(crate) const INITIAL_PERSISTENT_ROOT_CAPACITY: usize = 64;
 pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 /// Denominator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_DENOMINATOR: usize = 2;
+/// Initial whole-span promotion age; corpus and pause/fragmentation benchmarks may retune it.
+pub(crate) const YOUNG_PROMOTION_AGE: u8 = 2;
 
 /// Initial 1.0 size classes; benchmark evidence may refine spacing without changing `GcRef`.
 pub(crate) const SMALL_SIZE_CLASSES: [u16; 28] = [

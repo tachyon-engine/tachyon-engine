@@ -3,9 +3,10 @@
 use crate::{
     CollectionEpoch, HeapReferenceError, MINIMUM_SLOT_SIZE_BYTES, RawHeapRef, SPAN_SIZE_BYTES,
     SpanId, SpanSpace, SpanTable, SpanTableError, TypeRegistry,
-    table::{SmallSweepSnapshot, SweepTarget},
+    table::{SmallSweepSnapshot, SweepTarget, YoungSpanTransition},
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_SWEEP_WORKLIST_CAPACITY,
+        SMALL_SIZE_CLASSES,
     },
 };
 
@@ -52,6 +53,17 @@ pub struct SweepStats {
     pub retained_fragmentation_bytes: usize,
     pub reusable_old_free_bytes: usize,
     pub retained_tail_slack_bytes: usize,
+}
+
+/// Young-only sweep and cohort-transition counters for one minor collection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MinorSweepStats {
+    pub sweep: SweepStats,
+    pub eden_spans_processed: usize,
+    pub survivor_spans_processed: usize,
+    pub eden_to_survivor: usize,
+    pub survivor_spans_aged: usize,
+    pub whole_span_promotions: usize,
 }
 
 /// LIFO owner IDs keep collection memory proportional to spans rather than objects.
@@ -149,6 +161,120 @@ pub(crate) fn sweep_full(
                 sweep_large(table, types, span_id, epoch, stats)?;
             }
             None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Sweeps only the intrusive Eden/Survivor chain and transitions every retained whole span.
+pub(crate) fn sweep_young(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    epoch: CollectionEpoch,
+    promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    stats: &mut MinorSweepStats,
+) -> Result<(), SweepError> {
+    let mut current = table.young_head();
+    while let Some(span_id) = current {
+        let next = table.young_next(span_id);
+        if let Some(space) = table.young_space(span_id) {
+            stats.sweep.spans_processed += 1;
+            match space {
+                SpanSpace::Eden => stats.eden_spans_processed += 1,
+                SpanSpace::Survivor { .. } => stats.survivor_spans_processed += 1,
+                SpanSpace::Old => unreachable!("young_space excludes Old"),
+            }
+            sweep_young_span(table, types, span_id, epoch, promoted_active_old, stats)?;
+        }
+        current = next;
+    }
+    table.compact_young_spans();
+    Ok(())
+}
+
+/// Drops white young slots, releases empty storage, then ages or promotes the retained span.
+fn sweep_young_span(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    span_id: SpanId,
+    epoch: CollectionEpoch,
+    promoted_active_old: &mut [Option<SpanId>; SMALL_SIZE_CLASSES.len()],
+    stats: &mut MinorSweepStats,
+) -> Result<(), SweepError> {
+    let before = table
+        .small_sweep_snapshot(span_id)
+        .expect("young chain contains a live small span");
+    let mut cursor = 0;
+    let mut live_slots = 0_u16;
+    while let Some(reference) = table.next_allocated_reference(span_id, cursor) {
+        cursor = reference_slot_successor(before, reference);
+        if table
+            .is_marked(reference, epoch)
+            .map_err(SweepError::InvalidReference)?
+        {
+            live_slots += 1;
+        }
+    }
+    if live_slots == 0 {
+        table
+            .prepare_release(span_id)
+            .map_err(SweepError::SpanTable)?;
+    }
+    sweep_young_objects(table, types, span_id, epoch, before, stats)?;
+    if live_slots == 0 {
+        table.release(span_id).map_err(SweepError::SpanTable)?;
+        stats.sweep.spans_released += 1;
+        stats.sweep.released_storage_bytes += SPAN_SIZE_BYTES;
+        return Ok(());
+    }
+    let transition = table.advance_young_cohort(span_id, crate::tuning::YOUNG_PROMOTION_AGE);
+    match transition {
+        YoungSpanTransition::EdenToSurvivor => stats.eden_to_survivor += 1,
+        YoungSpanTransition::SurvivorAged => stats.survivor_spans_aged += 1,
+        YoungSpanTransition::Promoted => {
+            stats.whole_span_promotions += 1;
+            table.rebuild_old_free_list(span_id);
+            let class_index = SMALL_SIZE_CLASSES
+                .iter()
+                .position(|&size| size == before.size_class.slot_size())
+                .expect("every allocated small span uses a tuning size class");
+            if table.can_allocate_in_span(span_id) {
+                promoted_active_old[class_index] = Some(span_id);
+            }
+        }
+    }
+    let after = table
+        .small_sweep_snapshot(span_id)
+        .expect("retained young span remains installed after transition");
+    debug_assert_eq!(after.allocated_slots, live_slots);
+    account_retained_small(after, &mut stats.sweep);
+    Ok(())
+}
+
+/// Performs the destructive pass after release capacity and live counts have been preflighted.
+fn sweep_young_objects(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    span_id: SpanId,
+    epoch: CollectionEpoch,
+    snapshot: SmallSweepSnapshot,
+    stats: &mut MinorSweepStats,
+) -> Result<(), SweepError> {
+    let mut cursor = 0;
+    while let Some(reference) = table.next_allocated_reference(span_id, cursor) {
+        cursor = reference_slot_successor(snapshot, reference);
+        stats.sweep.scanned_objects += 1;
+        stats.sweep.scanned_bytes += usize::from(snapshot.size_class.slot_size());
+        if table
+            .is_marked(reference, epoch)
+            .map_err(SweepError::InvalidReference)?
+        {
+            stats.sweep.live_objects += 1;
+            stats.sweep.live_bytes += usize::from(snapshot.size_class.slot_size());
+        } else {
+            drop_small(table, types, reference)?;
+            stats.sweep.reclaimed_objects += 1;
+            stats.sweep.reclaimed_bytes += usize::from(snapshot.size_class.slot_size());
         }
     }
     Ok(())

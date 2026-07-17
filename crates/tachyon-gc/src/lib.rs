@@ -33,7 +33,7 @@ pub use gray::{GrayQueueError, GrayQueueStats};
 pub use handle::GcRef;
 pub use heap::{
     AllocationSpace, Heap, HeapAllocationError, HeapLimit, MajorCollectionError,
-    MajorCollectionStats,
+    MajorCollectionStats, MinorCollectionError, MinorCollectionStats,
 };
 pub use layout::{
     CARD_BITMAP_WORDS, CARD_SIZE_BYTES, CARDS_PER_SPAN, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId,
@@ -54,7 +54,7 @@ pub use span::{
     SmallSpanMetadata, SpanReuseGeneration, SpanSpace, SweepState,
 };
 pub use storage::{SpanStorage, SpanStorageAccessError, SpanStorageAllocationError};
-pub use sweep::{SweepError, SweepStats, SweepWorklistError, SweepWorklistStats};
+pub use sweep::{MinorSweepStats, SweepError, SweepStats, SweepWorklistError, SweepWorklistStats};
 pub use table::{
     HeapReferenceError, LargeAllocationError, LargeReclaim, SmallAllocationError, SpanTable,
     SpanTableError,
