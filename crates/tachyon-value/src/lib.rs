@@ -173,6 +173,48 @@ impl Value {
         }
     }
 
+    /// Returns whether this value is a Number without validating any tagged payload.
+    #[must_use]
+    pub const fn is_number(self) -> bool {
+        !self.is_tagged()
+    }
+
+    /// Returns the integer payload when its tag and upper payload bits are valid.
+    #[must_use]
+    pub const fn as_i32(self) -> Option<i32> {
+        if self.is_tagged()
+            && self.tag_bits() == Tag::Int32 as u8
+            && self.payload() & !LOW_U32_MASK == 0
+        {
+            Some(self.payload() as u32 as i32)
+        } else {
+            None
+        }
+    }
+
+    /// Returns a cage offset when its tag and payload are valid, without resolving it to a pointer.
+    #[must_use]
+    pub const fn as_heap_ref(self) -> Option<RawHeapRef> {
+        if !self.is_tagged()
+            || self.tag_bits() != Tag::HeapRef as u8
+            || self.payload() & !LOW_U32_MASK != 0
+        {
+            return None;
+        }
+
+        RawHeapRef::new(self.payload() as u32)
+    }
+
+    /// Returns the immediate payload when it is one of the fixed immediate encodings.
+    #[must_use]
+    pub const fn as_immediate(self) -> Option<Immediate> {
+        if self.is_tagged() && self.tag_bits() == Tag::Immediate as u8 {
+            Immediate::from_payload(self.payload())
+        } else {
+            None
+        }
+    }
+
     /// Validates and classifies a value without dereferencing a heap reference.
     pub fn decode(self) -> Result<ValueKind, DecodeError> {
         if let Some(number) = self.as_f64() {
@@ -197,6 +239,14 @@ impl Value {
 
     const fn from_tagged(tag: Tag, payload: u64) -> Self {
         Self(TAGGED_PREFIX | ((tag as u64) << TAG_SHIFT) | payload)
+    }
+
+    const fn payload(self) -> u64 {
+        self.0 & PAYLOAD_MASK
+    }
+
+    const fn tag_bits(self) -> u8 {
+        ((self.0 & TAG_MASK) >> TAG_SHIFT) as u8
     }
 
     fn decode_heap_ref(payload: u64) -> Result<ValueKind, DecodeError> {
@@ -252,6 +302,23 @@ mod tests {
                 Ok(ValueKind::Immediate(immediate))
             );
         }
+    }
+
+    #[test]
+    fn fast_paths_validate_tags_and_payloads() {
+        let reference = RawHeapRef::new(16).expect("non-zero offset");
+
+        assert!(Value::from_f64(1.5).is_number());
+        assert_eq!(Value::from_i32(-42).as_i32(), Some(-42));
+        assert_eq!(
+            Value::from_heap_ref(reference).as_heap_ref(),
+            Some(reference)
+        );
+        assert_eq!(
+            Value::from_immediate(Immediate::Null).as_immediate(),
+            Some(Immediate::Null)
+        );
+        assert_eq!(Value::from_bits(0xfff9_0001_0000_0000).as_i32(), None);
     }
 
     #[test]
