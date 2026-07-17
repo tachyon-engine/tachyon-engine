@@ -433,6 +433,7 @@ mod tests {
     }
 
     #[test]
+    /// Covers reserved encodings and both extremes of the 16-bit span-address partition.
     fn logical_heap_addresses_encode_and_decode_boundaries() {
         assert_eq!(SpanOffset::new(0), None);
         assert_eq!(RawHeapRef::new(0), None);

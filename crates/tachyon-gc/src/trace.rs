@@ -6,8 +6,8 @@ use crate::GcRef;
 
 /// Visits every GC edge owned by an object or root.
 ///
-/// References are mutable from the first collector phase. Mark-sweep only observes the edges, but
-/// the same implementations will update them when a later nursery relocates objects.
+/// References are mutable from the first collector phase so every collector uses one exact visitor
+/// contract. Tachyon 1.0 does not relocate objects; mutability does not imply a moving nursery.
 pub trait Trace {
     /// Traces every direct GC edge held by `self`.
     fn trace(&mut self, tracer: &mut dyn Tracer);
@@ -15,8 +15,8 @@ pub trait Trace {
 
 /// Receives exact heap references during graph traversal.
 ///
-/// Implementations must treat the visitor calls as safepoints: a future moving collector may
-/// replace the reference before the call returns.
+/// Implementations may rewrite an internal reference encoding before the call returns, while the
+/// 1.0 collector keeps every object's logical address and native address stable.
 pub trait Tracer {
     /// Visits a NaN-boxed JavaScript value, including a potential heap-reference payload.
     fn trace_value(&mut self, value: &mut Value);

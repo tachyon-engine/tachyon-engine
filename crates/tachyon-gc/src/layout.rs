@@ -15,6 +15,17 @@ pub const SPAN_SIZE_BYTES: usize = 64 * 1024;
 pub const MAX_LOGICAL_SPANS: usize = 1 << 16;
 /// The smallest small-object allocation slot, including its object header.
 pub const MINIMUM_SLOT_SIZE_BYTES: usize = 16;
+/// The maximum slot count in a span after reserving the first minimum-size offset.
+pub const MAX_SMALL_OBJECT_SLOTS: usize =
+    (SPAN_SIZE_BYTES - MINIMUM_SLOT_SIZE_BYTES) / MINIMUM_SLOT_SIZE_BYTES;
+/// Number of machine words retained per allocation or mark bitmap.
+pub const SLOT_BITMAP_WORDS: usize = MAX_SMALL_OBJECT_SLOTS.div_ceil(u64::BITS as usize);
+/// Remembered-set granularity for old-to-young pointer stores.
+pub const CARD_SIZE_BYTES: usize = 512;
+/// Number of remembered-set cards covering one span.
+pub const CARDS_PER_SPAN: usize = SPAN_SIZE_BYTES / CARD_SIZE_BYTES;
+/// Number of machine words retained by each per-span card bitmap.
+pub const CARD_BITMAP_WORDS: usize = CARDS_PER_SPAN.div_ceil(u64::BITS as usize);
 /// The byte size of every object header in the phase-1 heap.
 pub const GC_HEADER_SIZE_BYTES: usize = 8;
 
@@ -22,6 +33,7 @@ const _: () = assert!(LOGICAL_ADDRESS_SPACE_BYTES == u32::MAX as u64 + 1);
 const _: () = assert!(SPAN_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(MINIMUM_SLOT_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES));
+const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(CARD_SIZE_BYTES));
 const _: () =
     assert!(MAX_LOGICAL_SPANS as u64 * SPAN_SIZE_BYTES as u64 == LOGICAL_ADDRESS_SPACE_BYTES);
 
