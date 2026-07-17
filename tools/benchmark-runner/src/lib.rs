@@ -15,7 +15,7 @@ pub use adapter::{
 pub use compare::{BenchmarkComparison, CaseKey, CaseRatio, CompareError, compare_reports};
 pub use config::{
     BenchmarkCategory, BenchmarkConfig, BuildConfig, ConfigError, CorpusError, CorpusScript,
-    ScriptConfig, SuiteKind, load_corpus,
+    ExternalBuildStep, ExternalEngineProfile, ScriptConfig, SuiteKind, load_corpus,
 };
 pub use external::{ExternalProcessAdapter, ExternalProcessConfig};
 pub use runner::{

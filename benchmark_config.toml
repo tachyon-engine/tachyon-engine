@@ -12,6 +12,74 @@ maximum_background_relative_mad = 0.05
 external_process_timeout_millis = 10000
 maximum_process_output_bytes = 65536
 
+[[external_engines]]
+id = "boa-macos-aarch64"
+name = "Boa"
+kind = "boa-cli"
+platform = "macos-aarch64"
+repository = "https://github.com/boa-dev/boa"
+commit = "b562725784a18e55d27ddd9702abac61b36a250d"
+version = "1.0.0-dev"
+checkout_path = "boa"
+executable_path = "boa/target/release/boa"
+features = "default"
+build_flags = "Cargo release profile; cargo build --release -p boa_cli"
+fixed_arguments = []
+
+[[external_engines.build_steps]]
+working_directory = "boa"
+program = "cargo"
+arguments = ["build", "--release", "-p", "boa_cli"]
+
+[[external_engines]]
+id = "quickjs-macos-aarch64"
+name = "QuickJS"
+kind = "quick-js-cli"
+platform = "macos-aarch64"
+repository = "https://github.com/bellard/quickjs"
+commit = "04be246001599f5995fa2f2d8c91a0f198d3f34c"
+version = "2026-06-04"
+checkout_path = "target/benchmark-engines/quickjs"
+executable_path = "target/benchmark-engines/quickjs/qjs"
+features = "default"
+build_flags = "QuickJS Makefile default; AppleClang -O2 -g"
+fixed_arguments = []
+
+[[external_engines.build_steps]]
+working_directory = "target/benchmark-engines/quickjs"
+program = "make"
+arguments = ["qjs"]
+
+[[external_engines]]
+id = "escargot-macos-aarch64"
+name = "Escargot"
+kind = "escargot-cli"
+platform = "macos-aarch64"
+repository = "https://github.com/Samsung/escargot"
+commit = "0ac9f5cc66bdb24b4b8d06fb2aeae9d2488b5899"
+version = "2.0.0-1520-g0ac9f5cc"
+checkout_path = "escargot"
+executable_path = "escargot/out-release/escargot"
+features = "intl,threading"
+build_flags = "release shell aarch64; Intl ICU 78.3; AppleClang -O2 -g3"
+fixed_arguments = []
+
+[[external_engines.build_steps]]
+working_directory = "escargot"
+program = "git"
+arguments = ["submodule", "update", "--init", "third_party"]
+
+[[external_engines.build_steps]]
+working_directory = "."
+program = "cmake"
+arguments = ["-S", "escargot", "-B", "escargot/out-release", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", "-DESCARGOT_HOST=darwin", "-DESCARGOT_ARCH=aarch64", "-DESCARGOT_MODE=release", "-DESCARGOT_OUTPUT=shell", "-GNinja"]
+environment = { PKG_CONFIG_PATH = "/opt/homebrew/opt/icu4c@78/lib/pkgconfig" }
+
+[[external_engines.build_steps]]
+working_directory = "."
+program = "cmake"
+arguments = ["--build", "escargot/out-release"]
+
 [build]
 profile = "release"
 panic = "unwind"

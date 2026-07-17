@@ -11,9 +11,9 @@ use std::{
 };
 
 use benchmark_runner::{
-    BenchmarkConfig, BenchmarkReport, EngineIdentity, EngineKind, ExternalProcessAdapter,
-    ExternalProcessConfig, HostMetadata, MeasurementMode, compare_reports as compare_benchmarks,
-    load_corpus, run_case,
+    BenchmarkConfig, BenchmarkReport, CorpusScript, EngineIdentity, EngineKind,
+    ExternalProcessAdapter, ExternalProcessConfig, HostMetadata, MeasurementMode,
+    compare_reports as compare_benchmarks, load_corpus, run_case,
 };
 use test262_runner::{
     RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
@@ -82,6 +82,12 @@ fn main() {
         [command, subcommand, rest @ ..] if command == "bench" && subcommand == "run-external" => {
             run_external_benchmarks(rest)
         }
+        [command, subcommand, rest @ ..] if command == "bench" && subcommand == "run-profile" => {
+            run_benchmark_profile(rest)
+        }
+        [command, subcommand, profile] if command == "bench" && subcommand == "build-profile" => {
+            build_benchmark_profile(profile)
+        }
         _ => Err(USAGE.to_owned()),
     };
 
@@ -91,7 +97,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -262,9 +268,23 @@ fn verify_benchmarks() -> Result<(), String> {
             })
         })
         .collect::<Vec<_>>();
+    let engines = config
+        .external_engines
+        .iter()
+        .map(|profile| {
+            serde_json::json!({
+                "id": profile.id,
+                "kind": profile.kind,
+                "platform": profile.platform,
+                "repository": profile.repository,
+                "commit": profile.commit,
+                "executable_path": profile.executable_path,
+            })
+        })
+        .collect::<Vec<_>>();
     serde_json::to_writer_pretty(
         std::io::stdout().lock(),
-        &serde_json::json!({ "schema_version": 1, "scripts": scripts }),
+        &serde_json::json!({ "schema_version": 1, "engines": engines, "scripts": scripts }),
     )
     .map_err(|error| error.to_string())?;
     println!();
@@ -296,12 +316,82 @@ fn compare_benchmark_reports(base: &str, candidate: &str, markdown: bool) -> Res
 /// Runs an approved corpus subset through one release CLI and emits a standalone JSON report.
 fn run_external_benchmarks(arguments: &[String]) -> Result<(), String> {
     let options = parse_external_run_options(arguments)?;
+    let (config, corpus) = benchmark_config_and_corpus()?;
+    execute_external_benchmarks(options, config, corpus)
+}
+
+/// Resolves a pinned profile, verifies its source checkout, and runs its release executable.
+fn run_benchmark_profile(arguments: &[String]) -> Result<(), String> {
+    let (profile_id, script) = parse_profile_run_options(arguments)?;
+    let (config, corpus) = benchmark_config_and_corpus()?;
+    let workspace = workspace_root();
+    let profile = config
+        .external_engine(&profile_id)
+        .ok_or_else(|| format!("unknown external engine profile: {profile_id}"))?
+        .clone();
+    verify_profile_checkout(&workspace, &profile)?;
+    let options = ExternalRunOptions {
+        kind: profile.kind,
+        name: profile.name,
+        executable: workspace.join(&*profile.executable_path),
+        version: profile.version,
+        commit: profile.commit,
+        features: profile.features,
+        build_flags: profile.build_flags,
+        script,
+        engine_arguments: profile
+            .fixed_arguments
+            .into_iter()
+            .map(|argument| OsString::from(argument.as_ref()))
+            .collect(),
+    };
+    execute_external_benchmarks(options, config, corpus)
+}
+
+/// Executes profile build steps as argv arrays after validating the pinned tracked checkout.
+fn build_benchmark_profile(profile_id: &str) -> Result<(), String> {
+    let (config, _) = benchmark_config_and_corpus()?;
+    let workspace = workspace_root();
+    let profile = config
+        .external_engine(profile_id)
+        .ok_or_else(|| format!("unknown external engine profile: {profile_id}"))?;
+    verify_profile_checkout(&workspace, profile)?;
+    for step in &profile.build_steps {
+        let mut command = Command::new(&*step.program);
+        command
+            .current_dir(workspace.join(&*step.working_directory))
+            .args(step.arguments.iter().map(|argument| &**argument))
+            .envs(
+                step.environment
+                    .iter()
+                    .map(|(key, value)| (&**key, &**value)),
+            );
+        run_streaming_command(&mut command)?;
+    }
+    let executable = workspace.join(&*profile.executable_path);
+    executable
+        .is_file()
+        .then_some(())
+        .ok_or_else(|| format!("profile build did not produce {}", executable.display()))
+}
+
+/// Loads the one strict config and content-addressed corpus shared by all benchmark commands.
+fn benchmark_config_and_corpus() -> Result<(BenchmarkConfig, Vec<CorpusScript>), String> {
     let workspace = workspace_root();
     let config_path = workspace.join("benchmark_config.toml");
     let source = fs::read_to_string(&config_path)
         .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
     let config = BenchmarkConfig::parse(&source).map_err(|error| error.to_string())?;
     let corpus = load_corpus(&workspace, &config).map_err(|error| error.to_string())?;
+    Ok((config, corpus))
+}
+
+/// Runs one selected profile over approved scripts and serializes the complete report.
+fn execute_external_benchmarks(
+    options: ExternalRunOptions,
+    config: BenchmarkConfig,
+    corpus: Vec<CorpusScript>,
+) -> Result<(), String> {
     let host = HostMetadata::collect(&config);
     let identity = EngineIdentity {
         name: options.name,
@@ -362,6 +452,55 @@ fn run_external_benchmarks(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_profile_run_options(arguments: &[String]) -> Result<(String, Option<Box<str>>), String> {
+    match arguments {
+        [profile] => Ok((profile.clone(), None)),
+        [profile, flag, script] if flag == "--script" => {
+            Ok((profile.clone(), Some(script.clone().into_boxed_str())))
+        }
+        _ => Err(USAGE.to_owned()),
+    }
+}
+
+/// Verifies platform, full revision, and tracked cleanliness before trusting a profile binary.
+fn verify_profile_checkout(
+    workspace: &Path,
+    profile: &benchmark_runner::ExternalEngineProfile,
+) -> Result<(), String> {
+    let platform = format!("{}-{}", env::consts::OS, env::consts::ARCH);
+    if profile.platform.as_ref() != platform {
+        return Err(format!(
+            "profile {} targets {}, current platform is {platform}",
+            profile.id, profile.platform
+        ));
+    }
+    let checkout = workspace.join(&*profile.checkout_path);
+    let actual = command_output(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["rev-parse", "HEAD"]),
+    )?;
+    if actual.trim() != profile.commit.as_ref() {
+        return Err(format!(
+            "profile {} revision mismatch: expected {}, got {}",
+            profile.id,
+            profile.commit,
+            actual.trim()
+        ));
+    }
+    let cleanliness = Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["diff-index", "--quiet", "HEAD", "--"])
+        .status()
+        .map_err(|error| format!("failed to inspect {}: {error}", checkout.display()))?;
+    cleanliness
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("profile {} checkout has tracked modifications", profile.id))
+}
+
 /// Parses explicit provenance and engine arguments without accepting shell command strings.
 fn parse_external_run_options(arguments: &[String]) -> Result<ExternalRunOptions, String> {
     let [
@@ -420,6 +559,17 @@ fn run_command(command: &mut Command) -> Result<(), String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
     }
+}
+
+/// Streams potentially large build logs instead of retaining unbounded child output in memory.
+fn run_streaming_command(command: &mut Command) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|error| format!("failed to run command: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("command exited with status {status}"))
 }
 
 fn command_output(command: &mut Command) -> Result<String, String> {

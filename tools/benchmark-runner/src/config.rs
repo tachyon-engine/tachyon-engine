@@ -1,7 +1,14 @@
-use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Component, Path},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::EngineKind;
 
 /// Complete measurement, build, and approved corpus configuration.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -35,8 +42,57 @@ pub struct BenchmarkConfig {
     pub maximum_process_output_bytes: usize,
     /// Reproducible Tachyon/Rust build settings.
     pub build: BuildConfig,
+    /// Pinned release CLI profiles used for cross-engine smoke reports.
+    pub external_engines: Vec<ExternalEngineProfile>,
     /// Approved content-addressed corpus entries.
     pub scripts: Vec<ScriptConfig>,
+}
+
+/// Pinned source, build, and executable identity for one external engine on one platform.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEngineProfile {
+    /// Stable command-line profile ID.
+    pub id: Box<str>,
+    /// Report display name.
+    pub name: Box<str>,
+    /// CLI engine family.
+    pub kind: EngineKind,
+    /// Exact `std::env::consts::OS-ARCH` build platform.
+    pub platform: Box<str>,
+    /// Canonical source repository.
+    pub repository: Box<str>,
+    /// Full pinned source revision.
+    pub commit: Box<str>,
+    /// Version reported from the pinned source/build.
+    pub version: Box<str>,
+    /// Workspace-relative checkout or cache directory.
+    pub checkout_path: Box<str>,
+    /// Workspace-relative release executable.
+    pub executable_path: Box<str>,
+    /// Enabled engine features.
+    pub features: Box<str>,
+    /// Exact human-readable compiler/profile flags retained in reports.
+    pub build_flags: Box<str>,
+    /// Fixed arguments inserted before the script path.
+    pub fixed_arguments: Vec<Box<str>>,
+    /// Ordered build commands, represented without shell parsing.
+    pub build_steps: Vec<ExternalBuildStep>,
+}
+
+/// One reproducible external build command and its explicit environment additions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalBuildStep {
+    /// Workspace-relative command working directory.
+    pub working_directory: Box<str>,
+    /// Executable name or path.
+    pub program: Box<str>,
+    /// Exact argv excluding `argv[0]`.
+    pub arguments: Vec<Box<str>>,
+    /// Environment additions required by this step.
+    #[serde(default)]
+    pub environment: BTreeMap<Box<str>, Box<str>>,
 }
 
 /// Reproducible compiler/profile identity recorded beside every result.
@@ -186,6 +242,7 @@ impl BenchmarkConfig {
         if self.external_process_timeout_millis == 0 || self.maximum_process_output_bytes == 0 {
             return Err("external process timeout and output limit must be nonzero");
         }
+        validate_external_engines(&self.external_engines)?;
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();
         for script in &self.scripts {
@@ -203,6 +260,75 @@ impl BenchmarkConfig {
         }
         Ok(())
     }
+
+    /// Finds one exact external engine profile by stable ID.
+    #[must_use]
+    pub fn external_engine(&self, id: &str) -> Option<&ExternalEngineProfile> {
+        self.external_engines
+            .iter()
+            .find(|profile| &*profile.id == id)
+    }
+}
+
+/// Rejects ambiguous profiles, weak revisions, unsafe relative paths, and shell-like empty steps.
+fn validate_external_engines(profiles: &[ExternalEngineProfile]) -> Result<(), &'static str> {
+    let mut ids = BTreeSet::new();
+    for profile in profiles {
+        if !ids.insert(&profile.id) {
+            return Err("external engine profile IDs must be unique");
+        }
+        if !matches!(
+            profile.kind,
+            EngineKind::BoaCli | EngineKind::QuickJsCli | EngineKind::EscargotCli
+        ) {
+            return Err("external engine profiles require a CLI engine kind");
+        }
+        if profile.id.is_empty()
+            || profile.name.is_empty()
+            || profile.platform.is_empty()
+            || profile.repository.is_empty()
+            || profile.version.is_empty()
+            || profile.features.is_empty()
+            || profile.build_flags.is_empty()
+            || !is_hex(&profile.commit, 40)
+        {
+            return Err("external engine profile identity and full commit are required");
+        }
+        if !is_safe_relative(&profile.checkout_path)
+            || !is_safe_relative(&profile.executable_path)
+            || profile.build_steps.is_empty()
+        {
+            return Err("external engine paths must be non-empty safe relative paths");
+        }
+        for step in &profile.build_steps {
+            if step.program.is_empty() || !is_safe_relative(&step.working_directory) {
+                return Err("external build steps require a program and safe working directory");
+            }
+            if is_command_shell(&step.program) {
+                return Err("external build steps may not invoke command shells");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_command_shell(program: &str) -> bool {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "sh" | "bash" | "zsh" | "cmd" | "cmd.exe" | "powershell" | "powershell.exe" | "pwsh"
+    )
+}
+
+fn is_safe_relative(value: &str) -> bool {
+    !value.is_empty()
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 /// Reads every approved source, verifies content before publication, and shares bytes across adapters.
@@ -270,6 +396,8 @@ impl std::error::Error for CorpusError {}
 mod tests {
     use std::path::Path;
 
+    use crate::EngineKind;
+
     use super::{BenchmarkConfig, load_corpus};
 
     const CONFIG: &str = include_str!("../../../benchmark_config.toml");
@@ -282,5 +410,39 @@ mod tests {
         let corpus = load_corpus(&workspace, &config).unwrap();
         assert_eq!(corpus.len(), 3);
         assert!(corpus.iter().all(|script| !script.source.is_empty()));
+        assert_eq!(config.external_engines.len(), 3);
+        assert!(config.external_engine("boa-macos-aarch64").is_some());
+    }
+
+    #[test]
+    fn external_profiles_reject_duplicates_unsafe_paths_and_non_cli_kinds() {
+        let config = BenchmarkConfig::parse(CONFIG).unwrap();
+        let mut duplicate = config.clone();
+        duplicate.external_engines[1].id = duplicate.external_engines[0].id.clone();
+        assert_eq!(
+            duplicate.validate(),
+            Err("external engine profile IDs must be unique")
+        );
+
+        let mut escaping = config.clone();
+        escaping.external_engines[0].checkout_path = "../boa".into();
+        assert_eq!(
+            escaping.validate(),
+            Err("external engine paths must be non-empty safe relative paths")
+        );
+
+        let mut fixture = config;
+        fixture.external_engines[0].kind = EngineKind::Fixture;
+        assert_eq!(
+            fixture.validate(),
+            Err("external engine profiles require a CLI engine kind")
+        );
+
+        let mut shell = BenchmarkConfig::parse(CONFIG).unwrap();
+        shell.external_engines[0].build_steps[0].program = "/bin/sh".into();
+        assert_eq!(
+            shell.validate(),
+            Err("external build steps may not invoke command shells")
+        );
     }
 }
