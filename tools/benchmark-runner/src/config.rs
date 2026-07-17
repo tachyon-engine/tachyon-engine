@@ -29,6 +29,10 @@ pub struct BenchmarkConfig {
     pub background_work_units: u64,
     /// Maximum calibration MAD/median ratio.
     pub maximum_background_relative_mad: f64,
+    /// Hard deadline for one external cold-start sample.
+    pub external_process_timeout_millis: u64,
+    /// Per-stream external diagnostic capture cap.
+    pub maximum_process_output_bytes: usize,
     /// Reproducible Tachyon/Rust build settings.
     pub build: BuildConfig,
     /// Approved content-addressed corpus entries.
@@ -178,6 +182,9 @@ impl BenchmarkConfig {
             || self.maximum_background_relative_mad <= 0.0
         {
             return Err("maximum background relative MAD must be finite and positive");
+        }
+        if self.external_process_timeout_millis == 0 || self.maximum_process_output_bytes == 0 {
+            return Err("external process timeout and output limit must be nonzero");
         }
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();

@@ -59,6 +59,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
+ "wait-timeout",
 ]
 
 [[package]]

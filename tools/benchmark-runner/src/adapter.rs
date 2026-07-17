@@ -68,14 +68,30 @@ pub enum AdapterError {
     UnsupportedMode(MeasurementMode),
     /// Parse/compile/process preparation failed.
     Setup(Box<str>),
-    /// JavaScript execution returned an error.
-    Execution(Box<str>),
-    /// Configured deadline expired.
-    Timeout(Box<str>),
+    /// JavaScript execution returned a normal nonzero exit status.
+    Execution {
+        /// Numeric exit status.
+        status: i32,
+        /// Captured standard output, capped by adapter policy.
+        stdout: Box<str>,
+        /// Captured standard error, capped by adapter policy.
+        stderr: Box<str>,
+    },
+    /// Configured deadline expired and the child was terminated.
+    Timeout {
+        /// Deadline and termination diagnostic.
+        message: Box<str>,
+        /// Output produced before termination, capped by adapter policy.
+        stdout: Box<str>,
+        /// Error output produced before termination, capped by adapter policy.
+        stderr: Box<str>,
+    },
     /// External process terminated abnormally.
     Crash {
         /// Exit status or signal diagnostic.
         message: Box<str>,
+        /// Captured standard output, capped by adapter policy.
+        stdout: Box<str>,
         /// Captured standard error.
         stderr: Box<str>,
     },

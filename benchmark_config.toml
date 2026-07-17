@@ -9,6 +9,8 @@ required_performance_governor = "performance"
 background_precheck_samples = 15
 background_work_units = 100000
 maximum_background_relative_mad = 0.05
+external_process_timeout_millis = 10000
+maximum_process_output_bytes = 65536
 
 [build]
 profile = "release"

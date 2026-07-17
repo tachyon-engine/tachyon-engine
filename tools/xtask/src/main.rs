@@ -1,10 +1,19 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Repository maintenance commands. Host I/O is deliberately confined to this tool crate.
 
-use std::{env, fs, path::Path, process::Command};
+use std::{
+    env,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
 use benchmark_runner::{
-    BenchmarkConfig, BenchmarkReport, compare_reports as compare_benchmarks, load_corpus,
+    BenchmarkConfig, BenchmarkReport, EngineIdentity, EngineKind, ExternalProcessAdapter,
+    ExternalProcessConfig, HostMetadata, MeasurementMode, compare_reports as compare_benchmarks,
+    load_corpus, run_case,
 };
 use test262_runner::{
     RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
@@ -70,6 +79,9 @@ fn main() {
         {
             compare_benchmark_reports(base, candidate, true)
         }
+        [command, subcommand, rest @ ..] if command == "bench" && subcommand == "run-external" => {
+            run_external_benchmarks(rest)
+        }
         _ => Err(USAGE.to_owned()),
     };
 
@@ -79,7 +91,19 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+
+struct ExternalRunOptions {
+    kind: EngineKind,
+    name: Box<str>,
+    executable: PathBuf,
+    version: Box<str>,
+    commit: Box<str>,
+    features: Box<str>,
+    build_flags: Box<str>,
+    script: Option<Box<str>>,
+    engine_arguments: Vec<OsString>,
+}
 
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -269,6 +293,124 @@ fn compare_benchmark_reports(base: &str, candidate: &str, markdown: bool) -> Res
     Ok(())
 }
 
+/// Runs an approved corpus subset through one release CLI and emits a standalone JSON report.
+fn run_external_benchmarks(arguments: &[String]) -> Result<(), String> {
+    let options = parse_external_run_options(arguments)?;
+    let workspace = workspace_root();
+    let config_path = workspace.join("benchmark_config.toml");
+    let source = fs::read_to_string(&config_path)
+        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let config = BenchmarkConfig::parse(&source).map_err(|error| error.to_string())?;
+    let corpus = load_corpus(&workspace, &config).map_err(|error| error.to_string())?;
+    let host = HostMetadata::collect(&config);
+    let identity = EngineIdentity {
+        name: options.name,
+        kind: options.kind,
+        version: options.version,
+        commit: options.commit,
+        features: options.features,
+        build_flags: options.build_flags,
+        binary_size_bytes: None,
+    };
+    let mut adapter = ExternalProcessAdapter::new(
+        identity,
+        ExternalProcessConfig {
+            executable: options.executable,
+            fixed_arguments: options.engine_arguments,
+            timeout: Duration::from_millis(config.external_process_timeout_millis),
+            maximum_output_bytes: config.maximum_process_output_bytes,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let selected = corpus
+        .iter()
+        .filter(|script| {
+            options
+                .script
+                .as_deref()
+                .is_none_or(|id| id == &*script.config.id)
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err("external benchmark script selection matched nothing".to_owned());
+    }
+    let mut cases = Vec::new();
+    cases
+        .try_reserve_exact(selected.len())
+        .map_err(|_| "cannot reserve external benchmark results".to_owned())?;
+    for script in selected {
+        cases.push(
+            run_case(
+                &mut adapter,
+                script,
+                MeasurementMode::ColdStart,
+                &config,
+                &host,
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    let report = BenchmarkReport {
+        schema_version: 1,
+        host,
+        build: config.build,
+        cases,
+    };
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
+}
+
+/// Parses explicit provenance and engine arguments without accepting shell command strings.
+fn parse_external_run_options(arguments: &[String]) -> Result<ExternalRunOptions, String> {
+    let [
+        engine,
+        executable,
+        version,
+        commit,
+        features,
+        build_flags,
+        rest @ ..,
+    ] = arguments
+    else {
+        return Err(USAGE.to_owned());
+    };
+    let (kind, name) = match engine.as_str() {
+        "boa" => (EngineKind::BoaCli, "Boa"),
+        "quickjs" => (EngineKind::QuickJsCli, "QuickJS"),
+        "escargot" => (EngineKind::EscargotCli, "Escargot"),
+        _ => return Err("external engine must be boa, quickjs, or escargot".to_owned()),
+    };
+    let mut script = None;
+    let mut engine_arguments = Vec::new();
+    let mut index = 0;
+    while index < rest.len() {
+        let flag = &rest[index];
+        index += 1;
+        let value = rest
+            .get(index)
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--script" if script.is_none() => script = Some(value.clone().into_boxed_str()),
+            "--engine-arg" => engine_arguments.push(OsString::from(value)),
+            _ => return Err(USAGE.to_owned()),
+        }
+        index += 1;
+    }
+    Ok(ExternalRunOptions {
+        kind,
+        name: name.into(),
+        executable: executable.into(),
+        version: version.clone().into_boxed_str(),
+        commit: commit.clone().into_boxed_str(),
+        features: features.clone().into_boxed_str(),
+        build_flags: build_flags.clone().into_boxed_str(),
+        script,
+        engine_arguments,
+    })
+}
+
 fn run_command(command: &mut Command) -> Result<(), String> {
     let output = command
         .output()
@@ -398,7 +540,9 @@ fn manifest_has_dependency(manifest: &str, dependency: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FORBIDDEN_SOURCE_PATTERNS, manifest_has_dependency};
+    use benchmark_runner::EngineKind;
+
+    use super::{FORBIDDEN_SOURCE_PATTERNS, manifest_has_dependency, parse_external_run_options};
 
     #[test]
     fn dependency_lookup_does_not_match_package_name_prefixes() {
@@ -418,5 +562,38 @@ mod tests {
         assert!(FORBIDDEN_SOURCE_PATTERNS.contains(&"std::net"));
         assert!(FORBIDDEN_SOURCE_PATTERNS.contains(&"std::process"));
         assert!(FORBIDDEN_SOURCE_PATTERNS.contains(&"std::io"));
+    }
+
+    #[test]
+    fn external_benchmark_options_preserve_provenance_and_repeated_arguments() {
+        let arguments = [
+            "escargot",
+            "/tmp/escargot",
+            "1.0",
+            "deadbeef",
+            "intl",
+            "-O3",
+            "--script",
+            "basic/call-loop",
+            "--engine-arg",
+            "--shell",
+            "--engine-arg",
+            "--canblock-is-false",
+        ]
+        .map(str::to_owned);
+        let options = parse_external_run_options(&arguments).unwrap();
+        assert_eq!(options.kind, EngineKind::EscargotCli);
+        assert_eq!(&*options.commit, "deadbeef");
+        assert_eq!(options.script.as_deref(), Some("basic/call-loop"));
+        assert_eq!(options.engine_arguments.len(), 2);
+    }
+
+    #[test]
+    fn external_benchmark_options_reject_unknown_engines_and_missing_values() {
+        let unknown = ["v8", "bin", "v", "c", "f", "flags"].map(str::to_owned);
+        assert!(parse_external_run_options(&unknown).is_err());
+        let missing_value =
+            ["boa", "bin", "v", "c", "f", "flags", "--engine-arg"].map(str::to_owned);
+        assert!(parse_external_run_options(&missing_value).is_err());
     }
 }

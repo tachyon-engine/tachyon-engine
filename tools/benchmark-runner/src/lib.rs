@@ -5,6 +5,7 @@
 mod adapter;
 mod compare;
 mod config;
+mod external;
 mod runner;
 mod stats;
 
@@ -16,6 +17,7 @@ pub use config::{
     BenchmarkCategory, BenchmarkConfig, BuildConfig, ConfigError, CorpusError, CorpusScript,
     ScriptConfig, SuiteKind, load_corpus,
 };
+pub use external::{ExternalProcessAdapter, ExternalProcessConfig};
 pub use runner::{
     BenchmarkCaseResult, BenchmarkReport, EnvironmentCheck, HostMetadata, MeasurementMode,
     RunError, Validity, run_case,
