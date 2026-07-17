@@ -425,6 +425,194 @@ impl Bytecode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct Label(u32);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceMapEntry {
+    pub offset: WordOffset,
+    pub span: SourceSpan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuilderError {
+    Encode(EncodeError),
+    InvalidLabel(Label),
+    LabelAlreadyBound(Label),
+    UnboundLabel(Label),
+    RegisterCountOverflow,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct JumpPatch {
+    label: Label,
+    operand_word: WordOffset,
+}
+
+/// A compiler-only mutable builder that resolves symbolic jumps before freezing words into `Bytecode`.
+#[derive(Debug, Default)]
+pub struct BytecodeBuilder {
+    words: Vec<u32>,
+    labels: Vec<Option<WordOffset>>,
+    patches: Vec<JumpPatch>,
+    source_map: Vec<SourceMapEntry>,
+    register_count: u32,
+}
+
+impl BytecodeBuilder {
+    #[must_use]
+    pub fn with_capacity(word_capacity: usize, label_capacity: usize) -> Self {
+        Self {
+            words: Vec::with_capacity(word_capacity),
+            labels: Vec::with_capacity(label_capacity),
+            patches: Vec::new(),
+            source_map: Vec::new(),
+            register_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn new_label(&mut self) -> Label {
+        let label = Label(self.labels.len() as u32);
+        self.labels.push(None);
+        label
+    }
+
+    pub fn bind_label(&mut self, label: Label) -> Result<(), BuilderError> {
+        let Some(slot) = self.labels.get_mut(label.0 as usize) else {
+            return Err(BuilderError::InvalidLabel(label));
+        };
+        if slot.is_some() {
+            return Err(BuilderError::LabelAlreadyBound(label));
+        }
+        *slot = Some(WordOffset::new(self.words.len() as u32));
+        Ok(())
+    }
+
+    /// Emits an instruction in its smallest representation and records its source span without retaining AST data.
+    pub fn emit(
+        &mut self,
+        opcode: Opcode,
+        operands: &[u32],
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        self.note_registers(opcode, operands)?;
+        let offset = WordOffset::new(self.words.len() as u32);
+        self.words
+            .extend(encode_instruction(opcode, operands).map_err(BuilderError::Encode)?);
+        self.source_map.push(SourceMapEntry { offset, span });
+        Ok(offset)
+    }
+
+    /// Emits a wide `Jump` placeholder so label binding cannot alter instruction length or downstream offsets.
+    pub fn emit_jump(
+        &mut self,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        self.ensure_label(label)?;
+        let offset = WordOffset::new(self.words.len() as u32);
+        self.words
+            .extend([((Opcode::Jump as u8) | WIDE_FORMAT) as u32, 0]);
+        self.patches.push(JumpPatch {
+            label,
+            operand_word: WordOffset::new(offset.index() + 1),
+        });
+        self.source_map.push(SourceMapEntry { offset, span });
+        Ok(offset)
+    }
+
+    /// Emits a wide conditional jump placeholder with an immutable condition register and a patchable target word.
+    pub fn emit_jump_if_false(
+        &mut self,
+        condition: RegisterId,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        self.ensure_label(label)?;
+        self.note_register(condition.index())?;
+        let offset = WordOffset::new(self.words.len() as u32);
+        self.words.extend([
+            ((Opcode::JumpIfFalse as u8) | WIDE_FORMAT) as u32,
+            condition.index(),
+            0,
+        ]);
+        self.patches.push(JumpPatch {
+            label,
+            operand_word: WordOffset::new(offset.index() + 2),
+        });
+        self.source_map.push(SourceMapEntry { offset, span });
+        Ok(offset)
+    }
+
+    /// Resolves every label once, then freezes the builder's words and source map without retaining spare capacity.
+    pub fn finish(mut self) -> Result<(Bytecode, Arc<[SourceMapEntry]>, u32), BuilderError> {
+        for patch in &self.patches {
+            let target = self
+                .labels
+                .get(patch.label.0 as usize)
+                .ok_or(BuilderError::InvalidLabel(patch.label))?
+                .ok_or(BuilderError::UnboundLabel(patch.label))?;
+            self.words[patch.operand_word.index() as usize] = target.index();
+        }
+        Ok((
+            Bytecode::from_words(self.words),
+            self.source_map.into(),
+            self.register_count,
+        ))
+    }
+
+    fn ensure_label(&self, label: Label) -> Result<(), BuilderError> {
+        if self.labels.get(label.0 as usize).is_some() {
+            Ok(())
+        } else {
+            Err(BuilderError::InvalidLabel(label))
+        }
+    }
+
+    fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
+        let indexes: &[usize] = match opcode {
+            Opcode::Nop | Opcode::Jump => &[],
+            Opcode::LoadImmediate
+            | Opcode::LoadConstant
+            | Opcode::LoadScope
+            | Opcode::CreateClosure
+            | Opcode::StoreScope
+            | Opcode::Return
+            | Opcode::Throw => &[0],
+            Opcode::Move => &[0, 1],
+            Opcode::JumpIfFalse => &[0],
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::StrictEqual
+            | Opcode::Call => &[0, 1, 2],
+        };
+        for &index in indexes {
+            if let Some(&register) = operands.get(index) {
+                self.note_register(register)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn note_register(&mut self, register: u32) -> Result<(), BuilderError> {
+        let count = register
+            .checked_add(1)
+            .ok_or(BuilderError::RegisterCountOverflow)?;
+        self.register_count = self.register_count.max(count);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VerifiedBytecode {
     bytecode: Bytecode,
@@ -608,5 +796,39 @@ mod tests {
         let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap();
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         assert!(Bytecode::from_words(words).verify(context()).is_ok());
+    }
+
+    #[test]
+    fn builder_patches_forward_jump_and_freezes_metadata() {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(4, 1);
+        let end = builder.new_label();
+        builder.emit_jump(end, span).unwrap();
+        builder.emit(Opcode::Nop, &[], span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[0], span).unwrap();
+
+        let (bytecode, source_map, registers) = builder.finish().unwrap();
+        assert_eq!(registers, 1);
+        assert_eq!(source_map.len(), 3);
+        assert_eq!(
+            decode_instruction(bytecode.words(), WordOffset::new(0))
+                .unwrap()
+                .operand(0),
+            Some(3)
+        );
+        assert!(bytecode.verify(context()).is_ok());
+    }
+
+    #[test]
+    fn builder_rejects_unbound_labels() {
+        let span = SourceSpan { start: 0, end: 0 };
+        let mut builder = BytecodeBuilder::default();
+        let label = builder.new_label();
+        builder.emit_jump(label, span).unwrap();
+        assert!(matches!(
+            builder.finish(),
+            Err(BuilderError::UnboundLabel(found)) if found == label
+        ));
     }
 }
