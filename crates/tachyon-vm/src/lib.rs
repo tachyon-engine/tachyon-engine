@@ -173,6 +173,7 @@ impl Isolate {
         module: &CompiledModule,
         mut budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
+        assert!(N > 0, "interpreter batch size must be non-zero");
         self.enter(module, module.entry_function())?;
         loop {
             if budget.fuel == 0 || budget.quantum == 0 {
@@ -516,6 +517,18 @@ mod tests {
         assert_batch_budget::<4>();
         assert_batch_budget::<8>();
         assert_batch_budget::<16>();
+    }
+
+    #[test]
+    #[should_panic(expected = "interpreter batch size must be non-zero")]
+    fn interpreter_rejects_zero_batch_before_entering_dispatch_loop() {
+        let _ = Isolate::default().execute_with_batch::<0>(
+            &arithmetic_module(),
+            ExecutionBudget {
+                fuel: 1,
+                quantum: 1,
+            },
+        );
     }
 
     #[test]
