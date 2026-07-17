@@ -14,7 +14,10 @@ mod epoch;
 mod handle;
 mod layout;
 mod span;
+mod storage;
+mod table;
 mod trace;
+mod tuning;
 
 pub use descriptor::{DropObjectFn, TraceObjectFn, TypeDescriptor};
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
@@ -24,6 +27,11 @@ pub use layout::{
     LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_SPANS,
     MAX_SMALL_OBJECT_SLOTS, MINIMUM_SLOT_SIZE_BYTES, SLOT_BITMAP_WORDS, SPAN_SIZE_BYTES,
 };
-pub use span::{AllocationBitmap, CardBitmap, MarkBitmap, SizeClass, SlotIndex, SpanSpace};
+pub use span::{
+    AllocationBitmap, CardBitmap, MarkBitmap, SizeClass, SlotIndex, SmallSpanMetadata,
+    SpanReuseGeneration, SpanSpace, SweepState,
+};
+pub use storage::{SpanStorage, SpanStorageAllocationError};
+pub use table::{SpanTable, SpanTableError};
 pub use tachyon_value::{SpanId, SpanOffset};
 pub use trace::{Trace, Tracer};
