@@ -13,7 +13,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EngineAdapter, Harness, Phase, ResultKind, Test262Config, TestMetadata, TestResult, run_test,
+    Applicability, EngineAdapter, FeatureCatalog, Harness, Phase, ResultKind, SpecEdition,
+    Test262Config, TestClassification, TestMetadata, TestResult, run_test,
 };
 
 /// Stable traversal, selection, scheduling, and randomization policy for one suite run.
@@ -50,6 +51,8 @@ pub struct RunReport {
     pub schema_version: u32,
     /// Verified upstream revision.
     pub test262_commit: Box<str>,
+    /// SHA-256 of the canonical release-target and feature-policy configuration.
+    pub policy_sha256: Box<str>,
     /// Optional deterministic randomization seed.
     pub seed: Option<u64>,
     /// Aggregate counts retaining all failure categories.
@@ -65,10 +68,18 @@ pub struct RunSummary {
     pub total: u64,
     /// Variants whose actual outcome matched their expectation.
     pub passed: u64,
+    /// Variants in the release-target denominator.
+    pub applicable_total: u64,
+    /// Passing variants in the release-target denominator.
+    pub applicable_passed: u64,
     /// Global category counts.
     pub by_result: BTreeMap<ResultKind, u64>,
     /// Counts grouped by positive/parse/resolution/runtime expectation.
     pub by_phase: BTreeMap<Box<str>, BTreeMap<ResultKind, u64>>,
+    /// Counts grouped by minimum ECMAScript edition.
+    pub by_edition: BTreeMap<SpecEdition, BTreeMap<ResultKind, u64>>,
+    /// Counts grouped by denominator applicability.
+    pub by_applicability: BTreeMap<Applicability, BTreeMap<ResultKind, u64>>,
     /// Counts grouped by every upstream feature tag.
     pub by_feature: BTreeMap<Box<str>, BTreeMap<ResultKind, u64>>,
     /// Counts grouped by the first two checkout path components.
@@ -89,6 +100,7 @@ struct LoadedTest {
     relative_path: Box<str>,
     source: Arc<str>,
     metadata: TestMetadata,
+    classification: TestClassification,
 }
 
 /// Loads the checkout, executes all selected variants, and restores path/variant order after parallel work.
@@ -106,7 +118,8 @@ pub fn run_checkout(
         verify_checkout_commit(checkout, &config.commit)?;
     }
     let harness = load_harness(checkout)?;
-    let mut tests = load_tests(checkout, options)?;
+    let feature_catalog = FeatureCatalog::parse(&read_utf8(&checkout.join("features.txt"))?);
+    let mut tests = load_tests(checkout, config, &feature_catalog, options)?;
     if let Some(seed) = options.seed {
         tests.sort_by(|left, right| {
             seeded_key(seed, &left.relative_path)
@@ -131,8 +144,12 @@ pub fn run_checkout(
     });
     let summary = summarize(&results);
     Ok(RunReport {
-        schema_version: 1,
+        schema_version: 2,
         test262_commit: config.commit.clone(),
+        policy_sha256: config.policy_fingerprint().map_err(|error| SuiteError {
+            path: PathBuf::from("test262_config.toml"),
+            message: error.to_string().into(),
+        })?,
         seed: options.seed,
         summary,
         results,
@@ -155,7 +172,12 @@ fn load_harness(checkout: &Path) -> Result<Harness, SuiteError> {
 }
 
 /// Selects either the complete test tree, one directory, or one file, then parses every metadata block.
-fn load_tests(checkout: &Path, options: &RunOptions) -> Result<Vec<LoadedTest>, SuiteError> {
+fn load_tests(
+    checkout: &Path,
+    config: &Test262Config,
+    feature_catalog: &FeatureCatalog,
+    options: &RunOptions,
+) -> Result<Vec<LoadedTest>, SuiteError> {
     let test_root = checkout.join("test");
     let selected = match options.selector.as_ref() {
         None => test_root,
@@ -195,10 +217,17 @@ fn load_tests(checkout: &Path, options: &RunOptions) -> Result<Vec<LoadedTest>, 
             path: path.clone(),
             message: error.to_string().into(),
         })?;
+        let classification = feature_catalog
+            .classify(&metadata, &relative_path, config)
+            .map_err(|error| SuiteError {
+                path: path.clone(),
+                message: error.to_string().into(),
+            })?;
         tests.push(LoadedTest {
             relative_path: relative_path.into(),
             source: source.into(),
             metadata,
+            classification,
         });
     }
     Ok(tests)
@@ -232,6 +261,7 @@ fn execute_loaded(
             &loaded.relative_path,
             &loaded.metadata,
             &composed,
+            &loaded.classification,
         ));
     }
     Ok(results)
@@ -350,6 +380,17 @@ fn summarize(results: &[TestResult]) -> RunSummary {
             .iter()
             .filter(|result| result.result == ResultKind::Pass)
             .count() as u64,
+        applicable_total: results
+            .iter()
+            .filter(|result| result.applicability == Applicability::Applicable)
+            .count() as u64,
+        applicable_passed: results
+            .iter()
+            .filter(|result| {
+                result.applicability == Applicability::Applicable
+                    && result.result == ResultKind::Pass
+            })
+            .count() as u64,
         ..RunSummary::default()
     };
     for result in results {
@@ -357,6 +398,12 @@ fn summarize(results: &[TestResult]) -> RunSummary {
         increment_nested(
             &mut summary.by_phase,
             phase_name(result.expected_phase).into(),
+            result.result,
+        );
+        increment_nested(&mut summary.by_edition, result.edition, result.result);
+        increment_nested(
+            &mut summary.by_applicability,
+            result.applicability,
             result.result,
         );
         for feature in &result.features {
@@ -413,7 +460,10 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::{ResultKind, StubAdapter, Test262Config};
+    use crate::{
+        EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, ResultKind,
+        StubAdapter, Test262Config, VariantKind,
+    };
 
     use super::{RunOptions, run_checkout};
 
@@ -428,6 +478,11 @@ mod tests {
         fs::write(root.path().join("harness/sta.js"), "sta").unwrap();
         fs::write(root.path().join("harness/doneprintHandle.js"), "done").unwrap();
         fs::write(
+            root.path().join("features.txt"),
+            "## Standard language features\nBigInt\n",
+        )
+        .unwrap();
+        fs::write(
             root.path().join("test/language/positive.js"),
             "/*---\ndescription: positive\nfeatures: [BigInt]\n---*/\n1;",
         )
@@ -435,6 +490,11 @@ mod tests {
         fs::write(
             root.path().join("test/language/module.js"),
             "/*---\ndescription: module\nflags: [module, async]\n---*/\nexport {};",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("test/language/negative.js"),
+            "/*---\ndescription: negative\nflags: [onlyStrict]\nnegative:\n  phase: parse\n  type: SyntaxError\n---*/\ninvalid",
         )
         .unwrap();
         fs::write(
@@ -461,11 +521,12 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(report.summary.total, 3);
-        assert_eq!(report.summary.by_result[&ResultKind::Unsupported], 3);
+        assert_eq!(report.summary.total, 4);
+        assert_eq!(report.summary.by_result[&ResultKind::Unsupported], 4);
         assert_eq!(report.results[0].path.as_ref(), "test/language/module.js");
-        assert_eq!(report.results[1].path.as_ref(), "test/language/positive.js");
+        assert_eq!(report.results[1].path.as_ref(), "test/language/negative.js");
         assert_eq!(report.results[2].path.as_ref(), "test/language/positive.js");
+        assert_eq!(report.results[3].path.as_ref(), "test/language/positive.js");
     }
 
     #[test]
@@ -508,5 +569,85 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("within the test262 checkout"));
+    }
+
+    struct InspectingAdapter;
+
+    impl EngineAdapter for InspectingAdapter {
+        /// Validates the complete request contract before emulating the expected fixture outcome.
+        fn execute(&self, request: ExecutionRequest<'_>) -> EngineResponse {
+            let name = request.test.body.name.as_ref();
+            let valid = match name {
+                "test/language/module.js" => {
+                    request.is_module
+                        && request.is_async
+                        && request.can_block
+                        && request
+                            .test
+                            .preludes
+                            .iter()
+                            .any(|unit| unit.name.as_ref() == "doneprintHandle.js")
+                }
+                "test/language/negative.js" => {
+                    request.test.variant.kind == VariantKind::Strict
+                        && request.test.body.source.starts_with("\"use strict\";")
+                }
+                "test/language/positive.js" => {
+                    !request.is_module
+                        && !request.is_async
+                        && match request.test.variant.kind {
+                            VariantKind::Strict => {
+                                request.test.body.source.starts_with("\"use strict\";")
+                            }
+                            VariantKind::Sloppy => {
+                                !request.test.body.source.starts_with("\"use strict\";")
+                            }
+                            VariantKind::Module | VariantKind::Raw => false,
+                        }
+                }
+                _ => false,
+            };
+            if !valid {
+                return EngineResponse::new(EngineOutcome::HarnessFailure {
+                    message: "invalid fake-engine request".into(),
+                });
+            }
+            if name == "test/language/negative.js" {
+                EngineResponse::new(EngineOutcome::Error {
+                    phase: Phase::Parse,
+                    error_type: "SyntaxError".into(),
+                    message: "expected fixture error".into(),
+                })
+            } else {
+                EngineResponse::new(EngineOutcome::Completed)
+            }
+        }
+    }
+
+    #[test]
+    /// Proves one fake engine receives correct positive/negative/strict/async/module request semantics.
+    fn fake_engine_fixture_passes_every_execution_mode() {
+        let root = checkout();
+        let config = Test262Config::parse(CONFIG).unwrap();
+        let report = run_checkout(
+            root.path(),
+            &config,
+            &InspectingAdapter,
+            &RunOptions {
+                parallel: false,
+                verify_commit: false,
+                ..RunOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.summary.total, 4);
+        assert_eq!(report.summary.passed, 4);
+        assert_eq!(report.summary.applicable_passed, 4);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.result == ResultKind::Pass)
+        );
     }
 }

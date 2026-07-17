@@ -1,6 +1,9 @@
 use core::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::SpecEdition;
 
 /// A pinned Test262 checkout and release-policy manifest.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -26,6 +29,8 @@ pub struct ReleaseTarget {
     pub ecma262: Box<str>,
     /// Human-readable ECMA-402 edition identifier.
     pub ecma402: Box<str>,
+    /// Highest standardized ECMAScript edition included in the denominator.
+    pub max_edition: SpecEdition,
     /// Whether normative-optional Annex B tests are applicable.
     pub annex_b: bool,
     /// Whether ECMA-402 tests are applicable.
@@ -90,6 +95,9 @@ impl Test262Config {
         if !is_lower_hex_commit(&self.commit) {
             return Err("test262 commit must be a full lowercase hexadecimal SHA-1");
         }
+        if self.release_target.max_edition == SpecEdition::EsNext {
+            return Err("release target must name a published ECMAScript edition");
+        }
         for proposal in &self.feature_policy.pinned_proposals {
             if !is_lower_hex_commit(&proposal.commit) {
                 return Err("proposal commit must be a full lowercase hexadecimal SHA-1");
@@ -99,6 +107,16 @@ impl Test262Config {
             }
         }
         Ok(())
+    }
+
+    /// Hashes canonical struct-order JSON so reports cannot compare different denominator policies silently.
+    pub fn policy_fingerprint(&self) -> Result<Box<str>, serde_json::Error> {
+        let encoded = serde_json::to_vec(&(
+            self.schema_version,
+            &self.release_target,
+            &self.feature_policy,
+        ))?;
+        Ok(format!("{:x}", Sha256::digest(encoded)).into_boxed_str())
     }
 }
 
@@ -139,5 +157,22 @@ mod tests {
     fn unknown_policy_fields_are_rejected() {
         let source = CONFIG.replace("intl = true", "intl = true\ntyop = false");
         assert!(Test262Config::parse(&source).is_err());
+    }
+
+    #[test]
+    fn policy_fingerprint_excludes_checkout_commit_but_includes_denominator_rules() {
+        let config = Test262Config::parse(CONFIG).unwrap();
+        let mut other_commit = config.clone();
+        other_commit.commit = "1111111111111111111111111111111111111111".into();
+        assert_eq!(
+            config.policy_fingerprint().unwrap(),
+            other_commit.policy_fingerprint().unwrap()
+        );
+        let mut other_policy = config.clone();
+        other_policy.release_target.annex_b = false;
+        assert_ne!(
+            config.policy_fingerprint().unwrap(),
+            other_policy.policy_fingerprint().unwrap()
+        );
     }
 }

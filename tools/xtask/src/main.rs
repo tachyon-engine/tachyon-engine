@@ -1,7 +1,11 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 //! Repository maintenance commands. Host I/O is deliberately confined to this tool crate.
 
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, process::Command};
+
+use test262_runner::{
+    RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
+};
 
 const ENGINE_CRATES: [&str; 6] = [
     "tachyon-value",
@@ -40,7 +44,19 @@ fn main() {
         [command, subcommand] if command == "architecture" && subcommand == "check" => {
             check_architecture()
         }
-        _ => Err("usage: cargo xtask architecture check".to_owned()),
+        [command, subcommand] if command == "test262" && subcommand == "fetch" => fetch_test262(),
+        [command, subcommand, rest @ ..] if command == "test262" && subcommand == "run" => {
+            run_test262(rest)
+        }
+        [command, subcommand, base, new] if command == "test262" && subcommand == "compare" => {
+            compare_test262(base, new, false)
+        }
+        [command, subcommand, base, new, flag]
+            if command == "test262" && subcommand == "compare" && flag == "--markdown" =>
+        {
+            compare_test262(base, new, true)
+        }
+        _ => Err(USAGE.to_owned()),
     };
 
     if let Err(message) = result {
@@ -49,9 +65,172 @@ fn main() {
     }
 }
 
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]";
+
+fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn test262_config() -> Result<Test262Config, String> {
+    let path = workspace_root().join("test262_config.toml");
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let config = Test262Config::parse(&source).map_err(|error| error.to_string())?;
+    config.validate().map_err(str::to_owned)?;
+    Ok(config)
+}
+
+/// Fetches exactly the configured commit while preserving dirty or differently sourced checkouts.
+fn fetch_test262() -> Result<(), String> {
+    let workspace = workspace_root();
+    let checkout = workspace.join("test262");
+    let config = test262_config()?;
+    if !checkout.exists() {
+        run_command(Command::new("git").arg("init").arg(&checkout))?;
+        run_command(
+            Command::new("git")
+                .arg("-C")
+                .arg(&checkout)
+                .args(["remote", "add", "origin"])
+                .arg(&*config.repository),
+        )?;
+    }
+    let remote = command_output(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["remote", "get-url", "origin"]),
+    )?;
+    if remote.trim() != &*config.repository {
+        return Err(format!(
+            "test262 origin mismatch: expected {}, got {}",
+            config.repository,
+            remote.trim()
+        ));
+    }
+    if checkout.join(".git").exists() {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["diff-index", "--quiet", "HEAD", "--"])
+            .output()
+            .map_err(|error| format!("failed to inspect test262 checkout: {error}"))?;
+        if !matches!(output.status.code(), Some(0 | 128)) {
+            return Err("test262 checkout has tracked modifications".to_owned());
+        }
+    }
+    run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["fetch", "--depth", "1", "origin"])
+            .arg(&*config.commit),
+    )?;
+    run_command(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["checkout", "--detach"])
+            .arg(&*config.commit),
+    )?;
+    let actual = command_output(
+        Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(["rev-parse", "HEAD"]),
+    )?;
+    if actual.trim() == &*config.commit {
+        Ok(())
+    } else {
+        Err(format!(
+            "test262 checkout revision mismatch after fetch: expected {}, got {}",
+            config.commit,
+            actual.trim()
+        ))
+    }
+}
+
+/// Runs the engine-neutral adapter with deterministic selection flags and writes JSON to stdout.
+fn run_test262(arguments: &[String]) -> Result<(), String> {
+    let mut options = RunOptions::default();
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--serial" => options.parallel = false,
+            "--parallel" => options.parallel = true,
+            "--seed" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--seed requires an integer")?;
+                options.seed = Some(value.parse().map_err(|_| "invalid --seed value")?);
+            }
+            "--filter" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--filter requires text")?;
+                options.filter = Some(value.clone().into_boxed_str());
+            }
+            selector if options.selector.is_none() => options.selector = Some(selector.into()),
+            _ => return Err(USAGE.to_owned()),
+        }
+        index += 1;
+    }
+    let report = run_checkout(
+        &workspace_root().join("test262"),
+        &test262_config()?,
+        &StubAdapter::unsupported(),
+        &options,
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
+}
+
+fn compare_test262(base: &str, new: &str, markdown: bool) -> Result<(), String> {
+    let base: RunReport = serde_json::from_slice(
+        &fs::read(base).map_err(|error| format!("failed to read {base}: {error}"))?,
+    )
+    .map_err(|error| format!("failed to parse {base}: {error}"))?;
+    let new: RunReport = serde_json::from_slice(
+        &fs::read(new).map_err(|error| format!("failed to read {new}: {error}"))?,
+    )
+    .map_err(|error| format!("failed to parse {new}: {error}"))?;
+    let diff = compare_reports(&base, &new).map_err(|error| error.to_string())?;
+    if markdown {
+        print!("{}", diff.to_markdown());
+    } else {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &diff)
+            .map_err(|error| error.to_string())?;
+        println!();
+    }
+    Ok(())
+}
+
+fn run_command(command: &mut Command) -> Result<(), String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run command: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
+}
+
+fn command_output(command: &mut Command) -> Result<String, String> {
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to run command: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
+}
+
 /// Rejects host-runtime APIs, build scripts, and invalid local dependency directions in engine crates.
 fn check_architecture() -> Result<(), String> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = workspace_root();
     let mut violations = Vec::new();
 
     for crate_name in ENGINE_CRATES {

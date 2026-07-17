@@ -2,7 +2,9 @@
 
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
-use test262_runner::{StubAdapter, Test262Config, suite::RunOptions};
+use test262_runner::{
+    RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
+};
 
 /// Reads explicit config/checkout arguments and emits a versioned JSON report to stdout.
 fn main() -> ExitCode {
@@ -15,13 +17,21 @@ fn main() -> ExitCode {
     }
 }
 
-/// Implements the initial engine-neutral stub command without hiding path or policy defaults.
+/// Dispatches explicit runner commands without relying on current-directory discovery.
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or(USAGE)?;
-    if command != "run-stub" {
-        return Err(USAGE.into());
+    match command.to_str() {
+        Some("run-stub") => run_stub(args),
+        Some("compare") => compare(args),
+        _ => Err(USAGE.into()),
     }
+}
+
+/// Parses suite selection/scheduling flags and emits a complete versioned stub report.
+fn run_stub(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_path = PathBuf::from(args.next().ok_or(USAGE)?);
     let checkout = PathBuf::from(args.next().ok_or(USAGE)?);
     let mut options = RunOptions::default();
@@ -48,15 +58,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let config_source = fs::read_to_string(config_path)?;
     let config = Test262Config::parse(&config_source)?;
-    let report = test262_runner::suite::run_checkout(
-        &checkout,
-        &config,
-        &StubAdapter::unsupported(),
-        &options,
-    )?;
+    let report = run_checkout(&checkout, &config, &StubAdapter::unsupported(), &options)?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
     println!();
     Ok(())
 }
 
-const USAGE: &str = "usage: test262-runner run-stub <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]";
+/// Compares two reports with identical schema and release-policy fingerprints.
+fn compare(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let base_path = PathBuf::from(args.next().ok_or(USAGE)?);
+    let new_path = PathBuf::from(args.next().ok_or(USAGE)?);
+    let markdown = match args.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+        None => false,
+        Some("--markdown") => true,
+        _ => return Err(USAGE.into()),
+    };
+    if args.next().is_some() {
+        return Err(USAGE.into());
+    }
+    let base: RunReport = serde_json::from_slice(&fs::read(base_path)?)?;
+    let new: RunReport = serde_json::from_slice(&fs::read(new_path)?)?;
+    let diff = compare_reports(&base, &new)?;
+    if markdown {
+        print!("{}", diff.to_markdown());
+    } else {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &diff)?;
+        println!();
+    }
+    Ok(())
+}
+
+const USAGE: &str = "usage:\n  test262-runner run-stub <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  test262-runner compare <base.json> <new.json> [--markdown]";

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ComposedTest, NegativeExpectation, Phase, TestMetadata, VariantKind};
+use crate::{
+    Applicability, ComposedTest, NegativeExpectation, Phase, SpecEdition, TestClassification,
+    TestMetadata, VariantKind,
+};
 
 /// Immutable in-memory input supplied to an engine implementation.
 #[derive(Clone, Copy, Debug)]
@@ -116,6 +119,12 @@ pub struct TestResult {
     pub path: Box<str>,
     /// Independently counted execution variant.
     pub variant: VariantKind,
+    /// Minimum ECMAScript edition required by metadata and feature tags.
+    pub edition: SpecEdition,
+    /// Whether this variant participates in the standardized denominator.
+    pub applicability: Applicability,
+    /// Explicit release-policy reason for the applicability decision.
+    pub applicability_reason: Box<str>,
     /// Upstream feature classifications.
     pub features: Vec<Box<str>>,
     /// Negative phase, or `None` for a positive test.
@@ -173,6 +182,7 @@ pub fn run_test(
     path: &str,
     metadata: &TestMetadata,
     test: &ComposedTest,
+    classification: &TestClassification,
 ) -> TestResult {
     let request = ExecutionRequest {
         test,
@@ -185,6 +195,9 @@ pub fn run_test(
     TestResult {
         path: path.into(),
         variant: test.variant.kind,
+        edition: classification.edition,
+        applicability: classification.applicability,
+        applicability_reason: classification.reason.clone(),
         features: metadata.features.clone(),
         expected_phase: metadata.negative.as_ref().map(|negative| negative.phase),
         result,
@@ -270,7 +283,7 @@ fn message_result(kind: ResultKind, message: impl Into<Box<str>>) -> (ResultKind
 mod tests {
     use std::sync::Arc;
 
-    use crate::{Harness, Phase, TestMetadata};
+    use crate::{Applicability, Harness, Phase, SpecEdition, TestClassification, TestMetadata};
 
     use super::{EngineOutcome, EngineResponse, ResultKind, StubAdapter, run_test};
 
@@ -288,8 +301,17 @@ mod tests {
             "test/language/test.js",
             &metadata,
             &composed,
+            &classification(),
         )
         .result
+    }
+
+    fn classification() -> TestClassification {
+        TestClassification {
+            edition: SpecEdition::Es5,
+            applicability: Applicability::Applicable,
+            reason: "fixture".into(),
+        }
     }
 
     #[test]
@@ -375,7 +397,7 @@ mod tests {
             stderr: "captured stderr".into(),
             backtrace: "captured backtrace".into(),
         });
-        let result = run_test(&adapter, "test.js", &metadata, &composed);
+        let result = run_test(&adapter, "test.js", &metadata, &composed, &classification());
         assert_eq!(result.stdout.as_ref(), "captured stdout");
         assert_eq!(result.stderr.as_ref(), "captured stderr");
         assert_eq!(result.backtrace.as_ref(), "captured backtrace");

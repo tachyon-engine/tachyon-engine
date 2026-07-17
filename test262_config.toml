@@ -5,6 +5,7 @@ commit = "9e61c12835c5e4a3bdba93850427e6742c4f64c4"
 [release_target]
 ecma262 = "ECMA-262 16th edition (2025)"
 ecma402 = "ECMA-402 12th edition (2025)"
+max_edition = "es16"
 annex_b = true
 intl = true
 
