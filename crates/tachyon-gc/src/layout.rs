@@ -5,24 +5,25 @@
 
 use core::num::NonZeroU16;
 
-/// The largest addressable isolate-local cage. Offset zero remains an invalid reference sentinel.
-pub const CAGE_SIZE_BYTES: u64 = 1_u64 << 32;
-/// The largest valid byte offset in a cage because the cage's exclusive upper bound is 4 GiB.
-pub const MAX_CAGE_OFFSET: u32 = u32::MAX;
+/// The representable logical heap address space; it is not a native reservation or allocation.
+pub const LOGICAL_ADDRESS_SPACE_BYTES: u64 = 1_u64 << 32;
+/// The largest encoded logical heap address.
+pub const MAX_LOGICAL_HEAP_ADDRESS: u32 = u32::MAX;
 /// The fixed allocation and side-metadata granularity for small-object spans.
 pub const SPAN_SIZE_BYTES: usize = 64 * 1024;
-/// The number of spans that exactly partition a 4 GiB cage.
-pub const SPAN_COUNT: usize = (CAGE_SIZE_BYTES as usize) / SPAN_SIZE_BYTES;
+/// The maximum number of logical span-table entries; implementations allocate them on demand.
+pub const MAX_LOGICAL_SPANS: usize = 1 << 16;
 /// The smallest small-object allocation slot, including its object header.
 pub const MINIMUM_SLOT_SIZE_BYTES: usize = 16;
 /// The byte size of every object header in the phase-1 heap.
 pub const GC_HEADER_SIZE_BYTES: usize = 8;
 
-const _: () = assert!(CAGE_SIZE_BYTES == u32::MAX as u64 + 1);
+const _: () = assert!(LOGICAL_ADDRESS_SPACE_BYTES == u32::MAX as u64 + 1);
 const _: () = assert!(SPAN_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(MINIMUM_SLOT_SIZE_BYTES.is_power_of_two());
 const _: () = assert!(SPAN_SIZE_BYTES.is_multiple_of(MINIMUM_SLOT_SIZE_BYTES));
-const _: () = assert!(SPAN_COUNT * SPAN_SIZE_BYTES == CAGE_SIZE_BYTES as usize);
+const _: () =
+    assert!(MAX_LOGICAL_SPANS as u64 * SPAN_SIZE_BYTES as u64 == LOGICAL_ADDRESS_SPACE_BYTES);
 
 /// A non-zero index into the isolate's static GC type-descriptor table.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -49,8 +50,8 @@ impl GcTypeId {
 /// The fixed eight-byte prefix of each allocated GC object.
 ///
 /// Mark state deliberately lives in span side metadata. Header flags may describe object lifetime
-/// properties, but must never be used as the mark bitmap because that would block the planned
-/// moving and incremental collectors.
+/// properties, but must never be used as the mark bitmap because epoch marking and incremental
+/// collection use span side metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct GcHeader {
@@ -95,13 +96,16 @@ const _: [(); 4] = [(); core::mem::align_of::<GcHeader>()];
 #[cfg(test)]
 mod tests {
     use super::{
-        CAGE_SIZE_BYTES, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, MINIMUM_SLOT_SIZE_BYTES,
-        SPAN_COUNT, SPAN_SIZE_BYTES,
+        GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES, MAX_LOGICAL_SPANS,
+        MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES,
     };
 
     #[test]
-    fn representation_constants_partition_the_cage() {
-        assert_eq!(SPAN_COUNT * SPAN_SIZE_BYTES, CAGE_SIZE_BYTES as usize);
+    fn representation_constants_cover_the_logical_address_space() {
+        assert_eq!(
+            MAX_LOGICAL_SPANS as u64 * SPAN_SIZE_BYTES as u64,
+            LOGICAL_ADDRESS_SPACE_BYTES
+        );
         assert_eq!(GC_HEADER_SIZE_BYTES, core::mem::size_of::<GcHeader>());
         assert_eq!(MINIMUM_SLOT_SIZE_BYTES, 16);
     }

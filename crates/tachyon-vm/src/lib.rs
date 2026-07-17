@@ -152,8 +152,8 @@ impl Default for Isolate {
 impl Isolate {
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
-    /// The collector supplies a rewrite-capable tracer. This API does not resolve cage offsets or
-    /// borrow heap objects, so it remains valid for both the phase-1 mark-sweep heap and moving GC.
+    /// The collector supplies a rewrite-capable tracer. This API does not resolve logical addresses
+    /// or borrow heap objects, so it remains valid across non-moving collection phases.
     pub fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
     }
@@ -580,7 +580,7 @@ mod tests {
                 FunctionId::new(0),
             )
             .unwrap();
-        let raw = RawHeapRef::new(16).expect("non-zero cage offset");
+        let raw = RawHeapRef::new(16).expect("valid logical address");
         isolate.fiber.registers[0] = Value::from_heap_ref(raw);
         let frame = isolate.fiber.frames.last_mut().expect("entry frame exists");
         frame.environment = Some(GcRef::from_raw(raw));
@@ -600,7 +600,7 @@ mod tests {
 
         isolate.trace_roots(&mut tracer);
 
-        let rewritten = RawHeapRef::new(32).expect("non-zero cage offset");
+        let rewritten = RawHeapRef::new(32).expect("valid logical address");
         assert_eq!(isolate.fiber.registers[0].as_heap_ref(), Some(rewritten));
         let frame = isolate.fiber.frames.last().expect("entry frame exists");
         assert_eq!(frame.environment.map(GcRef::raw), Some(rewritten));

@@ -17,7 +17,8 @@ mod trace;
 pub use descriptor::{DropObjectFn, TraceObjectFn, TypeDescriptor};
 pub use handle::GcRef;
 pub use layout::{
-    CAGE_SIZE_BYTES, GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, MAX_CAGE_OFFSET,
-    MINIMUM_SLOT_SIZE_BYTES, SPAN_COUNT, SPAN_SIZE_BYTES,
+    GC_HEADER_SIZE_BYTES, GcHeader, GcTypeId, LOGICAL_ADDRESS_SPACE_BYTES,
+    MAX_LOGICAL_HEAP_ADDRESS, MAX_LOGICAL_SPANS, MINIMUM_SLOT_SIZE_BYTES, SPAN_SIZE_BYTES,
 };
+pub use tachyon_value::{SpanId, SpanOffset};
 pub use trace::{Trace, Tracer};

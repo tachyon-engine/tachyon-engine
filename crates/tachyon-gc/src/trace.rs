@@ -101,7 +101,7 @@ mod tests {
     fn trace_rewrites_values_and_typed_references() {
         struct Object;
 
-        let raw = RawHeapRef::new(16).expect("non-zero cage offset");
+        let raw = RawHeapRef::new(16).expect("valid logical address");
         let mut fields = [
             Value::from_heap_ref(raw),
             Value::from_i32(1),
@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(fields[2].as_heap_ref(), RawHeapRef::new(32));
         assert_eq!(
             reference.raw(),
-            RawHeapRef::new(32).expect("non-zero cage offset")
+            RawHeapRef::new(32).expect("valid logical address")
         );
     }
 }

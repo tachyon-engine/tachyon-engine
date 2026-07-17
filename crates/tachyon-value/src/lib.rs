@@ -7,10 +7,13 @@
 )]
 //! Bit-level JavaScript value representations and their invariants.
 //!
-//! This crate intentionally has no host I/O surface. Heap references are cage offsets only; resolving
-//! them into pointers belongs to `tachyon-gc` with an isolate-specific cage.
+//! This crate intentionally has no host I/O surface. Heap references are logical span addresses;
+//! resolving them into pointers belongs to `tachyon-gc` with an isolate-specific span table.
 
-use core::{fmt, num::NonZeroU32};
+use core::{
+    fmt,
+    num::{NonZeroU16, NonZeroU32},
+};
 
 const TAGGED_MASK: u64 = 0xfff8_0000_0000_0000;
 const TAGGED_PREFIX: u64 = 0xfff8_0000_0000_0000;
@@ -22,30 +25,102 @@ const LOW_U32_MASK: u64 = u32::MAX as u64;
 
 const _: [(); 8] = [(); core::mem::size_of::<Value>()];
 const _: [(); 4] = [(); core::mem::size_of::<RawHeapRef>()];
+const _: [(); 2] = [(); core::mem::size_of::<SpanId>()];
+const _: [(); 2] = [(); core::mem::size_of::<SpanOffset>()];
 const _: () = assert!(TAGGED_PREFIX & !TAGGED_MASK == 0);
 const _: () = assert!(TAG_MASK & TAGGED_MASK == 0);
 const _: () = assert!(TAG_MASK >> TAG_SHIFT == 0b111);
 const _: () = assert!(PAYLOAD_MASK & (TAGGED_MASK | TAG_MASK) == 0);
 
-/// A validated non-zero byte offset into an isolate's GC cage.
+/// A stable index into one isolate's logical span table.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct SpanId(u16);
+
+impl SpanId {
+    /// Creates a span ID. Every `u16` value is part of the logical address space.
+    #[must_use]
+    pub const fn new(index: u16) -> Self {
+        Self(index)
+    }
+
+    /// Returns the span-table index.
+    #[must_use]
+    pub const fn index(self) -> u16 {
+        self.0
+    }
+}
+
+/// A validated non-zero byte offset within one 64 KiB logical span.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct SpanOffset(NonZeroU16);
+
+impl SpanOffset {
+    /// Creates an in-span offset, reserving zero as an invalid reference sentinel.
+    #[must_use]
+    pub const fn new(offset: u16) -> Option<Self> {
+        match NonZeroU16::new(offset) {
+            Some(offset) => Some(Self(offset)),
+            None => None,
+        }
+    }
+
+    /// Returns the byte offset within its logical span.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+/// A validated logical heap address encoded as a span ID and an in-span byte offset.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct RawHeapRef(NonZeroU32);
 
 impl RawHeapRef {
-    /// Creates a cage offset, rejecting offset zero because the cage reserves it as an invalid sentinel.
+    /// Validates an encoded logical address, rejecting every reserved zero in-span offset.
     #[must_use]
     pub const fn new(offset: u32) -> Option<Self> {
+        if offset as u16 == 0 {
+            return None;
+        }
+
         match NonZeroU32::new(offset) {
             Some(offset) => Some(Self(offset)),
             None => None,
         }
     }
 
-    /// Returns the byte offset without resolving it against a cage.
+    /// Encodes a checked span ID and in-span offset into one 32-bit logical address.
+    #[must_use]
+    pub const fn from_parts(span_id: SpanId, span_offset: SpanOffset) -> Self {
+        let encoded = ((span_id.index() as u32) << 16) | span_offset.get() as u32;
+        match NonZeroU32::new(encoded) {
+            Some(encoded) => Self(encoded),
+            None => panic!("a non-zero span offset always produces a non-zero address"),
+        }
+    }
+
+    /// Returns the complete logical address without resolving it against a span table.
     #[must_use]
     pub const fn offset(self) -> u32 {
         self.0.get()
+    }
+
+    /// Decodes the span-table index from this logical address.
+    #[must_use]
+    pub const fn span_id(self) -> SpanId {
+        SpanId::new((self.offset() >> 16) as u16)
+    }
+
+    /// Decodes the validated byte offset within this logical address's span.
+    #[must_use]
+    pub const fn span_offset(self) -> SpanOffset {
+        match SpanOffset::new(self.offset() as u16) {
+            Some(offset) => offset,
+            None => panic!("RawHeapRef guarantees a non-zero in-span offset"),
+        }
     }
 }
 
@@ -141,7 +216,7 @@ impl Value {
         Self::from_tagged(Tag::Int32, value as u32 as u64)
     }
 
-    /// Builds a heap reference value from a validated cage byte offset.
+    /// Builds a heap reference value from a validated logical span address.
     #[must_use]
     pub const fn from_heap_ref(reference: RawHeapRef) -> Self {
         Self::from_tagged(Tag::HeapRef, reference.offset() as u64)
@@ -197,7 +272,7 @@ impl Value {
         }
     }
 
-    /// Returns a cage offset when its tag and payload are valid, without resolving it to a pointer.
+    /// Returns a logical span address when its tag and payload are valid, without resolving it.
     #[must_use]
     pub const fn as_heap_ref(self) -> Option<RawHeapRef> {
         if !self.is_tagged()
@@ -293,7 +368,10 @@ impl fmt::Debug for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CANONICAL_NAN_BITS, DecodeError, Immediate, RawHeapRef, Value, ValueKind};
+    use super::{
+        CANONICAL_NAN_BITS, DecodeError, Immediate, RawHeapRef, SpanId, SpanOffset, Value,
+        ValueKind,
+    };
     use proptest::prelude::*;
 
     #[test]
@@ -337,6 +415,10 @@ mod tests {
             Err(DecodeError::InvalidHeapRefPayload(0))
         );
         assert_eq!(
+            Value::from_bits(0xfff8_0000_0001_0000).decode(),
+            Err(DecodeError::InvalidHeapRefPayload(1 << 16))
+        );
+        assert_eq!(
             Value::from_bits(0xfff9_0001_0000_0000).decode(),
             Err(DecodeError::InvalidInt32Payload(0x0001_0000_0000))
         );
@@ -347,6 +429,29 @@ mod tests {
         assert_eq!(
             Value::from_bits(0xfffb_0000_0000_0000).decode(),
             Err(DecodeError::ReservedTag(3))
+        );
+    }
+
+    #[test]
+    fn logical_heap_addresses_encode_and_decode_boundaries() {
+        assert_eq!(SpanOffset::new(0), None);
+        assert_eq!(RawHeapRef::new(0), None);
+        assert_eq!(RawHeapRef::new(1_u32 << 16), None);
+
+        let first = RawHeapRef::from_parts(
+            SpanId::new(0),
+            SpanOffset::new(16).expect("minimum aligned object offset"),
+        );
+        assert_eq!(first.offset(), 16);
+        assert_eq!(first.span_id(), SpanId::new(0));
+        assert_eq!(first.span_offset().get(), 16);
+
+        let last = RawHeapRef::new(u32::MAX).expect("maximum address has a non-zero span offset");
+        assert_eq!(last.span_id(), SpanId::new(u16::MAX));
+        assert_eq!(last.span_offset().get(), u16::MAX);
+        assert_eq!(
+            RawHeapRef::from_parts(last.span_id(), last.span_offset()),
+            last
         );
     }
 
@@ -364,9 +469,18 @@ mod tests {
         }
 
         #[test]
-        fn heap_ref_and_int32_roundtrip(offset in 1u32..=u32::MAX, integer in any::<i32>()) {
-            let reference = RawHeapRef::new(offset).expect("range excludes zero");
+        fn heap_ref_and_int32_roundtrip(
+            span_id in any::<u16>(),
+            span_offset in 1u16..=u16::MAX,
+            integer in any::<i32>(),
+        ) {
+            let reference = RawHeapRef::from_parts(
+                SpanId::new(span_id),
+                SpanOffset::new(span_offset).expect("strategy excludes zero"),
+            );
             prop_assert_eq!(Value::from_heap_ref(reference).decode(), Ok(ValueKind::HeapRef(reference)));
+            prop_assert_eq!(reference.span_id(), SpanId::new(span_id));
+            prop_assert_eq!(reference.span_offset().get(), span_offset);
             prop_assert_eq!(Value::from_i32(integer).decode(), Ok(ValueKind::Int32(integer)));
         }
 

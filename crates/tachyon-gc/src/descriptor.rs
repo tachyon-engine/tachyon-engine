@@ -85,8 +85,8 @@ impl TypeDescriptor {
 /// Casts the collector-provided allocation back to its descriptor-registered payload type.
 ///
 /// This is the sole raw-pointer dereference in the descriptor layer. `TypeDescriptor::for_type`
-/// pairs this monomorphization with its layout, while the allocator will validate alignment, cage
-/// range, allocation bit, and header type ID before invoking it.
+/// pairs this monomorphization with its layout, while the allocator will validate the logical span,
+/// alignment, allocation bit, and header type ID before invoking it.
 unsafe fn trace_object<T: Trace>(object: NonNull<u8>, tracer: &mut dyn Tracer) {
     // SAFETY: `TypeDescriptor::trace` requires a live initialized `T` at this exact address.
     unsafe { &mut *object.cast::<T>().as_ptr() }.trace(tracer);
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn descriptor_traces_its_registered_payload_type() {
-        let raw = RawHeapRef::new(16).expect("non-zero cage offset");
+        let raw = RawHeapRef::new(16).expect("valid logical address");
         let mut pair = Pair {
             left: GcRef::from_raw(raw),
             right: Value::from_heap_ref(raw),

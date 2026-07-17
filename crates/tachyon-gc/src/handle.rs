@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 
 use tachyon_value::RawHeapRef;
 
-/// A typed byte offset into one isolate's GC cage.
+/// A typed logical address into one isolate's GC span table.
 ///
 /// This is intentionally only an encoded reference: resolving it into an object borrow belongs to
 /// a future `RunningScope`/`NoGcScope` API. The phantom function preserves covariance without
@@ -25,7 +25,7 @@ impl<T: ?Sized> Clone for GcRef<T> {
 }
 
 impl<T: ?Sized> GcRef<T> {
-    /// Retypes a validated cage offset at a descriptor-checked allocation or trace boundary.
+    /// Retypes a validated logical address at a descriptor-checked allocation or trace boundary.
     #[must_use]
     pub const fn from_raw(raw: RawHeapRef) -> Self {
         Self {
@@ -34,7 +34,7 @@ impl<T: ?Sized> GcRef<T> {
         }
     }
 
-    /// Returns the encoded cage offset without resolving it to a native pointer.
+    /// Returns the encoded logical address without resolving it to a native pointer.
     #[must_use]
     pub const fn raw(self) -> RawHeapRef {
         self.raw
@@ -59,7 +59,7 @@ mod tests {
     fn typed_reference_round_trips_without_changing_its_offset() {
         struct Object;
 
-        let raw = RawHeapRef::new(16).expect("non-zero cage offset");
+        let raw = RawHeapRef::new(16).expect("valid logical address");
         let reference = GcRef::<Object>::from_raw(raw);
         assert_eq!(reference.raw(), raw);
         assert_eq!(reference.erase().raw(), raw);
