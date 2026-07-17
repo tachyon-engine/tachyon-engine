@@ -1,7 +1,8 @@
 //! Heap-owned temporary roots and exact composition with subsystem root providers.
 
 use crate::tuning::{
-    CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_TEMPORARY_ROOT_CAPACITY,
+    CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_KEPT_OBJECT_CAPACITY,
+    INITIAL_TEMPORARY_ROOT_CAPACITY,
 };
 use crate::{RawHeapRef, Trace, Tracer, persistent::PersistentRoots};
 
@@ -19,6 +20,25 @@ pub struct TemporaryRootStats {
     pub growth_count: usize,
     pub peak_len: usize,
     pub current_len: usize,
+    pub retained_capacity: usize,
+    pub slack_entries: usize,
+}
+
+/// A job-scoped kept-object root cannot be retained within the isolate quota.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeptObjectError {
+    InvalidReference(crate::HeapReferenceError),
+    EntryLimitExceeded { limit: usize },
+    AllocationFailed,
+}
+
+/// Retained capacity and deduplicated live-root evidence for AddToKeptObjects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KeptObjectStats {
+    pub current_len: usize,
+    pub initial_capacity: usize,
+    pub growth_count: usize,
+    pub peak_len: usize,
     pub retained_capacity: usize,
     pub slack_entries: usize,
 }
@@ -104,11 +124,91 @@ impl Trace for TemporaryRoots {
     }
 }
 
+/// A small set-like root buffer cleared only by the surrounding JavaScript job boundary.
+pub(crate) struct KeptObjects {
+    entries: Vec<RawHeapRef>,
+    max_entries: usize,
+    initial_capacity: usize,
+    growth_count: usize,
+    peak_len: usize,
+}
+
+impl KeptObjects {
+    pub const fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries,
+            initial_capacity: 0,
+            growth_count: 0,
+            peak_len: 0,
+        }
+    }
+
+    /// Deduplicates the usual tiny set, then applies bounded growth before publication.
+    pub fn try_insert(&mut self, reference: RawHeapRef) -> Result<bool, KeptObjectError> {
+        if self.entries.contains(&reference) {
+            return Ok(false);
+        }
+        if self.entries.len() == self.max_entries {
+            return Err(KeptObjectError::EntryLimitExceeded {
+                limit: self.max_entries,
+            });
+        }
+        if self.entries.len() == self.entries.capacity() {
+            let target = if self.entries.capacity() == 0 {
+                INITIAL_KEPT_OBJECT_CAPACITY.min(self.max_entries)
+            } else {
+                self.entries
+                    .capacity()
+                    .saturating_mul(CAPACITY_GROWTH_NUMERATOR)
+                    .div_ceil(CAPACITY_GROWTH_DENOMINATOR)
+                    .min(self.max_entries)
+            }
+            .max(self.entries.len() + 1);
+            self.entries
+                .try_reserve_exact(target - self.entries.len())
+                .map_err(|_| KeptObjectError::AllocationFailed)?;
+            if self.initial_capacity == 0 {
+                self.initial_capacity = self.entries.capacity();
+            } else {
+                self.growth_count += 1;
+            }
+        }
+        self.entries.push(reference);
+        self.peak_len = self.peak_len.max(self.entries.len());
+        Ok(true)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> KeptObjectStats {
+        KeptObjectStats {
+            current_len: self.entries.len(),
+            initial_capacity: self.initial_capacity,
+            growth_count: self.growth_count,
+            peak_len: self.peak_len,
+            retained_capacity: self.entries.capacity(),
+            slack_entries: self.entries.capacity() - self.entries.len(),
+        }
+    }
+}
+
+impl Trace for KeptObjects {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.entries.trace(tracer);
+    }
+}
+
 /// Visits subsystem roots and scope roots through one exact strong-root contract.
 pub(crate) struct RootComposition<'a> {
     external: &'a mut dyn Trace,
     temporary: &'a mut TemporaryRoots,
     persistent: &'a mut PersistentRoots,
+    kept: &'a mut KeptObjects,
 }
 
 impl<'a> RootComposition<'a> {
@@ -116,11 +216,13 @@ impl<'a> RootComposition<'a> {
         external: &'a mut dyn Trace,
         temporary: &'a mut TemporaryRoots,
         persistent: &'a mut PersistentRoots,
+        kept: &'a mut KeptObjects,
     ) -> Self {
         Self {
             external,
             temporary,
             persistent,
+            kept,
         }
     }
 }
@@ -131,6 +233,7 @@ impl Trace for RootComposition<'_> {
         self.external.trace(tracer);
         self.temporary.trace(tracer);
         self.persistent.trace(tracer);
+        self.kept.trace(tracer);
     }
 }
 
@@ -182,6 +285,10 @@ mod tests {
 
         fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, _: &mut Value) {
             self.trace_weak_raw_heap_ref(key);
+        }
+
+        fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, _: &mut Value) {
+            self.trace_weak_raw_heap_ref(target);
         }
     }
 

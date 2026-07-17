@@ -3,7 +3,7 @@
 use core::any::TypeId;
 
 use crate::{
-    GcType, GcTypeId, Trace, TypeDescriptor,
+    GcAllocationPolicy, GcType, GcTypeId, Trace, TypeDescriptor,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_TYPE_DESCRIPTOR_CAPACITY,
     },
@@ -14,6 +14,7 @@ use crate::{
 pub enum TypeRegistrationError {
     DescriptorTableExhausted,
     DescriptorTableAllocationFailed,
+    AllocationPolicyMismatch,
 }
 
 struct TypeEntry {
@@ -41,14 +42,35 @@ impl TypeRegistry {
         &mut self,
         name: &'static str,
     ) -> Result<GcType<T>, TypeRegistrationError> {
+        self.try_register_with_policy(name, GcAllocationPolicy::YoungEligible)
+    }
+
+    /// Registers pinned/finalizer payloads that must bypass Eden even when callers request Young.
+    pub fn try_register_old_only<T: Trace + 'static>(
+        &mut self,
+        name: &'static str,
+    ) -> Result<GcType<T>, TypeRegistrationError> {
+        self.try_register_with_policy(name, GcAllocationPolicy::OldOnly)
+    }
+
+    /// Centralizes duplicate-policy validation and immutable descriptor publication.
+    fn try_register_with_policy<T: Trace + 'static>(
+        &mut self,
+        name: &'static str,
+        allocation_policy: GcAllocationPolicy,
+    ) -> Result<GcType<T>, TypeRegistrationError> {
         if let Some(entry) = self
             .entries
             .iter()
             .find(|entry| entry.rust_type_id == TypeId::of::<T>())
         {
-            return Ok(GcType::new(
+            if entry.descriptor.allocation_policy() != allocation_policy {
+                return Err(TypeRegistrationError::AllocationPolicyMismatch);
+            }
+            return Ok(GcType::new_with_policy(
                 entry.descriptor.type_id(),
                 entry.descriptor.name(),
+                allocation_policy,
             ));
         }
         if self.entries.len() == u16::MAX as usize {
@@ -57,7 +79,7 @@ impl TypeRegistry {
         self.reserve_for_registration()?;
         let type_id = GcTypeId::new((self.entries.len() + 1) as u16)
             .expect("descriptor IDs start at one and are bounded above");
-        let object_type = GcType::new(type_id, name);
+        let object_type = GcType::new_with_policy(type_id, name, allocation_policy);
         self.entries.push(TypeEntry {
             rust_type_id: TypeId::of::<T>(),
             descriptor: object_type.descriptor(),

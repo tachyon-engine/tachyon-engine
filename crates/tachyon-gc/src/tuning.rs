@@ -16,6 +16,10 @@ pub(crate) const INITIAL_TEMPORARY_ROOT_CAPACITY: usize = 64;
 pub(crate) const INITIAL_PERSISTENT_ROOT_CAPACITY: usize = 64;
 /// First weak-owner reservation; ordinary heaps contain few weak containers.
 pub(crate) const INITIAL_WEAK_OWNER_CAPACITY: usize = 64;
+/// First kept-object reservation; one job normally dereferences few WeakRef targets.
+pub(crate) const INITIAL_KEPT_OBJECT_CAPACITY: usize = 64;
+/// First pending-finalization reservation; cleanup jobs normally drain promptly after collection.
+pub(crate) const INITIAL_FINALIZATION_QUEUE_CAPACITY: usize = 64;
 /// Numerator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 /// Denominator for bounded 1.5x metadata-container growth.

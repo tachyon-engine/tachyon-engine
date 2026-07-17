@@ -29,6 +29,9 @@ pub trait Tracer {
 
     /// Visits a weak key whose value becomes strong only after the key is proven live.
     fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value);
+
+    /// Visits a weak finalization target and its strongly held cleanup value.
+    fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value);
 }
 
 impl Trace for Value {
@@ -112,6 +115,11 @@ mod tests {
         fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value) {
             *key = key.map(rewrite);
             self.trace_value(value);
+        }
+
+        fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value) {
+            *target = target.map(rewrite);
+            self.trace_value(held_value);
         }
     }
 

@@ -113,6 +113,7 @@ pub(crate) struct WeakOwner {
     pub reference: RawHeapRef,
     pub has_weak: bool,
     pub has_ephemeron: bool,
+    pub has_finalization: bool,
 }
 
 pub(crate) struct WeakOwners {
@@ -207,6 +208,7 @@ mod tests {
                     reference: RawHeapRef::new(offset).unwrap(),
                     has_weak: true,
                     has_ephemeron: false,
+                    has_finalization: false,
                 })
                 .unwrap();
         }
@@ -215,6 +217,7 @@ mod tests {
                 reference: RawHeapRef::new(101).unwrap(),
                 has_weak: true,
                 has_ephemeron: true,
+                has_finalization: true,
             }),
             Err(WeakOwnerError::EntryLimitExceeded { limit: 100 })
         );

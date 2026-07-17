@@ -461,6 +461,10 @@ mod tests {
         fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, _: &mut Value) {
             self.trace_weak_raw_heap_ref(key);
         }
+
+        fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, _: &mut Value) {
+            self.trace_weak_raw_heap_ref(target);
+        }
     }
 
     #[test]

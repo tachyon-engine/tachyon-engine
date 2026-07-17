@@ -1,15 +1,17 @@
 //! Small-object allocation policy over fixed logical spans.
 
 use crate::{
-    CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
-    LargeAllocationError, LargeReclaim, MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError,
-    MarkStats, MinorSweepStats, ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError,
-    SmallObjectLayout, SpanId, SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats,
-    SweepWorklistStats, TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
+    CollectionEpoch, FinalizationQueueStats, GcAllocationPolicy, GcHeader, GcRef, GcType, GcTypeId,
+    GrayQueueStats, HeapReferenceError, KeptObjectStats, LargeAllocationError, LargeReclaim,
+    MAX_LOGICAL_OBJECT_COUNT, MAX_LOGICAL_SPANS, MarkError, MarkStats, MinorSweepStats,
+    ObjectLayout, RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId,
+    SpanSpace, SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats,
+    TemporaryRootStats, Trace, TypeRegistry, WeakOwnerStats, YoungMarkStats,
+    finalization::PendingFinalizations,
     gray::GrayQueue,
     mark::{mark_strong_roots, mark_young_roots},
     persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
-    roots::{RootComposition, TemporaryRoots},
+    roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full, sweep_young},
     tuning::SMALL_SIZE_CLASSES,
@@ -100,6 +102,8 @@ pub struct Heap {
     temporary_roots: TemporaryRoots,
     persistent_roots: PersistentRoots,
     weak_owners: WeakOwners,
+    kept_objects: KeptObjects,
+    pending_finalizations: PendingFinalizations,
 }
 
 impl Heap {
@@ -132,6 +136,8 @@ impl Heap {
             temporary_roots: TemporaryRoots::new(max_reference_entries),
             persistent_roots: PersistentRoots::new(max_reference_entries),
             weak_owners: WeakOwners::new(max_reference_entries),
+            kept_objects: KeptObjects::new(max_reference_entries),
+            pending_finalizations: PendingFinalizations::new(max_reference_entries),
         }
     }
 
@@ -149,6 +155,11 @@ impl Heap {
                 type_id: object_type.type_id(),
             });
         }
+        let space = if object_type.descriptor().allocation_policy() == GcAllocationPolicy::OldOnly {
+            AllocationSpace::Old
+        } else {
+            space
+        };
         if let Ok(layout) = SmallObjectLayout::for_type::<T>()
             && let Some(class_index) = size_class_index(layout.slot_size())
         {
@@ -244,13 +255,18 @@ impl Heap {
     /// Starts a fresh epoch and reaches the exact strong-root fixed point iteratively.
     pub fn mark_strong(&mut self, roots: &mut dyn Trace) -> Result<MarkStats, MarkError> {
         self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
-        let mut roots =
-            RootComposition::new(roots, &mut self.temporary_roots, &mut self.persistent_roots);
+        let mut roots = RootComposition::new(
+            roots,
+            &mut self.temporary_roots,
+            &mut self.persistent_roots,
+            &mut self.kept_objects,
+        );
         mark_strong_roots(
             &mut self.table,
             &self.types,
             &mut self.gray,
             &mut self.weak_owners,
+            &mut self.pending_finalizations,
             self.collection_epoch,
             &mut roots,
         )
@@ -259,13 +275,18 @@ impl Heap {
     /// Marks young reachability from exact roots and the bounded remembered set without sweeping.
     pub fn mark_young(&mut self, roots: &mut dyn Trace) -> Result<YoungMarkStats, MarkError> {
         self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
-        let mut roots =
-            RootComposition::new(roots, &mut self.temporary_roots, &mut self.persistent_roots);
+        let mut roots = RootComposition::new(
+            roots,
+            &mut self.temporary_roots,
+            &mut self.persistent_roots,
+            &mut self.kept_objects,
+        );
         mark_young_roots(
             &mut self.table,
             &self.types,
             &mut self.gray,
             &mut self.weak_owners,
+            &mut self.pending_finalizations,
             self.collection_epoch,
             &mut roots,
         )
@@ -381,6 +402,38 @@ impl Heap {
     #[must_use]
     pub fn weak_owner_stats(&self) -> WeakOwnerStats {
         self.weak_owners.stats()
+    }
+
+    /// Returns job-scoped kept-root high-water evidence.
+    #[must_use]
+    pub fn kept_object_stats(&self) -> KeptObjectStats {
+        self.kept_objects.stats()
+    }
+
+    /// Returns pending cleanup records and retained queue capacity.
+    #[must_use]
+    pub fn finalization_queue_stats(&self) -> FinalizationQueueStats {
+        self.pending_finalizations.stats()
+    }
+
+    /// Transfers one cleanup command to the isolate safepoint scheduler.
+    ///
+    /// The record leaves the queue's root set; a scheduler must root its heap fields before any
+    /// allocation or JavaScript cleanup callback can run.
+    pub fn pop_pending_finalization(&mut self) -> Option<crate::PendingFinalization> {
+        self.pending_finalizations.pop()
+    }
+
+    /// Validates and retains one WeakRef dereference target until the host ends the current job.
+    pub(crate) fn keep_alive(&mut self, reference: RawHeapRef) -> Result<bool, KeptObjectError> {
+        self.verify_reference(reference, None)
+            .map_err(KeptObjectError::InvalidReference)?;
+        self.kept_objects.try_insert(reference)
+    }
+
+    /// Clears AddToKeptObjects roots only at an explicit ECMAScript job boundary.
+    pub fn clear_kept_objects_at_job_boundary(&mut self) {
+        self.kept_objects.clear();
     }
 
     pub(crate) const fn temporary_root_count(&self) -> usize {
@@ -671,8 +724,8 @@ mod tests {
 
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
     use crate::{
-        Ephemeron, GcRef, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, SpanSpace, Trace,
-        Tracer, TypeRegistry, WeakGcRef,
+        Ephemeron, FinalizationRegistration, GcRef, HeapReferenceError, RawHeapRef,
+        SPAN_SIZE_BYTES, SpanSpace, Trace, Tracer, TypeRegistrationError, TypeRegistry, WeakGcRef,
     };
     use tachyon_value::Value;
 
@@ -705,6 +758,12 @@ mod tests {
     struct EphemeronHolder {
         entry: Ephemeron<ChainNode>,
     }
+
+    struct FinalizationHolder {
+        registration: FinalizationRegistration<ChainNode>,
+    }
+
+    struct PinnedPayload;
 
     struct DropNode {
         next: Option<GcRef<DropNode>>,
@@ -765,6 +824,16 @@ mod tests {
         fn trace(&mut self, tracer: &mut dyn Tracer) {
             self.entry.trace(tracer);
         }
+    }
+
+    impl Trace for FinalizationHolder {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.registration.trace(tracer);
+        }
+    }
+
+    impl Trace for PinnedPayload {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
     }
 
     impl Trace for DropNode {
@@ -1625,6 +1694,158 @@ mod tests {
             })
         });
         assert!(cleared);
+    }
+
+    #[test]
+    /// AddToKeptObjects survives collections until the host explicitly ends the current job.
+    fn kept_objects_are_job_scoped_precise_roots() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let target = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        heap.with_running_scope(|scope| {
+            let target = scope.root(target).unwrap();
+            assert!(scope.keep_alive(target).unwrap());
+            assert!(!scope.keep_alive(target).unwrap());
+        });
+        let mut no_roots = Vec::<Value>::new();
+
+        let retained = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(retained.sweep.live_objects, 1);
+        assert_eq!(heap.kept_object_stats().current_len, 1);
+        assert_eq!(heap.kept_object_stats().initial_capacity, 64);
+        heap.clear_kept_objects_at_job_boundary();
+        let released = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(released.sweep.reclaimed_objects, 1);
+        assert_eq!(heap.kept_object_stats().current_len, 0);
+    }
+
+    #[test]
+    /// Dead finalization targets enqueue cleanup before sweep; queued registry/value stay rooted.
+    fn finalization_queue_roots_cleanup_until_safepoint_consumption() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let registry_type = types
+            .try_register::<FinalizationHolder>("FinalizationHolder")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let target = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let held = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut registry = heap
+            .try_allocate(
+                registry_type,
+                0,
+                0,
+                FinalizationHolder {
+                    registration: FinalizationRegistration::new(
+                        target,
+                        Value::from_heap_ref(held.raw()),
+                    ),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+
+        let first = heap.collect_major(&mut registry).unwrap();
+        assert_eq!(first.mark.finalizations_enqueued, 1);
+        assert_eq!(first.sweep.reclaimed_objects, 1);
+        assert_eq!(heap.finalization_queue_stats().pending, 1);
+        assert_eq!(heap.finalization_queue_stats().initial_capacity, 64);
+        let mut no_roots = Vec::<Value>::new();
+        let queued = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(queued.sweep.live_objects, 2);
+        let record = heap.pop_pending_finalization().unwrap();
+        assert_eq!(record.registry(), registry.raw());
+        assert_eq!(record.held_value().as_heap_ref(), Some(held.raw()));
+        let drained = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(drained.sweep.reclaimed_objects, 2);
+    }
+
+    #[test]
+    /// Minor finalization enqueues an Old registry's dead young target before young sweep.
+    fn minor_enqueues_dead_young_finalization_targets() {
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<ChainNode>("ChainNode").unwrap();
+        let registry_type = types
+            .try_register::<FinalizationHolder>("FinalizationHolder")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let target = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                ChainNode { next: None },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let registry = heap
+            .try_allocate(
+                registry_type,
+                0,
+                0,
+                FinalizationHolder {
+                    registration: FinalizationRegistration::new(target, Value::from_i32(7)),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let stats = heap.collect_minor(&mut no_roots).unwrap();
+        assert_eq!(stats.mark.mark.finalizations_enqueued, 1);
+        assert_eq!(stats.sweep.sweep.reclaimed_objects, 1);
+        let record = heap.pop_pending_finalization().unwrap();
+        assert_eq!(record.registry(), registry.raw());
+        assert_eq!(record.held_value().as_i32(), Some(7));
+    }
+
+    #[test]
+    /// Descriptor policy overrides a mistaken Young request for pinned/finalizer payloads.
+    fn old_only_type_policy_cannot_allocate_into_eden() {
+        let mut types = TypeRegistry::new();
+        let pinned_type = types
+            .try_register_old_only::<PinnedPayload>("PinnedPayload")
+            .unwrap();
+        assert!(matches!(
+            types.try_register::<PinnedPayload>("WrongPolicy"),
+            Err(TypeRegistrationError::AllocationPolicyMismatch)
+        ));
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let pinned = heap
+            .try_allocate(pinned_type, 0, 0, PinnedPayload, AllocationSpace::Young)
+            .unwrap();
+        assert_eq!(
+            heap.span_table()
+                .metadata(pinned.raw().span_id())
+                .unwrap()
+                .space(),
+            SpanSpace::Old
+        );
     }
 
     #[test]

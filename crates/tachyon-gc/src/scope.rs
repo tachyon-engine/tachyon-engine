@@ -175,6 +175,14 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
             .write_barrier(source.as_gc_ref().raw(), target.as_gc_ref().raw())
     }
 
+    /// Implements AddToKeptObjects for a successfully dereferenced weak target.
+    pub fn keep_alive<T: ?Sized>(
+        &mut self,
+        target: Local<'scope, T>,
+    ) -> Result<bool, crate::KeptObjectError> {
+        self.heap.keep_alive(target.as_gc_ref().raw())
+    }
+
     /// Creates a nested checkpoint whose locals are removed before the outer scope resumes.
     pub fn with_nested_scope<R>(
         &mut self,

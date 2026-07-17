@@ -20,6 +20,13 @@ pub type TraceObjectFn = unsafe fn(NonNull<u8>, &mut dyn Tracer);
 /// descriptor, and this function must be called at most once for that allocation.
 pub type DropObjectFn = unsafe fn(NonNull<u8>);
 
+/// Immutable generation policy attached to one concrete payload descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GcAllocationPolicy {
+    YoungEligible,
+    OldOnly,
+}
+
 /// Immutable metadata for a concrete heap payload type.
 #[derive(Clone, Copy)]
 pub struct TypeDescriptor {
@@ -28,6 +35,7 @@ pub struct TypeDescriptor {
     layout: Layout,
     trace: TraceObjectFn,
     drop: DropObjectFn,
+    allocation_policy: GcAllocationPolicy,
 }
 
 /// A descriptor registration token statically paired with its concrete Rust payload type.
@@ -45,11 +53,14 @@ impl<T: Trace> Clone for GcType<T> {
 }
 
 impl<T: Trace> GcType<T> {
-    /// Registers monomorphized callbacks and prevents safe allocation under another type ID.
-    #[must_use]
-    pub(crate) fn new(type_id: GcTypeId, name: &'static str) -> Self {
+    /// Creates a typed token whose generation policy cannot vary between allocations.
+    pub(crate) fn new_with_policy(
+        type_id: GcTypeId,
+        name: &'static str,
+        allocation_policy: GcAllocationPolicy,
+    ) -> Self {
         Self {
-            descriptor: TypeDescriptor::for_type::<T>(type_id, name),
+            descriptor: TypeDescriptor::for_type_with_policy::<T>(type_id, name, allocation_policy),
             marker: PhantomData,
         }
     }
@@ -71,12 +82,23 @@ impl TypeDescriptor {
     /// Creates a descriptor whose callbacks are monomorphized for `T`.
     #[must_use]
     pub fn for_type<T: Trace>(type_id: GcTypeId, name: &'static str) -> Self {
+        Self::for_type_with_policy::<T>(type_id, name, GcAllocationPolicy::YoungEligible)
+    }
+
+    /// Creates a descriptor with a fixed young-eligible or direct-Old allocation policy.
+    #[must_use]
+    pub fn for_type_with_policy<T: Trace>(
+        type_id: GcTypeId,
+        name: &'static str,
+        allocation_policy: GcAllocationPolicy,
+    ) -> Self {
         Self {
             type_id,
             name,
             layout: Layout::new::<T>(),
             trace: trace_object::<T>,
             drop: drop_object::<T>,
+            allocation_policy,
         }
     }
 
@@ -96,6 +118,12 @@ impl TypeDescriptor {
     #[must_use]
     pub const fn layout(self) -> Layout {
         self.layout
+    }
+
+    /// Returns the immutable generation policy used by every allocation of this payload type.
+    #[must_use]
+    pub const fn allocation_policy(self) -> GcAllocationPolicy {
+        self.allocation_policy
     }
 
     /// Invokes the concrete tracing callback through the checked descriptor boundary.
@@ -163,6 +191,11 @@ mod tests {
 
         fn trace_ephemeron(&mut self, key: &mut Option<RawHeapRef>, value: &mut Value) {
             self.0 += usize::from(key.is_some()) + usize::from(value.as_heap_ref().is_some());
+        }
+
+        fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value) {
+            self.0 +=
+                usize::from(target.is_some()) + usize::from(held_value.as_heap_ref().is_some());
         }
     }
 

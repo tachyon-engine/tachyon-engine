@@ -1,8 +1,9 @@
 //! Iterative strong marking over exact roots and descriptor-provided object edges.
 
 use crate::{
-    CardBitmap, CollectionEpoch, GrayQueueError, HeapReferenceError, RawHeapRef, SpanId, SpanTable,
-    Trace, Tracer, TypeDescriptor, TypeRegistry,
+    CardBitmap, CollectionEpoch, FinalizationQueueError, GrayQueueError, HeapReferenceError,
+    RawHeapRef, SpanId, SpanTable, Trace, Tracer, TypeDescriptor, TypeRegistry,
+    finalization::PendingFinalizations,
     gray::GrayQueue,
     table::ReferenceSpace,
     weak::{WeakOwner, WeakOwnerError, WeakOwners},
@@ -15,6 +16,7 @@ pub enum MarkError {
     InvalidReference(HeapReferenceError),
     GrayQueue(GrayQueueError),
     WeakOwners(WeakOwnerError),
+    FinalizationQueue(FinalizationQueueError),
     UnknownTypeId(RawHeapRef),
 }
 
@@ -29,6 +31,7 @@ pub struct MarkStats {
     pub ephemeron_values_marked: usize,
     pub weak_slots_cleared: usize,
     pub ephemerons_cleared: usize,
+    pub finalizations_enqueued: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +39,7 @@ enum TracePhase {
     Strong,
     Ephemeron,
     ClearWeak,
+    EnqueueFinalization,
 }
 
 /// Deterministic young-mark and remembered-set work counters.
@@ -54,6 +58,7 @@ pub(crate) fn mark_strong_roots(
     types: &TypeRegistry,
     gray: &mut GrayQueue,
     weak_owners: &mut WeakOwners,
+    pending_finalizations: &mut PendingFinalizations,
     epoch: CollectionEpoch,
     roots: &mut dyn Trace,
 ) -> Result<MarkStats, MarkError> {
@@ -63,14 +68,18 @@ pub(crate) fn mark_strong_roots(
         table,
         gray,
         weak_owners,
+        pending_finalizations,
         epoch,
         error: None,
         stats: MarkStats::default(),
         current_has_weak: false,
         current_has_ephemeron: false,
+        current_has_finalization: false,
+        current_owner: None,
         phase: TracePhase::Strong,
     };
     roots.trace(&mut marker);
+    marker.mark_pending_finalization_roots();
     marker.drain(types);
     marker.close_weak(types);
     if let Some(error) = marker.error {
@@ -86,6 +95,7 @@ pub(crate) fn mark_young_roots(
     types: &TypeRegistry,
     gray: &mut GrayQueue,
     weak_owners: &mut WeakOwners,
+    pending_finalizations: &mut PendingFinalizations,
     epoch: CollectionEpoch,
     roots: &mut dyn Trace,
 ) -> Result<YoungMarkStats, MarkError> {
@@ -95,6 +105,7 @@ pub(crate) fn mark_young_roots(
         table,
         gray,
         weak_owners,
+        pending_finalizations,
         epoch,
         error: None,
         stats: YoungMarkStats::default(),
@@ -102,9 +113,12 @@ pub(crate) fn mark_young_roots(
         source_has_young: false,
         current_has_weak: false,
         current_has_ephemeron: false,
+        current_has_finalization: false,
+        current_owner: None,
         phase: TracePhase::Strong,
     };
     roots.trace(&mut marker);
+    marker.mark_pending_finalization_roots();
     marker.scan_remembered(types);
     marker.drain(types);
     marker.close_weak(types);
@@ -121,11 +135,14 @@ struct Marker<'a> {
     table: &'a mut SpanTable,
     gray: &'a mut GrayQueue,
     weak_owners: &'a mut WeakOwners,
+    pending_finalizations: &'a mut PendingFinalizations,
     epoch: CollectionEpoch,
     error: Option<MarkError>,
     stats: MarkStats,
     current_has_weak: bool,
     current_has_ephemeron: bool,
+    current_has_finalization: bool,
+    current_owner: Option<RawHeapRef>,
     phase: TracePhase,
 }
 
@@ -191,6 +208,7 @@ impl Marker<'_> {
             self.stats.traced_objects += 1;
             self.current_has_weak = false;
             self.current_has_ephemeron = false;
+            self.current_has_finalization = false;
             // SAFETY: table verification matched the live header ID to this immutable descriptor;
             // storage is independently allocated and cannot move while this marker only changes
             // side metadata and its separate gray queue. No other payload borrow is active.
@@ -201,13 +219,14 @@ impl Marker<'_> {
 
     /// Publishes at most one weak-phase entry for the object just traced strongly.
     fn record_weak_owner(&mut self, reference: RawHeapRef) {
-        if !self.current_has_weak && !self.current_has_ephemeron {
+        if !self.current_has_weak && !self.current_has_ephemeron && !self.current_has_finalization {
             return;
         }
         if let Err(error) = self.weak_owners.try_push(WeakOwner {
             reference,
             has_weak: self.current_has_weak,
             has_ephemeron: self.current_has_ephemeron,
+            has_finalization: self.current_has_finalization,
         }) {
             self.error = Some(MarkError::WeakOwners(error));
         } else {
@@ -257,7 +276,36 @@ impl Marker<'_> {
                 break;
             }
         }
+        if self.error.is_none() {
+            self.phase = TracePhase::EnqueueFinalization;
+            for index in 0..self.weak_owners.len() {
+                let owner = self
+                    .weak_owners
+                    .get(index)
+                    .expect("finalization enqueue uses a stable worklist");
+                if owner.has_finalization {
+                    self.trace_weak_owner(owner.reference, types);
+                }
+                if self.error.is_some() {
+                    break;
+                }
+            }
+        }
         self.phase = TracePhase::Strong;
+    }
+
+    /// Marks cleanup records retained from earlier collections before discovering new garbage.
+    fn mark_pending_finalization_roots(&mut self) {
+        for index in 0..self.pending_finalizations.len() {
+            let record = self
+                .pending_finalizations
+                .get(index)
+                .expect("pending finalization indices remain stable during root marking");
+            self.enqueue(record.registry());
+            if let Some(held) = record.held_value().as_heap_ref() {
+                self.enqueue(held);
+            }
+        }
     }
 
     /// Resolves a registered owner afresh for each weak phase without retaining payload pointers.
@@ -286,7 +334,9 @@ impl Marker<'_> {
         };
         // SAFETY: the owner remains marked and allocated until weak closure completes; descriptor
         // identity is revalidated for every phase and the callback cannot retain this pointer.
+        self.current_owner = Some(reference);
         unsafe { descriptor.trace(payload, self) };
+        self.current_owner = None;
     }
 
     #[inline(always)]
@@ -304,7 +354,7 @@ impl Marker<'_> {
 impl Tracer for Marker<'_> {
     #[inline(always)]
     fn trace_value(&mut self, value: &mut Value) {
-        if self.phase != TracePhase::ClearWeak
+        if matches!(self.phase, TracePhase::Strong | TracePhase::Ephemeron)
             && let Some(reference) = value.as_heap_ref()
         {
             self.enqueue(reference);
@@ -313,7 +363,7 @@ impl Tracer for Marker<'_> {
 
     #[inline(always)]
     fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
-        if self.phase != TracePhase::ClearWeak {
+        if matches!(self.phase, TracePhase::Strong | TracePhase::Ephemeron) {
             self.enqueue(*reference);
         }
     }
@@ -323,6 +373,7 @@ impl Tracer for Marker<'_> {
         match self.phase {
             TracePhase::Strong => self.current_has_weak |= reference.is_some(),
             TracePhase::Ephemeron => {}
+            TracePhase::EnqueueFinalization => {}
             TracePhase::ClearWeak => {
                 if let Some(target) = *reference {
                     let live = self.reference_live(target);
@@ -356,6 +407,41 @@ impl Tracer for Marker<'_> {
                     self.stats.ephemerons_cleared += 1;
                 }
             }
+            TracePhase::EnqueueFinalization => {}
+        }
+    }
+
+    #[inline(always)]
+    fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value) {
+        match self.phase {
+            TracePhase::Strong => {
+                self.current_has_finalization |= target.is_some();
+                self.trace_value(held_value);
+            }
+            TracePhase::Ephemeron | TracePhase::ClearWeak => {}
+            TracePhase::EnqueueFinalization => {
+                let Some(target_reference) = *target else {
+                    return;
+                };
+                let live = self.reference_live(target_reference);
+                if self.error.is_some() || live {
+                    return;
+                }
+                let registry = self
+                    .current_owner
+                    .expect("finalization callbacks run while resolving one owner");
+                match self
+                    .pending_finalizations
+                    .try_enqueue(registry, *held_value)
+                {
+                    Ok(()) => {
+                        *target = None;
+                        *held_value = Value::from_immediate(tachyon_value::Immediate::Undefined);
+                        self.stats.finalizations_enqueued += 1;
+                    }
+                    Err(error) => self.error = Some(MarkError::FinalizationQueue(error)),
+                }
+            }
         }
     }
 }
@@ -364,6 +450,7 @@ struct YoungMarker<'a> {
     table: &'a mut SpanTable,
     gray: &'a mut GrayQueue,
     weak_owners: &'a mut WeakOwners,
+    pending_finalizations: &'a mut PendingFinalizations,
     epoch: CollectionEpoch,
     error: Option<MarkError>,
     stats: YoungMarkStats,
@@ -371,6 +458,8 @@ struct YoungMarker<'a> {
     source_has_young: bool,
     current_has_weak: bool,
     current_has_ephemeron: bool,
+    current_has_finalization: bool,
+    current_owner: Option<RawHeapRef>,
     phase: TracePhase,
 }
 
@@ -502,6 +591,7 @@ impl YoungMarker<'_> {
         self.source_has_young = false;
         self.current_has_weak = false;
         self.current_has_ephemeron = false;
+        self.current_has_finalization = false;
         // SAFETY: exact header/descriptor validation owns the same boundary as full marking. The
         // table never reallocates while tracing; only side metadata and the separate queue mutate.
         unsafe { descriptor.trace(payload, self) };
@@ -514,13 +604,14 @@ impl YoungMarker<'_> {
 
     /// Publishes one young/minor weak owner without retaining payload addresses.
     fn record_weak_owner(&mut self, reference: RawHeapRef) {
-        if !self.current_has_weak && !self.current_has_ephemeron {
+        if !self.current_has_weak && !self.current_has_ephemeron && !self.current_has_finalization {
             return;
         }
         if let Err(error) = self.weak_owners.try_push(WeakOwner {
             reference,
             has_weak: self.current_has_weak,
             has_ephemeron: self.current_has_ephemeron,
+            has_finalization: self.current_has_finalization,
         }) {
             self.error = Some(MarkError::WeakOwners(error));
         } else {
@@ -571,7 +662,36 @@ impl YoungMarker<'_> {
                 break;
             }
         }
+        if self.error.is_none() {
+            self.phase = TracePhase::EnqueueFinalization;
+            for index in 0..self.weak_owners.len() {
+                let owner = self
+                    .weak_owners
+                    .get(index)
+                    .expect("minor finalization enqueue uses a stable worklist");
+                if owner.has_finalization {
+                    self.trace_weak_owner(owner.reference, types);
+                }
+                if self.error.is_some() {
+                    break;
+                }
+            }
+        }
         self.phase = TracePhase::Strong;
+    }
+
+    /// Marks pending registry/held-value records under young liveness rules.
+    fn mark_pending_finalization_roots(&mut self) {
+        for index in 0..self.pending_finalizations.len() {
+            let record = self
+                .pending_finalizations
+                .get(index)
+                .expect("pending finalization indices remain stable during minor roots");
+            self.enqueue(record.registry());
+            if let Some(held) = record.held_value().as_heap_ref() {
+                self.enqueue(held);
+            }
+        }
     }
 
     /// Re-resolves one young or remembered Old owner before invoking a weak-phase trace.
@@ -588,7 +708,9 @@ impl YoungMarker<'_> {
         };
         // SAFETY: weak owners remain allocated throughout closure; descriptor identity and payload
         // placement are revalidated and no payload pointer survives this callback.
+        self.current_owner = Some(reference);
         unsafe { descriptor.trace(payload, self) };
+        self.current_owner = None;
     }
 
     #[inline(always)]
@@ -712,7 +834,7 @@ impl YoungMarker<'_> {
 impl Tracer for YoungMarker<'_> {
     #[inline(always)]
     fn trace_value(&mut self, value: &mut Value) {
-        if self.phase != TracePhase::ClearWeak
+        if matches!(self.phase, TracePhase::Strong | TracePhase::Ephemeron)
             && let Some(reference) = value.as_heap_ref()
         {
             self.enqueue(reference);
@@ -721,7 +843,7 @@ impl Tracer for YoungMarker<'_> {
 
     #[inline(always)]
     fn trace_raw_heap_ref(&mut self, reference: &mut RawHeapRef) {
-        if self.phase != TracePhase::ClearWeak {
+        if matches!(self.phase, TracePhase::Strong | TracePhase::Ephemeron) {
             self.enqueue(*reference);
         }
     }
@@ -736,6 +858,7 @@ impl Tracer for YoungMarker<'_> {
             match self.phase {
                 TracePhase::Strong => self.current_has_weak |= reference.is_some(),
                 TracePhase::Ephemeron => {}
+                TracePhase::EnqueueFinalization => {}
                 TracePhase::ClearWeak => {
                     if let Some(target) = *reference {
                         let live = self.reference_live(target);
@@ -778,6 +901,50 @@ impl Tracer for YoungMarker<'_> {
                         *value = Value::from_immediate(tachyon_value::Immediate::Undefined);
                         self.stats.mark.ephemerons_cleared += 1;
                     }
+                }
+                TracePhase::EnqueueFinalization => {}
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value) {
+        if self.rebuilding_source {
+            if let Some(target) = *target {
+                self.enqueue(target);
+            }
+            if let Some(held) = held_value.as_heap_ref() {
+                self.enqueue(held);
+            }
+            return;
+        }
+        match self.phase {
+            TracePhase::Strong => {
+                self.current_has_finalization |= target.is_some();
+                self.trace_value(held_value);
+            }
+            TracePhase::Ephemeron | TracePhase::ClearWeak => {}
+            TracePhase::EnqueueFinalization => {
+                let Some(target_reference) = *target else {
+                    return;
+                };
+                let live = self.reference_live(target_reference);
+                if self.error.is_some() || live {
+                    return;
+                }
+                let registry = self
+                    .current_owner
+                    .expect("minor finalization callback resolves one owner");
+                match self
+                    .pending_finalizations
+                    .try_enqueue(registry, *held_value)
+                {
+                    Ok(()) => {
+                        *target = None;
+                        *held_value = Value::from_immediate(tachyon_value::Immediate::Undefined);
+                        self.stats.mark.finalizations_enqueued += 1;
+                    }
+                    Err(error) => self.error = Some(MarkError::FinalizationQueue(error)),
                 }
             }
         }

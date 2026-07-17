@@ -639,6 +639,11 @@ mod tests {
             *key = key.map(rewrite);
             self.trace_value(value);
         }
+
+        fn trace_finalization(&mut self, target: &mut Option<RawHeapRef>, held_value: &mut Value) {
+            *target = target.map(rewrite);
+            self.trace_value(held_value);
+        }
     }
 
     fn rewrite(reference: RawHeapRef) -> RawHeapRef {

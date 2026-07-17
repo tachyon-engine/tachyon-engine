@@ -11,6 +11,7 @@
 
 mod descriptor;
 mod epoch;
+mod finalization;
 mod gray;
 mod handle;
 mod heap;
@@ -28,8 +29,11 @@ mod trace;
 mod tuning;
 mod weak;
 
-pub use descriptor::{DropObjectFn, GcType, TraceObjectFn, TypeDescriptor};
+pub use descriptor::{DropObjectFn, GcAllocationPolicy, GcType, TraceObjectFn, TypeDescriptor};
 pub use epoch::{CollectionEpoch, CollectionEpochOverflow};
+pub use finalization::{
+    FinalizationQueueError, FinalizationQueueStats, FinalizationRegistration, PendingFinalization,
+};
 pub use gray::{GrayQueueError, GrayQueueStats};
 pub use handle::GcRef;
 pub use heap::{
@@ -45,7 +49,7 @@ pub use layout::{
 pub use mark::{MarkError, MarkStats, YoungMarkStats};
 pub use persistent::{PersistentRootError, PersistentRootId, PersistentRootStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
-pub use roots::{TemporaryRootError, TemporaryRootStats};
+pub use roots::{KeptObjectError, KeptObjectStats, TemporaryRootError, TemporaryRootStats};
 pub use scope::{
     Local, NoGcBorrowError, NoGcScope, PersistentResolveError, RootError, RunningScope,
     ScopedAllocationError,
