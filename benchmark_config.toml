@@ -1,0 +1,47 @@
+schema_version = 1
+minimum_samples = 10
+collected_samples = 15
+warmup_iterations = 3
+outlier_mad_multiplier = 6.0
+maximum_relative_mad = 0.10
+
+[build]
+profile = "release"
+panic = "unwind"
+lto = "thin"
+codegen_units = 1
+target_cpu = "default"
+features = "default"
+
+[[scripts]]
+id = "basic/call-loop"
+path = "benches/scripts/boa/basic/call-loop.js"
+category = "call"
+suite = "micro"
+source_repository = "https://github.com/boa-dev/boa"
+source_commit = "b562725784a18e55d27ddd9702abac61b36a250d"
+source_path = "boa/benches/scripts/basic/call-loop.js"
+sha256 = "e0337d51665cde050485c522fab9db888538b784fe16237c4757b429178032bf"
+license = "MIT OR Unlicense"
+
+[[scripts]]
+id = "basic/closure"
+path = "benches/scripts/boa/basic/closure.js"
+category = "closure"
+suite = "micro"
+source_repository = "https://github.com/boa-dev/boa"
+source_commit = "b562725784a18e55d27ddd9702abac61b36a250d"
+source_path = "boa/benches/scripts/basic/closure.js"
+sha256 = "b8efad7ad539d79a7e014f2fb14096c0e9bfd591a17d7ec2da0e2b1b2e6ab8aa"
+license = "MIT OR Unlicense"
+
+[[scripts]]
+id = "basic/nested-loop"
+path = "benches/scripts/boa/basic/nested-loop.js"
+category = "dispatch"
+suite = "micro"
+source_repository = "https://github.com/boa-dev/boa"
+source_commit = "b562725784a18e55d27ddd9702abac61b36a250d"
+source_path = "boa/benches/scripts/basic/nested-loop.js"
+sha256 = "651f2b478c614df85aa5667a344c8ba0fcb6a00d53563e3663cb1eef74f36116"
+license = "MIT OR Unlicense"

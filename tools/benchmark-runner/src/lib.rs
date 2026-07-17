@@ -1,0 +1,21 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![warn(missing_docs)]
+//! Reproducible multi-engine JavaScript benchmark measurement infrastructure.
+
+mod adapter;
+mod config;
+mod runner;
+mod stats;
+
+pub use adapter::{
+    AdapterError, BenchmarkAdapter, BenchmarkRequest, EngineIdentity, EngineKind, SampleMetrics,
+};
+pub use config::{
+    BenchmarkCategory, BenchmarkConfig, BuildConfig, ConfigError, CorpusError, CorpusScript,
+    ScriptConfig, SuiteKind, load_corpus,
+};
+pub use runner::{
+    BenchmarkCaseResult, BenchmarkReport, HostMetadata, MeasurementMode, RunError, Validity,
+    run_case,
+};
+pub use stats::{SampleSummary, StatisticsError, summarize_samples};
