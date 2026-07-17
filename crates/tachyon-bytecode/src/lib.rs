@@ -13,6 +13,10 @@
 use core::fmt;
 use std::sync::Arc;
 
+mod disassembler;
+
+pub use disassembler::{DisassemblyError, disassemble};
+
 const OPCODE_MASK: u8 = 0x3f;
 const FORMAT_MASK: u8 = 0xc0;
 const NORMAL_FORMAT: u8 = 0x40;
@@ -749,6 +753,13 @@ pub struct SuspendPoint {
     pub completion_depth: u32,
 }
 
+/// The immutable location of isolate-local feedback; the feedback data itself never enters code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FeedbackSite {
+    pub offset: WordOffset,
+    pub slot: FeedbackSlot,
+}
+
 /// Register and stack-reservation requirements known before a function begins execution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FunctionLayout {
@@ -768,6 +779,7 @@ pub struct FunctionMetadata {
     pub source_map: Arc<[SourceMapEntry]>,
     pub handlers: Arc<[HandlerEntry]>,
     pub suspend_points: Arc<[SuspendPoint]>,
+    pub feedback_sites: Arc<[FeedbackSite]>,
 }
 
 impl FunctionMetadata {
@@ -779,6 +791,7 @@ impl FunctionMetadata {
             source_map: Arc::default(),
             handlers: Arc::default(),
             suspend_points: Arc::default(),
+            feedback_sites: Arc::default(),
         }
     }
 }
@@ -846,6 +859,11 @@ impl CompiledFunction {
     pub fn suspend_points(&self) -> &[SuspendPoint] {
         &self.metadata.suspend_points
     }
+
+    #[must_use]
+    pub fn feedback_sites(&self) -> &[FeedbackSite] {
+        &self.metadata.feedback_sites
+    }
 }
 
 /// A fully verified, immutable compilation result with no isolate-local or runtime-heap state.
@@ -901,6 +919,20 @@ pub enum ModuleBuildError {
     InvalidHandlerRange {
         function: FunctionId,
         handler: HandlerEntry,
+    },
+    FeedbackSiteOffsetNotInstructionStart {
+        function: FunctionId,
+        offset: WordOffset,
+    },
+    FeedbackSlotOutOfRange {
+        function: FunctionId,
+        slot: FeedbackSlot,
+        feedback_slot_count: u32,
+    },
+    FeedbackSitesNotMonotonic {
+        function: FunctionId,
+        previous: WordOffset,
+        current: WordOffset,
     },
     SuspendPointIdMismatch {
         function: FunctionId,
@@ -991,6 +1023,12 @@ impl CompiledModule {
                 source_len,
             )?;
             validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
+            validate_feedback_sites(
+                template.id,
+                &template.metadata.feedback_sites,
+                &bytecode,
+                template.metadata.layout.feedback_slot_count,
+            )?;
             validate_suspend_points(
                 template.id,
                 &template.metadata.suspend_points,
@@ -1110,6 +1148,41 @@ fn validate_handlers(
         {
             return Err(ModuleBuildError::InvalidHandlerRange { function, handler });
         }
+    }
+    Ok(())
+}
+
+/// Feedback sites have stable ordering and bounds, while their mutable feedback stays isolate-local.
+fn validate_feedback_sites(
+    function: FunctionId,
+    feedback_sites: &[FeedbackSite],
+    bytecode: &VerifiedBytecode,
+    feedback_slot_count: u32,
+) -> Result<(), ModuleBuildError> {
+    let mut previous: Option<WordOffset> = None;
+    for &site in feedback_sites {
+        if !bytecode.is_instruction_start(site.offset) {
+            return Err(ModuleBuildError::FeedbackSiteOffsetNotInstructionStart {
+                function,
+                offset: site.offset,
+            });
+        }
+        if site.slot.index() >= feedback_slot_count {
+            return Err(ModuleBuildError::FeedbackSlotOutOfRange {
+                function,
+                slot: site.slot,
+                feedback_slot_count,
+            });
+        }
+        if let Some(previous) = previous.filter(|previous| site.offset.index() <= previous.index())
+        {
+            return Err(ModuleBuildError::FeedbackSitesNotMonotonic {
+                function,
+                previous,
+                current: site.offset,
+            });
+        }
+        previous = Some(site.offset);
     }
     Ok(())
 }
@@ -1480,6 +1553,11 @@ mod tests {
             completion_depth: 1,
         }]
         .into();
+        metadata.feedback_sites = vec![FeedbackSite {
+            offset: WordOffset::new(0),
+            slot: FeedbackSlot::new(2),
+        }]
+        .into();
 
         let module = CompiledModule::new(
             Arc::from("x"),
@@ -1498,13 +1576,11 @@ mod tests {
 
         assert_eq!(module.source(), "x");
         assert_eq!(module.entry_function(), FunctionId::new(0));
+        let function = module.function(FunctionId::new(0)).unwrap();
+        assert_eq!(function.suspend_points().len(), 1);
         assert_eq!(
-            module
-                .function(FunctionId::new(0))
-                .unwrap()
-                .suspend_points()
-                .len(),
-            1
+            disassemble(function).unwrap(),
+            "000000 [0..1] Await r0, r0, suspend=0 feedback=2\n000001 [0..1] Return r0\n"
         );
         assert!(matches!(
             &module.constants()[1],
