@@ -24,12 +24,23 @@ license = "Apache-2.0"
 repository = "https://github.com/lemonhx/tachyon-js"
 
 [profile.dev]
+opt-level = 3
 debug = 2
+debug-assertions = false
+overflow-checks = false
+
+[profile.test]
+opt-level = 3
+debug = 2
+debug-assertions = false
+overflow-checks = false
 
 [profile.release]
 codegen-units = 1
 lto = "thin"
+debug = 2
 
 [profile.bench]
 codegen-units = 1
 lto = "thin"
+debug = 2
