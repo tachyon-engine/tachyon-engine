@@ -2,9 +2,12 @@
 
 use crate::{
     CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
-    LargeAllocationError, LargeReclaim, MarkError, MarkStats, ObjectLayout, RawHeapRef,
-    SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId, SpanSpace, SpanTable,
-    SpanTableError, Trace, TypeRegistry, gray::GrayQueue, mark::mark_strong_roots,
+    LargeAllocationError, LargeReclaim, MAX_LOGICAL_SPANS, MarkError, MarkStats, ObjectLayout,
+    RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId, SpanSpace,
+    SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats, Trace, TypeRegistry,
+    gray::GrayQueue,
+    mark::mark_strong_roots,
+    sweep::{SweepWorklist, sweep_full},
     tuning::SMALL_SIZE_CLASSES,
 };
 
@@ -49,6 +52,20 @@ pub enum HeapAllocationError {
     LargeAllocation(LargeAllocationError),
 }
 
+/// A full-major collection fails before sweep or leaves any partial sweep exactly accounted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MajorCollectionError {
+    Mark(MarkError),
+    Sweep(SweepError),
+}
+
+/// Combined fixed-point and sweep evidence for one stop-the-world full major collection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MajorCollectionStats {
+    pub mark: MarkStats,
+    pub sweep: SweepStats,
+}
+
 /// A single-mutator heap with fixed small-size-class slots and direct-old large ranges.
 pub struct Heap {
     types: TypeRegistry,
@@ -60,12 +77,19 @@ pub struct Heap {
     external_bytes: usize,
     collection_epoch: CollectionEpoch,
     gray: GrayQueue,
+    sweep_worklist: SweepWorklist,
 }
 
 impl Heap {
     /// Creates an empty heap without allocating a span or active-size-class side container.
     #[must_use]
     pub const fn new(limit: HeapLimit, types: TypeRegistry) -> Self {
+        let limit_spans = limit.max_heap_bytes().div_ceil(SPAN_SIZE_BYTES);
+        let max_sweep_entries = if limit_spans < MAX_LOGICAL_SPANS {
+            limit_spans
+        } else {
+            MAX_LOGICAL_SPANS
+        };
         Self {
             types,
             table: SpanTable::new(),
@@ -76,6 +100,7 @@ impl Heap {
             external_bytes: 0,
             collection_epoch: CollectionEpoch::INITIAL,
             gray: GrayQueue::new(limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES),
+            sweep_worklist: SweepWorklist::new(max_sweep_entries),
         }
     }
 
@@ -203,6 +228,38 @@ impl Heap {
         self.gray.stats()
     }
 
+    /// Marks exact roots and then sweeps every span owner without a per-object work vector.
+    pub fn collect_major(
+        &mut self,
+        roots: &mut dyn Trace,
+    ) -> Result<MajorCollectionStats, MajorCollectionError> {
+        let mark = self
+            .mark_strong(roots)
+            .map_err(MajorCollectionError::Mark)?;
+        let mut sweep = SweepStats::default();
+        let result = sweep_full(
+            &mut self.table,
+            &self.types,
+            &mut self.sweep_worklist,
+            self.collection_epoch,
+            &mut sweep,
+        );
+        self.committed_span_storage_bytes = self
+            .committed_span_storage_bytes
+            .checked_sub(sweep.released_storage_bytes)
+            .expect("sweep cannot release more storage than the heap committed");
+        sweep.external_bytes = self.external_bytes;
+        self.clear_released_active_spans();
+        result.map_err(MajorCollectionError::Sweep)?;
+        Ok(MajorCollectionStats { mark, sweep })
+    }
+
+    /// Returns retained span-worklist high water after successful or failed collection attempts.
+    #[must_use]
+    pub fn sweep_worklist_stats(&self) -> SweepWorklistStats {
+        self.sweep_worklist.stats()
+    }
+
     /// Updates committed storage after the collector has dropped a large payload and releases its range.
     pub fn reclaim_large_after_drop(
         &mut self,
@@ -211,6 +268,15 @@ impl Heap {
         let reclaimed = self.table.reclaim_large_after_drop(reference)?;
         self.committed_span_storage_bytes -= reclaimed.storage_bytes();
         Ok(reclaimed)
+    }
+
+    /// Removes cached allocator IDs whose backing spans were released by full sweep.
+    fn clear_released_active_spans(&mut self) {
+        for active in self.active_eden.iter_mut().chain(&mut self.active_old) {
+            if active.is_some_and(|span_id| self.table.sweep_target(span_id).is_none()) {
+                *active = None;
+            }
+        }
     }
 
     #[inline(always)]
@@ -328,6 +394,14 @@ fn size_class_index(required: u16) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
     use super::{AllocationSpace, Heap, HeapAllocationError, HeapLimit};
     use crate::{
         GcRef, HeapReferenceError, RawHeapRef, SPAN_SIZE_BYTES, Trace, Tracer, TypeRegistry,
@@ -351,6 +425,25 @@ mod tests {
         edges: [Option<GcRef<Leaf>>; 300],
     }
 
+    struct DropNode {
+        next: Option<GcRef<DropNode>>,
+        drops: Arc<AtomicUsize>,
+    }
+
+    struct DropLarge {
+        _bytes: [u8; 70_000],
+        drops: Arc<AtomicUsize>,
+    }
+
+    struct PanicOnDrop {
+        drops: Arc<AtomicUsize>,
+    }
+
+    struct LargePanicOnDrop {
+        _bytes: [u8; 70_000],
+        drops: Arc<AtomicUsize>,
+    }
+
     impl Trace for OtherPayload {
         fn trace(&mut self, _: &mut dyn Tracer) {}
     }
@@ -372,6 +465,50 @@ mod tests {
     impl Trace for Fanout {
         fn trace(&mut self, tracer: &mut dyn Tracer) {
             self.edges.trace(tracer);
+        }
+    }
+
+    impl Trace for DropNode {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.next.trace(tracer);
+        }
+    }
+
+    impl Drop for DropNode {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Trace for DropLarge {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Drop for DropLarge {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Trace for PanicOnDrop {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            panic!("intentional destructor unwind");
+        }
+    }
+
+    impl Trace for LargePanicOnDrop {
+        fn trace(&mut self, _: &mut dyn Tracer) {}
+    }
+
+    impl Drop for LargePanicOnDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            panic!("intentional large destructor unwind");
         }
     }
 
@@ -679,5 +816,281 @@ mod tests {
         assert_eq!(queue.growth_count, 1);
         assert_eq!(queue.peak_len, 299);
         assert!(queue.retained_capacity >= queue.peak_len);
+    }
+
+    #[test]
+    /// Keeps an exact graph, reclaims one peer, and proves the rebuilt Old free list reuses its slot.
+    fn full_major_preserves_roots_and_reuses_reclaimed_old_slots() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<DropNode>("DropNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let child = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut root = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: Some(child),
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let dead = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+
+        let stats = heap.collect_major(&mut root).unwrap();
+        assert_eq!(stats.sweep.scanned_objects, 3);
+        assert_eq!(stats.sweep.live_objects, 2);
+        assert_eq!(stats.sweep.reclaimed_objects, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(heap.verify_reference(root.raw(), None).is_ok());
+        assert!(heap.verify_reference(child.raw(), None).is_ok());
+        assert_eq!(
+            heap.verify_reference(dead.raw(), None),
+            Err(HeapReferenceError::UnallocatedSlot(dead.raw()))
+        );
+
+        let reused = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        assert_eq!(reused.raw(), dead.raw());
+
+        let mut no_roots = Vec::<Value>::new();
+        let final_stats = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(final_stats.sweep.reclaimed_objects, 3);
+        assert_eq!(final_stats.sweep.spans_released, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 4);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+    }
+
+    #[test]
+    /// Builds a two-node cycle through a validated payload boundary; reachability, not ref counts, wins.
+    fn full_major_handles_reachable_and_unreachable_cycles() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<DropNode>("DropNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let first = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let second = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: Some(first),
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let descriptor = heap.types.descriptor(node_type.type_id()).unwrap();
+        let first_payload = heap.table.payload_address(first.raw(), descriptor).unwrap();
+        // SAFETY: table verification paired this payload with `DropNode`; collection and allocation
+        // are paused while this exclusive test-only mutation installs the back edge.
+        unsafe { first_payload.cast::<DropNode>().as_mut().next = Some(second) };
+        let mut root = first;
+
+        let live = heap.collect_major(&mut root).unwrap();
+        assert_eq!(live.sweep.live_objects, 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        let mut no_roots = Vec::<Value>::new();
+        let dead = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(dead.sweep.reclaimed_objects, 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    /// Reclaims one independently backed large range and invokes its descriptor drop exactly once.
+    fn full_major_reclaims_large_owner_and_continuations() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let large_type = types.try_register::<DropLarge>("DropLarge").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                large_type,
+                0,
+                0,
+                DropLarge {
+                    _bytes: [0; 70_000],
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Young,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let stats = heap.collect_major(&mut no_roots).unwrap();
+
+        assert_eq!(stats.sweep.scanned_objects, 1);
+        assert_eq!(stats.sweep.reclaimed_objects, 1);
+        assert_eq!(stats.sweep.spans_processed, 1);
+        assert_eq!(stats.sweep.spans_released, 2);
+        assert_eq!(stats.sweep.released_storage_bytes, 2 * SPAN_SIZE_BYTES);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
+        assert_eq!(
+            heap.verify_reference(reference.raw(), None),
+            Err(HeapReferenceError::VacantSpan(reference.raw().span_id()))
+        );
+    }
+
+    #[test]
+    /// Repeated majors retain live objects, reclaim once, then make an empty collection a no-op.
+    fn repeated_full_major_collections_do_not_redrop_objects() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let node_type = types.try_register::<DropNode>("DropNode").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let mut root = heap
+            .try_allocate(
+                node_type,
+                0,
+                0,
+                DropNode {
+                    next: None,
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+
+        assert_eq!(heap.collect_major(&mut root).unwrap().sweep.live_objects, 1);
+        assert_eq!(heap.collect_major(&mut root).unwrap().sweep.live_objects, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        let mut no_roots = Vec::<Value>::new();
+        assert_eq!(
+            heap.collect_major(&mut no_roots)
+                .unwrap()
+                .sweep
+                .reclaimed_objects,
+            1
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            heap.collect_major(&mut no_roots)
+                .unwrap()
+                .sweep
+                .scanned_objects,
+            0
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    /// Unpublication precedes unsafe drop so a caught destructor panic cannot cause double drop.
+    fn destructor_unwind_cannot_republish_or_double_drop_a_slot() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let object_type = types.try_register::<PanicOnDrop>("PanicOnDrop").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                object_type,
+                0,
+                0,
+                PanicOnDrop {
+                    drops: Arc::clone(&drops),
+                },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _ = heap.collect_major(&mut no_roots);
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            heap.verify_reference(reference.raw(), None),
+            Err(HeapReferenceError::UnallocatedSlot(reference.raw()))
+        );
+
+        let retry = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(retry.sweep.reclaimed_objects, 0);
+        assert_eq!(retry.sweep.spans_released, 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    /// A large drop unwind leaves an unpublished owner that the next major releases without redrop.
+    fn large_destructor_unwind_releases_range_on_retry_without_double_drop() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut types = TypeRegistry::new();
+        let object_type = types
+            .try_register::<LargePanicOnDrop>("LargePanicOnDrop")
+            .unwrap();
+        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
+        heap.try_allocate(
+            object_type,
+            0,
+            0,
+            LargePanicOnDrop {
+                _bytes: [0; 70_000],
+                drops: Arc::clone(&drops),
+            },
+            AllocationSpace::Old,
+        )
+        .unwrap();
+        let mut no_roots = Vec::<Value>::new();
+
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _ = heap.collect_major(&mut no_roots);
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.committed_span_storage_bytes(), 2 * SPAN_SIZE_BYTES);
+
+        let retry = heap.collect_major(&mut no_roots).unwrap();
+        assert_eq!(retry.sweep.reclaimed_objects, 0);
+        assert_eq!(retry.sweep.spans_released, 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(heap.committed_span_storage_bytes(), 0);
     }
 }

@@ -7,8 +7,9 @@ use core::{
 
 use crate::{
     CollectionEpoch, GcHeader, GcRef, GcTypeId, LargeSpanMetadata, MAX_LOGICAL_SPANS, ObjectLayout,
-    RawHeapRef, SizeClass, SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata, SpanId,
-    SpanReuseGeneration, SpanSpace, SpanStorage, SpanStorageAllocationError, Trace, TypeDescriptor,
+    RawHeapRef, SizeClass, SlotIndex, SmallObjectLayout, SmallObjectLayoutError, SmallSpanMetadata,
+    SpanId, SpanReuseGeneration, SpanSpace, SpanStorage, SpanStorageAllocationError, Trace,
+    TypeDescriptor,
     tuning::{
         CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_FREE_RANGE_CAPACITY,
         INITIAL_SPAN_TABLE_CAPACITY,
@@ -58,6 +59,23 @@ pub struct LargeReclaim {
     span_count: u32,
     storage_bytes: usize,
     object_bytes: usize,
+}
+
+/// Copy-only collector view that never lends span storage across a callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SweepTarget {
+    Small,
+    LargeOwner,
+}
+
+/// Stable small-span accounting captured between collector mutation steps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SmallSweepSnapshot {
+    pub size_class: SizeClass,
+    pub space: SpanSpace,
+    pub bump_cursor: u16,
+    pub allocated_slots: u16,
+    pub allocated_bytes: u32,
 }
 
 impl LargeReclaim {
@@ -337,6 +355,79 @@ impl SpanTable {
         self.entries.capacity()
     }
 
+    /// Classifies an occupied owner entry while excluding vacant and continuation IDs.
+    #[must_use]
+    pub(crate) fn sweep_target(&self, span_id: SpanId) -> Option<SweepTarget> {
+        match self.entries.get(span_id.index() as usize)?.kind.as_ref()? {
+            SpanKind::Small(_) => Some(SweepTarget::Small),
+            SpanKind::LargeOwner(_) => Some(SweepTarget::LargeOwner),
+            SpanKind::LargeContinuation(_) => None,
+        }
+    }
+
+    /// Captures only scalar metadata needed to account for one small-span sweep.
+    #[must_use]
+    pub(crate) fn small_sweep_snapshot(&self, span_id: SpanId) -> Option<SmallSweepSnapshot> {
+        let metadata = self.metadata(span_id)?;
+        Some(SmallSweepSnapshot {
+            size_class: metadata.size_class(),
+            space: metadata.space(),
+            bump_cursor: metadata.bump_cursor(),
+            allocated_slots: metadata.allocated_slots(),
+            allocated_bytes: metadata.allocated_bytes(),
+        })
+    }
+
+    /// Returns the next live logical reference from the allocation bitmap without allocating.
+    #[must_use]
+    pub(crate) fn next_allocated_reference(
+        &self,
+        span_id: SpanId,
+        start: u16,
+    ) -> Option<RawHeapRef> {
+        let metadata = self.metadata(span_id)?;
+        let slot = metadata.allocations().next_allocated(start)?;
+        let offset = metadata
+            .size_class()
+            .offset_for_slot(slot)
+            .expect("allocated bitmap bits belong to the span size class");
+        Some(RawHeapRef::from_parts(span_id, offset))
+    }
+
+    /// Ensures a later whole-span/range release cannot fail after payload destruction.
+    pub(crate) fn prepare_release(&mut self, span_id: SpanId) -> Result<(), SpanTableError> {
+        self.reserve_free_range_if_needed(span_id.index())
+    }
+
+    /// Rebuilds an Old span's complete free list from allocation bits after batch sweep.
+    pub(crate) fn rebuild_old_free_list(&mut self, span_id: SpanId) {
+        let Some(SpanKind::Small(span)) = self
+            .entries
+            .get_mut(span_id.index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+        else {
+            return;
+        };
+        if span.metadata.space() != SpanSpace::Old {
+            return;
+        }
+        span.metadata.set_free_list_head(None);
+        for index in 0..span.metadata.bump_cursor() {
+            let slot = SlotIndex::new(index).expect("bump cursor is bounded by the size class");
+            if span.metadata.allocations().is_allocated(slot) {
+                continue;
+            }
+            let offset = span
+                .metadata
+                .size_class()
+                .offset_for_slot(slot)
+                .expect("bump slots belong to the size class");
+            let previous = span.metadata.free_list_head();
+            span.storage.write_free_next(offset, previous);
+            span.metadata.set_free_list_head(Some(slot));
+        }
+    }
+
     /// Checks the active-span fast path without consuming the value that a slow path may need.
     #[must_use]
     #[inline(always)]
@@ -583,6 +674,92 @@ impl SpanTable {
         true
     }
 
+    /// Removes lifetime metadata before invoking a potentially unwinding Rust destructor.
+    ///
+    /// Storage bytes remain untouched until the callback returns, but a caught panic cannot make
+    /// a later collection invoke the same destructor twice.
+    pub(crate) fn unpublish_small_for_drop(&mut self, reference: RawHeapRef) -> bool {
+        let Some(span) = self
+            .entries
+            .get_mut(reference.span_id().index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+            .and_then(|kind| match kind {
+                SpanKind::Small(span) => Some(span),
+                SpanKind::LargeOwner(_) | SpanKind::LargeContinuation(_) => None,
+            })
+        else {
+            return false;
+        };
+        let Some(slot) = span
+            .metadata
+            .size_class()
+            .slot_for_offset(reference.span_offset())
+        else {
+            return false;
+        };
+        span.metadata.reclaim_allocation(slot)
+    }
+
+    /// Unpublishes one large payload before drop while retaining its complete backing range.
+    pub(crate) fn unpublish_large_for_drop(
+        &mut self,
+        reference: RawHeapRef,
+    ) -> Result<(), SpanTableError> {
+        let owner = reference.span_id();
+        let Some(SpanKind::LargeOwner(span)) = self
+            .entries
+            .get_mut(owner.index() as usize)
+            .and_then(|entry| entry.kind.as_mut())
+        else {
+            return Err(SpanTableError::VacantSpan(owner));
+        };
+        if !span.metadata.is_allocated() {
+            return Err(SpanTableError::VacantSpan(owner));
+        }
+        span.metadata.reclaim();
+        Ok(())
+    }
+
+    /// Releases an unpublished large owner after its descriptor callback has returned.
+    pub(crate) fn release_unpublished_large(
+        &mut self,
+        reference: RawHeapRef,
+    ) -> Result<LargeReclaim, SpanTableError> {
+        let owner = reference.span_id();
+        let (span_count, object_bytes) = match self
+            .entries
+            .get(owner.index() as usize)
+            .and_then(|entry| entry.kind.as_ref())
+        {
+            Some(SpanKind::LargeOwner(span)) if !span.metadata.is_allocated() => (
+                span.metadata.span_count() as usize,
+                span.metadata.object_bytes(),
+            ),
+            Some(SpanKind::LargeContinuation(continuation)) => {
+                return Err(SpanTableError::LargeContinuationSpan {
+                    span: owner,
+                    owner: continuation.owner,
+                });
+            }
+            Some(SpanKind::Small(_)) | Some(SpanKind::LargeOwner(_)) | None => {
+                return Err(SpanTableError::VacantSpan(owner));
+            }
+        };
+        self.reserve_free_range_if_needed(owner.index())?;
+        for ordinal in 0..span_count {
+            let entry = &mut self.entries[owner.index() as usize + ordinal];
+            entry.kind = None;
+            entry.generation = entry.generation.next();
+            self.insert_free_span(owner.index() + ordinal as u16);
+        }
+        self.live_spans -= span_count;
+        Ok(LargeReclaim {
+            span_count: span_count as u32,
+            storage_bytes: span_count * crate::SPAN_SIZE_BYTES,
+            object_bytes,
+        })
+    }
+
     /// Releases a complete already-dropped large owner/continuation range for exact reuse.
     pub fn reclaim_large_after_drop(
         &mut self,
@@ -611,29 +788,11 @@ impl SpanTable {
             Some(SpanKind::LargeOwner(_)) | None => return Err(SpanTableError::VacantSpan(owner)),
         };
         self.reserve_free_range_if_needed(owner.index())?;
-        if let Some(SpanKind::LargeOwner(span)) = self.entries[owner.index() as usize].kind.as_mut()
-        {
-            span.metadata.reclaim();
-        }
-        for ordinal in 0..span_count {
-            let entry = &mut self.entries[owner.index() as usize + ordinal];
-            if ordinal != 0 {
-                debug_assert!(matches!(
-                    &entry.kind,
-                    Some(SpanKind::LargeContinuation(continuation))
-                        if continuation.owner == owner && continuation.ordinal as usize == ordinal
-                ));
-            }
-            entry.kind = None;
-            entry.generation = entry.generation.next();
-            self.insert_free_span(owner.index() + ordinal as u16);
-        }
-        self.live_spans -= span_count;
-        Ok(LargeReclaim {
-            span_count: span_count as u32,
-            storage_bytes: span_count * crate::SPAN_SIZE_BYTES,
-            object_bytes,
-        })
+        self.unpublish_large_for_drop(reference)?;
+        let reclaimed = self.release_unpublished_large(reference)?;
+        debug_assert_eq!(reclaimed.span_count(), span_count as u32);
+        debug_assert_eq!(reclaimed.object_bytes(), object_bytes);
+        Ok(reclaimed)
     }
 
     /// Advances the epoch, physically resetting every live span bitmap on the forced-wrap path.

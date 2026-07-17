@@ -8,6 +8,8 @@ pub(crate) const INITIAL_FREE_RANGE_CAPACITY: usize = 4;
 pub(crate) const INITIAL_TYPE_DESCRIPTOR_CAPACITY: usize = 64;
 /// First gray reservation balances tiny-script footprint against common graph breadth.
 pub(crate) const INITIAL_GRAY_QUEUE_CAPACITY: usize = 256;
+/// First major-sweep reservation; each entry is one span owner rather than one object.
+pub(crate) const INITIAL_SWEEP_WORKLIST_CAPACITY: usize = 64;
 /// Numerator for bounded 1.5x metadata-container growth.
 pub(crate) const CAPACITY_GROWTH_NUMERATOR: usize = 3;
 /// Denominator for bounded 1.5x metadata-container growth.

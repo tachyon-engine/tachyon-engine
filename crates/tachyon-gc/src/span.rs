@@ -233,6 +233,12 @@ impl AllocationBitmap {
     pub fn free(&mut self, slot: SlotIndex) -> bool {
         self.bits.remove(slot)
     }
+
+    /// Finds the next initialized slot without scanning zero bits one by one.
+    #[must_use]
+    pub(crate) fn next_allocated(&self, start: u16) -> Option<SlotIndex> {
+        self.bits.next_set(start)
+    }
 }
 
 impl Default for AllocationBitmap {
@@ -539,6 +545,26 @@ impl SlotBitmap {
         was_present
     }
 
+    /// Skips empty bitmap words and returns the least set bit at or after `start`.
+    fn next_set(&self, start: u16) -> Option<SlotIndex> {
+        let start = usize::from(start);
+        if start >= MAX_SMALL_OBJECT_SLOTS {
+            return None;
+        }
+        let mut word_index = start / u64::BITS as usize;
+        let bit_index = start % u64::BITS as usize;
+        let mut word = self.words[word_index] & (u64::MAX << bit_index);
+        loop {
+            if word != 0 {
+                let index = word_index * u64::BITS as usize + word.trailing_zeros() as usize;
+                return (index < MAX_SMALL_OBJECT_SLOTS)
+                    .then(|| SlotIndex::new(index as u16).expect("bitmap index is bounded"));
+            }
+            word_index += 1;
+            word = *self.words.get(word_index)?;
+        }
+    }
+
     fn clear(&mut self) {
         self.words.fill(0);
     }
@@ -614,6 +640,24 @@ mod tests {
         assert!(allocations.free(first));
         assert!(!allocations.is_allocated(first));
         assert!(marks.is_marked(first, epoch));
+    }
+
+    #[test]
+    fn allocation_bitmap_skips_empty_words_and_honors_start_position() {
+        let mut allocations = AllocationBitmap::new();
+        let first = SlotIndex::new(3).unwrap();
+        let second = SlotIndex::new(130).unwrap();
+        allocations.allocate(first);
+        allocations.allocate(second);
+
+        assert_eq!(allocations.next_allocated(0), Some(first));
+        assert_eq!(allocations.next_allocated(4), Some(second));
+        assert_eq!(allocations.next_allocated(130), Some(second));
+        assert_eq!(allocations.next_allocated(131), None);
+        assert_eq!(
+            allocations.next_allocated(MAX_SMALL_OBJECT_SLOTS as u16),
+            None
+        );
     }
 
     #[test]

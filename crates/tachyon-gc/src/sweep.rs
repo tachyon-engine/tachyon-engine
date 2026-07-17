@@ -1,0 +1,370 @@
+//! Bounded span-at-a-time full-major sweeping after the strong mark fixed point.
+
+use crate::{
+    CollectionEpoch, HeapReferenceError, MINIMUM_SLOT_SIZE_BYTES, RawHeapRef, SPAN_SIZE_BYTES,
+    SpanId, SpanSpace, SpanTable, SpanTableError, TypeRegistry,
+    table::{SmallSweepSnapshot, SweepTarget},
+    tuning::{
+        CAPACITY_GROWTH_DENOMINATOR, CAPACITY_GROWTH_NUMERATOR, INITIAL_SWEEP_WORKLIST_CAPACITY,
+    },
+};
+
+/// A span owner could not be retained within the bounded sweep worklist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SweepWorklistError {
+    EntryLimitExceeded { limit: usize },
+    AllocationFailed,
+}
+
+/// Retained high-water evidence for tuning the span-level sweep queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SweepWorklistStats {
+    pub initial_capacity: usize,
+    pub growth_count: usize,
+    pub peak_len: usize,
+    pub retained_capacity: usize,
+    pub slack_entries: usize,
+}
+
+/// A full-sweep failure leaves already reclaimed objects unpublished and never double-dropped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SweepError {
+    Worklist(SweepWorklistError),
+    InvalidReference(HeapReferenceError),
+    UnknownTypeId(RawHeapRef),
+    SpanTable(SpanTableError),
+    AllocationStateChanged(RawHeapRef),
+}
+
+/// Deterministic object, byte, span, and retained-fragmentation counters for one full sweep.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SweepStats {
+    pub scanned_objects: usize,
+    pub live_objects: usize,
+    pub reclaimed_objects: usize,
+    pub scanned_bytes: usize,
+    pub live_bytes: usize,
+    pub reclaimed_bytes: usize,
+    pub spans_processed: usize,
+    pub spans_released: usize,
+    pub released_storage_bytes: usize,
+    pub external_bytes: usize,
+    pub retained_fragmentation_bytes: usize,
+    pub reusable_old_free_bytes: usize,
+    pub retained_tail_slack_bytes: usize,
+}
+
+/// LIFO owner IDs keep collection memory proportional to spans rather than objects.
+pub(crate) struct SweepWorklist {
+    entries: Vec<SpanId>,
+    max_entries: usize,
+    initial_capacity: usize,
+    growth_count: usize,
+    peak_len: usize,
+}
+
+impl SweepWorklist {
+    pub const fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries,
+            initial_capacity: 0,
+            growth_count: 0,
+            peak_len: 0,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Applies the centralized 1.5x policy before publishing another span owner.
+    pub fn try_push(&mut self, span_id: SpanId) -> Result<(), SweepWorklistError> {
+        if self.entries.len() == self.max_entries {
+            return Err(SweepWorklistError::EntryLimitExceeded {
+                limit: self.max_entries,
+            });
+        }
+        if self.entries.len() == self.entries.capacity() {
+            let target = if self.entries.capacity() == 0 {
+                INITIAL_SWEEP_WORKLIST_CAPACITY.min(self.max_entries)
+            } else {
+                self.entries
+                    .capacity()
+                    .saturating_mul(CAPACITY_GROWTH_NUMERATOR)
+                    .div_ceil(CAPACITY_GROWTH_DENOMINATOR)
+                    .min(self.max_entries)
+            }
+            .max(self.entries.len() + 1);
+            self.entries
+                .try_reserve_exact(target - self.entries.len())
+                .map_err(|_| SweepWorklistError::AllocationFailed)?;
+            if self.initial_capacity == 0 {
+                self.initial_capacity = self.entries.capacity();
+            } else {
+                self.growth_count += 1;
+            }
+        }
+        self.entries.push(span_id);
+        self.peak_len = self.peak_len.max(self.entries.len());
+        Ok(())
+    }
+
+    pub fn pop(&mut self) -> Option<SpanId> {
+        self.entries.pop()
+    }
+
+    pub fn stats(&self) -> SweepWorklistStats {
+        SweepWorklistStats {
+            initial_capacity: self.initial_capacity,
+            growth_count: self.growth_count,
+            peak_len: self.peak_len,
+            retained_capacity: self.entries.capacity(),
+            slack_entries: self.entries.capacity() - self.entries.len(),
+        }
+    }
+}
+
+/// Sweeps every owner present when the phase begins; no dead-object side vector is created.
+pub(crate) fn sweep_full(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    worklist: &mut SweepWorklist,
+    epoch: CollectionEpoch,
+    stats: &mut SweepStats,
+) -> Result<(), SweepError> {
+    worklist.clear();
+    for index in 0..table.historical_span_count() {
+        let span_id = SpanId::new(index as u16);
+        if table.sweep_target(span_id).is_some() {
+            worklist.try_push(span_id).map_err(SweepError::Worklist)?;
+        }
+    }
+
+    while let Some(span_id) = worklist.pop() {
+        stats.spans_processed += 1;
+        match table.sweep_target(span_id) {
+            Some(SweepTarget::Small) => sweep_small(table, types, span_id, epoch, stats)?,
+            Some(SweepTarget::LargeOwner) => {
+                sweep_large(table, types, span_id, epoch, stats)?;
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Preflights whole-span release, then drops each white payload in allocation-bit order.
+fn sweep_small(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    span_id: SpanId,
+    epoch: CollectionEpoch,
+    stats: &mut SweepStats,
+) -> Result<(), SweepError> {
+    let before = table
+        .small_sweep_snapshot(span_id)
+        .expect("sweep worklist contains a live small owner");
+    let mut cursor = 0;
+    let mut live_slots = 0_u16;
+    while let Some(reference) = table.next_allocated_reference(span_id, cursor) {
+        cursor = reference_slot_successor(before, reference);
+        if table
+            .is_marked(reference, epoch)
+            .map_err(SweepError::InvalidReference)?
+        {
+            live_slots += 1;
+        }
+    }
+    if live_slots == 0 {
+        table
+            .prepare_release(span_id)
+            .map_err(SweepError::SpanTable)?;
+    }
+
+    cursor = 0;
+    while let Some(reference) = table.next_allocated_reference(span_id, cursor) {
+        cursor = reference_slot_successor(before, reference);
+        stats.scanned_objects += 1;
+        stats.scanned_bytes += usize::from(before.size_class.slot_size());
+        if table
+            .is_marked(reference, epoch)
+            .map_err(SweepError::InvalidReference)?
+        {
+            stats.live_objects += 1;
+            stats.live_bytes += usize::from(before.size_class.slot_size());
+            continue;
+        }
+        drop_small(table, types, reference)?;
+        stats.reclaimed_objects += 1;
+        stats.reclaimed_bytes += usize::from(before.size_class.slot_size());
+    }
+
+    let after = table
+        .small_sweep_snapshot(span_id)
+        .expect("small span remains installed until empty-span release");
+    debug_assert_eq!(after.allocated_slots, live_slots);
+    if after.allocated_slots == 0 {
+        table.release(span_id).map_err(SweepError::SpanTable)?;
+        stats.spans_released += 1;
+        stats.released_storage_bytes += SPAN_SIZE_BYTES;
+        return Ok(());
+    }
+    table.rebuild_old_free_list(span_id);
+    account_retained_small(after, stats);
+    Ok(())
+}
+
+/// Resolves the concrete callback before unpublishing, then makes panic retry double-drop safe.
+fn drop_small(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    reference: RawHeapRef,
+) -> Result<(), SweepError> {
+    let header = table
+        .verify_reference(reference, None)
+        .map_err(SweepError::InvalidReference)?;
+    let type_id = header
+        .type_id()
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let descriptor = types
+        .descriptor(type_id)
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let payload = table
+        .payload_address(reference, descriptor)
+        .map_err(SweepError::InvalidReference)?;
+    if !table.unpublish_small_for_drop(reference) {
+        return Err(SweepError::AllocationStateChanged(reference));
+    }
+    // SAFETY: descriptor/header identity and payload placement were revalidated immediately above;
+    // unpublishing changed only side metadata, backing storage remains installed and exclusively
+    // owned by this single-mutator table, and a panic cannot republish or double-drop this slot.
+    unsafe { descriptor.drop(payload) };
+    Ok(())
+}
+
+/// Drops or retains one large owner and always reclaims its complete continuation range together.
+fn sweep_large(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    span_id: SpanId,
+    epoch: CollectionEpoch,
+    stats: &mut SweepStats,
+) -> Result<(), SweepError> {
+    let metadata = table
+        .large_metadata(span_id)
+        .expect("sweep worklist contains a live large owner");
+    let reference = RawHeapRef::from_parts(
+        span_id,
+        crate::SpanOffset::new(MINIMUM_SLOT_SIZE_BYTES as u16)
+            .expect("large owner offset is non-zero"),
+    );
+    if !metadata.is_allocated() {
+        table
+            .prepare_release(span_id)
+            .map_err(SweepError::SpanTable)?;
+        let reclaimed = table
+            .release_unpublished_large(reference)
+            .map_err(SweepError::SpanTable)?;
+        stats.spans_released += reclaimed.span_count() as usize;
+        stats.released_storage_bytes += reclaimed.storage_bytes();
+        return Ok(());
+    }
+    stats.scanned_objects += 1;
+    stats.scanned_bytes += metadata.object_bytes();
+    if table
+        .is_marked(reference, epoch)
+        .map_err(SweepError::InvalidReference)?
+    {
+        stats.live_objects += 1;
+        stats.live_bytes += metadata.object_bytes();
+        let storage = metadata.span_count() as usize * SPAN_SIZE_BYTES;
+        stats.retained_tail_slack_bytes +=
+            storage.saturating_sub(MINIMUM_SLOT_SIZE_BYTES + metadata.object_bytes());
+        return Ok(());
+    }
+
+    table
+        .prepare_release(span_id)
+        .map_err(SweepError::SpanTable)?;
+    let header = table
+        .verify_reference(reference, None)
+        .map_err(SweepError::InvalidReference)?;
+    let type_id = header
+        .type_id()
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let descriptor = types
+        .descriptor(type_id)
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let payload = table
+        .payload_address(reference, descriptor)
+        .map_err(SweepError::InvalidReference)?;
+    table
+        .unpublish_large_for_drop(reference)
+        .map_err(SweepError::SpanTable)?;
+    // SAFETY: the verified owner header selects this immutable descriptor and payload layout;
+    // unpublishing retains the whole owner/continuation backing range until callback completion.
+    unsafe { descriptor.drop(payload) };
+    let reclaimed = table
+        .release_unpublished_large(reference)
+        .map_err(SweepError::SpanTable)?;
+    stats.reclaimed_objects += 1;
+    stats.reclaimed_bytes += reclaimed.object_bytes();
+    stats.spans_released += reclaimed.span_count() as usize;
+    stats.released_storage_bytes += reclaimed.storage_bytes();
+    Ok(())
+}
+
+#[inline(always)]
+fn reference_slot_successor(snapshot: SmallSweepSnapshot, reference: RawHeapRef) -> u16 {
+    snapshot
+        .size_class
+        .slot_for_offset(reference.span_offset())
+        .expect("allocation iterator returns aligned references")
+        .index()
+        + 1
+}
+
+fn account_retained_small(snapshot: SmallSweepSnapshot, stats: &mut SweepStats) {
+    let slot_size = usize::from(snapshot.size_class.slot_size());
+    let initialized_region = usize::from(snapshot.bump_cursor) * slot_size;
+    let allocated = snapshot.allocated_bytes as usize;
+    let fragmentation = initialized_region.saturating_sub(allocated);
+    stats.retained_fragmentation_bytes += fragmentation;
+    if snapshot.space == SpanSpace::Old {
+        stats.reusable_old_free_bytes += fragmentation;
+    }
+    let usable = SPAN_SIZE_BYTES - MINIMUM_SLOT_SIZE_BYTES;
+    stats.retained_tail_slack_bytes += usable.saturating_sub(initialized_region);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SweepWorklist, SweepWorklistError};
+    use crate::{MAX_LOGICAL_SPANS, SpanId};
+
+    #[test]
+    fn span_worklist_growth_retains_high_water_and_enforces_quota() {
+        let limit = 100;
+        let mut worklist = SweepWorklist::new(limit);
+        for index in 0..limit {
+            worklist.try_push(SpanId::new(index as u16)).unwrap();
+        }
+        assert_eq!(
+            worklist.try_push(SpanId::new(limit as u16)),
+            Err(SweepWorklistError::EntryLimitExceeded { limit })
+        );
+        let stats = worklist.stats();
+        assert_eq!(stats.initial_capacity, 64);
+        assert_eq!(stats.growth_count, 2);
+        assert_eq!(stats.peak_len, limit);
+        assert_eq!(stats.retained_capacity, limit);
+        worklist.clear();
+        assert_eq!(worklist.stats().slack_entries, limit);
+    }
+
+    #[test]
+    fn logical_span_limit_fits_the_worklist_index_type() {
+        assert_eq!(MAX_LOGICAL_SPANS, usize::from(u16::MAX) + 1);
+    }
+}
