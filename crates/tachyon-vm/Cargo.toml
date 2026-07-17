@@ -1,0 +1,16 @@
+[package]
+name = "tachyon-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tachyon-bytecode = { path = "../tachyon-bytecode" }
+tachyon-gc = { path = "../tachyon-gc" }
+tachyon-value = { path = "../tachyon-value" }

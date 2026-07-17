@@ -1,0 +1,18 @@
+disallowed-methods = [
+    { path = "std::env::current_dir", reason = "engine core receives host inputs explicitly" },
+    { path = "std::env::var", reason = "engine core must not read ambient environment" },
+    { path = "std::env::vars", reason = "engine core must not read ambient environment" },
+    { path = "std::fs::read", reason = "engine core must not access the filesystem" },
+    { path = "std::fs::read_to_string", reason = "engine core must not access the filesystem" },
+    { path = "std::fs::write", reason = "engine core must not access the filesystem" },
+    { path = "std::thread::sleep", reason = "engine core does not own an event loop" },
+    { path = "std::thread::spawn", reason = "engine core does not own a thread runtime" },
+]
+
+disallowed-types = [
+    { path = "std::fs::File", reason = "engine core must not access the filesystem" },
+    { path = "std::fs::OpenOptions", reason = "engine core must not access the filesystem" },
+    { path = "std::net::TcpListener", reason = "engine core must not own network listeners" },
+    { path = "std::net::TcpStream", reason = "engine core must not access the network" },
+    { path = "std::process::Command", reason = "engine core must not spawn processes" },
+]

@@ -3,5 +3,51 @@
 version = 4
 
 [[package]]
-name = "tachyon-js"
+name = "tachyon"
+version = "0.1.0"
+dependencies = [
+ "tachyon-compiler",
+ "tachyon-vm",
+]
+
+[[package]]
+name = "tachyon-bytecode"
+version = "0.1.0"
+
+[[package]]
+name = "tachyon-cli"
+version = "0.1.0"
+dependencies = [
+ "tachyon",
+]
+
+[[package]]
+name = "tachyon-compiler"
+version = "0.1.0"
+dependencies = [
+ "tachyon-bytecode",
+]
+
+[[package]]
+name = "tachyon-gc"
+version = "0.1.0"
+dependencies = [
+ "tachyon-value",
+]
+
+[[package]]
+name = "tachyon-value"
+version = "0.1.0"
+
+[[package]]
+name = "tachyon-vm"
+version = "0.1.0"
+dependencies = [
+ "tachyon-bytecode",
+ "tachyon-gc",
+ "tachyon-value",
+]
+
+[[package]]
+name = "xtask"
 version = "0.1.0"

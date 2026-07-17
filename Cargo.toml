@@ -1,6 +1,35 @@
-[package]
-name = "tachyon-js"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/tachyon-value",
+    "crates/tachyon-bytecode",
+    "crates/tachyon-gc",
+    "crates/tachyon-compiler",
+    "crates/tachyon-vm",
+    "crates/tachyon",
+    "tools/tachyon-cli",
+    "tools/xtask",
+]
+default-members = [
+    "crates/tachyon",
+    "tools/tachyon-cli",
+    "tools/xtask",
+]
+resolver = "3"
 
-[dependencies]
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/lemonhx/tachyon-js"
+
+[profile.dev]
+debug = 2
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.bench]
+codegen-units = 1
+lto = "thin"
