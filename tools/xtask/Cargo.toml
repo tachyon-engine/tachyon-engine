@@ -12,5 +12,6 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+benchmark-runner = { path = "../benchmark-runner" }
 serde_json = "1"
 test262-runner = { path = "../test262-runner" }

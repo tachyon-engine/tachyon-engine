@@ -1300,6 +1300,7 @@ checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "benchmark-runner",
  "serde_json",
  "test262-runner",
 ]

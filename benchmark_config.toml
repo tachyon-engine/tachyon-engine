@@ -4,6 +4,11 @@ collected_samples = 15
 warmup_iterations = 3
 outlier_mad_multiplier = 6.0
 maximum_relative_mad = 0.10
+require_cpu_affinity = true
+required_performance_governor = "performance"
+background_precheck_samples = 15
+background_work_units = 100000
+maximum_background_relative_mad = 0.05
 
 [build]
 profile = "release"

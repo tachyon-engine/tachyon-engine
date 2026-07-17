@@ -19,6 +19,16 @@ pub struct BenchmarkConfig {
     pub outlier_mad_multiplier: f64,
     /// Noise gate applied to retained MAD/median.
     pub maximum_relative_mad: f64,
+    /// Whether a single pinned CPU is mandatory for valid samples.
+    pub require_cpu_affinity: bool,
+    /// Required Linux scaling governor; empty disables the requirement.
+    pub required_performance_governor: Box<str>,
+    /// Number of host-noise calibration samples.
+    pub background_precheck_samples: usize,
+    /// Deterministic arithmetic work units per calibration sample.
+    pub background_work_units: u64,
+    /// Maximum calibration MAD/median ratio.
+    pub maximum_background_relative_mad: f64,
     /// Reproducible Tachyon/Rust build settings.
     pub build: BuildConfig,
     /// Approved content-addressed corpus entries.
@@ -160,6 +170,14 @@ impl BenchmarkConfig {
         }
         if !self.maximum_relative_mad.is_finite() || self.maximum_relative_mad <= 0.0 {
             return Err("maximum relative MAD must be finite and positive");
+        }
+        if self.background_precheck_samples < 10 || self.background_work_units == 0 {
+            return Err("background precheck requires at least ten non-empty samples");
+        }
+        if !self.maximum_background_relative_mad.is_finite()
+            || self.maximum_background_relative_mad <= 0.0
+        {
+            return Err("maximum background relative MAD must be finite and positive");
         }
         let mut ids = BTreeSet::new();
         let mut paths = BTreeSet::new();

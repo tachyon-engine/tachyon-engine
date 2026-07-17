@@ -3,6 +3,9 @@
 
 use std::{env, fs, path::Path, process::Command};
 
+use benchmark_runner::{
+    BenchmarkConfig, BenchmarkReport, compare_reports as compare_benchmarks, load_corpus,
+};
 use test262_runner::{
     RunOptions, RunReport, StubAdapter, Test262Config, compare_reports, run_checkout,
 };
@@ -56,6 +59,17 @@ fn main() {
         {
             compare_test262(base, new, true)
         }
+        [command, subcommand] if command == "bench" && subcommand == "verify" => {
+            verify_benchmarks()
+        }
+        [command, subcommand, base, candidate] if command == "bench" && subcommand == "compare" => {
+            compare_benchmark_reports(base, candidate, false)
+        }
+        [command, subcommand, base, candidate, flag]
+            if command == "bench" && subcommand == "compare" && flag == "--markdown" =>
+        {
+            compare_benchmark_reports(base, candidate, true)
+        }
         _ => Err(USAGE.to_owned()),
     };
 
@@ -65,7 +79,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]";
 
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -200,6 +214,55 @@ fn compare_test262(base: &str, new: &str, markdown: bool) -> Result<(), String> 
         print!("{}", diff.to_markdown());
     } else {
         serde_json::to_writer_pretty(std::io::stdout().lock(), &diff)
+            .map_err(|error| error.to_string())?;
+        println!();
+    }
+    Ok(())
+}
+
+/// Verifies benchmark configuration, licenses, provenance, and content-addressed corpus bytes.
+fn verify_benchmarks() -> Result<(), String> {
+    let workspace = workspace_root();
+    let config_path = workspace.join("benchmark_config.toml");
+    let source = fs::read_to_string(&config_path)
+        .map_err(|error| format!("failed to read {}: {error}", config_path.display()))?;
+    let config = BenchmarkConfig::parse(&source).map_err(|error| error.to_string())?;
+    let corpus = load_corpus(&workspace, &config).map_err(|error| error.to_string())?;
+    let scripts = corpus
+        .iter()
+        .map(|script| {
+            serde_json::json!({
+                "id": script.config.id,
+                "sha256": script.config.sha256,
+                "license": script.config.license,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_writer_pretty(
+        std::io::stdout().lock(),
+        &serde_json::json!({ "schema_version": 1, "scripts": scripts }),
+    )
+    .map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
+}
+
+/// Compares matched benchmark reports and emits either versioned JSON or a concise Markdown summary.
+fn compare_benchmark_reports(base: &str, candidate: &str, markdown: bool) -> Result<(), String> {
+    let base_report: BenchmarkReport = serde_json::from_slice(
+        &fs::read(base).map_err(|error| format!("failed to read {base}: {error}"))?,
+    )
+    .map_err(|error| format!("failed to parse {base}: {error}"))?;
+    let candidate_report: BenchmarkReport = serde_json::from_slice(
+        &fs::read(candidate).map_err(|error| format!("failed to read {candidate}: {error}"))?,
+    )
+    .map_err(|error| format!("failed to parse {candidate}: {error}"))?;
+    let comparison =
+        compare_benchmarks(&base_report, &candidate_report).map_err(|error| error.to_string())?;
+    if markdown {
+        print!("{}", comparison.to_markdown());
+    } else {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &comparison)
             .map_err(|error| error.to_string())?;
         println!();
     }

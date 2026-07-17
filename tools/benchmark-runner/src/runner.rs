@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::{hint::black_box, process::Command, time::Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +22,7 @@ pub enum MeasurementMode {
 }
 
 /// Host/compiler/build evidence required to interpret or reproduce a report.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct HostMetadata {
     /// Operating system target.
     pub os: Box<str>,
@@ -32,6 +32,23 @@ pub struct HostMetadata {
     pub cpu: Box<str>,
     /// Complete `rustc -Vv` output or unavailable marker.
     pub rustc: Box<str>,
+    /// CPU pinning probe.
+    pub cpu_affinity: EnvironmentCheck,
+    /// CPU frequency governor probe.
+    pub performance_governor: EnvironmentCheck,
+    /// Robust background calibration summary.
+    pub background_noise: Option<SampleSummary>,
+    /// Combined host gate used by every case.
+    pub validity: Validity,
+}
+
+/// One host precondition probe and its exact diagnostic.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EnvironmentCheck {
+    /// Whether the configured condition is met.
+    pub satisfied: bool,
+    /// Observed affinity/governor state or unavailable reason.
+    pub detail: Box<str>,
 }
 
 /// Explicit reasons a measurement is valid or must not enter performance gates.
@@ -50,6 +67,10 @@ pub struct BenchmarkCaseResult {
     pub script_id: Box<str>,
     /// Verified source hash.
     pub script_sha256: Box<str>,
+    /// Subsystem category used for aggregate ratios.
+    pub category: crate::BenchmarkCategory,
+    /// Corpus suite used for aggregate ratios.
+    pub suite: crate::SuiteKind,
     /// Timing boundary.
     pub mode: MeasurementMode,
     /// Engine and build identity.
@@ -94,6 +115,7 @@ pub fn run_case(
     script: &CorpusScript,
     mode: MeasurementMode,
     config: &BenchmarkConfig,
+    host: &HostMetadata,
 ) -> Result<BenchmarkCaseResult, RunError> {
     let request = BenchmarkRequest {
         script_id: script.config.id.clone(),
@@ -124,7 +146,7 @@ pub fn run_case(
         config.outlier_mad_multiplier,
     )
     .map_err(RunError::Statistics)?;
-    let mut reasons = Vec::new();
+    let mut reasons = host.validity.reasons.clone();
     if summary.relative_mad > config.maximum_relative_mad {
         reasons.push(
             format!(
@@ -137,6 +159,8 @@ pub fn run_case(
     Ok(BenchmarkCaseResult {
         script_id: script.config.id.clone(),
         script_sha256: script.config.sha256.clone(),
+        category: script.config.category,
+        suite: script.config.suite,
         mode,
         engine: adapter.identity().clone(),
         samples_ns: samples,
@@ -151,7 +175,17 @@ pub fn run_case(
 
 impl HostMetadata {
     /// Captures explicit host facts; unavailable CPU/compiler probes remain visible strings, never defaults.
-    pub fn collect() -> Self {
+    pub fn collect(config: &BenchmarkConfig) -> Self {
+        let cpu_affinity = probe_cpu_affinity(config.require_cpu_affinity);
+        let performance_governor =
+            probe_performance_governor(&config.required_performance_governor);
+        let background_noise = background_precheck(config).ok();
+        let validity = host_validity(
+            &cpu_affinity,
+            &performance_governor,
+            background_noise.as_ref(),
+            config.maximum_background_relative_mad,
+        );
         Self {
             os: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
@@ -165,7 +199,119 @@ impl HostMetadata {
             })
             .unwrap_or_else(|| "unavailable".to_owned())
             .into(),
+            cpu_affinity,
+            performance_governor,
+            background_noise,
+            validity,
         }
+    }
+
+    /// Compares reproducibility identity without treating per-run probes as machine identity.
+    #[must_use]
+    pub fn same_static_identity(&self, other: &Self) -> bool {
+        self.os == other.os
+            && self.architecture == other.architecture
+            && self.cpu == other.cpu
+            && self.rustc == other.rustc
+    }
+}
+
+/// Combines host preconditions while preserving every failed condition in report order.
+fn host_validity(
+    cpu_affinity: &EnvironmentCheck,
+    performance_governor: &EnvironmentCheck,
+    background_noise: Option<&SampleSummary>,
+    maximum_background_relative_mad: f64,
+) -> Validity {
+    let mut reasons = Vec::new();
+    if !cpu_affinity.satisfied {
+        reasons.push(format!("CPU affinity: {}", cpu_affinity.detail).into());
+    }
+    if !performance_governor.satisfied {
+        reasons.push(format!("performance governor: {}", performance_governor.detail).into());
+    }
+    match background_noise {
+        Some(summary) if summary.relative_mad <= maximum_background_relative_mad => {}
+        Some(summary) => reasons.push(
+            format!(
+                "background relative MAD {:.6} exceeds {:.6}",
+                summary.relative_mad, maximum_background_relative_mad
+            )
+            .into(),
+        ),
+        None => reasons.push("background noise precheck failed".into()),
+    }
+    Validity {
+        valid: reasons.is_empty(),
+        reasons,
+    }
+}
+
+/// Measures a deterministic host-only loop so heavily perturbed machines cannot enter parity gates.
+fn background_precheck(config: &BenchmarkConfig) -> Result<SampleSummary, StatisticsError> {
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(config.background_precheck_samples)
+        .map_err(|_| StatisticsError::AllocationFailed)?;
+    for sample_index in 0..config.background_precheck_samples {
+        let start = Instant::now();
+        let mut state = sample_index as u64 ^ 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..config.background_work_units {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            black_box(state);
+        }
+        samples.push(start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+    }
+    summarize_samples(&samples, 10, config.outlier_mad_multiplier)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_cpu_affinity(required: bool) -> EnvironmentCheck {
+    let mut command = Command::new("taskset");
+    command.args(["-pc", &std::process::id().to_string()]);
+    let detail = command_text(command).unwrap_or_else(|| "taskset unavailable".to_owned());
+    let cpu_list = detail.rsplit_once(':').map(|(_, value)| value.trim());
+    let pinned = cpu_list.is_some_and(|value| !value.contains(',') && !value.contains('-'));
+    EnvironmentCheck {
+        satisfied: !required || pinned,
+        detail: detail.into(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_cpu_affinity(required: bool) -> EnvironmentCheck {
+    EnvironmentCheck {
+        satisfied: !required,
+        detail: "single-CPU affinity probe unavailable on this host".into(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_performance_governor(required: &str) -> EnvironmentCheck {
+    if required.is_empty() {
+        return EnvironmentCheck {
+            satisfied: true,
+            detail: "not required".into(),
+        };
+    }
+    let observed = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        .map_or_else(
+            |_| "unavailable".to_owned(),
+            |value| value.trim().to_owned(),
+        );
+    EnvironmentCheck {
+        satisfied: observed == required,
+        detail: observed.into(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_performance_governor(required: &str) -> EnvironmentCheck {
+    EnvironmentCheck {
+        satisfied: required.is_empty(),
+        detail: "CPU scaling governor probe unavailable on this host".into(),
     }
 }
 
@@ -213,10 +359,10 @@ mod tests {
 
     use crate::{
         BenchmarkAdapter, BenchmarkConfig, BenchmarkRequest, EngineIdentity, EngineKind,
-        SampleMetrics, load_corpus,
+        HostMetadata, SampleMetrics, SampleSummary, load_corpus,
     };
 
-    use super::{MeasurementMode, run_case};
+    use super::{EnvironmentCheck, MeasurementMode, host_validity, run_case};
 
     const CONFIG: &str = include_str!("../../../benchmark_config.toml");
 
@@ -263,16 +409,81 @@ mod tests {
             },
             samples: [1, 2, 3].into_iter().chain([100; 15]).collect(),
         };
+        let host = HostMetadata {
+            os: "test".into(),
+            architecture: "test".into(),
+            cpu: "test".into(),
+            rustc: "test".into(),
+            cpu_affinity: super::EnvironmentCheck {
+                satisfied: true,
+                detail: "fixture".into(),
+            },
+            performance_governor: super::EnvironmentCheck {
+                satisfied: true,
+                detail: "fixture".into(),
+            },
+            background_noise: None,
+            validity: super::Validity {
+                valid: true,
+                reasons: Vec::new(),
+            },
+        };
         let result = run_case(
             &mut adapter,
             &corpus[0],
             MeasurementMode::SteadyState,
             &config,
+            &host,
         )
         .unwrap();
         assert_eq!(result.samples_ns, [100; 15]);
         assert_eq!(result.summary.median_ns, 100);
         assert_eq!(result.peak_rss_bytes, Some(4096));
         assert!(result.validity.valid);
+    }
+
+    #[test]
+    fn host_gate_reports_unavailable_probes_and_excess_noise() {
+        let unavailable = EnvironmentCheck {
+            satisfied: false,
+            detail: "unavailable".into(),
+        };
+        let noisy = SampleSummary {
+            collected: 15,
+            retained: 15,
+            rejected_outliers: 0,
+            median_ns: 100,
+            mad_ns: 10,
+            relative_mad: 0.10,
+            confidence_low_ns: 90,
+            confidence_high_ns: 110,
+            confidence_method: "fixture".into(),
+        };
+        let validity = host_validity(&unavailable, &unavailable, Some(&noisy), 0.05);
+        assert!(!validity.valid);
+        assert_eq!(validity.reasons.len(), 3);
+        assert!(validity.reasons[0].contains("CPU affinity"));
+        assert!(validity.reasons[1].contains("performance governor"));
+        assert!(validity.reasons[2].contains("background relative MAD"));
+    }
+
+    #[test]
+    fn host_gate_accepts_satisfied_probes_and_quiet_background() {
+        let satisfied = EnvironmentCheck {
+            satisfied: true,
+            detail: "fixture".into(),
+        };
+        let quiet = SampleSummary {
+            collected: 15,
+            retained: 15,
+            rejected_outliers: 0,
+            median_ns: 100,
+            mad_ns: 1,
+            relative_mad: 0.01,
+            confidence_low_ns: 99,
+            confidence_high_ns: 101,
+            confidence_method: "fixture".into(),
+        };
+        assert!(host_validity(&satisfied, &satisfied, Some(&quiet), 0.05).valid);
     }
 }
