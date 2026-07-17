@@ -32,6 +32,13 @@ impl Trace for Value {
     }
 }
 
+impl Trace for RawHeapRef {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        tracer.trace_raw_heap_ref(self);
+    }
+}
+
 impl<T: ?Sized> Trace for GcRef<T> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {

@@ -17,6 +17,8 @@ mod heap;
 mod layout;
 mod mark;
 mod registry;
+mod roots;
+mod scope;
 mod span;
 mod storage;
 mod sweep;
@@ -40,6 +42,8 @@ pub use layout::{
 };
 pub use mark::{MarkError, MarkStats};
 pub use registry::{TypeRegistrationError, TypeRegistry};
+pub use roots::{TemporaryRootError, TemporaryRootStats};
+pub use scope::{Local, RootError, RunningScope, ScopedAllocationError};
 pub use span::{
     AllocationBitmap, CardBitmap, LargeSpanMetadata, MarkBitmap, SizeClass, SlotIndex,
     SmallSpanMetadata, SpanReuseGeneration, SpanSpace, SweepState,

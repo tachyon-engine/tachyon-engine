@@ -4,9 +4,12 @@ use crate::{
     CollectionEpoch, GcHeader, GcRef, GcType, GcTypeId, GrayQueueStats, HeapReferenceError,
     LargeAllocationError, LargeReclaim, MAX_LOGICAL_SPANS, MarkError, MarkStats, ObjectLayout,
     RawHeapRef, SPAN_SIZE_BYTES, SmallAllocationError, SmallObjectLayout, SpanId, SpanSpace,
-    SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats, Trace, TypeRegistry,
+    SpanTable, SpanTableError, SweepError, SweepStats, SweepWorklistStats, TemporaryRootStats,
+    Trace, TypeRegistry,
     gray::GrayQueue,
     mark::mark_strong_roots,
+    roots::{RootComposition, TemporaryRoots},
+    scope::{RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full},
     tuning::SMALL_SIZE_CLASSES,
 };
@@ -78,6 +81,7 @@ pub struct Heap {
     collection_epoch: CollectionEpoch,
     gray: GrayQueue,
     sweep_worklist: SweepWorklist,
+    temporary_roots: TemporaryRoots,
 }
 
 impl Heap {
@@ -101,6 +105,9 @@ impl Heap {
             collection_epoch: CollectionEpoch::INITIAL,
             gray: GrayQueue::new(limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES),
             sweep_worklist: SweepWorklist::new(max_sweep_entries),
+            temporary_roots: TemporaryRoots::new(
+                limit.max_heap_bytes() / crate::MINIMUM_SLOT_SIZE_BYTES,
+            ),
         }
     }
 
@@ -213,13 +220,34 @@ impl Heap {
     /// Starts a fresh epoch and reaches the exact strong-root fixed point iteratively.
     pub fn mark_strong(&mut self, roots: &mut dyn Trace) -> Result<MarkStats, MarkError> {
         self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
+        let mut roots = RootComposition::new(roots, &mut self.temporary_roots);
         mark_strong_roots(
             &mut self.table,
             &self.types,
             &mut self.gray,
             self.collection_epoch,
-            roots,
+            &mut roots,
         )
+    }
+
+    /// Creates an unforgeable local-handle lifetime and always rolls back its root checkpoint.
+    ///
+    /// Returning a `Local` from the callback is rejected because `R` must be valid for every fresh
+    /// scope lifetime:
+    ///
+    /// ```compile_fail
+    /// use tachyon_gc::{GcRef, Heap, HeapLimit, RawHeapRef, TypeRegistry};
+    /// let mut heap = Heap::new(HeapLimit::new(64 * 1024), TypeRegistry::new());
+    /// let reference = GcRef::<()>::from_raw(RawHeapRef::new(16).unwrap());
+    /// let escaped = heap.with_running_scope(|scope| scope.root(reference));
+    /// ```
+    pub fn with_running_scope<R>(
+        &mut self,
+        callback: impl for<'scope> FnOnce(&mut RunningScope<'_, 'scope>) -> R,
+    ) -> R {
+        let checkpoint = self.temporary_roots.len();
+        let mut scope = RunningScope::new(self, checkpoint);
+        callback(&mut scope)
     }
 
     /// Returns retained gray high-water evidence for tuning and quota tests.
@@ -258,6 +286,31 @@ impl Heap {
     #[must_use]
     pub fn sweep_worklist_stats(&self) -> SweepWorklistStats {
         self.sweep_worklist.stats()
+    }
+
+    /// Returns temporary-root capacity evidence without exposing stack mutation.
+    #[must_use]
+    pub fn temporary_root_stats(&self) -> TemporaryRootStats {
+        self.temporary_roots.stats()
+    }
+
+    pub(crate) const fn temporary_root_count(&self) -> usize {
+        self.temporary_roots.len()
+    }
+
+    pub(crate) fn truncate_temporary_roots(&mut self, checkpoint: usize) {
+        self.temporary_roots.truncate(checkpoint);
+    }
+
+    pub(crate) fn try_push_temporary_root(
+        &mut self,
+        reference: RawHeapRef,
+    ) -> Result<(), RootError> {
+        self.verify_reference(reference, None)
+            .map_err(RootError::InvalidReference)?;
+        self.temporary_roots
+            .try_push(reference)
+            .map_err(RootError::Capacity)
     }
 
     /// Updates committed storage after the collector has dropped a large payload and releases its range.

@@ -1,6 +1,10 @@
 //! Typed, isolate-relative heap references.
 
-use core::marker::PhantomData;
+use core::{
+    fmt,
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+};
 
 use tachyon_value::RawHeapRef;
 
@@ -9,7 +13,6 @@ use tachyon_value::RawHeapRef;
 /// This is intentionally only an encoded reference: resolving it into an object borrow belongs to
 /// a future `RunningScope`/`NoGcScope` API. The phantom function preserves covariance without
 /// making this four-byte representation inherit the pointee's auto-trait bounds.
-#[derive(Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct GcRef<T: ?Sized> {
     raw: RawHeapRef,
@@ -21,6 +24,26 @@ impl<T: ?Sized> Copy for GcRef<T> {}
 impl<T: ?Sized> Clone for GcRef<T> {
     fn clone(&self) -> Self {
         *self
+    }
+}
+
+impl<T: ?Sized> fmt::Debug for GcRef<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("GcRef").field(&self.raw).finish()
+    }
+}
+
+impl<T: ?Sized> PartialEq for GcRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl<T: ?Sized> Eq for GcRef<T> {}
+
+impl<T: ?Sized> Hash for GcRef<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw.hash(state);
     }
 }
 
