@@ -425,6 +425,52 @@ mod tests {
     }
 
     #[test]
+    /// Proves compiler-selected frame/global locations are frozen alongside verified functions.
+    fn compiler_emits_binding_plans_for_local_and_global_storage() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "var global = 1; function read(param) { let local = param; const fixed = local; return fixed + global; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let entry = module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap();
+        let function = module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap();
+
+        assert!(entry.binding_plan().iter().any(|binding| {
+            binding.location == tachyon_bytecode::BindingLocation::GlobalProperty
+                && binding.name.as_ref() == "global"
+        }));
+        assert_eq!(
+            function
+                .binding_plan()
+                .iter()
+                .filter(|binding| matches!(
+                    binding.location,
+                    tachyon_bytecode::BindingLocation::FrameRegister(_)
+                ))
+                .count(),
+            3
+        );
+        assert!(
+            function
+                .binding_plan()
+                .iter()
+                .any(|binding| { !binding.mutable && binding.name.as_ref() == "fixed" })
+        );
+        assert!(function.binding_plan().iter().any(|binding| {
+            binding.location == tachyon_bytecode::BindingLocation::GlobalProperty
+                && binding.name.as_ref() == "global"
+        }));
+    }
+
+    #[test]
     /// Confirms control-flow HIR owns every nested node after the Oxc arena is dropped.
     fn hir_owns_nested_block_if_and_throw_statements() {
         let hir = Compiler

@@ -936,6 +936,25 @@ pub struct FeedbackSite {
     pub slot: FeedbackSlot,
 }
 
+/// The concrete runtime storage class selected for one source binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingLocation {
+    FrameRegister(RegisterId),
+    Environment { depth: u32, slot: u32 },
+    ModuleCell { slot: u32 },
+    GlobalLexical,
+    GlobalProperty,
+    Dynamic,
+}
+
+/// Immutable source-name, mutability, and storage metadata for one binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindingPlanEntry {
+    pub name: Arc<str>,
+    pub location: BindingLocation,
+    pub mutable: bool,
+}
+
 /// Register and stack-reservation requirements known before a function begins execution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FunctionLayout {
@@ -943,6 +962,7 @@ pub struct FunctionLayout {
     pub argument_count: u32,
     pub temporary_register_count: u32,
     pub feedback_slot_count: u32,
+    pub environment_slot_count: u32,
     pub max_handler_depth: u32,
     pub max_completion_depth: u32,
 }
@@ -956,6 +976,7 @@ pub struct FunctionMetadata {
     pub handlers: Arc<[HandlerEntry]>,
     pub suspend_points: Arc<[SuspendPoint]>,
     pub feedback_sites: Arc<[FeedbackSite]>,
+    pub binding_plan: Arc<[BindingPlanEntry]>,
 }
 
 impl FunctionMetadata {
@@ -968,6 +989,7 @@ impl FunctionMetadata {
             handlers: Arc::default(),
             suspend_points: Arc::default(),
             feedback_sites: Arc::default(),
+            binding_plan: Arc::default(),
         }
     }
 }
@@ -1039,6 +1061,11 @@ impl CompiledFunction {
     #[must_use]
     pub fn feedback_sites(&self) -> &[FeedbackSite] {
         &self.metadata.feedback_sites
+    }
+
+    #[must_use]
+    pub fn binding_plan(&self) -> &[BindingPlanEntry] {
+        &self.metadata.binding_plan
     }
 }
 
@@ -1122,6 +1149,20 @@ pub enum ModuleBuildError {
         function: FunctionId,
         previous: WordOffset,
         current: WordOffset,
+    },
+    BindingRegisterOutOfRange {
+        function: FunctionId,
+        binding: BindingPlanEntry,
+        register_count: u32,
+    },
+    BindingEnvironmentSlotOutOfRange {
+        function: FunctionId,
+        binding: BindingPlanEntry,
+        environment_slot_count: u32,
+    },
+    EmptyBindingName {
+        function: FunctionId,
+        binding: BindingPlanEntry,
     },
     SuspendPointIdMismatch {
         function: FunctionId,
@@ -1220,6 +1261,11 @@ impl CompiledModule {
                 &template.metadata.feedback_sites,
                 &bytecode,
                 template.metadata.layout.feedback_slot_count,
+            )?;
+            validate_binding_plan(
+                template.id,
+                &template.metadata.binding_plan,
+                template.metadata.layout,
             )?;
             validate_suspend_points(
                 template.id,
@@ -1436,6 +1482,42 @@ fn validate_feedback_sites(
             });
         }
         previous = Some(site.offset);
+    }
+    Ok(())
+}
+
+/// Binding plans may name future storage classes, but every currently bounded index is verified.
+fn validate_binding_plan(
+    function: FunctionId,
+    bindings: &[BindingPlanEntry],
+    layout: FunctionLayout,
+) -> Result<(), ModuleBuildError> {
+    for binding in bindings {
+        if binding.name.is_empty() {
+            return Err(ModuleBuildError::EmptyBindingName {
+                function,
+                binding: binding.clone(),
+            });
+        }
+        match binding.location {
+            BindingLocation::FrameRegister(register)
+                if register.index() >= layout.register_count =>
+            {
+                return Err(ModuleBuildError::BindingRegisterOutOfRange {
+                    function,
+                    binding: binding.clone(),
+                    register_count: layout.register_count,
+                });
+            }
+            BindingLocation::Environment { slot, .. } if slot >= layout.environment_slot_count => {
+                return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
+                    function,
+                    binding: binding.clone(),
+                    environment_slot_count: layout.environment_slot_count,
+                });
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1939,6 +2021,7 @@ mod tests {
             FunctionLayout {
                 register_count: 1,
                 feedback_slot_count: 3,
+                environment_slot_count: 1,
                 max_handler_depth: 1,
                 max_completion_depth: 2,
                 ..FunctionLayout::default()
@@ -1976,6 +2059,12 @@ mod tests {
             slot: FeedbackSlot::new(2),
         }]
         .into();
+        metadata.binding_plan = vec![BindingPlanEntry {
+            name: Arc::from("value"),
+            location: BindingLocation::FrameRegister(RegisterId::new(0)),
+            mutable: true,
+        }]
+        .into();
 
         let module = CompiledModule::new(
             Arc::from("x"),
@@ -1998,12 +2087,98 @@ mod tests {
         let function = module.function(FunctionId::new(0)).unwrap();
         assert_eq!(function.suspend_points().len(), 1);
         assert_eq!(
+            function.binding_plan(),
+            &[BindingPlanEntry {
+                name: Arc::from("value"),
+                location: BindingLocation::FrameRegister(RegisterId::new(0)),
+                mutable: true,
+            }]
+        );
+        assert_eq!(
             disassemble(function).unwrap(),
             "000000 [0..1] Await r0, r0, suspend=0 feedback=2\n000001 [0..1] Return r0\n"
         );
         assert!(matches!(
             &module.constants()[1],
             BytecodeConstant::String(value) if value.as_ref() == [0xd800]
+        ));
+    }
+
+    /// Builds one terminal function around caller-selected binding metadata for verifier tests.
+    fn binding_plan_module(
+        binding: BindingPlanEntry,
+        layout: FunctionLayout,
+        scope_names: Vec<Arc<str>>,
+    ) -> Result<CompiledModule, ModuleBuildError> {
+        let words = encode_instruction(Opcode::Return, &[0]).unwrap();
+        let mut metadata = FunctionMetadata::new(FunctionKind::Script, layout);
+        metadata.binding_plan = vec![binding].into();
+        CompiledModule::new(
+            Arc::from("x"),
+            Vec::new(),
+            scope_names,
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+    }
+
+    #[test]
+    /// Rejects every bounded binding location before malformed immutable code reaches the VM.
+    fn compiled_module_rejects_invalid_binding_plans() {
+        let frame = BindingPlanEntry {
+            name: Arc::from("value"),
+            location: BindingLocation::FrameRegister(RegisterId::new(1)),
+            mutable: true,
+        };
+        assert!(matches!(
+            binding_plan_module(
+                frame,
+                FunctionLayout {
+                    register_count: 1,
+                    ..FunctionLayout::default()
+                },
+                vec![Arc::from("value")],
+            ),
+            Err(ModuleBuildError::BindingRegisterOutOfRange { .. })
+        ));
+
+        let environment = BindingPlanEntry {
+            name: Arc::from("value"),
+            location: BindingLocation::Environment { depth: 0, slot: 1 },
+            mutable: true,
+        };
+        assert!(matches!(
+            binding_plan_module(
+                environment,
+                FunctionLayout {
+                    register_count: 1,
+                    environment_slot_count: 1,
+                    ..FunctionLayout::default()
+                },
+                vec![Arc::from("value")],
+            ),
+            Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange { .. })
+        ));
+
+        let name = BindingPlanEntry {
+            name: Arc::from(""),
+            location: BindingLocation::GlobalProperty,
+            mutable: true,
+        };
+        assert!(matches!(
+            binding_plan_module(
+                name,
+                FunctionLayout {
+                    register_count: 1,
+                    ..FunctionLayout::default()
+                },
+                vec![Arc::from("value")],
+            ),
+            Err(ModuleBuildError::EmptyBindingName { .. })
         ));
     }
 

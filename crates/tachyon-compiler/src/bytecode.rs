@@ -1,9 +1,10 @@
 //! Lowering of the first owned HIR subset into immutable register bytecode.
 
 use tachyon_bytecode::{
-    BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule, FunctionId,
-    FunctionKind, FunctionLayout, FunctionMetadata, HandlerEntry, HandlerKind, Label,
-    MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
+    BindingLocation, BindingPlanEntry, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate,
+    CompiledModule, FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, HandlerEntry,
+    HandlerKind, Label, MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId,
+    SourceSpan as BytecodeSourceSpan,
 };
 
 use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
@@ -98,11 +99,18 @@ fn lower_entry(
         })?;
     let handler_count = statements_handler_count(hir.statements())?;
     let max_handler_depth = statements_handler_depth(hir.statements())?;
+    let entry_binding_plan_capacity = hir_binding_count(hir)?
+        .checked_add(statements_scope_name_count(hir.statements())?)
+        .and_then(|count| count.checked_add(var_names.len()))
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "entry binding plan",
+        })?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(word_capacity, hir_label_count(hir)?),
         constants,
         scope_names,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
+        binding_plan: Vec::with_capacity(entry_binding_plan_capacity),
         break_targets: Vec::with_capacity(statements_switch_count(hir.statements())?),
         continue_targets: Vec::with_capacity(statements_loop_count(hir.statements())?),
         handlers: Vec::with_capacity(handler_count),
@@ -116,7 +124,7 @@ fn lower_entry(
         }
     }
     for name in &var_names {
-        let scope_name = lowerer.scope_name(name)?;
+        let scope_name = lowerer.global_binding(name, true)?;
         lowerer.emit(
             Opcode::DeclareScope,
             &[scope_name],
@@ -178,6 +186,7 @@ fn lower_entry(
         SourceSpan { start: 0, end: 0 },
     )?;
     let handlers = freeze_handlers(lowerer.handlers)?;
+    let binding_plan = lowerer.binding_plan.into();
     let (bytecode, source_map, register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
     let kind = match hir.kind() {
@@ -196,6 +205,7 @@ fn lower_entry(
         handlers,
         suspend_points: Default::default(),
         feedback_sites: Default::default(),
+        binding_plan,
     };
     Ok(CompiledFunctionTemplate::new(
         FunctionId::new(0),
@@ -230,6 +240,18 @@ fn lower_function(
         })?;
     let handler_count = statements_handler_count(&function.body)?;
     let max_handler_depth = statements_handler_depth(&function.body)?;
+    let local_binding_capacity = function
+        .parameters
+        .len()
+        .checked_add(statements_binding_count(&function.body)?)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "function local bindings",
+        })?;
+    let binding_plan_capacity = local_binding_capacity
+        .checked_add(statements_scope_name_count(&function.body)?)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "function binding plan",
+        })?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(
             instruction_capacity,
@@ -237,15 +259,8 @@ fn lower_function(
         ),
         constants,
         scope_names,
-        locals: Vec::with_capacity(
-            function
-                .parameters
-                .len()
-                .checked_add(statements_binding_count(&function.body)?)
-                .ok_or(CompileError::LoweringCapacityOverflow {
-                    collection: "function local bindings",
-                })?,
-        ),
+        locals: Vec::with_capacity(local_binding_capacity),
+        binding_plan: Vec::with_capacity(binding_plan_capacity),
         break_targets: Vec::with_capacity(statements_switch_count(&function.body)?),
         continue_targets: Vec::with_capacity(statements_loop_count(&function.body)?),
         handlers: Vec::with_capacity(handler_count),
@@ -255,22 +270,14 @@ fn lower_function(
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
-        lowerer.locals.push(LocalBinding {
-            name: parameter.name.clone(),
-            register,
-            mutable: true,
-        });
+        lowerer.add_local(parameter.name.clone(), register, true);
     }
     for name in var_names {
         if lowerer.local(&name).is_some() {
             continue;
         }
         let register = lowerer.load_undefined(function.span)?;
-        lowerer.locals.push(LocalBinding {
-            name,
-            register,
-            mutable: true,
-        });
+        lowerer.add_local(name, register, true);
     }
     let mut terminal = false;
     for statement in function.body.iter() {
@@ -284,6 +291,7 @@ fn lower_function(
         lowerer.emit(Opcode::Return, &[undefined.index()], function.span)?;
     }
     let handlers = freeze_handlers(lowerer.handlers)?;
+    let binding_plan = lowerer.binding_plan.into();
     let (bytecode, source_map, register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
     let function_id = function
@@ -308,6 +316,7 @@ fn lower_function(
             handlers,
             suspend_points: Default::default(),
             feedback_sites: Default::default(),
+            binding_plan,
         },
     ))
 }
@@ -317,6 +326,7 @@ struct Lowerer<'a> {
     constants: &'a mut Vec<BytecodeConstant>,
     scope_names: &'a mut Vec<std::sync::Arc<str>>,
     locals: Vec<LocalBinding>,
+    binding_plan: Vec<BindingPlanEntry>,
     break_targets: Vec<Label>,
     continue_targets: Vec<Label>,
     handlers: Vec<Option<HandlerEntry>>,
@@ -366,7 +376,7 @@ impl Lowerer<'_> {
             .checked_add(1)
             .ok_or(CompileError::RegisterOverflow)?;
         self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
-        let scope_name = self.scope_name(&declaration.binding.name)?;
+        let scope_name = self.global_binding(&declaration.binding.name, true)?;
         self.emit(Opcode::StoreScope, &[register.index(), scope_name], span)?;
         Ok(())
     }
@@ -870,11 +880,7 @@ impl Lowerer<'_> {
             )
             .map_err(CompileError::Builder)?;
         if let Some(parameter) = &handler.parameter {
-            self.locals.push(LocalBinding {
-                name: parameter.name.clone(),
-                register: exception,
-                mutable: true,
-            });
+            self.add_local(parameter.name.clone(), exception, true);
         }
         Ok(offset)
     }
@@ -1166,7 +1172,7 @@ impl Lowerer<'_> {
                 Some(binding) => Ok(binding.register),
                 None => {
                     let destination = self.register()?;
-                    let scope_name = self.scope_name(name)?;
+                    let scope_name = self.global_binding(name, true)?;
                     self.emit(
                         Opcode::LoadScope,
                         &[destination.index(), scope_name],
@@ -1346,7 +1352,7 @@ impl Lowerer<'_> {
         value: &HirExpression,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let scope_name = self.scope_name(target)?;
+        let scope_name = self.global_binding(target, true)?;
         let result = match operator {
             HirAssignmentOperator::Assign => self.expression(value)?,
             HirAssignmentOperator::Binary(operator) => {
@@ -1505,7 +1511,7 @@ impl Lowerer<'_> {
         target: &std::sync::Arc<str>,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let scope_name = self.scope_name(target)?;
+        let scope_name = self.global_binding(target, true)?;
         let old = self.register()?;
         self.emit(Opcode::LoadScope, &[old.index(), scope_name], span)?;
         let result = if prefix {
@@ -1748,11 +1754,11 @@ impl Lowerer<'_> {
                     });
                 }
             };
-            self.locals.push(LocalBinding {
-                name: declarator.binding.name.clone(),
+            self.add_local(
+                declarator.binding.name.clone(),
                 register,
-                mutable: declaration.kind == HirVariableDeclarationKind::Let,
-            });
+                declaration.kind == HirVariableDeclarationKind::Let,
+            );
         }
         Ok(())
     }
@@ -1774,7 +1780,7 @@ impl Lowerer<'_> {
                     declarator.span,
                 )?;
             } else if self.script_scope {
-                let scope_name = self.scope_name(&declarator.binding.name)?;
+                let scope_name = self.global_binding(&declarator.binding.name, true)?;
                 self.emit(
                     Opcode::StoreScope,
                     &[value.index(), scope_name],
@@ -1831,6 +1837,38 @@ impl Lowerer<'_> {
             .checked_add(1)
             .ok_or(CompileError::RegisterOverflow)?;
         Ok(register)
+    }
+
+    /// Publishes one frame binding and its verifier-owned storage contract together.
+    fn add_local(&mut self, name: std::sync::Arc<str>, register: RegisterId, mutable: bool) {
+        self.binding_plan.push(BindingPlanEntry {
+            name: name.clone(),
+            location: BindingLocation::FrameRegister(register),
+            mutable,
+        });
+        self.locals.push(LocalBinding {
+            name,
+            register,
+            mutable,
+        });
+    }
+
+    /// Records one global-property binding once while returning its shared module name index.
+    fn global_binding(
+        &mut self,
+        name: &std::sync::Arc<str>,
+        mutable: bool,
+    ) -> Result<u32, CompileError> {
+        let scope_name = self.scope_name(name)?;
+        let entry = BindingPlanEntry {
+            name: name.clone(),
+            location: BindingLocation::GlobalProperty,
+            mutable,
+        };
+        if !self.binding_plan.contains(&entry) {
+            self.binding_plan.push(entry);
+        }
+        Ok(scope_name)
     }
 
     /// Returns a module-stable scope-name index while retaining only one owned copy per spelling.
