@@ -1527,7 +1527,7 @@ impl Lowerer<'_> {
             let test = self.expression(test)?;
             let equal = self.register()?;
             self.emit(
-                Opcode::StrictEqual,
+                Opcode::LooseEqual,
                 &[equal.index(), discriminant.index(), test.index()],
                 case.span,
             )?;
@@ -1956,7 +1956,7 @@ impl Lowerer<'_> {
         ) {
             let equal = self.register()?;
             self.emit(
-                Opcode::StrictEqual,
+                Opcode::LooseEqual,
                 &[equal.index(), left.index(), right.index()],
                 span,
             )?;

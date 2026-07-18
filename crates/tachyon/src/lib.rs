@@ -1317,6 +1317,27 @@ mod tests {
     }
 
     #[test]
+    /// Covers abstract equality coercion without changing strict equality behavior.
+    fn loose_equality_converts_supported_primitives() {
+        assert_eq!(
+            execute_source(107, "1 == '1';").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(108, "null == undefined;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(109, "false == 0;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(110, "1 != '2';").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

@@ -99,6 +99,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::GreaterThan
         | Opcode::LessEqual
         | Opcode::GreaterEqual
+        | Opcode::LooseEqual
+        | Opcode::LooseNotEqual
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => write!(

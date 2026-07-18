@@ -2217,6 +2217,36 @@ impl Isolate {
         })
     }
 
+    /// Implements the supported primitive subset of Abstract Equality Comparison.
+    fn loose_equal_values(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
+        if self.strict_equal_values(left, right)? {
+            return Ok(true);
+        }
+        let left_immediate = left.as_immediate();
+        let right_immediate = right.as_immediate();
+        let left_nullish = matches!(left_immediate, Some(Immediate::Undefined | Immediate::Null));
+        let right_nullish = matches!(
+            right_immediate,
+            Some(Immediate::Undefined | Immediate::Null)
+        );
+        if left_nullish || right_nullish {
+            return Ok(left_nullish && right_nullish);
+        }
+        let left_number = numeric_value(left);
+        let right_number = numeric_value(right);
+        if left_number.is_some() && right_number.is_some() {
+            return Ok(left_number == right_number);
+        }
+        let left_boolean = matches!(left_immediate, Some(Immediate::True | Immediate::False));
+        let right_boolean = matches!(right_immediate, Some(Immediate::True | Immediate::False));
+        if left_boolean || right_boolean || left_number.is_some() || right_number.is_some() {
+            let left = self.convert_to_number(left)?;
+            let right = self.convert_to_number(right)?;
+            return Ok(numeric_value(left) == numeric_value(right));
+        }
+        Ok(false)
+    }
+
     #[inline(always)]
     fn is_truthy_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
         if let Some(raw) = value.as_heap_ref()
@@ -2446,6 +2476,25 @@ impl Isolate {
                     Value::from_immediate(Immediate::False)
                 };
                 self.write(base, operands[0], value)?;
+            }
+            Opcode::LooseEqual | Opcode::LooseNotEqual => {
+                let left = self.read(base, operands[1])?;
+                let right = self.read(base, operands[2])?;
+                let equal = self.loose_equal_values(left, right)?;
+                let result = if opcode == Opcode::LooseEqual {
+                    equal
+                } else {
+                    !equal
+                };
+                self.write(
+                    base,
+                    operands[0],
+                    Value::from_immediate(if result {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    }),
+                )?;
             }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;
