@@ -39,6 +39,10 @@ const _: [(); 4] = [(); core::mem::size_of::<AtomId>()];
 const _: [(); 4] = [(); core::mem::size_of::<Option<AtomId>>()];
 
 impl AtomId {
+    #[cfg(test)]
+    pub(crate) fn from_test_index(index: usize) -> Self {
+        Self::from_index(index)
+    }
     #[must_use]
     pub const fn index(self) -> u32 {
         self.0.get() - 1

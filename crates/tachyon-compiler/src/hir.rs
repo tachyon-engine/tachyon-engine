@@ -159,12 +159,25 @@ pub struct HirExpression {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum HirAssignmentTarget {
+    Identifier(Arc<str>),
+    StaticMember {
+        object: Box<HirExpression>,
+        property: Arc<str>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum HirExpressionKind {
     Number(u64),
     String(Arc<str>),
     Boolean(bool),
     Null,
     Identifier(Arc<str>),
+    StaticMember {
+        object: Box<HirExpression>,
+        property: Arc<str>,
+    },
     Unary {
         operator: HirUnaryOperator,
         argument: Box<HirExpression>,
@@ -180,7 +193,7 @@ pub enum HirExpressionKind {
         right: Box<HirExpression>,
     },
     Assignment {
-        target: Arc<str>,
+        target: HirAssignmentTarget,
         value: Box<HirExpression>,
     },
     Conditional {
@@ -573,6 +586,12 @@ fn lower_expression(
         Expression::Identifier(identifier) => {
             HirExpressionKind::Identifier(Arc::from(identifier.name.as_str()))
         }
+        Expression::StaticMemberExpression(expression) if !expression.optional => {
+            HirExpressionKind::StaticMember {
+                object: Box::new(lower_expression(&expression.object, source)?),
+                property: Arc::from(expression.property.name.as_str()),
+            }
+        }
         Expression::UnaryExpression(expression) => HirExpressionKind::Unary {
             operator: lower_unary_operator(expression.operator),
             argument: Box::new(lower_expression(&expression.argument, source)?),
@@ -628,7 +647,7 @@ fn lower_assignment_target(
     target: &AssignmentTarget<'_>,
     operator: AssignmentOperator,
     source: &SourceText,
-) -> Result<Arc<str>, CompileError> {
+) -> Result<HirAssignmentTarget, CompileError> {
     if !operator.is_assign() {
         return Err(unsupported(
             source.name(),
@@ -636,14 +655,22 @@ fn lower_assignment_target(
             "assignment operator",
         ));
     }
-    let AssignmentTarget::AssignmentTargetIdentifier(identifier) = target else {
-        return Err(unsupported(
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok(
+            HirAssignmentTarget::Identifier(Arc::from(identifier.name.as_str())),
+        ),
+        AssignmentTarget::StaticMemberExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::StaticMember {
+                object: Box::new(lower_expression(&expression.object, source)?),
+                property: Arc::from(expression.property.name.as_str()),
+            })
+        }
+        _ => Err(unsupported(
             source.name(),
             source_span(target.span()),
             "assignment target",
-        ));
-    };
-    Ok(Arc::from(identifier.name.as_str()))
+        )),
+    }
 }
 
 fn lower_unary_operator(operator: UnaryOperator) -> HirUnaryOperator {

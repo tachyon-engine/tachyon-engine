@@ -8,10 +8,11 @@ use core::{
 use std::rc::Rc;
 
 use crate::{
-    AllocationSpace, GcRef, GcType, GcTypeId, Heap, HeapAllocationError, HeapReferenceError,
-    MajorCollectionError, MajorCollectionStats, TemporaryRootError, Trace,
+    AllocationSpace, GcExternalMemory, GcRef, GcType, GcTypeId, Heap, HeapAllocationError,
+    HeapReferenceError, MajorCollectionError, MajorCollectionStats, TemporaryRootError, Trace,
     persistent::{PersistentRootError, PersistentRootId},
 };
+use tachyon_value::Value;
 
 /// A reference cannot become a local handle unless it is live and root capacity is reserved.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +141,24 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         Ok(Local::new(reference))
     }
 
+    /// Allocates, exactly charges, and roots one immutable external-backed payload.
+    pub fn try_allocate_external<T: Trace + GcExternalMemory + 'static>(
+        &mut self,
+        object_type: GcType<T>,
+        flags: u16,
+        value: T,
+        space: AllocationSpace,
+    ) -> Result<Local<'scope, T>, ScopedAllocationError> {
+        let reference = self
+            .heap
+            .try_allocate_external(object_type, flags, value, space)
+            .map_err(ScopedAllocationError::Allocation)?;
+        self.heap
+            .try_push_temporary_root(reference.raw())
+            .map_err(ScopedAllocationError::Root)?;
+        Ok(Local::new(reference))
+    }
+
     /// Runs a full major with all current locals plus the caller's subsystem roots.
     pub fn collect_major(
         &mut self,
@@ -173,6 +192,19 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
     ) -> Result<bool, crate::HeapReferenceError> {
         self.heap
             .write_barrier(source.as_gc_ref().raw(), target.as_gc_ref().raw())
+    }
+
+    /// Publishes a potential heap edge stored through a NaN-boxed JavaScript value.
+    #[inline(always)]
+    pub fn write_value_barrier<S: ?Sized>(
+        &mut self,
+        source: Local<'scope, S>,
+        target: Value,
+    ) -> Result<bool, crate::HeapReferenceError> {
+        let Some(target) = target.as_heap_ref() else {
+            return Ok(false);
+        };
+        self.heap.write_barrier(source.as_gc_ref().raw(), target)
     }
 
     /// Implements AddToKeptObjects for a successfully dereferenced weak target.

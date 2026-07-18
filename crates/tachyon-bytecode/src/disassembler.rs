@@ -64,6 +64,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
     match opcode {
         Opcode::Nop => {}
         Opcode::LoadUndefined => write!(output, " r{}", operands[0])?,
+        Opcode::CreateObject => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,
@@ -77,6 +78,16 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, r{}, r{}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::GetById => write!(
+            output,
+            " r{}, receiver=r{}, name={}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::SetById => write!(
+            output,
+            " receiver=r{}, value=r{}, name={}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::Jump => write!(output, " pc={}", operands[0])?,
         Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => {
             write!(output, " r{}, pc={}", operands[0], operands[1])?
@@ -85,6 +96,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::Call => write!(
             output,
             " r{}, callee=r{}, argc={}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::CallWithReceiver => write!(
+            output,
+            " r{}, receiver=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
         Opcode::CreateClosure => write!(output, " r{}, function={}", operands[0], operands[1])?,

@@ -133,6 +133,11 @@ pub enum Opcode {
     JumpIfTrue = 24,
     JumpIfNotNullish = 25,
     Negate = 26,
+    CreateObject = 27,
+    GetById = 28,
+    SetById = 29,
+    /// Calls callee at receiver+1 with arguments following it while preserving `this`.
+    CallWithReceiver = 30,
 }
 
 impl Opcode {
@@ -166,6 +171,8 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
+            Self::CreateObject => 1,
+            Self::GetById | Self::SetById | Self::CallWithReceiver => 3,
         }
     }
 
@@ -203,6 +210,10 @@ impl Opcode {
             24 => Some(Self::JumpIfTrue),
             25 => Some(Self::JumpIfNotNullish),
             26 => Some(Self::Negate),
+            27 => Some(Self::CreateObject),
+            28 => Some(Self::GetById),
+            29 => Some(Self::SetById),
+            30 => Some(Self::CallWithReceiver),
             _ => None,
         }
     }
@@ -705,11 +716,13 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::Return
             | Opcode::Throw => &[0],
+            Opcode::CreateObject => &[0],
             Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
                 &[0, 1, 2]
             }
+            Opcode::GetById | Opcode::SetById => &[0, 1],
             Opcode::Call => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {
@@ -725,6 +738,22 @@ impl BytecodeBuilder {
                             .ok_or(BuilderError::RegisterCountOverflow)?,
                     )?;
                 }
+                return Ok(());
+            }
+            Opcode::CallWithReceiver => {
+                for &index in &[0, 1] {
+                    if let Some(&register) = operands.get(index) {
+                        self.note_register(register)?;
+                    }
+                }
+                let receiver = operands[1];
+                let argument_count = operands[2];
+                self.note_register(
+                    receiver
+                        .checked_add(1)
+                        .and_then(|callee| callee.checked_add(argument_count))
+                        .ok_or(BuilderError::RegisterCountOverflow)?,
+                )?;
                 return Ok(());
             }
             Opcode::Await | Opcode::Yield => &[0, 1],
@@ -1524,6 +1553,7 @@ fn verify_instruction(
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
+        Opcode::CreateObject => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1537,6 +1567,10 @@ fn verify_instruction(
             check_register(operands[1])?;
             check_register(operands[2])?;
         }
+        Opcode::GetById | Opcode::SetById => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+        }
         Opcode::Call => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1548,6 +1582,22 @@ fn verify_instruction(
                 return Err(VerifyError::InvalidCallArgumentWindow {
                     offset,
                     callee: operands[1],
+                    argument_count: operands[2],
+                    register_count: context.register_count,
+                });
+            }
+        }
+        Opcode::CallWithReceiver => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            if operands[1]
+                .checked_add(1)
+                .and_then(|callee| callee.checked_add(operands[2]))
+                .is_none_or(|last_argument| last_argument >= context.register_count)
+            {
+                return Err(VerifyError::InvalidCallArgumentWindow {
+                    offset,
+                    callee: operands[1].saturating_add(1),
                     argument_count: operands[2],
                     register_count: context.register_count,
                 });
@@ -1571,12 +1621,15 @@ fn verify_instruction(
             constant_count: context.constant_count,
         });
     }
-    if matches!(instruction.opcode, Opcode::LoadScope | Opcode::StoreScope)
-        && operands[1] >= context.scope_name_count
-    {
+    let scope_name = match instruction.opcode {
+        Opcode::LoadScope | Opcode::StoreScope => Some(operands[1]),
+        Opcode::GetById | Opcode::SetById => Some(operands[2]),
+        _ => None,
+    };
+    if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {
         return Err(VerifyError::ScopeNameOutOfRange {
             offset,
-            scope_name: operands[1],
+            scope_name: scope_name.expect("scope-name opcode selected above"),
             scope_name_count: context.scope_name_count,
         });
     }

@@ -11,6 +11,7 @@
 
 mod atom;
 mod finalization;
+mod object;
 mod string;
 mod tuning;
 
@@ -20,6 +21,7 @@ pub use finalization::{
     FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
     FinalizationSafepointStats,
 };
+pub use object::ShapeError;
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
 
 use core::{cell::Cell, num::NonZeroU32};
@@ -33,6 +35,8 @@ use tachyon_gc::{
     NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::{Immediate, Value};
+
+use object::{OrdinaryObject, PropertyAttributes, PropertyStorage, ShapeId, ShapeTable};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
 #[derive(Clone, Copy, Debug, Default)]
@@ -69,6 +73,7 @@ impl IsolateConfig {
 pub struct RealmLimits {
     max_loaded_modules: u32,
     max_global_bindings: u32,
+    max_shapes: u32,
 }
 
 impl RealmLimits {
@@ -77,7 +82,15 @@ impl RealmLimits {
         Self {
             max_loaded_modules,
             max_global_bindings,
+            max_shapes: max_global_bindings,
         }
+    }
+
+    /// Overrides the hidden-class hard limit when object churn differs from global binding count.
+    #[must_use]
+    pub const fn with_max_shapes(mut self, max_shapes: u32) -> Self {
+        self.max_shapes = max_shapes;
+        self
     }
 }
 
@@ -143,11 +156,15 @@ pub enum ExecutionError {
     UnresolvedBinding(AtomId),
     GlobalBindingLimit { limit: u32 },
     GlobalBindingAllocationFailed,
+    Shape(ShapeError),
+    PropertyStorageAllocationFailed,
+    NotObject(Value),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IsolateCreationError {
     TypeRegistration(TypeRegistrationError),
+    Shape(ShapeError),
 }
 
 /// A future GC-managed lexical environment. Its concrete payload arrives with M5.
@@ -179,6 +196,7 @@ struct CallSite {
     destination: u32,
     callee_register: u32,
     argument_count: u32,
+    this_value: Value,
 }
 
 impl Trace for FunctionObject {
@@ -191,6 +209,8 @@ impl Trace for FunctionObject {
 #[derive(Clone, Copy)]
 struct VmTypes {
     function: GcType<FunctionObject>,
+    ordinary_object: GcType<OrdinaryObject>,
+    property_storage: GcType<PropertyStorage>,
 }
 
 /// An isolate-local immutable-code index; zero stays reserved for niche optimization and validation.
@@ -286,6 +306,19 @@ struct VmRoots<'a> {
     fiber: &'a mut Fiber,
     finalization_jobs: &'a mut finalization::FinalizationJobs,
     realm: &'a mut Realm,
+}
+
+struct PropertyMutationRoots<'a> {
+    vm: VmRoots<'a>,
+    receiver: Value,
+}
+
+impl Trace for PropertyMutationRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.receiver.trace(tracer);
+    }
 }
 
 impl Trace for VmRoots<'_> {
@@ -390,6 +423,7 @@ pub struct Isolate {
     fiber: Fiber,
     finalization_jobs: finalization::FinalizationJobs,
     atoms: AtomTable,
+    shapes: ShapeTable,
     realm: Realm,
     loaded_code: Vec<LoadedCode>,
     heap: Heap,
@@ -406,11 +440,20 @@ impl Isolate {
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            ordinary_object: registry
+                .try_register("OrdinaryObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            property_storage: registry
+                .try_register("PropertyStorage")
+                .map_err(IsolateCreationError::TypeRegistration)?,
         };
+        let shapes =
+            ShapeTable::new(config.realm_limits.max_shapes).map_err(IsolateCreationError::Shape)?;
         Ok(Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
             atoms: AtomTable::new(config.atom_table),
+            shapes,
             realm: Realm::new(config.realm_limits),
             loaded_code: Vec::new(),
             heap: Heap::new(config.heap_limit, registry),
@@ -427,6 +470,201 @@ impl Isolate {
 
     pub const fn atoms_mut(&mut self) -> &mut AtomTable {
         &mut self.atoms
+    }
+
+    /// Allocates an empty ordinary object through the managed young-generation path.
+    fn create_ordinary_object(&mut self) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+        };
+        let object = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    storage: None,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok(Value::from_heap_ref(object.raw()))
+    }
+
+    /// Reads one own ordinary data property without allocating or invoking exotic behavior.
+    #[inline]
+    fn get_own_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let object = self.ordinary_object_reference(receiver)?;
+        let snapshot = self.heap.with_running_scope(|scope| {
+            let local = scope.root(object).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.ordinary_object)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            return Ok(None);
+        };
+        debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
+        let storage = snapshot
+            .storage
+            .expect("a non-empty shape always owns property storage");
+        self.heap.with_running_scope(|scope| {
+            let local = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.property_storage)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(|storage| storage.slots.get(property.slot as usize).copied())
+            })
+        })
+    }
+
+    /// Updates an existing slot in place or publishes an exactly sized replacement backing.
+    fn set_own_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let object = self.ordinary_object_reference(receiver)?;
+        let snapshot = self.heap.with_running_scope(|scope| {
+            let local = scope.root(object).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.ordinary_object)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
+            debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
+            return self.update_property_slot(snapshot, property.slot, value);
+        }
+        self.add_property_slot(object, snapshot, key, value)
+    }
+
+    /// Mutates a fixed existing slot and publishes its potential young edge to the barrier.
+    fn update_property_slot(
+        &mut self,
+        snapshot: OrdinaryObject,
+        slot: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let storage = snapshot
+            .storage
+            .expect("an existing property slot always has storage");
+        self.heap.with_running_scope(|scope| {
+            let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let storage = no_gc
+                    .borrow_mut(storage_local, self.types.property_storage)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                storage.slots[slot as usize] = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(storage_local, value)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Copies old slots into a traced pending backing, allocates it, then switches the object edge.
+    fn add_property_slot(
+        &mut self,
+        object: GcRef<OrdinaryObject>,
+        snapshot: OrdinaryObject,
+        key: AtomId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let new_shape = self
+            .shapes
+            .transition_add(snapshot.shape, key, PropertyAttributes::DEFAULT_DATA)
+            .map_err(ExecutionError::Shape)?;
+        let new_length = self.shapes.property_count(new_shape) as usize;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(new_length)
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        if let Some(storage) = snapshot.storage {
+            self.heap.with_running_scope(|scope| {
+                let local = scope.root(storage).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let old = no_gc
+                        .borrow(local, self.types.property_storage)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    slots.extend_from_slice(&old.slots);
+                    Ok::<(), ExecutionError>(())
+                })
+            })?;
+        }
+        slots.push(value);
+        debug_assert_eq!(slots.len(), new_length);
+        let (storage, receiver) = {
+            let mut roots = PropertyMutationRoots {
+                vm: VmRoots {
+                    fiber: &mut self.fiber,
+                    finalization_jobs: &mut self.finalization_jobs,
+                    realm: &mut self.realm,
+                },
+                receiver: Value::from_heap_ref(object.raw()),
+            };
+            let storage = self
+                .heap
+                .try_allocate_external_with_gc(
+                    self.types.property_storage,
+                    0,
+                    PropertyStorage {
+                        slots: slots.into_boxed_slice(),
+                    },
+                    AllocationSpace::Young,
+                    &mut roots,
+                )
+                .map_err(ExecutionError::HeapAllocation)?;
+            (storage, roots.receiver)
+        };
+        let object = self.ordinary_object_reference(receiver)?;
+        self.heap.with_running_scope(|scope| {
+            let object_local = scope.root(object).map_err(ExecutionError::Root)?;
+            let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(object_local, self.types.ordinary_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.shape = new_shape;
+                object.storage = Some(storage);
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_barrier(object_local, storage_local)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    #[inline(always)]
+    fn ordinary_object_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<OrdinaryObject>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        self.heap
+            .checked_reference(raw, self.types.ordinary_object)
+            .map_err(|_| ExecutionError::NotObject(value))
     }
 
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
@@ -696,7 +934,35 @@ impl Isolate {
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
             }
-            Opcode::Call => self.call(base, operands[0], operands[1], operands[2])?,
+            Opcode::CreateObject => {
+                let object = self.create_ordinary_object()?;
+                self.write(base, operands[0], object)?;
+            }
+            Opcode::GetById => {
+                let receiver = self.read(base, operands[1])?;
+                let key = self.scope_atom(code, operands[2])?;
+                let value = self
+                    .get_own_data_property(receiver, key)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::SetById => {
+                let receiver = self.read(base, operands[0])?;
+                let value = self.read(base, operands[1])?;
+                let key = self.scope_atom(code, operands[2])?;
+                self.set_own_data_property(receiver, key, value)?;
+            }
+            Opcode::Call => self.call(
+                base,
+                operands[0],
+                operands[1],
+                operands[2],
+                Value::from_immediate(Immediate::Undefined),
+            )?,
+            Opcode::CallWithReceiver => {
+                let receiver = self.read(base, operands[1])?;
+                self.call(base, operands[0], operands[1] + 1, operands[2], receiver)?;
+            }
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
                 if self.fiber.frames.len() == 1 {
@@ -819,6 +1085,7 @@ impl Isolate {
         destination: u32,
         callee_register: u32,
         argument_count: u32,
+        this_value: Value,
     ) -> Result<(), ExecutionError> {
         let callee = self.read(caller_base, callee_register)?;
         let raw = callee
@@ -858,6 +1125,7 @@ impl Isolate {
                 destination,
                 callee_register,
                 argument_count,
+                this_value,
             },
         )
     }
@@ -922,7 +1190,7 @@ impl Isolate {
             base: callee_base,
             environment: target.object.environment,
             return_register: Some(RegisterId::new(site.destination)),
-            this_value: Value::from_immediate(Immediate::Undefined),
+            this_value: site.this_value,
             new_target: Value::from_immediate(Immediate::Undefined),
             strictness: strictness_for(target.kind),
             argument_base,
@@ -1139,7 +1407,7 @@ mod tests {
         Bytecode, BytecodeBuilder, CompiledFunctionTemplate, CompiledModule, FunctionId,
         FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
     };
-    use tachyon_gc::{GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
+    use tachyon_gc::{ForcedCollectionMode, GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
 
     use super::*;
@@ -1432,6 +1700,36 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    fn assert_property_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &property_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    fn assert_method_receiver_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &method_receiver_module(),
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::BudgetExhausted);
+        let receiver = isolate.fiber.frames[0].base;
+        let receiver = isolate.fiber.registers[receiver as usize];
+        assert_eq!(isolate.fiber.frames.last().unwrap().this_value, receiver);
+    }
+
     #[test]
     fn interpreter_executes_int32_arithmetic() {
         assert_batch_result::<1>();
@@ -1542,6 +1840,45 @@ mod tests {
         assert_cross_code_batch::<4>();
         assert_cross_code_batch::<8>();
         assert_cross_code_batch::<16>();
+    }
+
+    #[test]
+    fn ordinary_property_replacement_and_update_work_for_every_dispatch_batch() {
+        assert_property_batch::<1>();
+        assert_property_batch::<2>();
+        assert_property_batch::<4>();
+        assert_property_batch::<8>();
+        assert_property_batch::<16>();
+    }
+
+    #[test]
+    fn method_calls_preserve_receiver_for_every_dispatch_batch() {
+        assert_method_receiver_batch::<1>();
+        assert_method_receiver_batch::<2>();
+        assert_method_receiver_batch::<4>();
+        assert_method_receiver_batch::<8>();
+        assert_method_receiver_batch::<16>();
+    }
+
+    #[test]
+    fn property_publication_roots_receiver_and_heap_value_across_forced_major() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &heap_value_property_module(),
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        let RunOutcome::Completed(child) = outcome else {
+            panic!("property fixture must complete");
+        };
+        assert!(isolate.ordinary_object_reference(child).is_ok());
     }
 
     #[test]
@@ -1892,6 +2229,121 @@ mod tests {
             Arc::from("switch"),
             Vec::new(),
             Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds two property additions followed by an allocation-free update and own read.
+    fn property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(10, 0);
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 41], span).unwrap();
+        builder.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 7], span).unwrap();
+        builder.emit(Opcode::SetById, &[0, 2, 1], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[3, 42], span).unwrap();
+        builder.emit(Opcode::SetById, &[0, 3, 0], span).unwrap();
+        builder.emit(Opcode::GetById, &[4, 0, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[4], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("properties"),
+            Vec::new(),
+            vec![Arc::from("answer"), Arc::from("other")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a method call that stops immediately after pushing its receiver-bearing frame.
+    fn method_receiver_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(8, 0);
+        entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::Move, &[2, 0], span).unwrap();
+        entry.emit(Opcode::GetById, &[3, 2, 0], span).unwrap();
+        entry
+            .emit(Opcode::CallWithReceiver, &[4, 2, 0], span)
+            .unwrap();
+        entry.emit(Opcode::Return, &[4], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::LoadUndefined, &[0], span).unwrap();
+        callee.emit(Opcode::Return, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let callee_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callee_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callee_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("method receiver"),
+            Vec::new(),
+            vec![Arc::from("method")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Stores a young object through an allocation that forces root tracing before publication.
+    fn heap_value_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(6, 0);
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::CreateObject, &[1], span).unwrap();
+        builder.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        builder.emit(Opcode::GetById, &[2, 0, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[2], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("heap value property"),
+            Vec::new(),
+            vec![Arc::from("child")],
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 bytecode,

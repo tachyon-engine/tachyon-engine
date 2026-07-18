@@ -19,10 +19,11 @@ use std::sync::Arc;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
-    BindingId, FunctionStencilId, HirBinaryOperator, HirBinding, HirExpression, HirExpressionKind,
-    HirFunction, HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement,
-    HirStatementKind, HirSwitchCase, HirUnaryOperator, HirVariableDeclaration,
-    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    BindingId, FunctionStencilId, HirAssignmentTarget, HirBinaryOperator, HirBinding,
+    HirExpression, HirExpressionKind, HirFunction, HirFunctionDeclaration, HirLogicalOperator,
+    HirProgram, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
+    HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId,
+    ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -467,6 +468,40 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compiler_preserves_static_member_receiver_and_property_names() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "let object; object.value = 1; object.method(2);",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("SetById"));
+        assert!(disassembly.contains("GetById"));
+        assert!(disassembly.contains("CallWithReceiver"));
+        assert!(
+            module
+                .scope_names()
+                .iter()
+                .any(|name| name.as_ref() == "value")
+        );
+        assert!(
+            module
+                .scope_names()
+                .iter()
+                .any(|name| name.as_ref() == "method")
+        );
     }
 
     proptest! {

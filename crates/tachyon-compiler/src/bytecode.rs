@@ -6,6 +6,7 @@ use tachyon_bytecode::{
     RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
+use crate::hir::HirAssignmentTarget;
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction,
     HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
@@ -746,30 +747,53 @@ impl Lowerer<'_> {
                     Ok(destination)
                 }
             },
-            HirExpressionKind::Assignment { target, value } => {
-                let binding =
-                    self.local(target)
-                        .cloned()
-                        .ok_or_else(|| CompileError::UnsupportedSyntax {
+            HirExpressionKind::StaticMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let destination = self.register()?;
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::GetById,
+                    &[destination.index(), receiver.index(), property],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
+            HirExpressionKind::Assignment { target, value } => match target {
+                HirAssignmentTarget::Identifier(target) => {
+                    let binding = self.local(target).cloned().ok_or_else(|| {
+                        CompileError::UnsupportedSyntax {
                             source_name: self.source_name.clone(),
                             span: expression.span,
                             syntax: "unresolved assignment target",
-                        })?;
-                if !binding.mutable {
-                    return Err(CompileError::UnsupportedSyntax {
-                        source_name: self.source_name.clone(),
-                        span: expression.span,
-                        syntax: "assignment to immutable local",
-                    });
+                        }
+                    })?;
+                    if !binding.mutable {
+                        return Err(CompileError::UnsupportedSyntax {
+                            source_name: self.source_name.clone(),
+                            span: expression.span,
+                            syntax: "assignment to immutable local",
+                        });
+                    }
+                    let value = self.expression(value)?;
+                    self.emit(
+                        Opcode::Move,
+                        &[binding.register.index(), value.index()],
+                        expression.span,
+                    )?;
+                    Ok(value)
                 }
-                let value = self.expression(value)?;
-                self.emit(
-                    Opcode::Move,
-                    &[binding.register.index(), value.index()],
-                    expression.span,
-                )?;
-                Ok(value)
-            }
+                HirAssignmentTarget::StaticMember { object, property } => {
+                    let receiver = self.expression(object)?;
+                    let value = self.expression(value)?;
+                    let property = self.scope_name(property)?;
+                    self.emit(
+                        Opcode::SetById,
+                        &[receiver.index(), value.index(), property],
+                        expression.span,
+                    )?;
+                    Ok(value)
+                }
+            },
             HirExpressionKind::Conditional {
                 test,
                 consequent,
@@ -826,6 +850,9 @@ impl Lowerer<'_> {
         arguments: &[HirExpression],
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
+        if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
+            return self.method_call_expression(object, property, arguments, span);
+        }
         let callee_value = self.expression(callee)?;
         let call_base = self.register()?;
         self.emit(
@@ -846,6 +873,47 @@ impl Lowerer<'_> {
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
             Opcode::Call,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Materializes receiver/callee/arguments once in one verified contiguous method-call window.
+    fn method_call_expression(
+        &mut self,
+        object: &HirExpression,
+        property: &std::sync::Arc<str>,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver_value = self.expression(object)?;
+        let call_base = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[call_base.index(), receiver_value.index()],
+            span,
+        )?;
+        let callee_slot = self.register()?;
+        let property = self.scope_name(property)?;
+        self.emit(
+            Opcode::GetById,
+            &[callee_slot.index(), call_base.index(), property],
+            span,
+        )?;
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CallWithReceiver,
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
@@ -1100,6 +1168,9 @@ fn switch_scope_name_count(
 fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
+        HirExpressionKind::StaticMember { object, .. } => {
+            checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
+        }
         HirExpressionKind::Unary { argument, .. } => expression_scope_name_count(argument),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_scope_name_count(left)?,
@@ -1111,7 +1182,15 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             expression_scope_name_count(right)?,
             "scope names",
         ),
-        HirExpressionKind::Assignment { value, .. } => expression_scope_name_count(value),
+        HirExpressionKind::Assignment { target, value } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => {
+                    checked_count_add(expression_scope_name_count(object)?, 1, "scope names")?
+                }
+            };
+            checked_count_add(target, expression_scope_name_count(value)?, "scope names")
+        }
         HirExpressionKind::Conditional {
             test,
             consequent,
@@ -1263,11 +1342,25 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             )?;
             checked_count_add(operands, 3, "bytecode instructions")
         }
-        HirExpressionKind::Assignment { value, .. } => checked_count_add(
-            expression_instruction_count(value)?,
+        HirExpressionKind::StaticMember { object, .. } => checked_count_add(
+            expression_instruction_count(object)?,
             1,
             "bytecode instructions",
         ),
+        HirExpressionKind::Assignment { target, value } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => {
+                    expression_instruction_count(object)?
+                }
+            };
+            let operands = checked_count_add(
+                target,
+                expression_instruction_count(value)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(operands, 1, "bytecode instructions")
+        }
         HirExpressionKind::Unary { argument, .. } => checked_count_add(
             expression_instruction_count(argument)?,
             1,
@@ -1671,7 +1764,14 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             )?;
             checked_count_add(nested, 1, "bytecode labels")
         }
-        HirExpressionKind::Assignment { value, .. } => expression_label_count(value),
+        HirExpressionKind::StaticMember { object, .. } => expression_label_count(object),
+        HirExpressionKind::Assignment { target, value } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object)?,
+            };
+            checked_count_add(target, expression_label_count(value)?, "bytecode labels")
+        }
         HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {
             test,
@@ -1714,7 +1814,20 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             expression_literal_count(right)?,
             "bytecode constants",
         ),
-        HirExpressionKind::Assignment { value, .. } => expression_literal_count(value),
+        HirExpressionKind::StaticMember { object, .. } => expression_literal_count(object),
+        HirExpressionKind::Assignment { target, value } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => {
+                    expression_literal_count(object)?
+                }
+            };
+            checked_count_add(
+                target,
+                expression_literal_count(value)?,
+                "bytecode constants",
+            )
+        }
         HirExpressionKind::Unary { argument, .. } => expression_literal_count(argument),
         HirExpressionKind::Conditional {
             test,
