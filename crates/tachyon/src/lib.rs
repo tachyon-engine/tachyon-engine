@@ -1215,6 +1215,27 @@ mod tests {
     }
 
     #[test]
+    /// Covers ordinary and computed object methods through the existing receiver call path.
+    fn object_literals_support_methods() {
+        assert_eq!(
+            execute_source(
+                80,
+                "let object = { answer() { return 40; } }; object.answer() + 2;"
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                81,
+                "let object = { ['answer']() { return 40; } }; object.answer() + 2;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

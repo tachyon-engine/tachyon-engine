@@ -1044,11 +1044,11 @@ fn lower_expression(
                         "object spread",
                     ));
                 };
-                if property.kind != PropertyKind::Init || property.method {
+                if property.kind != PropertyKind::Init {
                     return Err(unsupported(
                         source.name(),
                         source_span(property.span),
-                        "object accessor or method",
+                        "object accessor",
                     ));
                 }
                 let key = if property.computed {
@@ -1072,10 +1072,34 @@ fn lower_expression(
                     };
                     HirObjectPropertyKey::Static(Arc::from(key))
                 };
+                let value = if property.method {
+                    let Expression::FunctionExpression(function) = &property.value else {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(property.span),
+                            "object method value",
+                        ));
+                    };
+                    if function.id.is_some() {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(function.span),
+                            "named object method",
+                        ));
+                    }
+                    HirExpression {
+                        span: source_span(function.span),
+                        kind: HirExpressionKind::Function(lower_function_stencil(
+                            function, None, source, semantic, functions,
+                        )?),
+                    }
+                } else {
+                    lower_expression(&property.value, source, semantic, functions)?
+                };
                 properties.push(HirObjectProperty {
                     span: source_span(property.span),
                     key,
-                    value: lower_expression(&property.value, source, semantic, functions)?,
+                    value,
                 });
             }
             HirExpressionKind::Object(properties.into())
