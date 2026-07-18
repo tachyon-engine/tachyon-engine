@@ -1668,6 +1668,19 @@ impl Lowerer<'_> {
                 self.expression(argument)?;
                 self.load_undefined(expression.span)
             }
+            HirExpressionKind::Unary {
+                operator: HirUnaryOperator::Plus,
+                argument,
+            } => {
+                let argument = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::ToNumber,
+                    &[destination.index(), argument.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Binary {
                 operator,
                 left,

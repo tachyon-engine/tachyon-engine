@@ -165,6 +165,7 @@ pub enum ExecutionError {
     PropertyKeyAtom(AtomTableError),
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
+    UnsupportedNumberConversion(Value),
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
@@ -2101,6 +2102,22 @@ impl Isolate {
             .map_err(ExecutionError::PropertyKeyAtom)
     }
 
+    /// Converts the primitive values represented by the current numeric VM subset.
+    #[inline(always)]
+    fn to_number(&self, value: Value) -> Result<Value, ExecutionError> {
+        if value.as_i32().is_some() || value.as_f64().is_some() {
+            return Ok(value);
+        }
+        match value.as_immediate() {
+            Some(Immediate::True) => Ok(Value::from_i32(1)),
+            Some(Immediate::False | Immediate::Null) => Ok(Value::from_i32(0)),
+            Some(Immediate::Undefined) => Ok(Value::from_f64(f64::NAN)),
+            Some(Immediate::Hole | Immediate::Uninitialized) | None => {
+                Err(ExecutionError::UnsupportedNumberConversion(value))
+            }
+        }
+    }
+
     #[inline(always)]
     fn typeof_value(&self, value: Value) -> Result<Value, ExecutionError> {
         let strings = self.realm.typeof_strings;
@@ -2351,6 +2368,10 @@ impl Isolate {
             }
             Opcode::Negate => {
                 let value = numeric_negate(self.read(base, operands[1])?);
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::ToNumber => {
+                let value = self.to_number(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {

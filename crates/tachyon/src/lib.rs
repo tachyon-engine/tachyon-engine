@@ -1246,6 +1246,19 @@ mod tests {
     }
 
     #[test]
+    /// Covers primitive numeric conversion for unary plus without object/string coercion.
+    fn unary_plus_converts_supported_primitives() {
+        assert_eq!(execute_source(84, "+1;").as_i32(), Some(1));
+        assert_eq!(execute_source(85, "+true;").as_i32(), Some(1));
+        assert_eq!(execute_source(86, "+null;").as_i32(), Some(0));
+        assert!(
+            execute_source(87, "+undefined;")
+                .as_f64()
+                .is_some_and(f64::is_nan)
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

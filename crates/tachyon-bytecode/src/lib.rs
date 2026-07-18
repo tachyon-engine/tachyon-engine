@@ -168,6 +168,8 @@ pub enum Opcode {
     InitializeGlobalLexical = 45,
     /// Returns the ECMAScript undefined value without allocating a register.
     ReturnUndefined = 46,
+    /// Converts a primitive value to the current numeric subset.
+    ToNumber = 47,
 }
 
 impl Opcode {
@@ -197,7 +199,7 @@ impl Opcode {
             | Self::StoreResolvedScope
             | Self::DeclareGlobalLexical
             | Self::InitializeGlobalLexical => 2,
-            Self::Typeof => 2,
+            Self::Typeof | Self::ToNumber => 2,
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -274,6 +276,7 @@ impl Opcode {
             44 => Some(Self::DeclareGlobalLexical),
             45 => Some(Self::InitializeGlobalLexical),
             46 => Some(Self::ReturnUndefined),
+            47 => Some(Self::ToNumber),
             _ => None,
         }
     }
@@ -801,7 +804,9 @@ impl BytecodeBuilder {
             | Opcode::LoadException
             | Opcode::LoadThis
             | Opcode::LoadNewTarget => &[0],
-            Opcode::Move | Opcode::Not | Opcode::Negate | Opcode::Typeof => &[0, 1],
+            Opcode::Move | Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber => {
+                &[0, 1]
+            }
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1779,7 +1784,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Not | Opcode::Negate | Opcode::Typeof => {
+        Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
