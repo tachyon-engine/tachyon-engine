@@ -43,6 +43,7 @@ struct PreparedRequest {
     script_id: Box<str>,
     source: Arc<str>,
     entry: ScriptEntry,
+    iterations: u64,
 }
 
 impl ExternalProcessAdapter {
@@ -99,6 +100,7 @@ impl ExternalProcessAdapter {
         if prepared.script_id != request.script_id
             || prepared.source != request.source
             || prepared.entry != request.entry
+            || prepared.iterations != request.iterations
         {
             return Err(AdapterError::Setup(
                 "external process request differs from prepared source".into(),
@@ -185,6 +187,11 @@ impl BenchmarkAdapter for ExternalProcessAdapter {
         if request.mode != MeasurementMode::ColdStart {
             return Err(AdapterError::UnsupportedMode(request.mode));
         }
+        if request.iterations != 1 {
+            return Err(AdapterError::Setup(
+                "external cold-start request must execute exactly once".into(),
+            ));
+        }
         reset_file(&mut self.source_file)?;
         let execution_source = compose_execution_source(&request.source, request.entry)?;
         self.source_file
@@ -195,6 +202,7 @@ impl BenchmarkAdapter for ExternalProcessAdapter {
             script_id: request.script_id.clone(),
             source: Arc::clone(&request.source),
             entry: request.entry,
+            iterations: request.iterations,
         });
         Ok(())
     }

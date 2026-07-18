@@ -9,8 +9,7 @@ use benchmark_runner::{
 const CONFIG: &str = include_str!("../../../benchmark_config.toml");
 
 fn config_and_corpus() -> (BenchmarkConfig, Vec<CorpusScript>) {
-    let mut config = BenchmarkConfig::parse(CONFIG).unwrap();
-    config.tachyon.steady_state_iterations = 8;
+    let config = BenchmarkConfig::parse(CONFIG).unwrap();
     let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let corpus = load_corpus(&workspace, &config).unwrap();
     (config, corpus)
@@ -38,6 +37,11 @@ fn request(script: &CorpusScript, mode: MeasurementMode) -> BenchmarkRequest {
         entry: script.config.entry,
         source: Arc::clone(&script.source),
         mode,
+        iterations: if mode == MeasurementMode::SteadyState {
+            script.config.steady_state_iterations
+        } else {
+            1
+        },
     }
 }
 
@@ -69,7 +73,7 @@ fn tachyon_adapter_executes_all_honest_in_process_modes() {
     adapter.prepare(&request).unwrap();
     let metrics = adapter.sample(&request).unwrap();
     assert!(metrics.elapsed_ns > 0);
-    assert_eq!(metrics.iterations, 8);
+    assert_eq!(metrics.iterations, 1);
 }
 
 /// Keeps process startup and unsupported future syntax out of successful in-process measurements.
@@ -97,6 +101,13 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
     assert!(matches!(
         adapter.prepare(&unsupported),
         Err(AdapterError::Setup(message)) if message.contains("compile failed")
+    ));
+
+    let mut repeated_compile = request(tachyon_script, MeasurementMode::PrecompiledExecute);
+    repeated_compile.iterations = 2;
+    assert!(matches!(
+        adapter.prepare(&repeated_compile),
+        Err(AdapterError::Setup(message)) if message.contains("iteration count")
     ));
 }
 
@@ -152,5 +163,27 @@ fn main_function_setup_can_publish_global_lexical_closure_state() {
     adapter.prepare(&request).unwrap();
     let metrics = adapter.sample(&request).unwrap();
     assert!(metrics.elapsed_ns > 0);
-    assert_eq!(metrics.iterations, 8);
+    assert_eq!(metrics.iterations, 1);
+}
+
+#[test]
+/// Proves the adapter executes exactly the requested count and rejects post-prepare drift.
+fn steady_state_uses_and_freezes_the_request_work_count() {
+    let (config, corpus) = config_and_corpus();
+    let script = corpus
+        .iter()
+        .find(|script| script.config.id.as_ref() == "basic/call-loop")
+        .unwrap();
+    let mut request = request(script, MeasurementMode::SteadyState);
+    request.source = Arc::from("function main() { return 42; }");
+    request.iterations = 3;
+    let mut adapter = adapter(&config);
+    adapter.prepare(&request).unwrap();
+    assert_eq!(adapter.sample(&request).unwrap().iterations, 3);
+
+    request.iterations = 4;
+    assert!(matches!(
+        adapter.sample(&request),
+        Err(AdapterError::Setup(message)) if message.contains("differs from prepared")
+    ));
 }

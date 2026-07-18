@@ -70,10 +70,8 @@ pub struct TachyonBenchmarkConfig {
     pub stack_max_registers: u32,
     /// Maximum immutable modules retained by one benchmark isolate.
     pub max_loaded_modules: u32,
-    /// Maximum global object bindings retained by one benchmark isolate.
+    /// Maximum aggregate global object and declarative bindings retained by one benchmark isolate.
     pub max_global_bindings: u32,
-    /// Executions represented by one steady-state timing sample.
-    pub steady_state_iterations: u64,
 }
 
 /// Pinned source, build, and executable identity for one external engine on one platform.
@@ -149,6 +147,8 @@ pub struct ScriptConfig {
     pub id: Box<str>,
     /// Execution entry contract applied after the verified source is loaded.
     pub entry: ScriptEntry,
+    /// Complete workload executions represented by one steady-state sample.
+    pub steady_state_iterations: u64,
     /// Workspace-relative checked-in path.
     pub path: Box<str>,
     /// Microbenchmark subsystem category.
@@ -259,7 +259,7 @@ impl BenchmarkConfig {
 
     /// Rejects ambiguous samples, invalid robust-statistic thresholds, duplicate IDs, and weak provenance.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema_version != 2 {
+        if self.schema_version != 3 {
             return Err("unsupported benchmark config schema version");
         }
         if self.minimum_samples < 10 || self.collected_samples < self.minimum_samples {
@@ -289,11 +289,8 @@ impl BenchmarkConfig {
             || self.tachyon.stack_max_registers == 0
             || self.tachyon.max_loaded_modules == 0
             || self.tachyon.max_global_bindings == 0
-            || self.tachyon.steady_state_iterations < 2
         {
-            return Err(
-                "Tachyon benchmark capacities must be nonzero and steady state must repeat",
-            );
+            return Err("Tachyon benchmark capacities must be nonzero");
         }
         validate_external_engines(&self.external_engines)?;
         let mut ids = BTreeSet::new();
@@ -309,6 +306,9 @@ impl BenchmarkConfig {
             }
             if script.license.is_empty() || script.source_repository.is_empty() {
                 return Err("benchmark provenance requires repository and license");
+            }
+            if script.steady_state_iterations == 0 {
+                return Err("benchmark steady-state iterations must be nonzero");
             }
         }
         Ok(())
@@ -465,6 +465,16 @@ mod tests {
         assert!(corpus.iter().all(|script| !script.source.is_empty()));
         assert_eq!(config.external_engines.len(), 3);
         assert!(config.external_engine("boa-macos-aarch64").is_some());
+    }
+
+    #[test]
+    fn corpus_rejects_a_zero_steady_state_work_count() {
+        let mut config = BenchmarkConfig::parse(CONFIG).unwrap();
+        config.scripts[0].steady_state_iterations = 0;
+        assert_eq!(
+            config.validate(),
+            Err("benchmark steady-state iterations must be nonzero")
+        );
     }
 
     #[test]

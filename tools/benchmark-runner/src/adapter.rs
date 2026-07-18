@@ -52,6 +52,8 @@ pub struct BenchmarkRequest {
     pub source: Arc<str>,
     /// Exact timing boundary requested from the adapter.
     pub mode: MeasurementMode,
+    /// Exact complete JavaScript workload executions required from each sample.
+    pub iterations: u64,
 }
 
 /// Timing and optional process-memory evidence for one completed sample.

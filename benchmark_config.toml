@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 minimum_samples = 10
 collected_samples = 15
 warmup_iterations = 3
@@ -22,7 +22,6 @@ stack_max_frames = 2048
 stack_max_registers = 1048576
 max_loaded_modules = 64
 max_global_bindings = 1024
-steady_state_iterations = 1000
 
 [[external_engines]]
 id = "boa-macos-aarch64"
@@ -103,6 +102,7 @@ features = "default"
 [[scripts]]
 id = "tachyon/foundation-arithmetic"
 entry = "script"
+steady_state_iterations = 1000
 path = "benches/scripts/tachyon/foundation/arithmetic.js"
 category = "arithmetic"
 suite = "micro"
@@ -115,6 +115,7 @@ license = "Apache-2.0"
 [[scripts]]
 id = "basic/call-loop"
 entry = "main-function"
+steady_state_iterations = 1
 path = "benches/scripts/boa/basic/call-loop.js"
 category = "call"
 suite = "micro"
@@ -127,6 +128,7 @@ license = "MIT OR Unlicense"
 [[scripts]]
 id = "basic/closure"
 entry = "main-function"
+steady_state_iterations = 1
 path = "benches/scripts/boa/basic/closure.js"
 category = "closure"
 suite = "micro"
@@ -139,6 +141,7 @@ license = "MIT OR Unlicense"
 [[scripts]]
 id = "basic/nested-loop"
 entry = "main-function"
+steady_state_iterations = 1
 path = "benches/scripts/boa/basic/nested-loop.js"
 category = "dispatch"
 suite = "micro"

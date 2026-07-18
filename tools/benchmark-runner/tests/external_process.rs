@@ -35,6 +35,7 @@ fn request(source: &str, mode: MeasurementMode) -> BenchmarkRequest {
         entry: ScriptEntry::Script,
         source: Arc::from(source),
         mode,
+        iterations: 1,
     }
 }
 
@@ -78,6 +79,13 @@ fn external_adapter_rejects_unsupported_and_unprepared_requests() {
     assert!(matches!(
         adapter.sample(&cold),
         Err(AdapterError::Setup(message)) if message.contains("before prepare")
+    ));
+
+    let mut repeated_cold = cold;
+    repeated_cold.iterations = 2;
+    assert!(matches!(
+        adapter.prepare(&repeated_cold),
+        Err(AdapterError::Setup(message)) if message.contains("exactly once")
     ));
 }
 

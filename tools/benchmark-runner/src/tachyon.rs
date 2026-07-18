@@ -14,11 +14,10 @@ use crate::{
     adapter::{MAIN_INVOCATION_SOURCE, compose_execution_source},
 };
 
-/// Fully explicit isolate and repetition policy for the in-process Tachyon adapter.
+/// Fully explicit isolate policy for the in-process Tachyon adapter.
 #[derive(Clone, Copy, Debug)]
 pub struct TachyonInProcessConfig {
     isolate: IsolateConfig,
-    steady_state_iterations: u64,
 }
 
 /// In-process adapter with separate compile and execution timing boundaries.
@@ -34,6 +33,7 @@ struct PreparedRequest {
     entry: ScriptEntry,
     execution_source: Arc<str>,
     mode: MeasurementMode,
+    iterations: u64,
     module: Option<CompiledModule>,
     code: Option<CodeId>,
     isolate: Isolate,
@@ -54,13 +54,12 @@ impl TachyonInProcessConfig {
                 StackLimits::new(config.stack_max_frames, config.stack_max_registers),
                 RealmLimits::new(config.max_loaded_modules, config.max_global_bindings),
             ),
-            steady_state_iterations: config.steady_state_iterations,
         }
     }
 }
 
 impl TachyonInProcessAdapter {
-    /// Validates the engine identity and stores an allocation-free steady-state iteration count.
+    /// Validates the engine identity and stores the explicit isolate configuration.
     pub fn new(
         identity: EngineIdentity,
         config: TachyonInProcessConfig,
@@ -68,11 +67,6 @@ impl TachyonInProcessAdapter {
         if identity.kind != EngineKind::TachyonInProcess {
             return Err(AdapterError::Setup(
                 "Tachyon in-process adapter requires TachyonInProcess identity".into(),
-            ));
-        }
-        if config.steady_state_iterations < 2 {
-            return Err(AdapterError::Setup(
-                "steady-state mode requires at least two iterations".into(),
             ));
         }
         Ok(Self {
@@ -92,6 +86,7 @@ impl TachyonInProcessAdapter {
             || prepared.source != request.source
             || prepared.entry != request.entry
             || prepared.mode != request.mode
+            || prepared.iterations != request.iterations
         {
             return Err(AdapterError::Setup(
                 "Tachyon request differs from prepared source or mode".into(),
@@ -170,6 +165,13 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
         if request.mode == MeasurementMode::ColdStart {
             return Err(AdapterError::UnsupportedMode(request.mode));
         }
+        if request.iterations == 0
+            || (request.mode != MeasurementMode::SteadyState && request.iterations != 1)
+        {
+            return Err(AdapterError::Setup(
+                "Tachyon request has an invalid iteration count for its mode".into(),
+            ));
+        }
         self.prepared = None;
         let execution_source = compose_execution_source(&request.source, request.entry)?;
         let mut isolate = Isolate::new(self.config.isolate).map_err(|error| {
@@ -200,6 +202,7 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
             entry: request.entry,
             execution_source,
             mode: request.mode,
+            iterations: request.iterations,
             module,
             code,
             isolate,
@@ -219,9 +222,7 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
         match request.mode {
             MeasurementMode::ParseCompileExecute => Self::parse_compile_execute(prepared),
             MeasurementMode::PrecompiledExecute => Self::precompiled_execute(prepared),
-            MeasurementMode::SteadyState => {
-                Self::steady_state(prepared, self.config.steady_state_iterations)
-            }
+            MeasurementMode::SteadyState => Self::steady_state(prepared, request.iterations),
             MeasurementMode::ColdStart => unreachable!("cold start returned above"),
         }
     }

@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// Current JSON contract for benchmark reports and derived comparisons.
-pub const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 3;
+pub const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 4;
 
 /// Mutually exclusive benchmark timing boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -136,28 +136,34 @@ pub fn run_case(
         entry: script.config.entry,
         source: script.source.clone(),
         mode,
+        iterations: if mode == MeasurementMode::SteadyState {
+            script.config.steady_state_iterations
+        } else {
+            1
+        },
     };
     adapter.prepare(&request).map_err(RunError::Adapter)?;
     for _ in 0..config.warmup_iterations {
-        adapter.sample(&request).map_err(RunError::Adapter)?;
+        let metrics = adapter.sample(&request).map_err(RunError::Adapter)?;
+        if metrics.iterations != request.iterations {
+            return Err(RunError::IterationCount {
+                expected: request.iterations,
+                actual: metrics.iterations,
+            });
+        }
     }
     let mut samples = Vec::new();
     samples
         .try_reserve_exact(config.collected_samples)
         .map_err(|_| RunError::AllocationFailed)?;
     let mut peak_rss_bytes: Option<u64> = None;
-    let mut iterations_per_sample = None;
     for _ in 0..config.collected_samples {
         let metrics = adapter.sample(&request).map_err(RunError::Adapter)?;
-        match iterations_per_sample {
-            None if metrics.iterations != 0 => iterations_per_sample = Some(metrics.iterations),
-            Some(expected) if metrics.iterations == expected => {}
-            expected => {
-                return Err(RunError::IterationCount {
-                    expected: expected.unwrap_or(0),
-                    actual: metrics.iterations,
-                });
-            }
+        if metrics.iterations != request.iterations {
+            return Err(RunError::IterationCount {
+                expected: request.iterations,
+                actual: metrics.iterations,
+            });
         }
         samples.push(metrics.elapsed_ns);
         peak_rss_bytes = match (peak_rss_bytes, metrics.peak_rss_bytes) {
@@ -191,7 +197,7 @@ pub fn run_case(
         mode,
         engine: adapter.identity().clone(),
         samples_ns: samples,
-        iterations_per_sample: iterations_per_sample.unwrap_or(0),
+        iterations_per_sample: request.iterations,
         peak_rss_bytes,
         summary,
         validity: Validity {
@@ -438,7 +444,7 @@ mod tests {
                 binary_size_bytes: None,
             },
             samples: [1, 2, 3].into_iter().chain([100; 15]).collect(),
-            iterations: [1; 18].into(),
+            iterations: [1000; 18].into(),
         };
         let host = HostMetadata {
             os: "test".into(),
@@ -468,7 +474,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.samples_ns, [100; 15]);
-        assert_eq!(result.iterations_per_sample, 1);
+        assert_eq!(result.iterations_per_sample, 1000);
         assert_eq!(result.summary.median_ns, 100);
         assert_eq!(result.peak_rss_bytes, Some(4096));
         assert!(result.validity.valid);
@@ -512,7 +518,7 @@ mod tests {
         let mut changing = FixtureAdapter {
             identity: identity.clone(),
             samples: [100; 15].into(),
-            iterations: [1, 2].into(),
+            iterations: [1000, 2].into(),
         };
         assert!(matches!(
             run_case(
@@ -523,7 +529,7 @@ mod tests {
                 &host,
             ),
             Err(super::RunError::IterationCount {
-                expected: 1,
+                expected: 1000,
                 actual: 2
             })
         ));
@@ -541,7 +547,7 @@ mod tests {
                 &host,
             ),
             Err(super::RunError::IterationCount {
-                expected: 0,
+                expected: 1000,
                 actual: 0
             })
         ));
