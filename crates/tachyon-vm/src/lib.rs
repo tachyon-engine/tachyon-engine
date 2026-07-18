@@ -219,6 +219,9 @@ impl GcExternalMemory for Environment {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeFunction {
+    ObjectConstructor,
+    ObjectDefineProperty,
+    ObjectHasOwnProperty,
     FunctionPrototype,
     FunctionPrototypeCall,
     ErrorConstructor(NativeErrorKind),
@@ -377,10 +380,11 @@ struct RealmIntrinsicAtoms {
     infinity: AtomId,
     errors: [AtomId; NativeErrorKind::ALL.len()],
     array: AtomId,
+    object: AtomId,
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 4 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 5 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -568,6 +572,10 @@ struct Realm {
     array_prototype: Option<Value>,
     array_concat: Option<Value>,
     array_to_string: Option<Value>,
+    object_constructor: Option<Value>,
+    object_prototype: Option<Value>,
+    object_define_property: Option<Value>,
+    object_has_own_property: Option<Value>,
     error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
@@ -589,6 +597,10 @@ impl Realm {
             array_prototype: None,
             array_concat: None,
             array_to_string: None,
+            object_constructor: None,
+            object_prototype: None,
+            object_define_property: None,
+            object_has_own_property: None,
             error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
@@ -837,6 +849,10 @@ impl Trace for Realm {
         self.array_prototype.trace(tracer);
         self.array_concat.trace(tracer);
         self.array_to_string.trace(tracer);
+        self.object_constructor.trace(tracer);
+        self.object_prototype.trace(tracer);
+        self.object_define_property.trace(tracer);
+        self.object_has_own_property.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
@@ -1136,30 +1152,87 @@ impl Isolate {
         }
     }
 
-    /// Builds the global object, shared callable prototype, and native `call` before publication.
+    /// Builds the object/function prototype graph and intrinsic constructors before publication.
     fn initialize_realm_intrinsics(&mut self) -> Result<(), ExecutionError> {
-        let global_object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+        let object_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             storage: None,
             prototype: Value::from_immediate(Immediate::Null),
         })?;
+        self.realm.object_prototype = Some(object_prototype);
+        let global_object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            storage: None,
+            prototype: object_prototype,
+        })?;
         self.realm.global_object = Some(global_object);
         self.initialize_function_intrinsics()?;
+        self.initialize_object_intrinsics()?;
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
+    /// Builds Object constructor, Object.prototype, and the basic own-property native methods.
+    fn initialize_object_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before Object constructor");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Object constructor");
+        let constructor = self.allocate_native_function(
+            NativeFunction::ObjectConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_constructor = Some(constructor);
+        self.set_function_prototype(constructor, object_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_own_data_property(object_prototype, constructor_atom, constructor)?;
+        let define_property = self.allocate_native_function(
+            NativeFunction::ObjectDefineProperty,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_define_property = Some(define_property);
+        let define_atom = self.intern_intrinsic_name(b"defineProperty")?;
+        self.set_own_data_property(constructor, define_atom, define_property)?;
+        let has_own_property = self.allocate_native_function(
+            NativeFunction::ObjectHasOwnProperty,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_has_own_property = Some(has_own_property);
+        let has_own_atom = self.intern_intrinsic_name(b"hasOwnProperty")?;
+        self.set_own_data_property(object_prototype, has_own_atom, has_own_property)
+    }
+
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
     fn initialize_function_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let call_atom = self.intern_intrinsic_name(b"call")?;
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Function prototype");
         let call = self.allocate_native_function(
             NativeFunction::FunctionPrototypeCall,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 storage: None,
-                prototype: Value::from_immediate(Immediate::Null),
+                prototype: object_prototype,
             },
         )?;
         self.realm.function_prototype_call = Some(call);
@@ -1190,7 +1263,7 @@ impl Isolate {
             OrdinaryObject {
                 shape,
                 storage: Some(storage),
-                prototype: Value::from_immediate(Immediate::Null),
+                prototype: object_prototype,
             },
         )?;
         self.realm.function_prototype = Some(function_prototype);
@@ -1210,6 +1283,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"TypeError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
+            object: self.intern_intrinsic_name(b"Object")?,
         })
     }
 
@@ -1222,7 +1296,9 @@ impl Isolate {
         let constructor_atom = self.constructor_atom()?;
         for kind in NativeErrorKind::ALL {
             let parent = if kind == NativeErrorKind::Error {
-                Value::from_immediate(Immediate::Null)
+                self.realm
+                    .object_prototype
+                    .expect("Object prototype initializes before Error prototypes")
             } else {
                 self.realm
                     .error_intrinsics
@@ -1260,7 +1336,10 @@ impl Isolate {
         let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             storage: None,
-            prototype: Value::from_immediate(Immediate::Null),
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before Array prototype"),
         })?;
         self.realm.array_prototype = Some(prototype);
         let constructor = self.allocate_native_function(
@@ -1336,6 +1415,13 @@ impl Isolate {
                 .expect("Array initializes before global publication"),
             true,
         )?;
+        self.realm.publish_intrinsic(
+            atoms.object,
+            self.realm
+                .object_constructor
+                .expect("Object initializes before global publication"),
+            true,
+        )?;
         Ok(())
     }
 
@@ -1400,7 +1486,11 @@ impl Isolate {
 
     /// Allocates an empty ordinary object with a caller-selected prototype through managed GC.
     fn create_ordinary_object(&mut self) -> Result<Value, ExecutionError> {
-        self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))
+        let prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before ordinary objects");
+        self.create_ordinary_object_with_prototype(prototype)
     }
 
     /// Keeps a prototype edge in the pending payload so pre-allocation collection can rewrite it.
@@ -1474,6 +1564,18 @@ impl Isolate {
         Ok(array)
     }
 
+    /// Implements the ordinary Object constructor for object values and primitive fallback values.
+    fn create_object_from_site(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        if let Some(value) = self.call_argument(site, 0)?
+            && self.is_object_value(value)
+        {
+            return Ok(value);
+        }
+        let object = self.create_ordinary_object()?;
+        self.write(site.caller_base, site.destination, object)?;
+        Ok(object)
+    }
+
     /// Appends one array-like source while preserving holes as length-only positions.
     fn append_array_source(
         &mut self,
@@ -1535,6 +1637,14 @@ impl Isolate {
             let (_, next) = self.object_snapshot(snapshot.prototype)?;
             snapshot = next;
         }
+    }
+
+    /// Converts the small property-key subset while handling the ubiquitous undefined key.
+    fn property_key_atom_or_undefined(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
+        if value.as_immediate() == Some(Immediate::Undefined) {
+            return self.intern_intrinsic_name(b"undefined");
+        }
+        self.property_key_atom(value)
     }
 
     /// Implements the basic Array.prototype.concat flattening contract for ordinary arrays.
@@ -1683,6 +1793,16 @@ impl Isolate {
             }
             current = snapshot.prototype;
         }
+    }
+
+    /// Reads only an object's own data slot, excluding inherited prototype properties.
+    fn has_own_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<bool, ExecutionError> {
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        Ok(self.data_property_from_snapshot(snapshot, key)?.is_some())
     }
 
     /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
@@ -3425,6 +3545,24 @@ impl Isolate {
             .resolve_function_object(constructor)
             .map_err(|_| ExecutionError::NonConstructor(constructor))?;
         match callable.executable {
+            FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
+                let site = CallSite {
+                    caller_base,
+                    destination,
+                    callee: constructor,
+                    argument_base: caller_base
+                        .checked_add(callee_register)
+                        .and_then(|base| base.checked_add(1))
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+                    argument_count,
+                    this_value: Value::from_immediate(Immediate::Undefined),
+                    new_target: constructor,
+                    construct_receiver: None,
+                    call_site,
+                };
+                let object = self.create_object_from_site(&site)?;
+                return self.write(caller_base, destination, object);
+            }
             FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                 let argument_base = caller_base
                     .checked_add(callee_register)
@@ -3526,6 +3664,44 @@ impl Isolate {
                         site.caller_base,
                         site.destination,
                         Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
+                    let object = self.create_object_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, object);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectDefineProperty) => {
+                    let object = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let descriptor = self
+                        .call_argument(&site, 2)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self.property_key_atom_or_undefined(key)?;
+                    let value_atom = self.intern_intrinsic_name(b"value")?;
+                    let value = self
+                        .get_data_property(descriptor, value_atom)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    self.set_own_data_property(object, key, value)?;
+                    return self.write(site.caller_base, site.destination, object);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectHasOwnProperty) => {
+                    let key = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self.property_key_atom_or_undefined(key)?;
+                    let result = self.has_own_data_property(site.this_value, key)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeCall) => {
