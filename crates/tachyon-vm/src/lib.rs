@@ -2432,6 +2432,11 @@ impl Isolate {
                     numeric_remainder_or_power(opcode, left, right),
                 )?;
             }
+            Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
+                let left = self.convert_to_number(self.read(base, operands[1])?)?;
+                let right = self.convert_to_number(self.read(base, operands[2])?)?;
+                self.write(base, operands[0], numeric_relational(opcode, left, right))?;
+            }
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -3604,6 +3609,32 @@ fn numeric_remainder_or_power(opcode: Opcode, left: Value, right: Value) -> Valu
         _ => unreachable!("arithmetic dispatch only supplies remainder or exponentiation"),
     };
     Value::from_f64(result)
+}
+
+/// Compares converted numeric operands while preserving false results for NaN.
+#[inline(always)]
+fn numeric_relational(opcode: Opcode, left: Value, right: Value) -> Value {
+    let left = left
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| left.as_f64())
+        .unwrap_or(f64::NAN);
+    let right = right
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| right.as_f64())
+        .unwrap_or(f64::NAN);
+    let result = match opcode {
+        Opcode::GreaterThan => left > right,
+        Opcode::LessEqual => left <= right,
+        Opcode::GreaterEqual => left >= right,
+        _ => unreachable!("relational dispatch only supplies relational opcodes"),
+    };
+    Value::from_immediate(if result {
+        Immediate::True
+    } else {
+        Immediate::False
+    })
 }
 
 #[inline(always)]

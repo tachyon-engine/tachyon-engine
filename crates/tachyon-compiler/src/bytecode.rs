@@ -1948,16 +1948,24 @@ impl Lowerer<'_> {
         right: RegisterId,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        if matches!(operator, HirBinaryOperator::StrictNotEqual) {
+        if matches!(
+            operator,
+            HirBinaryOperator::Equal
+                | HirBinaryOperator::NotEqual
+                | HirBinaryOperator::StrictNotEqual
+        ) {
             let equal = self.register()?;
             self.emit(
                 Opcode::StrictEqual,
                 &[equal.index(), left.index(), right.index()],
                 span,
             )?;
-            let destination = self.register()?;
-            self.emit(Opcode::Not, &[destination.index(), equal.index()], span)?;
-            return Ok(destination);
+            if operator != HirBinaryOperator::Equal {
+                let destination = self.register()?;
+                self.emit(Opcode::Not, &[destination.index(), equal.index()], span)?;
+                return Ok(destination);
+            }
+            return Ok(equal);
         }
         let opcode = match operator {
             HirBinaryOperator::Add => Opcode::Add,
@@ -1974,6 +1982,9 @@ impl Lowerer<'_> {
             HirBinaryOperator::ShiftRightUnsigned => Opcode::ShiftRightUnsigned,
             HirBinaryOperator::StrictEqual => Opcode::StrictEqual,
             HirBinaryOperator::LessThan => Opcode::LessThan,
+            HirBinaryOperator::GreaterThan => Opcode::GreaterThan,
+            HirBinaryOperator::LessEqual => Opcode::LessEqual,
+            HirBinaryOperator::GreaterEqual => Opcode::GreaterEqual,
             HirBinaryOperator::InstanceOf => Opcode::InstanceOf,
             _ => {
                 return Err(CompileError::UnsupportedSyntax {

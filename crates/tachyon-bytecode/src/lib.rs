@@ -180,6 +180,9 @@ pub enum Opcode {
     ShiftRightUnsigned = 54,
     Remainder = 55,
     Exponentiate = 56,
+    GreaterThan = 57,
+    LessEqual = 58,
+    GreaterEqual = 59,
 }
 
 impl Opcode {
@@ -231,7 +234,10 @@ impl Opcode {
             | Self::ShiftRight
             | Self::ShiftRightUnsigned
             | Self::Remainder
-            | Self::Exponentiate => 3,
+            | Self::Exponentiate
+            | Self::GreaterThan
+            | Self::LessEqual
+            | Self::GreaterEqual => 3,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -304,6 +310,9 @@ impl Opcode {
             54 => Some(Self::ShiftRightUnsigned),
             55 => Some(Self::Remainder),
             56 => Some(Self::Exponentiate),
+            57 => Some(Self::GreaterThan),
+            58 => Some(Self::LessEqual),
+            59 => Some(Self::GreaterEqual),
             _ => None,
         }
     }
@@ -852,6 +861,9 @@ impl BytecodeBuilder {
             | Opcode::ShiftRightUnsigned
             | Opcode::Remainder
             | Opcode::Exponentiate
+            | Opcode::GreaterThan
+            | Opcode::LessEqual
+            | Opcode::GreaterEqual
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
@@ -1840,6 +1852,9 @@ fn verify_instruction(
         | Opcode::ShiftRightUnsigned
         | Opcode::Remainder
         | Opcode::Exponentiate
+        | Opcode::GreaterThan
+        | Opcode::LessEqual
+        | Opcode::GreaterEqual
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {

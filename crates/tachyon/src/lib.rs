@@ -1300,6 +1300,23 @@ mod tests {
     }
 
     #[test]
+    /// Covers the remaining numeric relational operators and NaN's unordered result.
+    fn relational_operators_compare_supported_primitives() {
+        assert_eq!(
+            execute_source(104, "3 > 2;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(105, "2 <= '2';").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(106, "3 >= 4;").as_immediate(),
+            Some(tachyon_value::Immediate::False)
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(
