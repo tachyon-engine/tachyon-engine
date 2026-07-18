@@ -1773,6 +1773,22 @@ mod tests {
         );
         assert_eq!(
             execute_source(
+                152,
+                "let values = [1, [2, [3]], , 4]; let flat = values.flat(2); flat.length === 4 && flat[0] === 1 && flat[1] === 2 && flat[2] === 3 && flat[3] === 4;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                153,
+                "let values = [1, [2, [3]]]; values.flat(1)[2][0] === 3 && values.flat(0)[1][1][0] === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
                 127,
                 "let recursive = []; recursive.push(recursive); let descriptor = Object.getOwnPropertyDescriptor([], 'length'); [1, , null, undefined, 4].join('-') === '1----4' && recursive.join() === '' && descriptor.writable === true && descriptor.enumerable === false && descriptor.configurable === false;",
             )

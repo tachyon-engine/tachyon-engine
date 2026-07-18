@@ -281,8 +281,14 @@ enum NativeFunction {
     ArrayFill,
     ArrayLastIndexOf,
     ArrayCopyWithin,
+    ArrayFlat,
     ArrayToString,
     MathPow,
+}
+
+enum FlatWork {
+    Value(Value, u32),
+    Hole,
 }
 
 impl NativeFunction {
@@ -340,7 +346,8 @@ impl NativeFunction {
             | Self::ArrayReverse
             | Self::ArrayFill
             | Self::ArrayLastIndexOf
-            | Self::ArrayCopyWithin => 1,
+            | Self::ArrayCopyWithin
+            | Self::ArrayFlat => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -395,6 +402,7 @@ impl NativeFunction {
             Self::ArrayFill => "fill",
             Self::ArrayLastIndexOf => "lastIndexOf",
             Self::ArrayCopyWithin => "copyWithin",
+            Self::ArrayFlat => "flat",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -794,6 +802,7 @@ struct Realm {
     array_fill: Option<Value>,
     array_last_index_of: Option<Value>,
     array_copy_within: Option<Value>,
+    array_flat: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -855,6 +864,7 @@ impl Realm {
             array_fill: None,
             array_last_index_of: None,
             array_copy_within: None,
+            array_flat: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1143,6 +1153,7 @@ impl Trace for Realm {
         self.array_fill.trace(tracer);
         self.array_last_index_of.trace(tracer);
         self.array_copy_within.trace(tracer);
+        self.array_flat.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -2159,6 +2170,18 @@ impl Isolate {
         self.realm.array_copy_within = Some(copy_within);
         let copy_within_atom = self.intern_intrinsic_name(b"copyWithin")?;
         self.set_intrinsic_data_property(prototype, copy_within_atom, copy_within, true)?;
+        let flat = self.allocate_native_function(
+            NativeFunction::ArrayFlat,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_flat = Some(flat);
+        let flat_atom = self.intern_intrinsic_name(b"flat")?;
+        self.set_intrinsic_data_property(prototype, flat_atom, flat, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -3379,6 +3402,62 @@ impl Isolate {
             return Err(ExecutionError::ReadOnlyProperty(receiver));
         }
         Ok(())
+    }
+
+    /// Implements `Array.prototype.flat` with an explicit work stack and bounded depth.
+    fn array_flat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let depth_value = self.call_argument(site, 0)?.unwrap_or(Value::from_i32(1));
+        let depth_number = numeric_value(self.convert_to_number(depth_value)?).unwrap_or(f64::NAN);
+        let depth = if depth_number.is_nan() || depth_number <= 0.0 {
+            0
+        } else {
+            depth_number.floor().min(u32::MAX as f64) as u32
+        };
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        let length = self.length_of_array_like(site.this_value)?;
+        let mut work = Vec::new();
+        for index in (0..length).rev() {
+            let key = self.safe_integer_property_atom(index)?;
+            if let Some(value) = self.get_data_property(site.this_value, key)? {
+                work.push(FlatWork::Value(value, depth));
+            } else {
+                work.push(FlatWork::Hole);
+            }
+        }
+        let mut next_index = 0_u64;
+        while let Some(item) = work.pop() {
+            match item {
+                FlatWork::Hole => {
+                    continue;
+                }
+                FlatWork::Value(value, remaining)
+                    if remaining > 0 && self.is_array_value(value)? =>
+                {
+                    let nested_length = self.length_of_array_like(value)?;
+                    for index in (0..nested_length).rev() {
+                        let key = self.safe_integer_property_atom(index)?;
+                        if let Some(nested) = self.get_data_property(value, key)? {
+                            work.push(FlatWork::Value(nested, remaining - 1));
+                        } else {
+                            work.push(FlatWork::Hole);
+                        }
+                    }
+                }
+                FlatWork::Value(value, _) => {
+                    let key = self.safe_integer_property_atom(next_index)?;
+                    self.set_own_data_property(result, key, value)?;
+                    next_index = next_index
+                        .checked_add(1)
+                        .ok_or(ExecutionError::ArrayLengthOverflow)?;
+                }
+            }
+        }
+        let length_atom = self.length_atom()?;
+        self.set_own_data_property(result, length_atom, safe_integer_value(next_index))?;
+        Ok(result)
     }
 
     fn array_element_or_undefined(
@@ -6838,6 +6917,10 @@ impl Isolate {
                     let value = self.array_copy_within(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
+                    let value = self.array_flat(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -8383,6 +8466,57 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
+
+    #[test]
+    fn array_flat_work_stack_survives_forced_major_allocations() {
+        let mut isolate = test_isolate();
+        let prototype = isolate.realm.array_prototype.unwrap();
+        let inner = isolate
+            .create_array_object_with_prototype(prototype)
+            .unwrap();
+        let outer = isolate
+            .create_array_object_with_prototype(prototype)
+            .unwrap();
+        let zero = isolate.safe_integer_property_atom(0).unwrap();
+        let length = isolate.length_atom().unwrap();
+        isolate
+            .set_own_data_property(inner, zero, Value::from_i32(42))
+            .unwrap();
+        isolate
+            .set_own_data_property(inner, length, Value::from_i32(1))
+            .unwrap();
+        isolate.set_own_data_property(outer, zero, inner).unwrap();
+        isolate
+            .set_own_data_property(outer, length, Value::from_i32(1))
+            .unwrap();
+        isolate.fiber.registers = vec![outer, Value::from_i32(1)];
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let result = isolate
+            .array_flat(&CallSite {
+                caller_base: 0,
+                destination: 0,
+                callee: isolate.realm.array_flat.unwrap(),
+                argument_base: 1,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 1,
+                this_value: outer,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: WordOffset::new(0),
+            })
+            .unwrap();
+        assert_eq!(
+            isolate
+                .get_data_property(result, zero)
+                .unwrap()
+                .and_then(Value::as_i32),
+            Some(42)
+        );
     }
 
     #[test]
