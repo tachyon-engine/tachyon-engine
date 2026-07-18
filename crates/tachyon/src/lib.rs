@@ -1557,6 +1557,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                76,
+                "let prototype = { answer: 42 }; let object = Object.create(prototype); Object.getPrototypeOf(object) === prototype && prototype.isPrototypeOf(object) && object.answer === 42;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]

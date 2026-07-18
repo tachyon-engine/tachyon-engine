@@ -229,6 +229,9 @@ enum NativeFunction {
     ObjectEntries,
     ObjectHasOwn,
     ObjectIs,
+    ObjectGetPrototypeOf,
+    ObjectCreate,
+    ObjectIsPrototypeOf,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -596,6 +599,9 @@ struct Realm {
     object_entries: Option<Value>,
     object_has_own: Option<Value>,
     object_is: Option<Value>,
+    object_get_prototype_of: Option<Value>,
+    object_create: Option<Value>,
+    object_is_prototype_of: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -631,6 +637,9 @@ impl Realm {
             object_entries: None,
             object_has_own: None,
             object_is: None,
+            object_get_prototype_of: None,
+            object_create: None,
+            object_is_prototype_of: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -893,6 +902,9 @@ impl Trace for Realm {
         self.object_entries.trace(tracer);
         self.object_has_own.trace(tracer);
         self.object_is.trace(tracer);
+        self.object_get_prototype_of.trace(tracer);
+        self.object_create.trace(tracer);
+        self.object_is_prototype_of.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1338,7 +1350,40 @@ impl Isolate {
         )?;
         self.realm.object_is = Some(object_is);
         let is_atom = self.intern_intrinsic_name(b"is")?;
-        self.set_own_data_property(constructor, is_atom, object_is)
+        self.set_own_data_property(constructor, is_atom, object_is)?;
+        let get_prototype_of = self.allocate_native_function(
+            NativeFunction::ObjectGetPrototypeOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_get_prototype_of = Some(get_prototype_of);
+        let get_prototype_atom = self.intern_intrinsic_name(b"getPrototypeOf")?;
+        self.set_own_data_property(constructor, get_prototype_atom, get_prototype_of)?;
+        let create = self.allocate_native_function(
+            NativeFunction::ObjectCreate,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_create = Some(create);
+        let create_atom = self.intern_intrinsic_name(b"create")?;
+        self.set_own_data_property(constructor, create_atom, create)?;
+        let is_prototype_of = self.allocate_native_function(
+            NativeFunction::ObjectIsPrototypeOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_is_prototype_of = Some(is_prototype_of);
+        let is_prototype_atom = self.intern_intrinsic_name(b"isPrototypeOf")?;
+        self.set_own_data_property(object_prototype, is_prototype_atom, is_prototype_of)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1901,6 +1946,50 @@ impl Isolate {
         let (_, mut snapshot) = self.object_snapshot(value)?;
         loop {
             if snapshot.prototype == array_prototype {
+                return Ok(true);
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(false);
+            }
+            let (_, next) = self.object_snapshot(snapshot.prototype)?;
+            snapshot = next;
+        }
+    }
+
+    /// Returns the current ordinary prototype and applies the nullish TypeError boundary.
+    fn object_prototype_of(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if matches!(
+            value.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(value));
+        }
+        if self.is_object_value(value) {
+            return self
+                .object_snapshot(value)
+                .map(|(_, object)| object.prototype);
+        }
+        Ok(self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before primitive boxing"))
+    }
+
+    /// Walks one ordinary prototype chain without invoking user code or allocating.
+    fn is_prototype_of(
+        &mut self,
+        prototype: Value,
+        value: Option<Value>,
+    ) -> Result<bool, ExecutionError> {
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        if !self.is_object_value(prototype) || !self.is_object_value(value) {
+            return Ok(false);
+        }
+        let (_, mut snapshot) = self.object_snapshot(value)?;
+        loop {
+            if snapshot.prototype == prototype {
                 return Ok(true);
             }
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
@@ -4283,6 +4372,38 @@ impl Isolate {
                         .call_argument(&site, 1)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let result = self.same_value(left, right)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectGetPrototypeOf) => {
+                    let object = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let prototype = self.object_prototype_of(object)?;
+                    return self.write(site.caller_base, site.destination, prototype);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectCreate) => {
+                    let prototype = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if prototype.as_immediate() != Some(Immediate::Null)
+                        && !self.is_object_value(prototype)
+                    {
+                        return Err(ExecutionError::NotObject(prototype));
+                    }
+                    let object = self.create_ordinary_object_with_prototype(prototype)?;
+                    return self.write(site.caller_base, site.destination, object);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectIsPrototypeOf) => {
+                    let result =
+                        self.is_prototype_of(site.this_value, self.call_argument(&site, 0)?)?;
                     return self.write(
                         site.caller_base,
                         site.destination,
