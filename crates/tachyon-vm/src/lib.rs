@@ -208,6 +208,8 @@ pub enum ExecutionError {
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),
     UnsupportedErrorMessage(Value),
+    UnsupportedStringValue(Value),
+    UnsupportedPrimitiveStringConversion(Value),
     UnsupportedDynamicFunctionConstructor,
     NonExtensibleObject(Value),
     ReadOnlyProperty(Value),
@@ -1420,6 +1422,29 @@ struct NativeContinuationSite {
 enum ToPrimitiveStage {
     ValueOf,
     ToString,
+}
+
+#[inline]
+fn next_to_primitive_stage(
+    native: NativeFunction,
+    stage: ToPrimitiveStage,
+) -> Option<ToPrimitiveStage> {
+    match native {
+        NativeFunction::StringConstructor => match stage {
+            ToPrimitiveStage::ToString => Some(ToPrimitiveStage::ValueOf),
+            ToPrimitiveStage::ValueOf => None,
+        },
+        NativeFunction::NumberToExponential
+        | NativeFunction::NumberToFixed
+        | NativeFunction::NumberToPrecision
+        | NativeFunction::NumberToString => match stage {
+            ToPrimitiveStage::ValueOf => Some(ToPrimitiveStage::ToString),
+            ToPrimitiveStage::ToString => None,
+        },
+        _ => {
+            unreachable!("only conversion consumers advance ToPrimitive stages")
+        }
+    }
 }
 
 /// Resumable native work owned by a JS callback frame instead of the Rust call stack.
@@ -2767,11 +2792,11 @@ impl Isolate {
     fn string_value_length(&mut self, value: Value) -> Result<usize, ExecutionError> {
         let raw = value
             .as_heap_ref()
-            .ok_or(ExecutionError::UnsupportedErrorMessage(value))?;
+            .ok_or(ExecutionError::UnsupportedStringValue(value))?;
         let string = self
             .heap
             .checked_reference(raw, self.types.string)
-            .map_err(|_| ExecutionError::UnsupportedErrorMessage(value))?;
+            .map_err(|_| ExecutionError::UnsupportedStringValue(value))?;
         self.heap.with_running_scope(|scope| {
             let string = scope.root(string).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -3043,24 +3068,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let argument = self.call_argument(site, 0)?;
         match native {
-            NativeFunction::StringConstructor => {
-                let Some(argument) = argument else {
-                    return self.allocate_runtime_string(
-                        JsString::try_from_latin1(b"")
-                            .map_err(ExecutionError::PropertyKeyString)?,
-                    );
-                };
-                if let Some(raw) = argument.as_heap_ref()
-                    && self.heap.checked_reference(raw, self.types.string).is_ok()
-                {
-                    return Ok(argument);
-                }
-                let mut units = Vec::new();
-                self.append_primitive_string_units(argument, &mut units)?;
-                self.allocate_runtime_string(
-                    JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
-                )
-            }
+            NativeFunction::StringConstructor => self.primitive_string_value(argument),
             NativeFunction::SymbolConstructor => self.allocate_symbol(
                 argument.filter(|value| value.as_immediate() != Some(Immediate::Undefined)),
             ),
@@ -3080,6 +3088,23 @@ impl Isolate {
                 Immediate::Undefined,
             ))),
         }
+    }
+
+    /// Converts one already-primitive String constructor argument into its canonical string value.
+    fn primitive_string_value(&mut self, argument: Option<Value>) -> Result<Value, ExecutionError> {
+        let Some(argument) = argument else {
+            return self.allocate_runtime_string(
+                JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,
+            );
+        };
+        if self.is_string_value(argument) {
+            return Ok(argument);
+        }
+        let mut units = Vec::new();
+        self.append_primitive_string_units(argument, &mut units)?;
+        self.allocate_runtime_string(
+            JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+        )
     }
 
     /// Allocates one unique Symbol primitive while retaining its optional description as a GC edge.
@@ -3248,8 +3273,8 @@ impl Isolate {
         )
     }
 
-    /// Starts one Number method, suspending only when its argument requires a JavaScript callback.
-    fn dispatch_number_method(
+    /// Starts one conversion consumer, suspending only when its argument requires a JS callback.
+    fn dispatch_conversion_native(
         &mut self,
         native: NativeFunction,
         site: &CallSite,
@@ -3258,7 +3283,20 @@ impl Isolate {
         if let Some(object) = argument
             && self.is_object_value(object)
         {
-            let receiver = self.this_number_value(site.this_value)?;
+            let (receiver, stage) = match native {
+                NativeFunction::StringConstructor => (
+                    Value::from_immediate(Immediate::Undefined),
+                    ToPrimitiveStage::ToString,
+                ),
+                NativeFunction::NumberToExponential
+                | NativeFunction::NumberToFixed
+                | NativeFunction::NumberToPrecision
+                | NativeFunction::NumberToString => (
+                    self.this_number_value(site.this_value)?,
+                    ToPrimitiveStage::ValueOf,
+                ),
+                _ => unreachable!("only conversion consumers enter this dispatch path"),
+            };
             let continuation = NativeContinuation {
                 site: NativeContinuationSite {
                     caller_base: site.caller_base,
@@ -3268,16 +3306,16 @@ impl Isolate {
                 native,
                 receiver,
                 object,
-                stage: ToPrimitiveStage::ValueOf,
+                stage,
             };
-            return self.advance_number_conversion(continuation, None);
+            return self.advance_native_conversion(continuation, None);
         }
-        let value = self.finish_number_method(native, site.this_value, argument)?;
+        let value = self.finish_native_conversion(native, site.this_value, argument)?;
         self.write(site.caller_base, site.destination, value)
     }
 
-    /// Advances ordinary ToPrimitive(number hint) without recursively entering the interpreter.
-    fn advance_number_conversion(
+    /// Advances ordinary ToPrimitive without recursively entering the interpreter.
+    fn advance_native_conversion(
         &mut self,
         mut continuation: NativeContinuation,
         mut returned: Option<Value>,
@@ -3285,11 +3323,15 @@ impl Isolate {
         loop {
             if let Some(value) = returned.take() {
                 if !self.is_object_value(value) {
-                    let converted = self.convert_to_number(value)?;
-                    let result = self.finish_number_method(
+                    let value = if continuation.native == NativeFunction::StringConstructor {
+                        value
+                    } else {
+                        self.convert_to_number(value)?
+                    };
+                    let result = self.finish_native_conversion(
                         continuation.native,
                         continuation.receiver,
-                        Some(converted),
+                        Some(value),
                     )?;
                     return self.write(
                         continuation.site.caller_base,
@@ -3297,10 +3339,11 @@ impl Isolate {
                         result,
                     );
                 }
-                if continuation.stage == ToPrimitiveStage::ToString {
+                let Some(stage) = next_to_primitive_stage(continuation.native, continuation.stage)
+                else {
                     return Err(ExecutionError::NotObject(continuation.object));
-                }
-                continuation.stage = ToPrimitiveStage::ToString;
+                };
+                continuation.stage = stage;
             }
             let name = match continuation.stage {
                 ToPrimitiveStage::ValueOf => b"valueOf".as_slice(),
@@ -3311,11 +3354,12 @@ impl Isolate {
             let Some(method) =
                 method.filter(|method| self.resolve_function_object(*method).is_ok())
             else {
-                if continuation.stage == ToPrimitiveStage::ValueOf {
-                    continuation.stage = ToPrimitiveStage::ToString;
-                    continue;
-                }
-                return Err(ExecutionError::NotObject(continuation.object));
+                let Some(stage) = next_to_primitive_stage(continuation.native, continuation.stage)
+                else {
+                    return Err(ExecutionError::NotObject(continuation.object));
+                };
+                continuation.stage = stage;
+                continue;
             };
             self.fiber
                 .completions
@@ -3368,19 +3412,20 @@ impl Isolate {
         }
     }
 
-    /// Completes one Number method after its optional argument has become a primitive Number.
-    fn finish_number_method(
+    /// Completes one native consumer after its optional argument has become the required primitive.
+    fn finish_native_conversion(
         &mut self,
         native: NativeFunction,
         receiver: Value,
         argument: Option<Value>,
     ) -> Result<Value, ExecutionError> {
         match native {
+            NativeFunction::StringConstructor => self.primitive_string_value(argument),
             NativeFunction::NumberToExponential => self.number_to_exponential(receiver, argument),
             NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
             NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),
             NativeFunction::NumberToString => self.number_to_string(receiver, argument),
-            _ => unreachable!("only Number argument methods create this continuation"),
+            _ => unreachable!("only conversion consumers create this continuation"),
         }
     }
 
@@ -4179,7 +4224,7 @@ impl Isolate {
                 Immediate::Undefined => b"undefined".as_slice(),
                 Immediate::Null => b"null".as_slice(),
                 Immediate::Hole | Immediate::Uninitialized => {
-                    return Err(ExecutionError::UnsupportedErrorMessage(value));
+                    return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
                 }
             };
             output
@@ -4203,11 +4248,11 @@ impl Isolate {
         }
         let raw = value
             .as_heap_ref()
-            .ok_or(ExecutionError::UnsupportedErrorMessage(value))?;
+            .ok_or(ExecutionError::UnsupportedPrimitiveStringConversion(value))?;
         let string = self
             .heap
             .checked_reference(raw, self.types.string)
-            .map_err(|_| ExecutionError::UnsupportedErrorMessage(value))?;
+            .map_err(|_| ExecutionError::UnsupportedPrimitiveStringConversion(value))?;
         self.heap.with_running_scope(|scope| {
             let string = scope.root(string).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -5576,6 +5621,25 @@ impl Isolate {
         Ok(true)
     }
 
+    /// Applies strict DeletePropertyOrThrow semantics to bytecode property deletion.
+    fn delete_data_property_from_bytecode(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<bool, ExecutionError> {
+        let deleted = self.delete_own_data_property(receiver, key)?;
+        let strictness = self
+            .fiber
+            .frames
+            .last()
+            .expect("property deletion always has an active frame")
+            .strictness;
+        if !deleted && strictness == FunctionStrictness::Strict {
+            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        }
+        Ok(deleted)
+    }
+
     /// Mutates a fixed existing slot and publishes its potential young edge to the barrier.
     fn update_property_slot(
         &mut self,
@@ -6611,7 +6675,7 @@ impl Isolate {
             Opcode::DeleteById => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
-                let result = self.delete_own_data_property(receiver, key)?;
+                let result = self.delete_data_property_from_bytecode(receiver, key)?;
                 self.write(
                     base,
                     operands[0],
@@ -6625,7 +6689,7 @@ impl Isolate {
             Opcode::DeleteByValue => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.property_key_atom(self.read(base, operands[2])?)?;
-                let result = self.delete_own_data_property(receiver, key)?;
+                let result = self.delete_data_property_from_bytecode(receiver, key)?;
                 self.write(
                     base,
                     operands[0],
@@ -7421,18 +7485,18 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(
-                    native @ (NativeFunction::NumberToExponential
+                    native @ (NativeFunction::StringConstructor
+                    | NativeFunction::NumberToExponential
                     | NativeFunction::NumberToFixed
                     | NativeFunction::NumberToPrecision
                     | NativeFunction::NumberToString),
-                ) => return self.dispatch_number_method(native, &site),
+                ) => return self.dispatch_conversion_native(native, &site),
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(
-                    native @ (NativeFunction::StringConstructor
-                    | NativeFunction::SymbolConstructor
+                    native @ (NativeFunction::SymbolConstructor
                     | NativeFunction::NumberConstructor
                     | NativeFunction::BooleanConstructor),
                 ) => {
@@ -7979,7 +8043,7 @@ impl Isolate {
         continuation: NativeContinuation,
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        match self.advance_number_conversion(continuation, Some(value)) {
+        match self.advance_native_conversion(continuation, Some(value)) {
             Ok(()) => Ok(None),
             Err(error) => {
                 let Some(kind) = execution_error_kind(&error) else {
@@ -9237,6 +9301,15 @@ mod tests {
     }
 
     #[test]
+    fn string_hint_continuation_resumes_for_every_dispatch_batch_and_forced_major() {
+        assert_string_continuation_batch::<1>();
+        assert_string_continuation_batch::<2>();
+        assert_string_continuation_batch::<4>();
+        assert_string_continuation_batch::<8>();
+        assert_string_continuation_batch::<16>();
+    }
+
+    #[test]
     fn bound_argument_prefix_forwards_for_every_dispatch_batch() {
         assert_bound_function_batch::<1>();
         assert_bound_function_batch::<2>();
@@ -10358,6 +10431,28 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    /// Exercises String's string-hint callback ordering and continuation tracing for one batch.
+    fn assert_string_continuation_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &string_continuation_module(),
+                ExecutionBudget {
+                    fuel: 20,
+                    quantum: 20,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
+    }
+
     fn assert_bound_function_batch<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -11172,6 +11267,73 @@ mod tests {
                 Arc::from("toFixed"),
                 Arc::from("valueOf"),
             ],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callback_bytecode,
+                    callback_metadata,
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `String({ toString() { try/catch; return "converted"; } })` for trampoline tests.
+    fn string_continuation_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(8, 2);
+        entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[1], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[2, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[1, 2, 1], span).unwrap();
+        entry.emit(Opcode::Call, &[3, 0, 1], span).unwrap();
+        entry.emit(Opcode::LoadConstant, &[4, 0], span).unwrap();
+        entry.emit(Opcode::StrictEqual, &[5, 3, 4], span).unwrap();
+        entry.emit(Opcode::Return, &[5], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut callback = BytecodeBuilder::with_capacity(6, 1);
+        let protected_start = callback.emit(Opcode::Nop, &[], span).unwrap();
+        callback.emit(Opcode::LoadImmediate, &[0, 7], span).unwrap();
+        callback.emit(Opcode::Throw, &[0], span).unwrap();
+        let handler = callback.emit(Opcode::LoadException, &[1], span).unwrap();
+        callback.emit(Opcode::LoadConstant, &[2, 0], span).unwrap();
+        callback.emit(Opcode::Return, &[2], span).unwrap();
+        let (callback_bytecode, callback_source_map, callback_registers) =
+            callback.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let mut callback_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callback_registers,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map: callback_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        callback_metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        CompiledModule::new(
+            Arc::from("String ToPrimitive continuation"),
+            vec![BytecodeConstant::string_from_utf16(
+                "converted".encode_utf16().collect(),
+            )],
+            vec![Arc::from("String"), Arc::from("toString")],
             vec![
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 CompiledFunctionTemplate::new(

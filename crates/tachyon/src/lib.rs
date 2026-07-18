@@ -1927,6 +1927,43 @@ mod tests {
         );
     }
 
+    /// Covers the mutation probes used by test262 propertyHelper for immutable constants.
+    #[test]
+    fn immutable_intrinsic_constants_survive_descriptor_harness_probes() {
+        assert_eq!(
+            execute_source(
+                170,
+                "let original = Number.EPSILON; Number.EPSILON = 'unlikelyValue'; Number.EPSILON === original && Number.EPSILON > 0 && Number.EPSILON < 0.000001;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                171,
+                "'use strict'; let threw = false; try { Number.EPSILON = 'unlikelyValue'; } catch (error) { threw = error instanceof TypeError; } threw && Number.EPSILON > 0;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                172,
+                "let name = 'EPSILON'; let removed = delete Number[name]; let seen = false; for (let key in Number) { if (key === name) seen = true; } removed === false && Number[name] > 0 && seen === false;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                173,
+                "'use strict'; let name = 'EPSILON'; let threw = false; try { delete Number[name]; } catch (error) { threw = error instanceof TypeError; } threw && Number[name] > 0;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
     /// Verifies Object intrinsics use the ordinary shape path for own-property operations.
     #[test]
     fn object_define_property_and_has_own_property_work() {
@@ -1986,6 +2023,14 @@ mod tests {
     fn primitive_constructors_convert_values() {
         assert_eq!(
             execute_source(67, "String(42) === '42' && String(null) === 'null';").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                175,
+                "let order = 0; let direct = { toString() { order = order * 10 + 1; return 'direct'; }, valueOf() { order = 99; return 'wrong'; } }; let fallback = { toString() { order = order * 10 + 2; return {}; }, valueOf() { order = order * 10 + 3; try { throw 7; } catch (error) { return error - 1; } } }; let threw = false; try { String({ toString() { throw 42; } }); } catch (error) { threw = error === 42; } String(direct) === 'direct' && String(fallback) === '6' && order === 123 && threw;",
+            )
+            .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
         assert_eq!(
