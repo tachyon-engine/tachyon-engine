@@ -1661,6 +1661,22 @@ mod tests {
         );
         assert_eq!(
             execute_source(
+                133,
+                "let values = [10, 20, NaN, -0]; values.at(1) === 20 && values.at(-1) === 0 && values.at(99) === undefined && values.indexOf(NaN) === -1 && values.includes(NaN) && values.includes(0) && values.indexOf(0) === 3 && [,].includes(undefined);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                134,
+                "let object = { length: 3 }; object[0] = 'a'; object[2] = 'c'; Array.prototype.at.call(object, -1) === 'c' && Array.prototype.indexOf.call(object, 'a') === 0 && !Array.prototype.includes.call(object, 'b');",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
                 130,
                 "let object = { length: 1 }; object[0] = 'a'; Array.prototype.push.call(object, 'b'); Array.prototype.join.call(object, ':') === 'a:b';",
             )

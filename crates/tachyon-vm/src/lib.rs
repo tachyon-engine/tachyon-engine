@@ -270,6 +270,9 @@ enum NativeFunction {
     ArrayConcat,
     ArrayPush,
     ArrayJoin,
+    ArrayAt,
+    ArrayIndexOf,
+    ArrayIncludes,
     ArrayToString,
     MathPow,
 }
@@ -318,7 +321,10 @@ impl NativeFunction {
             | Self::ErrorConstructor(_)
             | Self::ArrayConstructor
             | Self::ArrayIsArray
-            | Self::ArrayConcat => 1,
+            | Self::ArrayConcat
+            | Self::ArrayAt
+            | Self::ArrayIndexOf
+            | Self::ArrayIncludes => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -362,6 +368,9 @@ impl NativeFunction {
             Self::ArrayConcat => "concat",
             Self::ArrayPush => "push",
             Self::ArrayJoin => "join",
+            Self::ArrayAt => "at",
+            Self::ArrayIndexOf => "indexOf",
+            Self::ArrayIncludes => "includes",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -750,6 +759,9 @@ struct Realm {
     array_concat: Option<Value>,
     array_push: Option<Value>,
     array_join: Option<Value>,
+    array_at: Option<Value>,
+    array_index_of: Option<Value>,
+    array_includes: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -800,6 +812,9 @@ impl Realm {
             array_concat: None,
             array_push: None,
             array_join: None,
+            array_at: None,
+            array_index_of: None,
+            array_includes: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1077,6 +1092,9 @@ impl Trace for Realm {
         self.array_concat.trace(tracer);
         self.array_push.trace(tracer);
         self.array_join.trace(tracer);
+        self.array_at.trace(tracer);
+        self.array_index_of.trace(tracer);
+        self.array_includes.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -1961,6 +1979,42 @@ impl Isolate {
         self.realm.array_join = Some(join);
         let join_atom = self.intern_intrinsic_name(b"join")?;
         self.set_intrinsic_data_property(prototype, join_atom, join, true)?;
+        let at = self.allocate_native_function(
+            NativeFunction::ArrayAt,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_at = Some(at);
+        let at_atom = self.intern_intrinsic_name(b"at")?;
+        self.set_intrinsic_data_property(prototype, at_atom, at, true)?;
+        let index_of = self.allocate_native_function(
+            NativeFunction::ArrayIndexOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_index_of = Some(index_of);
+        let index_of_atom = self.intern_intrinsic_name(b"indexOf")?;
+        self.set_intrinsic_data_property(prototype, index_of_atom, index_of, true)?;
+        let includes = self.allocate_native_function(
+            NativeFunction::ArrayIncludes,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_includes = Some(includes);
+        let includes_atom = self.intern_intrinsic_name(b"includes")?;
+        self.set_intrinsic_data_property(prototype, includes_atom, includes, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -2866,6 +2920,99 @@ impl Isolate {
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_own_data_property(result, length_atom, Value::from_i32(next_index))?;
         Ok(result)
+    }
+
+    /// Implements `Array.prototype.at` for the supported generic array-like receiver.
+    fn array_at(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        if length == 0 {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        }
+        let index_value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let number = numeric_value(self.convert_to_number(index_value)?).unwrap_or(f64::NAN);
+        if number.is_nan() {
+            return self.array_element_or_undefined(site.this_value, 0);
+        }
+        let index = if number < 0.0 {
+            length as f64 + number.ceil()
+        } else {
+            number.floor()
+        };
+        if !(0.0..(length as f64)).contains(&index) {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        }
+        self.array_element_or_undefined(site.this_value, index as u64)
+    }
+
+    /// Implements `indexOf` and `includes` without allocating an iterator or callback closure.
+    fn array_search(&mut self, site: &CallSite, includes: bool) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        if length == 0 {
+            return Ok(if includes {
+                Value::from_immediate(Immediate::False)
+            } else {
+                Value::from_i32(-1)
+            });
+        }
+        let search = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
+        let start_number = numeric_value(self.convert_to_number(start_value)?).unwrap_or(f64::NAN);
+        let start = if start_number.is_nan() {
+            0
+        } else if start_number < 0.0 {
+            length.saturating_sub((-start_number).ceil() as u64)
+        } else {
+            start_number.floor() as u64
+        };
+        for index in start..length {
+            let key = self.safe_integer_property_atom(index)?;
+            let Some(value) = self.get_data_property(site.this_value, key)? else {
+                if includes && search.as_immediate() == Some(Immediate::Undefined) {
+                    return Ok(Value::from_immediate(Immediate::True));
+                }
+                continue;
+            };
+            let equal = if includes {
+                self.same_value_zero(value, search)?
+            } else {
+                self.strict_equal_values(value, search)?
+            };
+            if equal {
+                return Ok(if includes {
+                    Value::from_immediate(Immediate::True)
+                } else {
+                    safe_integer_value(index)
+                });
+            }
+        }
+        Ok(if includes {
+            Value::from_immediate(Immediate::False)
+        } else {
+            Value::from_i32(-1)
+        })
+    }
+
+    fn array_element_or_undefined(
+        &mut self,
+        receiver: Value,
+        index: u64,
+    ) -> Result<Value, ExecutionError> {
+        let key = self.safe_integer_property_atom(index)?;
+        Ok(self
+            .get_data_property(receiver, key)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined)))
+    }
+
+    #[inline(always)]
+    fn same_value_zero(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
+        if let (Some(left), Some(right)) = (numeric_value(left), numeric_value(right)) {
+            return Ok((left.is_nan() && right.is_nan()) || left == right);
+        }
+        self.strict_equal_values(left, right)
     }
 
     /// Implements Array.prototype.toString as comma-joined primitive elements for this subset.
@@ -6236,6 +6383,18 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayJoin) => {
                     let value = self.array_join(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayAt) => {
+                    let value = self.array_at(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayIndexOf) => {
+                    let value = self.array_search(&site, false)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayIncludes) => {
+                    let value = self.array_search(&site, true)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
