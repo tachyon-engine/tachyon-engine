@@ -2038,6 +2038,14 @@ mod tests {
             Some(tachyon_value::Immediate::True),
         );
         assert_eq!(
+            execute_source(
+                176,
+                "let calls = 0; let direct = { valueOf() { calls = calls + 1; return 7; }, toString() { return 'wrong'; } }; let fallback = { valueOf() { return {}; }, toString() { return '8'; } }; let called = Number(direct) === 7 && Number(fallback) === 8; let boxed = new Number(direct); let callThrow = false; let constructThrow = false; let abrupt = { valueOf() { throw 42; } }; try { Number(abrupt); } catch (error) { callThrow = error === 42; } try { new Number(abrupt); } catch (error) { constructThrow = error === 42; } called && boxed.valueOf() === 7 && boxed instanceof Number && calls === 2 && callThrow && constructThrow;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
             execute_source(69, "Boolean(0) === false && Boolean('x') === true;").as_immediate(),
             Some(tachyon_value::Immediate::True),
         );

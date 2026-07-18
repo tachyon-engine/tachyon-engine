@@ -1437,7 +1437,8 @@ fn next_to_primitive_stage(
         NativeFunction::NumberToExponential
         | NativeFunction::NumberToFixed
         | NativeFunction::NumberToPrecision
-        | NativeFunction::NumberToString => match stage {
+        | NativeFunction::NumberToString
+        | NativeFunction::NumberConstructor => match stage {
             ToPrimitiveStage::ValueOf => Some(ToPrimitiveStage::ToString),
             ToPrimitiveStage::ToString => None,
         },
@@ -1452,6 +1453,7 @@ fn next_to_primitive_stage(
 struct NativeContinuation {
     site: NativeContinuationSite,
     native: NativeFunction,
+    construct: bool,
     receiver: Value,
     object: Value,
     stage: ToPrimitiveStage,
@@ -3278,6 +3280,7 @@ impl Isolate {
         &mut self,
         native: NativeFunction,
         site: &CallSite,
+        construct: bool,
     ) -> Result<(), ExecutionError> {
         let argument = self.call_argument(site, 0)?;
         if let Some(object) = argument
@@ -3295,6 +3298,14 @@ impl Isolate {
                     self.this_number_value(site.this_value)?,
                     ToPrimitiveStage::ValueOf,
                 ),
+                NativeFunction::NumberConstructor => (
+                    if construct {
+                        site.new_target
+                    } else {
+                        Value::from_immediate(Immediate::Undefined)
+                    },
+                    ToPrimitiveStage::ValueOf,
+                ),
                 _ => unreachable!("only conversion consumers enter this dispatch path"),
             };
             let continuation = NativeContinuation {
@@ -3304,13 +3315,19 @@ impl Isolate {
                     call_site: site.call_site,
                 },
                 native,
+                construct,
                 receiver,
                 object,
                 stage,
             };
             return self.advance_native_conversion(continuation, None);
         }
-        let value = self.finish_native_conversion(native, site.this_value, argument)?;
+        let receiver = if construct {
+            site.new_target
+        } else {
+            site.this_value
+        };
+        let value = self.finish_native_conversion(native, receiver, argument, construct)?;
         self.write(site.caller_base, site.destination, value)
     }
 
@@ -3332,6 +3349,7 @@ impl Isolate {
                         continuation.native,
                         continuation.receiver,
                         Some(value),
+                        continuation.construct,
                     )?;
                     return self.write(
                         continuation.site.caller_base,
@@ -3418,15 +3436,42 @@ impl Isolate {
         native: NativeFunction,
         receiver: Value,
         argument: Option<Value>,
+        construct: bool,
     ) -> Result<Value, ExecutionError> {
         match native {
             NativeFunction::StringConstructor => self.primitive_string_value(argument),
+            NativeFunction::NumberConstructor => {
+                let number = self.convert_to_number(argument.unwrap_or(Value::from_i32(0)))?;
+                if construct {
+                    self.box_number_from_constructor(number, receiver)
+                } else {
+                    Ok(number)
+                }
+            }
             NativeFunction::NumberToExponential => self.number_to_exponential(receiver, argument),
             NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
             NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),
             NativeFunction::NumberToString => self.number_to_string(receiver, argument),
             _ => unreachable!("only conversion consumers create this continuation"),
         }
+    }
+
+    /// Allocates a Number wrapper only after constructor argument conversion has completed.
+    fn box_number_from_constructor(
+        &mut self,
+        number: Value,
+        new_target: Value,
+    ) -> Result<Value, ExecutionError> {
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(new_target, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .unwrap_or_else(|| {
+                self.realm
+                    .number_prototype
+                    .expect("Number prototype initializes before construction")
+            });
+        self.allocate_number_object(number, prototype, AllocationSpace::Young)
     }
 
     /// Implements Number::toString for decimal and shortest round-trip radix representations.
@@ -7323,20 +7368,11 @@ impl Isolate {
                     site.new_target = new_target;
                 }
                 FunctionExecutable::Native(NativeFunction::NumberConstructor) => {
-                    let value =
-                        self.primitive_constructor_value(NativeFunction::NumberConstructor, &site)?;
-                    let prototype_atom = self.prototype_atom()?;
-                    let prototype = self
-                        .get_data_property(site.new_target, prototype_atom)?
-                        .filter(|value| self.is_object_value(*value))
-                        .unwrap_or_else(|| {
-                            self.realm
-                                .number_prototype
-                                .expect("Number prototype initializes before construction")
-                        });
-                    let object =
-                        self.allocate_number_object(value, prototype, AllocationSpace::Young)?;
-                    return self.write(caller_base, destination, object);
+                    return self.dispatch_conversion_native(
+                        NativeFunction::NumberConstructor,
+                        &site,
+                        true,
+                    );
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
@@ -7489,15 +7525,15 @@ impl Isolate {
                     | NativeFunction::NumberToExponential
                     | NativeFunction::NumberToFixed
                     | NativeFunction::NumberToPrecision
-                    | NativeFunction::NumberToString),
-                ) => return self.dispatch_conversion_native(native, &site),
+                    | NativeFunction::NumberToString
+                    | NativeFunction::NumberConstructor),
+                ) => return self.dispatch_conversion_native(native, &site, false),
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::SymbolConstructor
-                    | NativeFunction::NumberConstructor
                     | NativeFunction::BooleanConstructor),
                 ) => {
                     let value = self.primitive_constructor_value(native, &site)?;
