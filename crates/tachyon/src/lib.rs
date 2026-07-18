@@ -983,6 +983,22 @@ mod tests {
             .as_i32(),
             Some(42)
         );
+        assert_eq!(
+            execute_source(
+                53,
+                "function outer() { let first = 20; function middle() { let second = 22; function inner() { return first + second; } return inner; } return middle; } outer()()();",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                54,
+                "function outer() { return inner(); function inner() { return 42; } } outer();",
+            )
+            .as_i32(),
+            Some(42)
+        );
     }
 
     #[test]

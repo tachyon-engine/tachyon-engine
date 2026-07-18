@@ -389,7 +389,7 @@ pub(crate) fn lower(
             source,
             semantic,
             &mut functions,
-            true,
+            StatementContext::ScriptBody,
         )?);
     }
     Ok(HirProgram {
@@ -423,12 +423,33 @@ fn copy_scopes(semantic: &Semantic<'_>) -> Vec<HirScope> {
 }
 
 /// Copies one statement while enforcing which declaration/control forms are legal in this scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StatementContext {
+    ScriptBody,
+    ScriptNested,
+    FunctionBody,
+    FunctionNested,
+}
+
+impl StatementContext {
+    const fn nested(self) -> Self {
+        match self {
+            Self::ScriptBody | Self::ScriptNested => Self::ScriptNested,
+            Self::FunctionBody | Self::FunctionNested => Self::FunctionNested,
+        }
+    }
+
+    const fn allows_return(self) -> bool {
+        matches!(self, Self::FunctionBody | Self::FunctionNested)
+    }
+}
+
 fn lower_statement(
     statement: &Statement<'_>,
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
-    allow_function_declaration: bool,
+    context: StatementContext,
 ) -> Result<HirStatement, CompileError> {
     match statement {
         Statement::ExpressionStatement(statement) => Ok(HirStatement {
@@ -456,14 +477,23 @@ fn lower_statement(
                 functions,
             )?),
         }),
-        Statement::FunctionDeclaration(function) if allow_function_declaration => {
+        Statement::FunctionDeclaration(function)
+            if matches!(
+                context,
+                StatementContext::ScriptBody | StatementContext::FunctionBody
+            ) =>
+        {
             lower_function_declaration(function, source, semantic, functions)
         }
         Statement::BlockStatement(block) => {
             let mut statements = Vec::with_capacity(block.body.len());
             for statement in &block.body {
                 statements.push(lower_statement(
-                    statement, source, semantic, functions, false,
+                    statement,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
                 )?);
             }
             Ok(HirStatement {
@@ -482,25 +512,26 @@ fn lower_statement(
                     source,
                     semantic,
                     functions,
-                    false,
+                    context.nested(),
                 )?),
                 alternate: statement
                     .alternate
                     .as_ref()
                     .map(|alternate| {
-                        lower_statement(alternate, source, semantic, functions, false).map(Box::new)
+                        lower_statement(alternate, source, semantic, functions, context.nested())
+                            .map(Box::new)
                     })
                     .transpose()?,
             },
         }),
         Statement::ForStatement(statement) => {
-            lower_for_statement(statement, source, semantic, functions)
+            lower_for_statement(statement, source, semantic, functions, context)
         }
         Statement::SwitchStatement(statement) => {
-            lower_switch_statement(statement, source, semantic, functions)
+            lower_switch_statement(statement, source, semantic, functions, context)
         }
         Statement::TryStatement(statement) => {
-            lower_try_statement(statement, source, semantic, functions)
+            lower_try_statement(statement, source, semantic, functions, context)
         }
         Statement::BreakStatement(statement) if statement.label.is_none() => Ok(HirStatement {
             span: source_span(statement.span),
@@ -522,7 +553,7 @@ fn lower_statement(
             source_span(statement.span),
             "labelled continue",
         )),
-        Statement::ReturnStatement(statement) if !allow_function_declaration => Ok(HirStatement {
+        Statement::ReturnStatement(statement) if context.allows_return() => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
             kind: HirStatementKind::Return(
@@ -557,6 +588,7 @@ fn lower_for_statement(
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
+    context: StatementContext,
 ) -> Result<HirStatement, CompileError> {
     let initializer = statement
         .init
@@ -592,7 +624,7 @@ fn lower_for_statement(
                 source,
                 semantic,
                 functions,
-                false,
+                context.nested(),
             )?),
         },
     })
@@ -604,11 +636,16 @@ fn lower_try_statement(
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
+    context: StatementContext,
 ) -> Result<HirStatement, CompileError> {
     let mut block = Vec::with_capacity(statement.block.body.len());
     for statement in &statement.block.body {
         block.push(lower_statement(
-            statement, source, semantic, functions, false,
+            statement,
+            source,
+            semantic,
+            functions,
+            context.nested(),
         )?);
     }
     let handler = statement
@@ -632,7 +669,11 @@ fn lower_try_statement(
             let mut body = Vec::with_capacity(handler.body.body.len());
             for statement in &handler.body.body {
                 body.push(lower_statement(
-                    statement, source, semantic, functions, false,
+                    statement,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
                 )?);
             }
             Ok(HirCatchClause {
@@ -649,7 +690,11 @@ fn lower_try_statement(
             let mut statements = Vec::with_capacity(finalizer.body.len());
             for statement in &finalizer.body {
                 statements.push(lower_statement(
-                    statement, source, semantic, functions, false,
+                    statement,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
                 )?);
             }
             Ok::<Arc<[HirStatement]>, CompileError>(statements.into())
@@ -672,13 +717,18 @@ fn lower_switch_statement(
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
+    context: StatementContext,
 ) -> Result<HirStatement, CompileError> {
     let mut cases = Vec::with_capacity(statement.cases.len());
     for case in &statement.cases {
         let mut consequent = Vec::with_capacity(case.consequent.len());
         for statement in &case.consequent {
             consequent.push(lower_statement(
-                statement, source, semantic, functions, false,
+                statement,
+                source,
+                semantic,
+                functions,
+                context.nested(),
             )?);
         }
         cases.push(HirSwitchCase {
@@ -776,7 +826,11 @@ fn lower_function_stencil(
     let mut statements = Vec::with_capacity(body.statements.len());
     for statement in &body.statements {
         statements.push(lower_statement(
-            statement, source, semantic, functions, false,
+            statement,
+            source,
+            semantic,
+            functions,
+            StatementContext::FunctionBody,
         )?);
     }
     let id = FunctionStencilId(

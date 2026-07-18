@@ -511,8 +511,16 @@ fn lower_function(
             lowerer.add_local(binding, Some(register), true)?;
         }
     }
+    for statement in function.body.iter() {
+        if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
+            lowerer.local_function_declaration(declaration, statement.span)?;
+        }
+    }
     let mut terminal = false;
     for statement in function.body.iter() {
+        if matches!(statement.kind, HirStatementKind::FunctionDeclaration(_)) {
+            continue;
+        }
         terminal = lowerer.function_statement(statement)?;
         if terminal {
             break;
@@ -624,6 +632,22 @@ impl Lowerer<'_> {
         let scope_name = self.global_binding(&declaration.binding.name, true)?;
         self.emit(Opcode::StoreScope, &[register.index(), scope_name], span)?;
         Ok(())
+    }
+
+    /// Instantiates one direct function-body declaration before ordinary statement execution.
+    fn local_function_declaration(
+        &mut self,
+        declaration: &HirFunctionDeclaration,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let register = self.register()?;
+        let function = declaration
+            .function
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
+        self.add_local(&declaration.binding, Some(register), true)
     }
 
     /// Lowers one script statement while preserving the most recent non-empty completion value.

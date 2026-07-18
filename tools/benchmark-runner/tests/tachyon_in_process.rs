@@ -72,13 +72,13 @@ fn tachyon_adapter_executes_all_honest_in_process_modes() {
 
 /// Keeps process startup and unsupported future syntax out of successful in-process measurements.
 #[test]
-fn tachyon_adapter_rejects_process_cold_start_and_unsupported_corpus() {
+fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
     let (config, corpus) = config_and_corpus();
     let tachyon_script = corpus
         .iter()
         .find(|script| script.config.id.as_ref() == "tachyon/foundation-arithmetic")
         .unwrap();
-    let boa_script = corpus
+    let script = corpus
         .iter()
         .find(|script| script.config.id.as_ref() == "basic/closure")
         .unwrap();
@@ -90,7 +90,8 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_corpus() {
         Err(AdapterError::UnsupportedMode(MeasurementMode::ColdStart))
     );
 
-    let unsupported = request(boa_script, MeasurementMode::PrecompiledExecute);
+    let mut unsupported = request(script, MeasurementMode::PrecompiledExecute);
+    unsupported.source = Arc::from("class Unsupported {}");
     assert!(matches!(
         adapter.prepare(&unsupported),
         Err(AdapterError::Setup(message)) if message.contains("compile failed")
@@ -106,11 +107,30 @@ fn parse_compile_mode_keeps_compile_failures_inside_the_sample_boundary() {
         .find(|script| script.config.id.as_ref() == "basic/closure")
         .unwrap();
     let mut adapter = adapter(&config);
-    let request = request(script, MeasurementMode::ParseCompileExecute);
+    let mut request = request(script, MeasurementMode::ParseCompileExecute);
+    request.source = Arc::from("class Unsupported {}");
 
     adapter.prepare(&request).unwrap();
     assert!(matches!(
         adapter.sample(&request),
         Err(AdapterError::Engine(message)) if message.contains("compile failed")
     ));
+}
+
+#[test]
+fn closure_corpus_executes_after_environment_lowering() {
+    let (config, corpus) = config_and_corpus();
+    let script = corpus
+        .iter()
+        .find(|script| script.config.id.as_ref() == "basic/closure")
+        .unwrap();
+    let mut adapter = adapter(&config);
+    for mode in [
+        MeasurementMode::PrecompiledExecute,
+        MeasurementMode::SteadyState,
+    ] {
+        let request = request(script, mode);
+        adapter.prepare(&request).unwrap();
+        assert!(adapter.sample(&request).unwrap().elapsed_ns > 0);
+    }
 }
