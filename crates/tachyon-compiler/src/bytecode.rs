@@ -1527,7 +1527,7 @@ impl Lowerer<'_> {
             let test = self.expression(test)?;
             let equal = self.register()?;
             self.emit(
-                Opcode::LooseEqual,
+                Opcode::StrictEqual,
                 &[equal.index(), discriminant.index(), test.index()],
                 case.span,
             )?;
