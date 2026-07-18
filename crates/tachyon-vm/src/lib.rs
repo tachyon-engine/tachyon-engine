@@ -282,6 +282,7 @@ enum NativeFunction {
     ArrayLastIndexOf,
     ArrayCopyWithin,
     ArrayFlat,
+    ArraySort,
     ArrayToString,
     MathPow,
 }
@@ -347,7 +348,8 @@ impl NativeFunction {
             | Self::ArrayFill
             | Self::ArrayLastIndexOf
             | Self::ArrayCopyWithin
-            | Self::ArrayFlat => 1,
+            | Self::ArrayFlat
+            | Self::ArraySort => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -403,6 +405,7 @@ impl NativeFunction {
             Self::ArrayLastIndexOf => "lastIndexOf",
             Self::ArrayCopyWithin => "copyWithin",
             Self::ArrayFlat => "flat",
+            Self::ArraySort => "sort",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -803,6 +806,7 @@ struct Realm {
     array_last_index_of: Option<Value>,
     array_copy_within: Option<Value>,
     array_flat: Option<Value>,
+    array_sort: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -865,6 +869,7 @@ impl Realm {
             array_last_index_of: None,
             array_copy_within: None,
             array_flat: None,
+            array_sort: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1154,6 +1159,7 @@ impl Trace for Realm {
         self.array_last_index_of.trace(tracer);
         self.array_copy_within.trace(tracer);
         self.array_flat.trace(tracer);
+        self.array_sort.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -2182,6 +2188,18 @@ impl Isolate {
         self.realm.array_flat = Some(flat);
         let flat_atom = self.intern_intrinsic_name(b"flat")?;
         self.set_intrinsic_data_property(prototype, flat_atom, flat, true)?;
+        let sort = self.allocate_native_function(
+            NativeFunction::ArraySort,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_sort = Some(sort);
+        let sort_atom = self.intern_intrinsic_name(b"sort")?;
+        self.set_intrinsic_data_property(prototype, sort_atom, sort, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -3458,6 +3476,45 @@ impl Isolate {
         let length_atom = self.length_atom()?;
         self.set_own_data_property(result, length_atom, safe_integer_value(next_index))?;
         Ok(result)
+    }
+
+    /// Implements the default `Array.prototype.sort` comparator over UTF-16 code units.
+    fn array_sort(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        let mut values = Vec::new();
+        let mut holes = 0_u64;
+        for index in 0..length {
+            let key = self.safe_integer_property_atom(index)?;
+            let Some(value) = self.get_data_property(site.this_value, key)? else {
+                holes += 1;
+                continue;
+            };
+            if value.as_immediate() == Some(Immediate::Undefined) {
+                values.push((value, None));
+                continue;
+            }
+            let mut units = Vec::new();
+            self.append_primitive_string_units(value, &mut units)?;
+            values.push((value, Some(units)));
+        }
+        values.sort_by(|left, right| match (&left.1, &right.1) {
+            (None, None) => core::cmp::Ordering::Equal,
+            (None, Some(_)) => core::cmp::Ordering::Greater,
+            (Some(_), None) => core::cmp::Ordering::Less,
+            (Some(left), Some(right)) => left.cmp(right),
+        });
+        for (index, (value, _)) in values.iter().enumerate() {
+            let key = self.safe_integer_property_atom(index as u64)?;
+            self.set_own_data_property(site.this_value, key, *value)?;
+        }
+        for index in (values.len() as u64)..length {
+            let key = self.safe_integer_property_atom(index)?;
+            if !self.delete_own_data_property(site.this_value, key)? {
+                return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+            }
+        }
+        debug_assert_eq!(values.len() as u64 + holes, length);
+        Ok(site.this_value)
     }
 
     fn array_element_or_undefined(
@@ -6919,6 +6976,10 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
                     let value = self.array_flat(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArraySort) => {
+                    let value = self.array_sort(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {

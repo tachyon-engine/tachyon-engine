@@ -150,6 +150,18 @@ mod tests {
     }
 
     #[test]
+    fn array_sort_default_comparator_orders_strings_and_holes() {
+        assert_eq!(
+            execute_source(
+                157,
+                "let values = [10, 2, 'a', undefined, , 1]; values.sort() === values && values[0] === 1 && values[1] === 10 && values[2] === 2 && values[3] === 'a' && values[4] === undefined && values.length === 6;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
     fn declaration_only_script_returns_undefined() {
         let source = SourceText::new(
             SourceId::new(3),
