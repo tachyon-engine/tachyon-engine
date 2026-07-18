@@ -7,6 +7,7 @@ use oxc::{
         AssignmentTarget, BindingPattern, Expression, ForStatementInit, Program,
         SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
     },
+    semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::{GetSpan, Span},
     syntax::operator::{
         AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
@@ -38,6 +39,42 @@ impl FunctionStencilId {
     }
 }
 
+impl ScopeId {
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+impl BindingId {
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+impl ReferenceId {
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HirScopeFlags {
+    pub strict: bool,
+    pub function: bool,
+    pub arrow: bool,
+    pub direct_eval: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HirScope {
+    pub id: ScopeId,
+    pub parent: Option<ScopeId>,
+    pub flags: HirScopeFlags,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatementCompletion {
     Value,
@@ -50,6 +87,8 @@ pub struct HirProgram {
     kind: ProgramKind,
     statements: Arc<[HirStatement]>,
     functions: Arc<[HirFunction]>,
+    root_scope: ScopeId,
+    scopes: Arc<[HirScope]>,
 }
 
 impl HirProgram {
@@ -71,6 +110,16 @@ impl HirProgram {
     #[must_use]
     pub fn functions(&self) -> &[HirFunction] {
         &self.functions
+    }
+
+    #[must_use]
+    pub const fn root_scope(&self) -> ScopeId {
+        self.root_scope
+    }
+
+    #[must_use]
+    pub fn scopes(&self) -> &[HirScope] {
+        &self.scopes
     }
 }
 
@@ -147,14 +196,27 @@ pub struct HirFunction {
     pub name: Option<Arc<str>>,
     pub parameters: Arc<[HirBinding]>,
     pub body: Arc<[HirStatement]>,
+    pub scope: ScopeId,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirBinding {
     pub id: BindingId,
+    pub scope: ScopeId,
     pub span: SourceSpan,
     pub name: Arc<str>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirIdentifierReference {
+    pub id: ReferenceId,
+    pub scope: ScopeId,
+    pub binding: Option<BindingId>,
+    pub binding_scope: Option<ScopeId>,
+    pub name: Arc<str>,
+    pub read: bool,
+    pub write: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,7 +249,7 @@ pub struct HirExpression {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirAssignmentTarget {
-    Identifier(Arc<str>),
+    Identifier(HirIdentifierReference),
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -210,7 +272,7 @@ pub enum HirExpressionKind {
     String(Arc<str>),
     Boolean(bool),
     Null,
-    Identifier(Arc<str>),
+    Identifier(HirIdentifierReference),
     Function(FunctionStencilId),
     This,
     NewTarget,
@@ -316,15 +378,15 @@ pub(crate) fn lower(
     program: &Program<'_>,
     kind: ProgramKind,
     source: &SourceText,
+    semantic: &Semantic<'_>,
 ) -> Result<HirProgram, CompileError> {
     let mut statements = Vec::with_capacity(program.body.len());
     let mut functions = Vec::with_capacity(program.body.len());
-    let mut next_binding = 0;
     for statement in &program.body {
         statements.push(lower_statement(
             statement,
             source,
-            &mut next_binding,
+            semantic,
             &mut functions,
             true,
         )?);
@@ -334,14 +396,36 @@ pub(crate) fn lower(
         kind,
         statements: statements.into(),
         functions: functions.into(),
+        root_scope: to_scope_id(semantic.scoping().root_scope_id()),
+        scopes: copy_scopes(semantic).into(),
     })
+}
+
+/// Copies Oxc's arena-owned scope tree into compact Tachyon identities and capability flags.
+fn copy_scopes(semantic: &Semantic<'_>) -> Vec<HirScope> {
+    let scoping = semantic.scoping();
+    let mut scopes = Vec::with_capacity(scoping.scopes_len());
+    for id in scoping.scope_descendants_from_root() {
+        let flags = scoping.scope_flags(id);
+        scopes.push(HirScope {
+            id: to_scope_id(id),
+            parent: scoping.scope_parent_id(id).map(to_scope_id),
+            flags: HirScopeFlags {
+                strict: flags.contains(OxcScopeFlags::StrictMode),
+                function: flags.contains(OxcScopeFlags::Function),
+                arrow: flags.contains(OxcScopeFlags::Arrow),
+                direct_eval: flags.contains(OxcScopeFlags::DirectEval),
+            },
+        });
+    }
+    scopes
 }
 
 /// Copies one statement while enforcing which declaration/control forms are legal in this scope.
 fn lower_statement(
     statement: &Statement<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
     allow_function_declaration: bool,
 ) -> Result<HirStatement, CompileError> {
@@ -352,7 +436,7 @@ fn lower_statement(
             kind: HirStatementKind::Expression(lower_expression(
                 &statement.expression,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         }),
@@ -367,22 +451,18 @@ fn lower_statement(
             kind: HirStatementKind::VariableDeclaration(lower_variable_declaration(
                 declaration,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         }),
         Statement::FunctionDeclaration(function) if allow_function_declaration => {
-            lower_function_declaration(function, source, next_binding, functions)
+            lower_function_declaration(function, source, semantic, functions)
         }
         Statement::BlockStatement(block) => {
             let mut statements = Vec::with_capacity(block.body.len());
             for statement in &block.body {
                 statements.push(lower_statement(
-                    statement,
-                    source,
-                    next_binding,
-                    functions,
-                    false,
+                    statement, source, semantic, functions, false,
                 )?);
             }
             Ok(HirStatement {
@@ -395,11 +475,11 @@ fn lower_statement(
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
             kind: HirStatementKind::If {
-                test: lower_expression(&statement.test, source, next_binding, functions)?,
+                test: lower_expression(&statement.test, source, semantic, functions)?,
                 consequent: Box::new(lower_statement(
                     &statement.consequent,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                     false,
                 )?),
@@ -407,20 +487,19 @@ fn lower_statement(
                     .alternate
                     .as_ref()
                     .map(|alternate| {
-                        lower_statement(alternate, source, next_binding, functions, false)
-                            .map(Box::new)
+                        lower_statement(alternate, source, semantic, functions, false).map(Box::new)
                     })
                     .transpose()?,
             },
         }),
         Statement::ForStatement(statement) => {
-            lower_for_statement(statement, source, next_binding, functions)
+            lower_for_statement(statement, source, semantic, functions)
         }
         Statement::SwitchStatement(statement) => {
-            lower_switch_statement(statement, source, next_binding, functions)
+            lower_switch_statement(statement, source, semantic, functions)
         }
         Statement::TryStatement(statement) => {
-            lower_try_statement(statement, source, next_binding, functions)
+            lower_try_statement(statement, source, semantic, functions)
         }
         Statement::BreakStatement(statement) if statement.label.is_none() => Ok(HirStatement {
             span: source_span(statement.span),
@@ -449,7 +528,7 @@ fn lower_statement(
                 statement
                     .argument
                     .as_ref()
-                    .map(|argument| lower_expression(argument, source, next_binding, functions))
+                    .map(|argument| lower_expression(argument, source, semantic, functions))
                     .transpose()?,
             ),
         }),
@@ -459,7 +538,7 @@ fn lower_statement(
             kind: HirStatementKind::Throw(lower_expression(
                 &statement.argument,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         }),
@@ -475,7 +554,7 @@ fn lower_statement(
 fn lower_for_statement(
     statement: &oxc::ast::ast::ForStatement<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirStatement, CompileError> {
     let initializer = statement
@@ -483,11 +562,11 @@ fn lower_for_statement(
         .as_ref()
         .map(|initializer| match initializer {
             ForStatementInit::VariableDeclaration(declaration) => {
-                lower_variable_declaration(declaration, source, next_binding, functions)
+                lower_variable_declaration(declaration, source, semantic, functions)
                     .map(HirForInitializer::Variable)
             }
             initializer => {
-                lower_expression(initializer.to_expression(), source, next_binding, functions)
+                lower_expression(initializer.to_expression(), source, semantic, functions)
                     .map(HirForInitializer::Expression)
             }
         })
@@ -500,17 +579,17 @@ fn lower_for_statement(
             test: statement
                 .test
                 .as_ref()
-                .map(|test| lower_expression(test, source, next_binding, functions))
+                .map(|test| lower_expression(test, source, semantic, functions))
                 .transpose()?,
             update: statement
                 .update
                 .as_ref()
-                .map(|update| lower_expression(update, source, next_binding, functions))
+                .map(|update| lower_expression(update, source, semantic, functions))
                 .transpose()?,
             body: Box::new(lower_statement(
                 &statement.body,
                 source,
-                next_binding,
+                semantic,
                 functions,
                 false,
             )?),
@@ -522,17 +601,13 @@ fn lower_for_statement(
 fn lower_try_statement(
     statement: &oxc::ast::ast::TryStatement<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirStatement, CompileError> {
     let mut block = Vec::with_capacity(statement.block.body.len());
     for statement in &statement.block.body {
         block.push(lower_statement(
-            statement,
-            source,
-            next_binding,
-            functions,
-            false,
+            statement, source, semantic, functions, false,
         )?);
     }
     let handler = statement
@@ -543,11 +618,9 @@ fn lower_try_statement(
                 .param
                 .as_ref()
                 .map(|parameter| match &parameter.pattern {
-                    BindingPattern::BindingIdentifier(identifier) => new_binding(
-                        identifier.name.as_str(),
-                        source_span(identifier.span),
-                        next_binding,
-                    ),
+                    BindingPattern::BindingIdentifier(identifier) => {
+                        new_binding(identifier, source, semantic)
+                    }
                     _ => Err(unsupported(
                         source.name(),
                         source_span(parameter.span),
@@ -558,11 +631,7 @@ fn lower_try_statement(
             let mut body = Vec::with_capacity(handler.body.body.len());
             for statement in &handler.body.body {
                 body.push(lower_statement(
-                    statement,
-                    source,
-                    next_binding,
-                    functions,
-                    false,
+                    statement, source, semantic, functions, false,
                 )?);
             }
             Ok(HirCatchClause {
@@ -579,11 +648,7 @@ fn lower_try_statement(
             let mut statements = Vec::with_capacity(finalizer.body.len());
             for statement in &finalizer.body {
                 statements.push(lower_statement(
-                    statement,
-                    source,
-                    next_binding,
-                    functions,
-                    false,
+                    statement, source, semantic, functions, false,
                 )?);
             }
             Ok::<Arc<[HirStatement]>, CompileError>(statements.into())
@@ -604,7 +669,7 @@ fn lower_try_statement(
 fn lower_switch_statement(
     statement: &oxc::ast::ast::SwitchStatement<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirStatement, CompileError> {
     let mut cases = Vec::with_capacity(statement.cases.len());
@@ -612,11 +677,7 @@ fn lower_switch_statement(
         let mut consequent = Vec::with_capacity(case.consequent.len());
         for statement in &case.consequent {
             consequent.push(lower_statement(
-                statement,
-                source,
-                next_binding,
-                functions,
-                false,
+                statement, source, semantic, functions, false,
             )?);
         }
         cases.push(HirSwitchCase {
@@ -624,7 +685,7 @@ fn lower_switch_statement(
             test: case
                 .test
                 .as_ref()
-                .map(|test| lower_expression(test, source, next_binding, functions))
+                .map(|test| lower_expression(test, source, semantic, functions))
                 .transpose()?,
             consequent: consequent.into(),
         });
@@ -633,12 +694,7 @@ fn lower_switch_statement(
         span: source_span(statement.span),
         completion: StatementCompletion::Empty,
         kind: HirStatementKind::Switch {
-            discriminant: lower_expression(
-                &statement.discriminant,
-                source,
-                next_binding,
-                functions,
-            )?,
+            discriminant: lower_expression(&statement.discriminant, source, semantic, functions)?,
             cases: cases.into(),
         },
     })
@@ -648,7 +704,7 @@ fn lower_switch_statement(
 fn lower_function_declaration(
     function: &oxc::ast::ast::Function<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirStatement, CompileError> {
     let identifier = function.id.as_ref().ok_or_else(|| {
@@ -658,16 +714,12 @@ fn lower_function_declaration(
             "anonymous function declaration",
         )
     })?;
-    let declaration_binding = new_binding(
-        identifier.name.as_str(),
-        source_span(identifier.span),
-        next_binding,
-    )?;
+    let declaration_binding = new_binding(identifier, source, semantic)?;
     let id = lower_function_stencil(
         function,
         Some(Arc::from(identifier.name.as_str())),
         source,
-        next_binding,
+        semantic,
         functions,
     )?;
     Ok(HirStatement {
@@ -685,7 +737,7 @@ fn lower_function_stencil(
     function: &oxc::ast::ast::Function<'_>,
     name: Option<Arc<str>>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
     if function.generator || function.r#async || function.params.rest.is_some() {
@@ -718,20 +770,12 @@ fn lower_function_stencil(
                 "parameter binding pattern",
             ));
         };
-        parameters.push(new_binding(
-            identifier.name.as_str(),
-            source_span(identifier.span),
-            next_binding,
-        )?);
+        parameters.push(new_binding(identifier, source, semantic)?);
     }
     let mut statements = Vec::with_capacity(body.statements.len());
     for statement in &body.statements {
         statements.push(lower_statement(
-            statement,
-            source,
-            next_binding,
-            functions,
-            false,
+            statement, source, semantic, functions, false,
         )?);
     }
     let id = FunctionStencilId(
@@ -743,31 +787,36 @@ fn lower_function_stencil(
         name,
         parameters: parameters.into(),
         body: statements.into(),
+        scope: function.scope_id.get().map(to_scope_id).ok_or_else(|| {
+            missing_semantic(source, source_span(function.span), "function scope")
+        })?,
     });
     Ok(id)
 }
 
 fn new_binding(
-    name: &str,
-    span: SourceSpan,
-    next_binding: &mut u32,
+    identifier: &oxc::ast::ast::BindingIdentifier<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
 ) -> Result<HirBinding, CompileError> {
-    let binding = HirBinding {
-        id: BindingId(*next_binding),
+    let span = source_span(identifier.span);
+    let symbol = identifier
+        .symbol_id
+        .get()
+        .ok_or_else(|| missing_semantic(source, span, "binding symbol"))?;
+    Ok(HirBinding {
+        id: BindingId(symbol.index() as u32),
+        scope: to_scope_id(semantic.scoping().symbol_scope_id(symbol)),
         span,
-        name: Arc::from(name),
-    };
-    *next_binding = next_binding
-        .checked_add(1)
-        .ok_or(CompileError::BindingOverflow)?;
-    Ok(binding)
+        name: Arc::from(identifier.name.as_str()),
+    })
 }
 
 /// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.
 fn lower_variable_declaration(
     declaration: &VariableDeclaration<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirVariableDeclaration, CompileError> {
     let mut declarators = Vec::with_capacity(declaration.declarations.len());
@@ -779,18 +828,14 @@ fn lower_variable_declaration(
                 "binding pattern",
             ));
         };
-        let binding = new_binding(
-            identifier.name.as_str(),
-            source_span(identifier.span),
-            next_binding,
-        )?;
+        let binding = new_binding(identifier, source, semantic)?;
         declarators.push(HirVariableDeclarator {
             span: source_span(declarator.span),
             binding,
             initializer: declarator
                 .init
                 .as_ref()
-                .map(|initializer| lower_expression(initializer, source, next_binding, functions))
+                .map(|initializer| lower_expression(initializer, source, semantic, functions))
                 .transpose()?,
         });
     }
@@ -814,7 +859,7 @@ fn lower_variable_declaration_kind(kind: VariableDeclarationKind) -> HirVariable
 fn lower_expression(
     expression: &Expression<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirExpression, CompileError> {
     let span = source_span(expression.span());
@@ -826,15 +871,11 @@ fn lower_expression(
         Expression::BooleanLiteral(literal) => HirExpressionKind::Boolean(literal.value),
         Expression::NullLiteral(_) => HirExpressionKind::Null,
         Expression::Identifier(identifier) => {
-            HirExpressionKind::Identifier(Arc::from(identifier.name.as_str()))
+            HirExpressionKind::Identifier(new_reference(identifier, source, semantic)?)
         }
         Expression::FunctionExpression(function) if function.id.is_none() => {
             HirExpressionKind::Function(lower_function_stencil(
-                function,
-                None,
-                source,
-                next_binding,
-                functions,
+                function, None, source, semantic, functions,
             )?)
         }
         Expression::FunctionExpression(_) => {
@@ -855,7 +896,7 @@ fn lower_expression(
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Arc::from(expression.property.name.as_str()),
@@ -866,13 +907,13 @@ fn lower_expression(
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Box::new(lower_expression(
                     &expression.expression,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
             }
@@ -882,7 +923,7 @@ fn lower_expression(
             argument: Box::new(lower_expression(
                 &expression.argument,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         },
@@ -891,13 +932,13 @@ fn lower_expression(
             left: Box::new(lower_expression(
                 &expression.left,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
             right: Box::new(lower_expression(
                 &expression.right,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         },
@@ -906,23 +947,23 @@ fn lower_expression(
             left: Box::new(lower_expression(
                 &expression.left,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
             right: Box::new(lower_expression(
                 &expression.right,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         },
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
             operator: lower_assignment_operator(expression.operator, source, expression.span)?,
-            target: lower_assignment_target(&expression.left, source, next_binding, functions)?,
+            target: lower_assignment_target(&expression.left, source, semantic, functions)?,
             value: Box::new(lower_expression(
                 &expression.right,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         },
@@ -932,25 +973,25 @@ fn lower_expression(
                 UpdateOperator::Decrement => HirUpdateOperator::Decrement,
             },
             prefix: expression.prefix,
-            target: lower_update_target(&expression.argument, source, next_binding, functions)?,
+            target: lower_update_target(&expression.argument, source, semantic, functions)?,
         },
         Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
             test: Box::new(lower_expression(
                 &expression.test,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
             consequent: Box::new(lower_expression(
                 &expression.consequent,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
             alternate: Box::new(lower_expression(
                 &expression.alternate,
                 source,
-                next_binding,
+                semantic,
                 functions,
             )?),
         },
@@ -964,13 +1005,13 @@ fn lower_expression(
                         "spread argument",
                     )
                 })?;
-                arguments.push(lower_expression(argument, source, next_binding, functions)?);
+                arguments.push(lower_expression(argument, source, semantic, functions)?);
             }
             HirExpressionKind::Call {
                 callee: Box::new(lower_expression(
                     &expression.callee,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 arguments: arguments.into(),
@@ -986,13 +1027,13 @@ fn lower_expression(
                         "spread constructor argument",
                     )
                 })?;
-                arguments.push(lower_expression(argument, source, next_binding, functions)?);
+                arguments.push(lower_expression(argument, source, semantic, functions)?);
             }
             HirExpressionKind::New {
                 callee: Box::new(lower_expression(
                     &expression.callee,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 arguments: arguments.into(),
@@ -1000,7 +1041,7 @@ fn lower_expression(
         }
         Expression::ParenthesizedExpression(expression) => {
             let mut lowered =
-                lower_expression(&expression.expression, source, next_binding, functions)?;
+                lower_expression(&expression.expression, source, semantic, functions)?;
             lowered.span = span;
             return Ok(lowered);
         }
@@ -1029,19 +1070,19 @@ fn lower_assignment_operator(
 fn lower_assignment_target(
     target: &AssignmentTarget<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirAssignmentTarget, CompileError> {
     match target {
         AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok(
-            HirAssignmentTarget::Identifier(Arc::from(identifier.name.as_str())),
+            HirAssignmentTarget::Identifier(new_reference(identifier, source, semantic)?),
         ),
         AssignmentTarget::StaticMemberExpression(expression) if !expression.optional => {
             Ok(HirAssignmentTarget::StaticMember {
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Arc::from(expression.property.name.as_str()),
@@ -1052,13 +1093,13 @@ fn lower_assignment_target(
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Box::new(lower_expression(
                     &expression.expression,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
             })
@@ -1075,19 +1116,19 @@ fn lower_assignment_target(
 fn lower_update_target(
     target: &SimpleAssignmentTarget<'_>,
     source: &SourceText,
-    next_binding: &mut u32,
+    semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirAssignmentTarget, CompileError> {
     match target {
         SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok(
-            HirAssignmentTarget::Identifier(Arc::from(identifier.name.as_str())),
+            HirAssignmentTarget::Identifier(new_reference(identifier, source, semantic)?),
         ),
         SimpleAssignmentTarget::StaticMemberExpression(expression) if !expression.optional => {
             Ok(HirAssignmentTarget::StaticMember {
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Arc::from(expression.property.name.as_str()),
@@ -1098,13 +1139,13 @@ fn lower_update_target(
                 object: Box::new(lower_expression(
                     &expression.object,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
                 property: Box::new(lower_expression(
                     &expression.expression,
                     source,
-                    next_binding,
+                    semantic,
                     functions,
                 )?),
             })
@@ -1114,6 +1155,46 @@ fn lower_update_target(
             source_span(target.span()),
             "update target",
         )),
+    }
+}
+
+/// Copies one Oxc semantic reference without retaining its arena-owned ID or symbol table.
+fn new_reference(
+    identifier: &oxc::ast::ast::IdentifierReference<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+) -> Result<HirIdentifierReference, CompileError> {
+    let span = source_span(identifier.span);
+    let id = identifier
+        .reference_id
+        .get()
+        .ok_or_else(|| missing_semantic(source, span, "identifier reference"))?;
+    let reference = semantic.scoping().get_reference(id);
+    let binding_scope = reference
+        .symbol_id()
+        .map(|symbol| to_scope_id(semantic.scoping().symbol_scope_id(symbol)));
+    Ok(HirIdentifierReference {
+        id: ReferenceId(id.index() as u32),
+        scope: to_scope_id(reference.scope_id()),
+        binding: reference
+            .symbol_id()
+            .map(|symbol| BindingId(symbol.index() as u32)),
+        binding_scope,
+        name: Arc::from(identifier.name.as_str()),
+        read: reference.is_read(),
+        write: reference.is_write(),
+    })
+}
+
+fn to_scope_id(id: oxc::semantic::ScopeId) -> ScopeId {
+    ScopeId(id.index() as u32)
+}
+
+fn missing_semantic(source: &SourceText, span: SourceSpan, semantic: &'static str) -> CompileError {
+    CompileError::MissingSemanticId {
+        source_name: source.name().clone(),
+        span,
+        semantic,
     }
 }
 

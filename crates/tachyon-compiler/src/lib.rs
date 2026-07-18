@@ -21,9 +21,10 @@ pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, Sour
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
     HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirForInitializer, HirFunction,
-    HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
-    HirSwitchCase, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
-    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator, HirProgram, HirScope,
+    HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
+    HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
+    ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -46,6 +47,11 @@ pub enum CompileError {
     ConstantAllocationFailed,
     RegisterOverflow,
     BindingOverflow,
+    MissingSemanticId {
+        source_name: SourceName,
+        span: SourceSpan,
+        semantic: &'static str,
+    },
     LoweringCapacityOverflow {
         collection: &'static str,
     },
@@ -247,6 +253,97 @@ mod tests {
                 kind: HirExpressionKind::Number(bits),
                 ..
             }) if *bits == 42.0_f64.to_bits()
+        ));
+    }
+
+    #[test]
+    /// Proves same-spelling references retain distinct semantic bindings across nested scopes.
+    fn hir_owns_scope_binding_and_reference_identity() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "let value = 1; { let value = 2; value; } value;",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [outer_declaration, block, outer_read] = hir.statements() else {
+            panic!("expected declaration, block, and read");
+        };
+        let HirStatementKind::VariableDeclaration(outer_declaration) = &outer_declaration.kind
+        else {
+            panic!("expected outer declaration");
+        };
+        let HirStatementKind::Block(block) = &block.kind else {
+            panic!("expected nested block");
+        };
+        let HirStatementKind::VariableDeclaration(inner_declaration) = &block[0].kind else {
+            panic!("expected inner declaration");
+        };
+        let HirStatementKind::Expression(HirExpression {
+            kind: HirExpressionKind::Identifier(inner_read),
+            ..
+        }) = &block[1].kind
+        else {
+            panic!("expected inner read");
+        };
+        let HirStatementKind::Expression(HirExpression {
+            kind: HirExpressionKind::Identifier(outer_read),
+            ..
+        }) = &outer_read.kind
+        else {
+            panic!("expected outer read");
+        };
+        let outer = &outer_declaration.declarators[0].binding;
+        let inner = &inner_declaration.declarators[0].binding;
+        assert_ne!(outer.id, inner.id);
+        assert_ne!(outer.scope, inner.scope);
+        assert_eq!(inner_read.binding, Some(inner.id));
+        assert_eq!(outer_read.binding, Some(outer.id));
+        assert!(inner_read.read && !inner_read.write);
+        assert_eq!(
+            hir.scopes()[inner.scope.index() as usize].parent,
+            Some(outer.scope)
+        );
+    }
+
+    #[test]
+    fn hir_copies_direct_eval_scope_capability() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "function run() { eval('var value = 1;'); }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let function = &hir.functions()[0];
+        assert!(
+            hir.scopes()[function.scope.index() as usize]
+                .flags
+                .direct_eval
+        );
+    }
+
+    #[test]
+    fn compiler_rejects_capture_until_environment_storage_is_emitted() {
+        let error = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function outer() { let value = 1; return function() { return value; }; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnsupportedSyntax {
+                syntax: "captured binding requires environment storage",
+                ..
+            }
         ));
     }
 

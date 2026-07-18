@@ -9,11 +9,11 @@ use tachyon_bytecode::{
 
 use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
 use crate::{
-    CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
-    HirForInitializer, HirFunction, HirFunctionDeclaration, HirLogicalOperator, HirProgram,
-    HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator, HirUpdateOperator,
-    HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName, SourceSpan,
-    SourceText,
+    BindingId, CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
+    HirForInitializer, HirFunction, HirFunctionDeclaration, HirIdentifierReference,
+    HirLogicalOperator, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
+    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    ProgramKind, ScopeId, SourceName, SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -33,6 +33,7 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
         templates.push(lower_function(
             source,
             function,
+            hir.root_scope(),
             &mut constants,
             &mut scope_names,
         )?);
@@ -54,7 +55,7 @@ fn lower_entry(
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
-    let var_names = var_declared_names(hir.statements())?;
+    let var_bindings = var_declared_bindings(hir.statements())?;
     let has_control_flow = hir.statements().iter().any(|statement| {
         matches!(
             statement.kind,
@@ -84,7 +85,7 @@ fn lower_entry(
         2
     };
     let instruction_upper_bound = hir_instruction_count(hir)?
-        .checked_add(var_names.len())
+        .checked_add(var_bindings.len())
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "global var instantiation instructions",
         })?
@@ -101,7 +102,7 @@ fn lower_entry(
     let max_handler_depth = statements_handler_depth(hir.statements())?;
     let entry_binding_plan_capacity = hir_binding_count(hir)?
         .checked_add(statements_scope_name_count(hir.statements())?)
-        .and_then(|count| count.checked_add(var_names.len()))
+        .and_then(|count| count.checked_add(var_bindings.len()))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "entry binding plan",
         })?;
@@ -117,14 +118,15 @@ fn lower_entry(
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: true,
+        root_scope: hir.root_scope(),
     };
     for statement in hir.statements() {
         if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
             lowerer.function_declaration(declaration, statement.span)?;
         }
     }
-    for name in &var_names {
-        let scope_name = lowerer.global_binding(name, true)?;
+    for binding in &var_bindings {
+        let scope_name = lowerer.global_binding(&binding.name, true)?;
         lowerer.emit(
             Opcode::DeclareScope,
             &[scope_name],
@@ -218,17 +220,18 @@ fn lower_entry(
 fn lower_function(
     source: &SourceText,
     function: &HirFunction,
+    root_scope: ScopeId,
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
-    let var_names = var_declared_names(&function.body)?;
-    let var_initialization_count = var_names
+    let var_bindings = var_declared_bindings(&function.body)?;
+    let var_initialization_count = var_bindings
         .iter()
-        .filter(|name| {
+        .filter(|binding| {
             !function
                 .parameters
                 .iter()
-                .any(|parameter| parameter.name.as_ref() == name.as_ref())
+                .any(|parameter| parameter.id == binding.id)
         })
         .count();
     let instruction_capacity = statements_instruction_count(&function.body)?
@@ -267,17 +270,18 @@ fn lower_function(
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: false,
+        root_scope,
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
-        lowerer.add_local(parameter.name.clone(), register, true);
+        lowerer.add_local(parameter, register, true);
     }
-    for name in var_names {
-        if lowerer.local(&name).is_some() {
+    for binding in &var_bindings {
+        if lowerer.local_by_id(binding.id).is_some() {
             continue;
         }
         let register = lowerer.load_undefined(function.span)?;
-        lowerer.add_local(name, register, true);
+        lowerer.add_local(binding, register, true);
     }
     let mut terminal = false;
     for statement in function.body.iter() {
@@ -333,11 +337,12 @@ struct Lowerer<'a> {
     next_register: u32,
     source_name: SourceName,
     script_scope: bool,
+    root_scope: ScopeId,
 }
 
 #[derive(Clone, Debug)]
 struct LocalBinding {
-    name: std::sync::Arc<str>,
+    id: BindingId,
     register: RegisterId,
     mutable: bool,
 }
@@ -880,7 +885,7 @@ impl Lowerer<'_> {
             )
             .map_err(CompileError::Builder)?;
         if let Some(parameter) = &handler.parameter {
-            self.add_local(parameter.name.clone(), exception, true);
+            self.add_local(parameter, exception, true);
         }
         Ok(offset)
     }
@@ -1168,11 +1173,12 @@ impl Lowerer<'_> {
                 left,
                 right,
             } => self.logical(*operator, left, right, expression.span),
-            HirExpressionKind::Identifier(name) => match self.local(name) {
+            HirExpressionKind::Identifier(reference) => match self.local_reference(reference) {
                 Some(binding) => Ok(binding.register),
                 None => {
+                    self.require_global_reference(reference, expression.span)?;
                     let destination = self.register()?;
-                    let scope_name = self.global_binding(name, true)?;
+                    let scope_name = self.global_binding(&reference.name, true)?;
                     self.emit(
                         Opcode::LoadScope,
                         &[destination.index(), scope_name],
@@ -1269,7 +1275,7 @@ impl Lowerer<'_> {
     ) -> Result<RegisterId, CompileError> {
         match target {
             HirAssignmentTarget::Identifier(target) => {
-                if let Some(binding) = self.local(target).cloned() {
+                if let Some(binding) = self.local_reference(target).cloned() {
                     if !binding.mutable {
                         return Err(self.unsupported(span, "assignment to immutable local"));
                     }
@@ -1348,11 +1354,12 @@ impl Lowerer<'_> {
     fn scope_assignment(
         &mut self,
         operator: HirAssignmentOperator,
-        target: &std::sync::Arc<str>,
+        target: &HirIdentifierReference,
         value: &HirExpression,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let scope_name = self.global_binding(target, true)?;
+        self.require_global_reference(target, span)?;
+        let scope_name = self.global_binding(&target.name, true)?;
         let result = match operator {
             HirAssignmentOperator::Assign => self.expression(value)?,
             HirAssignmentOperator::Binary(operator) => {
@@ -1428,7 +1435,7 @@ impl Lowerer<'_> {
         };
         match target {
             HirAssignmentTarget::Identifier(target) => {
-                if let Some(binding) = self.local(target).cloned() {
+                if let Some(binding) = self.local_reference(target).cloned() {
                     if !binding.mutable {
                         return Err(self.unsupported(span, "update of immutable local"));
                     }
@@ -1508,10 +1515,11 @@ impl Lowerer<'_> {
         &mut self,
         opcode: HirBinaryOperator,
         prefix: bool,
-        target: &std::sync::Arc<str>,
+        target: &HirIdentifierReference,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let scope_name = self.global_binding(target, true)?;
+        self.require_global_reference(target, span)?;
+        let scope_name = self.global_binding(&target.name, true)?;
         let old = self.register()?;
         self.emit(Opcode::LoadScope, &[old.index(), scope_name], span)?;
         let result = if prefix {
@@ -1755,7 +1763,7 @@ impl Lowerer<'_> {
                 }
             };
             self.add_local(
-                declarator.binding.name.clone(),
+                &declarator.binding,
                 register,
                 declaration.kind == HirVariableDeclarationKind::Let,
             );
@@ -1773,7 +1781,7 @@ impl Lowerer<'_> {
                 continue;
             };
             let value = self.expression(initializer)?;
-            if let Some(binding) = self.local(&declarator.binding.name).cloned() {
+            if let Some(binding) = self.local_by_id(declarator.binding.id).cloned() {
                 self.emit(
                     Opcode::Move,
                     &[binding.register.index(), value.index()],
@@ -1794,11 +1802,24 @@ impl Lowerer<'_> {
     }
 
     #[inline(always)]
-    fn local(&self, name: &str) -> Option<&LocalBinding> {
-        self.locals
-            .iter()
-            .rev()
-            .find(|binding| binding.name.as_ref() == name)
+    fn local_by_id(&self, id: BindingId) -> Option<&LocalBinding> {
+        self.locals.iter().rev().find(|binding| binding.id == id)
+    }
+
+    #[inline(always)]
+    fn local_reference(&self, reference: &HirIdentifierReference) -> Option<&LocalBinding> {
+        reference.binding.and_then(|id| self.local_by_id(id))
+    }
+
+    fn require_global_reference(
+        &self,
+        reference: &HirIdentifierReference,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        if reference.binding.is_some() && reference.binding_scope != Some(self.root_scope) {
+            return Err(self.unsupported(span, "captured binding requires environment storage"));
+        }
+        Ok(())
     }
 
     fn load_immediate(&mut self, value: u32, span: SourceSpan) -> Result<RegisterId, CompileError> {
@@ -1840,14 +1861,14 @@ impl Lowerer<'_> {
     }
 
     /// Publishes one frame binding and its verifier-owned storage contract together.
-    fn add_local(&mut self, name: std::sync::Arc<str>, register: RegisterId, mutable: bool) {
+    fn add_local(&mut self, binding: &crate::HirBinding, register: RegisterId, mutable: bool) {
         self.binding_plan.push(BindingPlanEntry {
-            name: name.clone(),
+            name: binding.name.clone(),
             location: BindingLocation::FrameRegister(register),
             mutable,
         });
         self.locals.push(LocalBinding {
-            name,
+            id: binding.id,
             register,
             mutable,
         });
@@ -1892,32 +1913,37 @@ fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
 }
 
 /// Collects function/script-scoped var names once with a source-derived no-growth capacity.
-fn var_declared_names(
+fn var_declared_bindings(
     statements: &[HirStatement],
-) -> Result<Vec<std::sync::Arc<str>>, CompileError> {
-    let mut names = Vec::with_capacity(statements_binding_count(statements)?);
-    collect_var_declared_names(statements, &mut names);
-    Ok(names)
+) -> Result<Vec<crate::HirBinding>, CompileError> {
+    let mut bindings = Vec::with_capacity(statements_binding_count(statements)?);
+    collect_var_declared_bindings(statements, &mut bindings);
+    Ok(bindings)
 }
 
 /// Walks statement containers but deliberately stops at separately owned function stencils.
-fn collect_var_declared_names(statements: &[HirStatement], names: &mut Vec<std::sync::Arc<str>>) {
+fn collect_var_declared_bindings(
+    statements: &[HirStatement],
+    bindings: &mut Vec<crate::HirBinding>,
+) {
     for statement in statements {
         match &statement.kind {
             HirStatementKind::VariableDeclaration(declaration) => {
                 if declaration.kind == HirVariableDeclarationKind::Var {
-                    push_var_declaration_names(declaration, names);
+                    push_var_declaration_bindings(declaration, bindings);
                 }
             }
-            HirStatementKind::Block(statements) => collect_var_declared_names(statements, names),
+            HirStatementKind::Block(statements) => {
+                collect_var_declared_bindings(statements, bindings);
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
                 ..
             } => {
-                collect_var_declared_names(core::slice::from_ref(consequent), names);
+                collect_var_declared_bindings(core::slice::from_ref(consequent), bindings);
                 if let Some(alternate) = alternate {
-                    collect_var_declared_names(core::slice::from_ref(alternate), names);
+                    collect_var_declared_bindings(core::slice::from_ref(alternate), bindings);
                 }
             }
             HirStatementKind::For {
@@ -1926,13 +1952,13 @@ fn collect_var_declared_names(statements: &[HirStatement], names: &mut Vec<std::
                 if let Some(HirForInitializer::Variable(declaration)) = initializer
                     && declaration.kind == HirVariableDeclarationKind::Var
                 {
-                    push_var_declaration_names(declaration, names);
+                    push_var_declaration_bindings(declaration, bindings);
                 }
-                collect_var_declared_names(core::slice::from_ref(body), names);
+                collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
-                    collect_var_declared_names(&case.consequent, names);
+                    collect_var_declared_bindings(&case.consequent, bindings);
                 }
             }
             HirStatementKind::Try {
@@ -1940,12 +1966,12 @@ fn collect_var_declared_names(statements: &[HirStatement], names: &mut Vec<std::
                 handler,
                 finalizer,
             } => {
-                collect_var_declared_names(block, names);
+                collect_var_declared_bindings(block, bindings);
                 if let Some(handler) = handler {
-                    collect_var_declared_names(&handler.body, names);
+                    collect_var_declared_bindings(&handler.body, bindings);
                 }
                 if let Some(finalizer) = finalizer {
-                    collect_var_declared_names(finalizer, names);
+                    collect_var_declared_bindings(finalizer, bindings);
                 }
             }
             HirStatementKind::Expression(_)
@@ -1959,16 +1985,16 @@ fn collect_var_declared_names(statements: &[HirStatement], names: &mut Vec<std::
     }
 }
 
-fn push_var_declaration_names(
+fn push_var_declaration_bindings(
     declaration: &HirVariableDeclaration,
-    names: &mut Vec<std::sync::Arc<str>>,
+    bindings: &mut Vec<crate::HirBinding>,
 ) {
     for declarator in declaration.declarators.iter() {
-        if names
+        if bindings
             .iter()
-            .all(|name| name.as_ref() != declarator.binding.name.as_ref())
+            .all(|binding| binding.id != declarator.binding.id)
         {
-            names.push(declarator.binding.name.clone());
+            bindings.push(declarator.binding.clone());
         }
     }
 }
@@ -2133,7 +2159,7 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
 fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
     let mut count = checked_count_add(
         statements_scope_name_count(hir.statements())?,
-        var_declared_names(hir.statements())?.len(),
+        var_declared_bindings(hir.statements())?.len(),
         "scope names",
     )?;
     for function in hir.functions() {

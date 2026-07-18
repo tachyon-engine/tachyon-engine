@@ -55,7 +55,7 @@ pub(crate) fn parse(
     source: SourceText,
     options: CompileOptions,
 ) -> Result<ParsedSource, CompileError> {
-    let (parsed_source, ()) = parse_with(source, options, |_, _, _| Ok(()))?;
+    let (parsed_source, ()) = parse_with(source, options, |_, _, _, _| Ok(()))?;
     Ok(parsed_source)
 }
 
@@ -63,7 +63,12 @@ pub(crate) fn parse(
 pub(crate) fn parse_with<T>(
     source: SourceText,
     options: CompileOptions,
-    lower: impl FnOnce(&oxc::ast::ast::Program<'_>, ProgramKind, &SourceText) -> Result<T, CompileError>,
+    lower: impl FnOnce(
+        &oxc::ast::ast::Program<'_>,
+        ProgramKind,
+        &SourceText,
+        &oxc::semantic::Semantic<'_>,
+    ) -> Result<T, CompileError>,
 ) -> Result<(ParsedSource, T), CompileError> {
     if source.text().len() > u32::MAX as usize {
         return Err(CompileError::SourceTooLarge {
@@ -107,7 +112,7 @@ pub(crate) fn parse_with<T>(
         return Err(CompileError::Diagnostics(diagnostics.into()));
     }
 
-    let lowered = lower(&parsed.program, kind, &source)?;
+    let lowered = lower(&parsed.program, kind, &source, &semantic.semantic)?;
     Ok((
         ParsedSource {
             source,
