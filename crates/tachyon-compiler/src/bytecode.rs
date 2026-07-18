@@ -7,7 +7,7 @@ use tachyon_bytecode::{
     SourceSpan as BytecodeSourceSpan,
 };
 
-use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
+use crate::hir::{HirAssignmentOperator, HirAssignmentTarget, HirForInLeft};
 use crate::{
     BindingId, CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
     HirForInitializer, HirFunction, HirFunctionDeclaration, HirIdentifierReference,
@@ -72,6 +72,7 @@ fn lower_entry(
             HirStatementKind::Block(_)
                 | HirStatementKind::If { .. }
                 | HirStatementKind::For { .. }
+                | HirStatementKind::ForIn { .. }
                 | HirStatementKind::Loop { .. }
                 | HirStatementKind::Switch { .. }
                 | HirStatementKind::Try { .. }
@@ -187,6 +188,7 @@ fn lower_entry(
                         HirStatementKind::Block(_)
                         | HirStatementKind::If { .. }
                         | HirStatementKind::For { .. }
+                        | HirStatementKind::ForIn { .. }
                         | HirStatementKind::Loop { .. }
                         | HirStatementKind::Switch { .. }
                         | HirStatementKind::Try { .. }
@@ -454,6 +456,15 @@ fn collect_captured_slots(
                 initializer, body, ..
             } => {
                 if let Some(HirForInitializer::Variable(declaration)) = initializer {
+                    let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                    for declarator in declaration.declarators.iter() {
+                        push_captured_slot(&declarator.binding, mutable, slots)?;
+                    }
+                }
+                collect_captured_slots(core::slice::from_ref(body), slots)?;
+            }
+            HirStatementKind::ForIn { left, body, .. } => {
+                if let HirForInLeft::Variable(declaration) = left {
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                     for declarator in declaration.declarators.iter() {
                         push_captured_slot(&declarator.binding, mutable, slots)?;
@@ -857,6 +868,10 @@ impl Lowerer<'_> {
                 )?;
                 Ok(false)
             }
+            HirStatementKind::ForIn { left, right, body } => {
+                self.entry_for_in_statement(left, right, body, result, statement.span)?;
+                Ok(false)
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -987,6 +1002,30 @@ impl Lowerer<'_> {
         Ok(())
     }
 
+    /// Emits script `for-in` using one managed key snapshot and the existing completion register.
+    fn entry_for_in_statement(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        body: &HirStatement,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (condition, end) = self.for_in_prelude(left, right, span)?;
+        self.break_targets.push(end);
+        self.continue_targets.push(condition);
+        self.entry_statement(body, result)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_in_scope(left, checkpoint);
+        Ok(())
+    }
+
     /// Emits a script while/do-while loop with the condition as the continue destination.
     fn entry_loop_statement(
         &mut self,
@@ -1087,6 +1126,10 @@ impl Lowerer<'_> {
                 )?;
                 Ok(false)
             }
+            HirStatementKind::ForIn { left, right, body } => {
+                self.function_for_in_statement(left, right, body, statement.span)?;
+                Ok(false)
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -1178,6 +1221,182 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)?;
         self.restore_for_scope(initializer, checkpoint);
         Ok(())
+    }
+
+    /// Emits function-body `for-in` without introducing native recursion or iterator host state.
+    fn function_for_in_statement(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        body: &HirStatement,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (condition, end) = self.for_in_prelude(left, right, span)?;
+        self.break_targets.push(end);
+        self.continue_targets.push(condition);
+        self.function_statement(body)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_in_scope(left, checkpoint);
+        Ok(())
+    }
+
+    /// Evaluates the source once, advances the iterator, checks completion, and stores each key.
+    fn for_in_prelude(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<(Label, Label), CompileError> {
+        let source = self.expression(right)?;
+        let iterator = self.register()?;
+        self.emit(
+            Opcode::CreateForInIterator,
+            &[iterator.index(), source.index()],
+            span,
+        )?;
+        self.prepare_for_in_binding(left, span)?;
+        let key = self.register()?;
+        let undefined = self.load_undefined(span)?;
+        let complete = self.register()?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        self.emit(Opcode::ForInNext, &[key.index(), iterator.index()], span)?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[complete.index(), key.index(), undefined.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                complete,
+                end,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        self.store_for_in_left(left, key, span)?;
+        Ok((condition, end))
+    }
+
+    /// Publishes one lexical head binding before its repeated internal initialization.
+    fn prepare_for_in_binding(
+        &mut self,
+        left: &HirForInLeft,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let HirForInLeft::Variable(declaration) = left else {
+            return Ok(());
+        };
+        if declaration.kind == HirVariableDeclarationKind::Var {
+            return Ok(());
+        }
+        let declarator = declaration
+            .declarators
+            .first()
+            .expect("HIR validates one for-in declarator");
+        let initial = self.load_undefined(span)?;
+        self.add_local(
+            &declarator.binding,
+            Some(initial),
+            declaration.kind == HirVariableDeclarationKind::Let,
+        )
+    }
+
+    /// Writes one iterator key into a declaration or re-evaluated assignment reference.
+    fn store_for_in_left(
+        &mut self,
+        left: &HirForInLeft,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        match left {
+            HirForInLeft::Assignment(target) => self.assign_existing_value(target, value, span),
+            HirForInLeft::Variable(declaration) => {
+                let declarator = declaration
+                    .declarators
+                    .first()
+                    .expect("HIR validates one for-in declarator");
+                if let Some(binding) = self.local_by_id(declarator.binding.id).cloned() {
+                    return self.write_local(&binding, value, span);
+                }
+                if self.script_scope && declaration.kind == HirVariableDeclarationKind::Var {
+                    let scope_name = self.global_binding(&declarator.binding.name, true)?;
+                    return self.emit(Opcode::StoreScope, &[value.index(), scope_name], span);
+                }
+                Err(self.unsupported(span, "uninstantiated for-in binding"))
+            }
+        }
+    }
+
+    /// Evaluates a member reference once per iteration and stores an already computed key value.
+    fn assign_existing_value(
+        &mut self,
+        target: &HirAssignmentTarget,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        match target {
+            HirAssignmentTarget::Identifier(target) => {
+                if let Some(binding) = self.local_reference(target).cloned() {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "assignment to immutable local"));
+                    }
+                    return self.write_local(&binding, value, span);
+                }
+                if let Some(binding) = self.captured_reference(target)? {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "assignment to immutable capture"));
+                    }
+                    return self.write_local(&binding, value, span);
+                }
+                self.require_global_reference(target, span)?;
+                let scope_name = self.resolved_global_binding(target, true)?;
+                self.emit(
+                    Opcode::StoreResolvedScope,
+                    &[value.index(), scope_name],
+                    span,
+                )
+            }
+            HirAssignmentTarget::StaticMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::SetById,
+                    &[receiver.index(), value.index(), property],
+                    span,
+                )
+            }
+            HirAssignmentTarget::ComputedMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.expression(property)?;
+                self.emit(
+                    Opcode::SetByValue,
+                    &[receiver.index(), value.index(), property.index()],
+                    span,
+                )
+            }
+        }
+    }
+
+    fn restore_for_in_scope(&mut self, left: &HirForInLeft, checkpoint: usize) {
+        if matches!(
+            left,
+            HirForInLeft::Variable(declaration)
+                if declaration.kind != HirVariableDeclarationKind::Var
+        ) {
+            self.locals.truncate(checkpoint);
+        }
     }
 
     /// Emits an ordinary-function while/do-while loop without entering the Rust call stack.
@@ -2826,6 +3045,14 @@ fn collect_var_declared_bindings(
                 }
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
+            HirStatementKind::ForIn { left, body, .. } => {
+                if let HirForInLeft::Variable(declaration) = left
+                    && declaration.kind == HirVariableDeclarationKind::Var
+                {
+                    push_var_declaration_bindings(declaration, bindings);
+                }
+                collect_var_declared_bindings(core::slice::from_ref(body), bindings);
+            }
             HirStatementKind::Loop { body, .. } => {
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
@@ -2921,7 +3148,9 @@ fn statements_handler_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => {
                 statements_handler_count(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => {
@@ -2982,7 +3211,9 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
                     .unwrap_or(0);
                 consequent.max(alternate)
             }
-            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => {
                 statements_handler_depth(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => {
@@ -3099,6 +3330,16 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 update,
                 body,
             } => for_scope_name_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::ForIn { left, right, body } => {
+                let mut nested = expression_scope_name_count(right)?;
+                nested =
+                    checked_count_add(nested, for_in_left_scope_name_count(left)?, "scope names")?;
+                checked_count_add(
+                    nested,
+                    statements_scope_name_count(core::slice::from_ref(body))?,
+                    "scope names",
+                )?
+            }
             HirStatementKind::Loop { test, body, .. } => checked_count_add(
                 expression_scope_name_count(test)?,
                 statements_scope_name_count(core::slice::from_ref(body))?,
@@ -3177,6 +3418,27 @@ fn declaration_scope_name_count(
         )?;
     }
     Ok(count)
+}
+
+fn for_in_left_scope_name_count(left: &HirForInLeft) -> Result<usize, CompileError> {
+    match left {
+        HirForInLeft::Variable(_) => Ok(1),
+        HirForInLeft::Assignment(target) => assignment_target_scope_name_count(target),
+    }
+}
+
+fn assignment_target_scope_name_count(target: &HirAssignmentTarget) -> Result<usize, CompileError> {
+    match target {
+        HirAssignmentTarget::Identifier(_) => Ok(1),
+        HirAssignmentTarget::StaticMember { object, .. } => {
+            checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
+        }
+        HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+            expression_scope_name_count(object)?,
+            expression_scope_name_count(property)?,
+            "scope names",
+        ),
+    }
 }
 
 /// Counts discriminant, case-test, and clause-body identifiers without flattening case order.
@@ -3351,6 +3613,20 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 update,
                 body,
             } => for_instruction_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::ForIn { left, right, body } => {
+                let mut nested = expression_instruction_count(right)?;
+                nested = checked_count_add(
+                    nested,
+                    for_in_left_instruction_count(left)?,
+                    "bytecode instructions",
+                )?;
+                nested = checked_count_add(
+                    nested,
+                    statements_instruction_count(core::slice::from_ref(body))?,
+                    "bytecode instructions",
+                )?;
+                checked_count_add(nested, 8, "bytecode instructions")?
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -3435,6 +3711,28 @@ fn for_instruction_count(
         "bytecode instructions",
     )?;
     checked_count_add(count, 1, "bytecode instructions")
+}
+
+fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileError> {
+    match left {
+        HirForInLeft::Variable(_) => Ok(1),
+        HirForInLeft::Assignment(HirAssignmentTarget::Identifier(_)) => Ok(1),
+        HirForInLeft::Assignment(HirAssignmentTarget::StaticMember { object, .. }) => {
+            checked_count_add(
+                expression_instruction_count(object)?,
+                1,
+                "bytecode instructions",
+            )
+        }
+        HirForInLeft::Assignment(HirAssignmentTarget::ComputedMember { object, property }) => {
+            let nested = checked_count_add(
+                expression_instruction_count(object)?,
+                expression_instruction_count(property)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(nested, 1, "bytecode instructions")
+        }
+    }
 }
 
 /// Includes dispatch comparisons, conditional branches, fallback jump, and every clause body.
@@ -3741,6 +4039,19 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 update,
                 body,
             } => for_literal_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::ForIn { left, right, body } => {
+                let mut nested = expression_literal_count(right)?;
+                nested = checked_count_add(
+                    nested,
+                    for_in_left_literal_count(left)?,
+                    "bytecode constants",
+                )?;
+                checked_count_add(
+                    nested,
+                    statements_literal_count(core::slice::from_ref(body))?,
+                    "bytecode constants",
+                )?
+            }
             HirStatementKind::Loop { test, body, .. } => checked_count_add(
                 expression_literal_count(test)?,
                 statements_literal_count(core::slice::from_ref(body))?,
@@ -3793,6 +4104,21 @@ fn for_literal_count(
         statements_literal_count(core::slice::from_ref(body))?,
         "bytecode constants",
     )
+}
+
+fn for_in_left_literal_count(left: &HirForInLeft) -> Result<usize, CompileError> {
+    let HirForInLeft::Assignment(target) = left else {
+        return Ok(0);
+    };
+    match target {
+        HirAssignmentTarget::Identifier(_) => Ok(0),
+        HirAssignmentTarget::StaticMember { object, .. } => expression_literal_count(object),
+        HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+            expression_literal_count(object)?,
+            expression_literal_count(property)?,
+            "bytecode constants",
+        ),
+    }
 }
 
 /// Counts constants in both dispatch expressions and source-ordered clause bodies.
@@ -3865,6 +4191,14 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
                 };
                 checked_count_add(
                     initializer,
+                    statements_binding_count(core::slice::from_ref(body))?,
+                    "local bindings",
+                )?
+            }
+            HirStatementKind::ForIn { left, body, .. } => {
+                let head = usize::from(matches!(left, HirForInLeft::Variable(_)));
+                checked_count_add(
+                    head,
                     statements_binding_count(core::slice::from_ref(body))?,
                     "local bindings",
                 )?
@@ -4011,6 +4345,18 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                     "bytecode labels",
                 )?;
             }
+            HirStatementKind::ForIn { left, right, body } => {
+                let mut nested = expression_label_count(right)?;
+                nested =
+                    checked_count_add(nested, for_in_left_label_count(left)?, "bytecode labels")?;
+                nested = checked_count_add(
+                    nested,
+                    statements_label_count(core::slice::from_ref(body))?,
+                    "bytecode labels",
+                )?;
+                count = checked_count_add(count, nested, "bytecode labels")?;
+                count = checked_count_add(count, 2, "bytecode labels")?;
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -4095,6 +4441,21 @@ fn for_label_count(
     )
 }
 
+fn for_in_left_label_count(left: &HirForInLeft) -> Result<usize, CompileError> {
+    let HirForInLeft::Assignment(target) = left else {
+        return Ok(0);
+    };
+    match target {
+        HirAssignmentTarget::Identifier(_) => Ok(0),
+        HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object),
+        HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+            expression_label_count(object)?,
+            expression_label_count(property)?,
+            "bytecode labels",
+        ),
+    }
+}
+
 /// Reserves one label per clause, one shared end label, and every nested expression/body label.
 fn switch_label_count(
     discriminant: &HirExpression,
@@ -4138,7 +4499,9 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => {
                 statements_expression_count(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => switch_expression_count(cases)?,
@@ -4200,13 +4563,13 @@ fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, Compile
                 }
                 count
             }
-            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
-                checked_count_add(
-                    1,
-                    statements_switch_count(core::slice::from_ref(body))?,
-                    "switch control targets",
-                )?
-            }
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => checked_count_add(
+                1,
+                statements_switch_count(core::slice::from_ref(body))?,
+                "switch control targets",
+            )?,
             HirStatementKind::Switch { cases, .. } => {
                 let mut count = 1;
                 for case in cases.iter() {
@@ -4264,13 +4627,13 @@ fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileEr
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
-                checked_count_add(
-                    1,
-                    statements_loop_count(core::slice::from_ref(body))?,
-                    "loop continue targets",
-                )?
-            }
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => checked_count_add(
+                1,
+                statements_loop_count(core::slice::from_ref(body))?,
+                "loop continue targets",
+            )?,
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
                 for case in cases.iter() {

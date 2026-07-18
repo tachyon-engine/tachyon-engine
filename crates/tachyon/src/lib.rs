@@ -1177,6 +1177,80 @@ mod tests {
     }
 
     #[test]
+    /// Covers own/prototype keys, non-enumerable shadowing, and both loop-head forms.
+    fn for_in_enumerates_visible_string_keys() {
+        assert_eq!(
+            execute_source(
+                67,
+                "let score = 0; for (let key in { first: 1, second: 2 }) { if (key === 'first') score += 1; if (key === 'second') score += 10; } score;",
+            )
+            .as_i32(),
+            Some(11)
+        );
+        assert_eq!(
+            execute_source(
+                68,
+                "let proto = { inherited: 1, shadowed: 2 }; let object = Object.create(proto); object.own = 3; Object.defineProperty(object, 'shadowed', { enumerable: false }); let score = 0; for (let key in object) { if (key === 'own') score += 1; if (key === 'inherited') score += 10; if (key === 'shadowed') score += 100; } score;",
+            )
+            .as_i32(),
+            Some(11)
+        );
+        assert_eq!(
+            execute_source(
+                69,
+                "var key; for (key in { declared: 1 }) {} key === 'declared';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                73,
+                "let holder = { value: '' }; for (holder.value in { member: 1 }) {} holder.value === 'member';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                74,
+                "var proto = { prop: 'enumerable' }; var Construct = function () {}; Construct.prototype = proto; var child = new Construct(); Object.defineProperty(child, 'prop', { value: 'hidden', enumerable: false }); var accessed = false; for (var key in child) { if (key === 'prop') accessed = true; } accessed;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::False)
+        );
+    }
+
+    #[test]
+    /// Exercises continue/break destinations plus nullish and string primitive enumeration.
+    fn for_in_preserves_control_flow_and_primitive_boundaries() {
+        assert_eq!(
+            execute_source(
+                70,
+                "let score = 0; for (let key in { first: 1, skip: 2, stop: 3, after: 4 }) { if (key === 'skip') continue; if (key === 'stop') break; score += 1; } score;",
+            )
+            .as_i32(),
+            Some(1)
+        );
+        assert_eq!(
+            execute_source(
+                71,
+                "let count = 0; for (let key in null) count++; for (let key in undefined) count++; for (let key in 'ab') { if (key === '0') count += 1; if (key === '1') count += 10; } count;",
+            )
+            .as_i32(),
+            Some(11)
+        );
+        assert_eq!(
+            execute_source(
+                72,
+                "function count(object) { let result = 0; for (const key in object) { result += 1; } return result; } count({ first: 1, second: 2 });",
+            )
+            .as_i32(),
+            Some(2)
+        );
+    }
+
+    #[test]
     /// Covers pre-test/post-test ordering, continue targets, breaks, and script completion values.
     fn while_and_do_while_preserve_loop_control_and_completion() {
         assert_eq!(

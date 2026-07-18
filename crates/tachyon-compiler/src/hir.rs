@@ -5,8 +5,8 @@ use std::sync::Arc;
 use oxc::{
     ast::ast::{
         ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, ForStatementInit,
-        ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
-        VariableDeclaration, VariableDeclarationKind,
+        ForStatementLeft, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+        SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
     },
     semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::{GetSpan, Span},
@@ -148,6 +148,11 @@ pub enum HirStatementKind {
         update: Option<HirExpression>,
         body: Box<HirStatement>,
     },
+    ForIn {
+        left: HirForInLeft,
+        right: HirExpression,
+        body: Box<HirStatement>,
+    },
     Loop {
         test: HirExpression,
         body: Box<HirStatement>,
@@ -173,6 +178,12 @@ pub enum HirStatementKind {
 pub enum HirForInitializer {
     Variable(HirVariableDeclaration),
     Expression(HirExpression),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirForInLeft {
+    Variable(HirVariableDeclaration),
+    Assignment(HirAssignmentTarget),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -551,6 +562,9 @@ fn lower_statement(
         Statement::ForStatement(statement) => {
             lower_for_statement(statement, source, semantic, functions, context)
         }
+        Statement::ForInStatement(statement) => {
+            lower_for_in_statement(statement, source, semantic, functions, context)
+        }
         Statement::WhileStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
@@ -634,6 +648,58 @@ fn lower_statement(
             "statement",
         )),
     }
+}
+
+/// Owns one for-in target while rejecting initializers and destructuring until iteration envs land.
+fn lower_for_in_statement(
+    statement: &oxc::ast::ast::ForInStatement<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+    context: StatementContext,
+) -> Result<HirStatement, CompileError> {
+    let left = match &statement.left {
+        ForStatementLeft::VariableDeclaration(declaration) => {
+            let declaration = lower_variable_declaration(declaration, source, semantic, functions)?;
+            if declaration.declarators.len() != 1
+                || declaration.declarators[0].initializer.is_some()
+            {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(statement.left.span()),
+                    "for-in declaration",
+                ));
+            }
+            HirForInLeft::Variable(declaration)
+        }
+        left => {
+            let target = left.as_assignment_target().ok_or_else(|| {
+                unsupported(
+                    source.name(),
+                    source_span(statement.left.span()),
+                    "for-in assignment target",
+                )
+            })?;
+            HirForInLeft::Assignment(lower_assignment_target(
+                target, source, semantic, functions,
+            )?)
+        }
+    };
+    Ok(HirStatement {
+        span: source_span(statement.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::ForIn {
+            left,
+            right: lower_expression(&statement.right, source, semantic, functions)?,
+            body: Box::new(lower_statement(
+                &statement.body,
+                source,
+                semantic,
+                functions,
+                context.nested(),
+            )?),
+        },
+    })
 }
 
 /// Owns a classic for-loop without collapsing its update target or continue destination.

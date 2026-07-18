@@ -191,6 +191,10 @@ pub enum Opcode {
     DeleteById = 64,
     DeleteByValue = 65,
     CreateArray = 66,
+    /// Snapshots enumerable string keys into one internal iterator object.
+    CreateForInIterator = 67,
+    /// Returns the next string key or undefined when the internal iterator is exhausted.
+    ForInNext = 68,
 }
 
 impl Opcode {
@@ -220,7 +224,11 @@ impl Opcode {
             | Self::StoreResolvedScope
             | Self::DeclareGlobalLexical
             | Self::InitializeGlobalLexical => 2,
-            Self::Typeof | Self::ToNumber | Self::BitwiseNot => 2,
+            Self::Typeof
+            | Self::ToNumber
+            | Self::BitwiseNot
+            | Self::CreateForInIterator
+            | Self::ForInNext => 2,
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -341,6 +349,8 @@ impl Opcode {
             0 => Some(Self::DeleteById),
             1 => Some(Self::DeleteByValue),
             2 => Some(Self::CreateArray),
+            3 => Some(Self::CreateForInIterator),
+            4 => Some(Self::ForInNext),
             _ => None,
         }
     }
@@ -917,7 +927,9 @@ impl BytecodeBuilder {
             | Opcode::Typeof
             | Opcode::ToNumber
             | Opcode::BitwiseNot
-            | Opcode::TypeofScope => &[0, 1],
+            | Opcode::TypeofScope
+            | Opcode::CreateForInIterator
+            | Opcode::ForInNext => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1918,7 +1930,9 @@ fn verify_instruction(
         | Opcode::Typeof
         | Opcode::ToNumber
         | Opcode::BitwiseNot
-        | Opcode::TypeofScope => {
+        | Opcode::TypeofScope
+        | Opcode::CreateForInIterator
+        | Opcode::ForInNext => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
@@ -2135,6 +2149,13 @@ mod tests {
         assert_eq!(decoded.opcode, Opcode::CreateArray);
         assert_eq!(decoded.operand(0), Some(u32::MAX));
         assert_eq!(decoded.word_len, 2);
+
+        for opcode in [Opcode::CreateForInIterator, Opcode::ForInNext] {
+            let words = encode_instruction(opcode, &[17, 23]).unwrap();
+            let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+            assert_eq!(decoded.opcode, opcode);
+            assert_eq!(decoded.operands, [17, 23, 0]);
+        }
     }
     #[test]
     fn verifier_rejects_operand_word_jump_target() {

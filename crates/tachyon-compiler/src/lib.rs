@@ -752,6 +752,59 @@ mod tests {
     }
 
     #[test]
+    /// Owns declaration and assignment heads after Oxc's arena is dropped.
+    fn hir_owns_for_in_heads_and_body() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "let target; for (const key in { first: 1 }) { target = key; } for (target in {}) {}",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [_, declaration_loop, assignment_loop] = hir.statements() else {
+            panic!("expected declaration and two for-in statements");
+        };
+        assert!(matches!(
+            declaration_loop.kind,
+            HirStatementKind::ForIn {
+                left: crate::hir::HirForInLeft::Variable(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            assignment_loop.kind,
+            HirStatementKind::ForIn {
+                left: crate::hir::HirForInLeft::Assignment(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compiler_emits_verified_for_in_iterator_bytecode() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "let result; for (let key in { first: 1 }) { result = key; } result;",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("CreateForInIterator"));
+        assert!(disassembly.contains("ForInNext"));
+        assert!(disassembly.contains("JumpIfTrue"));
+    }
+
+    #[test]
     /// Owns ordinary object data properties and rejects descriptor-bearing syntax at the boundary.
     fn hir_owns_plain_object_literal_properties() {
         let hir = Compiler

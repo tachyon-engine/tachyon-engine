@@ -11,6 +11,7 @@
 
 mod atom;
 mod finalization;
+mod for_in;
 mod object;
 mod string;
 mod tuning;
@@ -38,6 +39,7 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
+use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 use object::{
     OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId, ShapeTable,
 };
@@ -187,6 +189,8 @@ pub enum ExecutionError {
     IntrinsicBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
+    ForInKeyAllocationFailed,
+    InvalidForInIterator(Value),
     UnsupportedErrorMessage(Value),
     UnsupportedDynamicFunctionConstructor,
     NonExtensibleObject(Value),
@@ -459,6 +463,7 @@ impl Trace for FunctionObject {
 #[derive(Clone, Copy)]
 struct VmTypes {
     environment: GcType<Environment>,
+    for_in_iterator: GcType<ForInIterator>,
     function: GcType<FunctionObject>,
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
@@ -1240,6 +1245,9 @@ impl Isolate {
             environment: registry
                 .try_register("Environment")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            for_in_iterator: registry
+                .try_register("ForInIterator")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1355,7 +1363,7 @@ impl Isolate {
         self.realm.object_constructor = Some(constructor);
         self.set_function_prototype(constructor, object_prototype)?;
         let constructor_atom = self.constructor_atom()?;
-        self.set_own_data_property(object_prototype, constructor_atom, constructor)?;
+        self.set_intrinsic_data_property(object_prototype, constructor_atom, constructor, true)?;
         let define_property = self.allocate_native_function(
             NativeFunction::ObjectDefineProperty,
             OrdinaryObject {
@@ -1367,7 +1375,7 @@ impl Isolate {
         )?;
         self.realm.object_define_property = Some(define_property);
         let define_atom = self.intern_intrinsic_name(b"defineProperty")?;
-        self.set_own_data_property(constructor, define_atom, define_property)?;
+        self.set_intrinsic_data_property(constructor, define_atom, define_property, true)?;
         let get_own_property_descriptor = self.allocate_native_function(
             NativeFunction::ObjectGetOwnPropertyDescriptor,
             OrdinaryObject {
@@ -1379,10 +1387,11 @@ impl Isolate {
         )?;
         self.realm.object_get_own_property_descriptor = Some(get_own_property_descriptor);
         let get_own_descriptor_atom = self.intern_intrinsic_name(b"getOwnPropertyDescriptor")?;
-        self.set_own_data_property(
+        self.set_intrinsic_data_property(
             constructor,
             get_own_descriptor_atom,
             get_own_property_descriptor,
+            true,
         )?;
         let has_own_property = self.allocate_native_function(
             NativeFunction::ObjectHasOwnProperty,
@@ -1395,7 +1404,7 @@ impl Isolate {
         )?;
         self.realm.object_has_own_property = Some(has_own_property);
         let has_own_atom = self.intern_intrinsic_name(b"hasOwnProperty")?;
-        self.set_own_data_property(object_prototype, has_own_atom, has_own_property)?;
+        self.set_intrinsic_data_property(object_prototype, has_own_atom, has_own_property, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ObjectToString,
             OrdinaryObject {
@@ -1407,7 +1416,7 @@ impl Isolate {
         )?;
         self.realm.object_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
-        self.set_own_data_property(object_prototype, to_string_atom, to_string)?;
+        self.set_intrinsic_data_property(object_prototype, to_string_atom, to_string, true)?;
         let assign = self.allocate_native_function(
             NativeFunction::ObjectAssign,
             OrdinaryObject {
@@ -1419,7 +1428,7 @@ impl Isolate {
         )?;
         self.realm.object_assign = Some(assign);
         let assign_atom = self.intern_intrinsic_name(b"assign")?;
-        self.set_own_data_property(constructor, assign_atom, assign)?;
+        self.set_intrinsic_data_property(constructor, assign_atom, assign, true)?;
         let keys = self.allocate_native_function(
             NativeFunction::ObjectKeys,
             OrdinaryObject {
@@ -1431,7 +1440,7 @@ impl Isolate {
         )?;
         self.realm.object_keys = Some(keys);
         let keys_atom = self.intern_intrinsic_name(b"keys")?;
-        self.set_own_data_property(constructor, keys_atom, keys)?;
+        self.set_intrinsic_data_property(constructor, keys_atom, keys, true)?;
         let values = self.allocate_native_function(
             NativeFunction::ObjectValues,
             OrdinaryObject {
@@ -1443,7 +1452,7 @@ impl Isolate {
         )?;
         self.realm.object_values = Some(values);
         let values_atom = self.intern_intrinsic_name(b"values")?;
-        self.set_own_data_property(constructor, values_atom, values)?;
+        self.set_intrinsic_data_property(constructor, values_atom, values, true)?;
         let entries = self.allocate_native_function(
             NativeFunction::ObjectEntries,
             OrdinaryObject {
@@ -1455,7 +1464,7 @@ impl Isolate {
         )?;
         self.realm.object_entries = Some(entries);
         let entries_atom = self.intern_intrinsic_name(b"entries")?;
-        self.set_own_data_property(constructor, entries_atom, entries)?;
+        self.set_intrinsic_data_property(constructor, entries_atom, entries, true)?;
         let has_own = self.allocate_native_function(
             NativeFunction::ObjectHasOwn,
             OrdinaryObject {
@@ -1467,7 +1476,7 @@ impl Isolate {
         )?;
         self.realm.object_has_own = Some(has_own);
         let has_own_atom = self.intern_intrinsic_name(b"hasOwn")?;
-        self.set_own_data_property(constructor, has_own_atom, has_own)?;
+        self.set_intrinsic_data_property(constructor, has_own_atom, has_own, true)?;
         let object_is = self.allocate_native_function(
             NativeFunction::ObjectIs,
             OrdinaryObject {
@@ -1479,7 +1488,7 @@ impl Isolate {
         )?;
         self.realm.object_is = Some(object_is);
         let is_atom = self.intern_intrinsic_name(b"is")?;
-        self.set_own_data_property(constructor, is_atom, object_is)?;
+        self.set_intrinsic_data_property(constructor, is_atom, object_is, true)?;
         let get_prototype_of = self.allocate_native_function(
             NativeFunction::ObjectGetPrototypeOf,
             OrdinaryObject {
@@ -1491,7 +1500,7 @@ impl Isolate {
         )?;
         self.realm.object_get_prototype_of = Some(get_prototype_of);
         let get_prototype_atom = self.intern_intrinsic_name(b"getPrototypeOf")?;
-        self.set_own_data_property(constructor, get_prototype_atom, get_prototype_of)?;
+        self.set_intrinsic_data_property(constructor, get_prototype_atom, get_prototype_of, true)?;
         let create = self.allocate_native_function(
             NativeFunction::ObjectCreate,
             OrdinaryObject {
@@ -1503,7 +1512,7 @@ impl Isolate {
         )?;
         self.realm.object_create = Some(create);
         let create_atom = self.intern_intrinsic_name(b"create")?;
-        self.set_own_data_property(constructor, create_atom, create)?;
+        self.set_intrinsic_data_property(constructor, create_atom, create, true)?;
         let is_prototype_of = self.allocate_native_function(
             NativeFunction::ObjectIsPrototypeOf,
             OrdinaryObject {
@@ -1515,7 +1524,12 @@ impl Isolate {
         )?;
         self.realm.object_is_prototype_of = Some(is_prototype_of);
         let is_prototype_atom = self.intern_intrinsic_name(b"isPrototypeOf")?;
-        self.set_own_data_property(object_prototype, is_prototype_atom, is_prototype_of)?;
+        self.set_intrinsic_data_property(
+            object_prototype,
+            is_prototype_atom,
+            is_prototype_of,
+            true,
+        )?;
         let is_extensible = self.allocate_native_function(
             NativeFunction::ObjectIsExtensible,
             OrdinaryObject {
@@ -1527,7 +1541,7 @@ impl Isolate {
         )?;
         self.realm.object_is_extensible = Some(is_extensible);
         let is_extensible_atom = self.intern_intrinsic_name(b"isExtensible")?;
-        self.set_own_data_property(constructor, is_extensible_atom, is_extensible)?;
+        self.set_intrinsic_data_property(constructor, is_extensible_atom, is_extensible, true)?;
         let prevent_extensions = self.allocate_native_function(
             NativeFunction::ObjectPreventExtensions,
             OrdinaryObject {
@@ -1539,7 +1553,12 @@ impl Isolate {
         )?;
         self.realm.object_prevent_extensions = Some(prevent_extensions);
         let prevent_extensions_atom = self.intern_intrinsic_name(b"preventExtensions")?;
-        self.set_own_data_property(constructor, prevent_extensions_atom, prevent_extensions)
+        self.set_intrinsic_data_property(
+            constructor,
+            prevent_extensions_atom,
+            prevent_extensions,
+            true,
+        )
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1584,7 +1603,11 @@ impl Isolate {
         self.realm.function_prototype_call = Some(call);
         let shape = self
             .shapes
-            .transition_add(ShapeId::EMPTY, call_atom, PropertyAttributes::DEFAULT_DATA)
+            .transition_add(
+                ShapeId::EMPTY,
+                call_atom,
+                PropertyAttributes::data(true, false, true),
+            )
             .map_err(ExecutionError::Shape)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
@@ -1627,7 +1650,7 @@ impl Isolate {
         self.realm.function_constructor = Some(constructor);
         self.set_function_prototype(constructor, function_prototype)?;
         let constructor_atom = self.constructor_atom()?;
-        self.set_own_data_property(function_prototype, constructor_atom, constructor)
+        self.set_intrinsic_data_property(function_prototype, constructor_atom, constructor, true)
     }
 
     /// Interns every mandatory global name before reserving the dense atom-indexed binding table.
@@ -1688,7 +1711,7 @@ impl Isolate {
             )?;
             self.realm.error_intrinsics.get_mut(kind).constructor = Some(constructor);
             self.set_function_prototype(constructor, prototype)?;
-            self.set_own_data_property(prototype, constructor_atom, constructor)?;
+            self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
         }
         Ok(())
     }
@@ -1721,9 +1744,9 @@ impl Isolate {
         self.realm.array_constructor = Some(constructor);
         self.set_function_prototype(constructor, prototype)?;
         let constructor_atom = self.constructor_atom()?;
-        self.set_own_data_property(prototype, constructor_atom, constructor)?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
-        self.set_own_data_property(prototype, length_atom, Value::from_i32(0))?;
+        self.set_intrinsic_data_property(prototype, length_atom, Value::from_i32(0), false)?;
         let concat = self.allocate_native_function(
             NativeFunction::ArrayConcat,
             OrdinaryObject {
@@ -1735,7 +1758,7 @@ impl Isolate {
         )?;
         self.realm.array_concat = Some(concat);
         let concat_atom = self.intern_intrinsic_name(b"concat")?;
-        self.set_own_data_property(prototype, concat_atom, concat)?;
+        self.set_intrinsic_data_property(prototype, concat_atom, concat, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -1747,7 +1770,7 @@ impl Isolate {
         )?;
         self.realm.array_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
-        self.set_own_data_property(prototype, to_string_atom, to_string)
+        self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.
@@ -2477,6 +2500,26 @@ impl Isolate {
         })
     }
 
+    /// Defines one spec-facing intrinsic field with non-enumerable builtin attributes.
+    fn set_intrinsic_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        value: Value,
+        configurable: bool,
+    ) -> Result<(), ExecutionError> {
+        self.define_data_property(
+            receiver,
+            key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(configurable),
+            },
+        )
+    }
+
     /// Implements ValidateAndApplyPropertyDescriptor for ordinary data properties.
     fn define_data_property(
         &mut self,
@@ -2728,6 +2771,176 @@ impl Isolate {
         let length = self.intern_intrinsic_name(b"length")?;
         self.set_own_data_property(result, length, Value::from_i32(output_index))?;
         Ok(result)
+    }
+
+    /// Snapshots the currently visible enumerable string keys into one managed iterator payload.
+    fn create_for_in_iterator(&mut self, source: Value) -> Result<Value, ExecutionError> {
+        let keys = self.for_in_keys(source)?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.for_in_iterator,
+                0,
+                ForInIterator::new(keys),
+                AllocationSpace::Young,
+                roots,
+            )
+            .map(|iterator| Value::from_heap_ref(iterator.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Applies ordinary `for-in` shadowing: every present own key suppresses prototypes.
+    fn for_in_keys(&mut self, source: Value) -> Result<Box<[AtomId]>, ExecutionError> {
+        if matches!(
+            source.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Ok(Box::default());
+        }
+        if let Some(raw) = source.as_heap_ref()
+            && let Ok(string) = self.heap.checked_reference(raw, self.types.string)
+        {
+            return self.for_in_string_keys(string);
+        }
+        if !self.is_object_value(source) {
+            return Ok(Box::default());
+        }
+        let upper_bound = self.for_in_object_key_upper_bound(source)?;
+        let mut keys = ForInKeySet::with_upper_bound(upper_bound)
+            .map_err(|_: ForInAllocationError| ExecutionError::ForInKeyAllocationFailed)?;
+        let mut current = source;
+        loop {
+            self.insert_for_in_virtual_function_keys(current, &mut keys)?;
+            let (_, snapshot) = self.object_snapshot(current)?;
+            for key in self
+                .shapes
+                .own_keys(snapshot.shape)
+                .map_err(ExecutionError::Shape)?
+            {
+                let property = self
+                    .shapes
+                    .lookup(snapshot.shape, key)
+                    .expect("own key resolves in its source shape");
+                if self
+                    .property_value_from_snapshot(snapshot, property)?
+                    .is_some()
+                    && keys.insert(key)
+                    && property.attributes.enumerable()
+                {
+                    keys.push_enumerable(key);
+                }
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                break;
+            }
+            if !self.is_object_value(snapshot.prototype) {
+                return Err(ExecutionError::NotObject(snapshot.prototype));
+            }
+            current = snapshot.prototype;
+        }
+        Ok(keys.finish())
+    }
+
+    /// Counts shape and virtual function keys before collection so snapshot vectors never grow.
+    fn for_in_object_key_upper_bound(&mut self, source: Value) -> Result<usize, ExecutionError> {
+        let mut count = 0_usize;
+        let mut current = source;
+        loop {
+            let virtual_count = match self.resolve_function_object(current) {
+                Ok(function) => {
+                    1 + usize::from(matches!(function.executable, FunctionExecutable::Native(_)))
+                        * 2
+                }
+                Err(_) => 0,
+            };
+            let (_, snapshot) = self.object_snapshot(current)?;
+            count = count
+                .checked_add(virtual_count)
+                .and_then(|count| {
+                    usize::try_from(self.shapes.property_count(snapshot.shape))
+                        .ok()
+                        .and_then(|properties| count.checked_add(properties))
+                })
+                .ok_or(ExecutionError::ForInKeyAllocationFailed)?;
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(count);
+            }
+            if !self.is_object_value(snapshot.prototype) {
+                return Err(ExecutionError::NotObject(snapshot.prototype));
+            }
+            current = snapshot.prototype;
+        }
+    }
+
+    /// Adds non-enumerable virtual function fields to the shadow set without materializing values.
+    fn insert_for_in_virtual_function_keys(
+        &mut self,
+        receiver: Value,
+        keys: &mut ForInKeySet,
+    ) -> Result<(), ExecutionError> {
+        let Ok(function) = self.resolve_function_object(receiver) else {
+            return Ok(());
+        };
+        keys.insert(self.prototype_atom()?);
+        if matches!(function.executable, FunctionExecutable::Native(_)) {
+            keys.insert(self.name_atom()?);
+            keys.insert(self.length_atom()?);
+        }
+        Ok(())
+    }
+
+    /// Enumerates primitive string indices without retaining copies of their character values.
+    fn for_in_string_keys(
+        &mut self,
+        string: GcRef<JsString>,
+    ) -> Result<Box<[AtomId]>, ExecutionError> {
+        let length = self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(string, self.types.string)
+                    .map(|string| string.len())
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(length)
+            .map_err(|_| ExecutionError::ForInKeyAllocationFailed)?;
+        for index in 0..length {
+            let index =
+                i32::try_from(index).map_err(|_| ExecutionError::ForInKeyAllocationFailed)?;
+            keys.push(self.property_key_atom(Value::from_i32(index))?);
+        }
+        Ok(keys.into_boxed_slice())
+    }
+
+    /// Advances one verified internal iterator and materializes only the returned atom string.
+    fn for_in_next(&mut self, iterator: Value) -> Result<Value, ExecutionError> {
+        let raw = iterator
+            .as_heap_ref()
+            .ok_or(ExecutionError::InvalidForInIterator(iterator))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.for_in_iterator)
+            .map_err(|_| ExecutionError::InvalidForInIterator(iterator))?;
+        let key = self.heap.with_running_scope(|scope| {
+            let iterator = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(iterator, self.types.for_in_iterator)
+                    .map(ForInIterator::next)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        key.map_or_else(
+            || Ok(Value::from_immediate(Immediate::Undefined)),
+            |key| self.atom_string_value(key),
+        )
     }
 
     /// Enumerates the virtual indexed properties exposed by one primitive string.
@@ -4285,6 +4498,16 @@ impl Isolate {
                     .expect("Array prototype initializes before array literals");
                 let object = self.create_ordinary_object_with_prototype(prototype)?;
                 self.write(base, operands[0], object)?;
+            }
+            Opcode::CreateForInIterator => {
+                let source = self.read(base, operands[1])?;
+                let iterator = self.create_for_in_iterator(source)?;
+                self.write(base, operands[0], iterator)?;
+            }
+            Opcode::ForInNext => {
+                let iterator = self.read(base, operands[1])?;
+                let value = self.for_in_next(iterator)?;
+                self.write(base, operands[0], value)?;
             }
             Opcode::LoadException => {
                 let value = self
@@ -6392,6 +6615,19 @@ mod tests {
         }
     }
 
+    fn assert_for_in_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &for_in_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
+
     fn assert_method_receiver_batch<const N: usize>() {
         let mut isolate = test_isolate();
         let outcome = isolate
@@ -6810,6 +7046,33 @@ mod tests {
         assert_backedge_batch::<4>();
         assert_backedge_batch::<8>();
         assert_backedge_batch::<16>();
+    }
+
+    #[test]
+    fn for_in_iterator_loop_is_stable_for_every_dispatch_batch() {
+        assert_for_in_batch::<1>();
+        assert_for_in_batch::<2>();
+        assert_for_in_batch::<4>();
+        assert_for_in_batch::<8>();
+        assert_for_in_batch::<16>();
+    }
+
+    #[test]
+    fn for_in_iterator_and_returned_keys_survive_forced_major() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &for_in_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
     }
 
     #[test]
@@ -7583,6 +7846,40 @@ mod tests {
         builder.bind_label(end).unwrap();
         builder.emit(Opcode::Return, &[0], span).unwrap();
         single_function_module("backedge", Vec::new(), builder)
+    }
+
+    /// Builds two numeric own properties and counts the complete managed iterator snapshot.
+    fn for_in_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(24, 2);
+        let condition = builder.new_label().unwrap();
+        let end = builder.new_label().unwrap();
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 10], span).unwrap();
+        builder.emit(Opcode::SetByValue, &[0, 2, 1], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[3, 1], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[4, 20], span).unwrap();
+        builder.emit(Opcode::SetByValue, &[0, 4, 3], span).unwrap();
+        builder
+            .emit(Opcode::CreateForInIterator, &[5, 0], span)
+            .unwrap();
+        builder.emit(Opcode::LoadUndefined, &[6], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[7, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[8, 1], span).unwrap();
+        builder.bind_label(condition).unwrap();
+        builder.emit(Opcode::ForInNext, &[9, 5], span).unwrap();
+        builder
+            .emit(Opcode::StrictEqual, &[10, 9, 6], span)
+            .unwrap();
+        builder
+            .emit_jump_if_true(RegisterId::new(10), end, span)
+            .unwrap();
+        builder.emit(Opcode::Add, &[7, 7, 8], span).unwrap();
+        builder.emit_jump(condition, span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[7], span).unwrap();
+        single_function_module("for-in", Vec::new(), builder)
     }
 
     /// Builds one operand-preserving short-circuit branch around a right-hand integer load.
