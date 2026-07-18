@@ -24,12 +24,12 @@ pub use finalization::{
 pub use object::ShapeError;
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
 
-use core::{cell::Cell, num::NonZeroU32};
+use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
-    BindingLocation, BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout,
-    FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset,
-    decode_instruction,
+    BindingLocation, BytecodeConstant, CompiledModule, DecodeError, DecodedInstruction, FunctionId,
+    FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode,
+    RegisterId, WordOffset, decode_instruction,
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
@@ -432,6 +432,39 @@ struct LoadedCode {
     module: CompiledModule,
     scope_resolutions: Box<[ScopeResolution]>,
     constant_values: Box<[Option<Value>]>,
+}
+
+/// A batch-local view into verified immutable bytecode retained by the active `LoadedCode` module.
+#[derive(Clone, Copy)]
+struct BytecodeCursor {
+    words: NonNull<u32>,
+    word_count: usize,
+}
+
+impl BytecodeCursor {
+    /// Captures stable `Arc<[u32]>` backing without incrementing its reference count per batch.
+    fn new(words: &[u32]) -> Self {
+        debug_assert!(
+            !words.is_empty(),
+            "verified functions contain a terminal opcode"
+        );
+        Self {
+            words: NonNull::new(words.as_ptr().cast_mut())
+                .expect("slice pointers are non-null even for empty slices"),
+            word_count: words.len(),
+        }
+    }
+
+    /// Decodes while the dispatch owner retains the immutable module which owns this allocation.
+    #[inline(always)]
+    fn decode(self, offset: WordOffset) -> Result<DecodedInstruction, DecodeError> {
+        // SAFETY: `execute_batch` creates the cursor from the active `LoadedCode` module. Loaded
+        // modules are append-only and `CompiledModule` owns the words through an immutable Arc, so
+        // dispatch may mutate isolate state or grow the loaded-code Vec without moving/freeing this
+        // backing. Frame identity is checked before every decode and the cursor never escapes a batch.
+        let words = unsafe { core::slice::from_raw_parts(self.words.as_ptr(), self.word_count) };
+        decode_instruction(words, offset)
+    }
 }
 
 impl Trace for LoadedCode {
@@ -2184,6 +2217,19 @@ impl Isolate {
         &mut self,
         budget: &mut ExecutionBudget,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let cached_frame = *self
+            .fiber
+            .frames
+            .last()
+            .expect("entry frame exists while executing");
+        let bytecode = self
+            .loaded_code(cached_frame.code)?
+            .module
+            .function(cached_frame.function)
+            .ok_or(ExecutionError::MissingEntryFunction(cached_frame.function))?
+            .bytecode()
+            .bytecode();
+        let cursor = BytecodeCursor::new(bytecode.words());
         for _ in 0..N {
             if budget.fuel == 0 || budget.quantum == 0 {
                 return Ok(Some(RunOutcome::BudgetExhausted));
@@ -2193,12 +2239,11 @@ impl Isolate {
                 .frames
                 .last()
                 .expect("entry frame exists while executing");
-            let function = self
-                .loaded_code(frame.code)?
-                .module
-                .function(frame.function)
-                .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
-            let instruction = decode_instruction(function.bytecode().bytecode().words(), frame.pc)
+            if frame.code != cached_frame.code || frame.function != cached_frame.function {
+                return Ok(None);
+            }
+            let instruction = cursor
+                .decode(frame.pc)
                 .map_err(|_| ExecutionError::DecodeInvariant(frame.pc))?;
             let next_pc = WordOffset::new(frame.pc.index() + u32::from(instruction.word_len));
             self.fiber
@@ -4346,6 +4391,26 @@ mod tests {
             isolate.realm.get_slot(slot).and_then(Value::as_i32),
             Some(7)
         );
+    }
+
+    #[test]
+    /// Pins the cursor's unsafe backing invariant across owner moves and Vec reallocations.
+    fn bytecode_cursor_survives_owner_and_container_moves() {
+        let module = arithmetic_module();
+        let words = module
+            .function(module.entry_function())
+            .unwrap()
+            .bytecode()
+            .bytecode()
+            .words();
+        let cursor = BytecodeCursor::new(words);
+        let mut owners = Vec::with_capacity(1);
+        owners.push(module);
+        owners.extend((0..32).map(|_| arithmetic_module()));
+
+        let instruction = cursor.decode(WordOffset::new(0)).unwrap();
+        assert_eq!(instruction.opcode, Opcode::LoadImmediate);
+        assert_eq!(owners.len(), 33);
     }
 
     #[test]
