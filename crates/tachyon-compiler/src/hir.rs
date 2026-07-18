@@ -300,6 +300,7 @@ pub enum HirExpressionKind {
     This,
     NewTarget,
     Object(Arc<[HirObjectProperty]>),
+    Array(Arc<[HirObjectProperty]>),
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -1062,7 +1063,7 @@ fn lower_expression(
                     kind: HirExpressionKind::Number((array.elements.len() as f64).to_bits()),
                 },
             });
-            HirExpressionKind::Object(properties.into())
+            HirExpressionKind::Array(properties.into())
         }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());

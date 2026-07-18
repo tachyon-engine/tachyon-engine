@@ -68,9 +68,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             write!(output, " scope={}, mutable={}", operands[0], operands[1])?
         }
         Opcode::LoadUndefined => write!(output, " r{}", operands[0])?,
-        Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
-            write!(output, " r{}", operands[0])?
-        }
+        Opcode::CreateObject
+        | Opcode::CreateArray
+        | Opcode::LoadException
+        | Opcode::LoadThis
+        | Opcode::LoadNewTarget => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,

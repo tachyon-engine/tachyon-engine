@@ -1414,6 +1414,49 @@ mod tests {
             Some(42)
         );
         assert_eq!(execute_source(116, "[1, , 3].length;").as_i32(), Some(3));
+        assert_eq!(
+            execute_source(117, "[1, , 3] instanceof Array;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                118,
+                "let value = []; value.toString === Array.prototype.toString;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    /// Verifies native Array call/construct paths, indexed storage, length, and concat flattening.
+    #[test]
+    fn native_array_constructor_and_concat_preserve_elements() {
+        assert_eq!(
+            execute_source(
+                60,
+                "let values = new Array('Saab', 'Volvo'); values.concat(['BMW'])[2] === 'BMW';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(61, "let values = Array('a', 'b'); values.length;").as_i32(),
+            Some(2)
+        );
+        assert_eq!(execute_source(62, "new Array(3).length;").as_i32(), Some(3));
+        assert_eq!(
+            execute_source(64, "[1, 'two', null, true].toString() === '1,two,,true';")
+                .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                63,
+                "let item = { '0': 9, length: 1 }; let joined = [1].concat(2, item); joined[1] === 2 && joined[2] === item && joined.length === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]

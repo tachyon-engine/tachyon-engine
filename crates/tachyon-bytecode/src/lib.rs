@@ -190,6 +190,7 @@ pub enum Opcode {
     TypeofScope = 63,
     DeleteById = 64,
     DeleteByValue = 65,
+    CreateArray = 66,
 }
 
 impl Opcode {
@@ -248,7 +249,11 @@ impl Opcode {
             Self::LooseEqual | Self::LooseNotEqual | Self::HasProperty => 3,
             Self::TypeofScope => 2,
             Self::DeleteById | Self::DeleteByValue => 3,
-            Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
+            Self::CreateObject
+            | Self::CreateArray
+            | Self::LoadException
+            | Self::LoadThis
+            | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
     }
@@ -335,6 +340,7 @@ impl Opcode {
         match base {
             0 => Some(Self::DeleteById),
             1 => Some(Self::DeleteByValue),
+            2 => Some(Self::CreateArray),
             _ => None,
         }
     }
@@ -901,6 +907,7 @@ impl BytecodeBuilder {
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject
+            | Opcode::CreateArray
             | Opcode::LoadException
             | Opcode::LoadThis
             | Opcode::LoadNewTarget => &[0],
@@ -1897,9 +1904,11 @@ fn verify_instruction(
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
-        Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
-            check_register(operands[0])?
-        }
+        Opcode::CreateObject
+        | Opcode::CreateArray
+        | Opcode::LoadException
+        | Opcode::LoadThis
+        | Opcode::LoadNewTarget => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -2120,6 +2129,12 @@ mod tests {
         assert_eq!(decoded.opcode, Opcode::DeleteById);
         assert_eq!(decoded.operands, [7, 8, 9]);
         assert_eq!(decoded.word_len, 4);
+
+        let words = encode_instruction(Opcode::CreateArray, &[u32::MAX]).unwrap();
+        let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        assert_eq!(decoded.opcode, Opcode::CreateArray);
+        assert_eq!(decoded.operand(0), Some(u32::MAX));
+        assert_eq!(decoded.word_len, 2);
     }
     #[test]
     fn verifier_rejects_operand_word_jump_target() {

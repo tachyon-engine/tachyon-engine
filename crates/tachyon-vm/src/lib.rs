@@ -222,6 +222,9 @@ enum NativeFunction {
     FunctionPrototype,
     FunctionPrototypeCall,
     ErrorConstructor(NativeErrorKind),
+    ArrayConstructor,
+    ArrayConcat,
+    ArrayToString,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -373,10 +376,11 @@ struct RealmIntrinsicAtoms {
     nan: AtomId,
     infinity: AtomId,
     errors: [AtomId; NativeErrorKind::ALL.len()],
+    array: AtomId,
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 3 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 4 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -560,6 +564,10 @@ struct Realm {
     global_object: Option<Value>,
     function_prototype: Option<Value>,
     function_prototype_call: Option<Value>,
+    array_constructor: Option<Value>,
+    array_prototype: Option<Value>,
+    array_concat: Option<Value>,
+    array_to_string: Option<Value>,
     error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
@@ -577,6 +585,10 @@ impl Realm {
             global_object: None,
             function_prototype: None,
             function_prototype_call: None,
+            array_constructor: None,
+            array_prototype: None,
+            array_concat: None,
+            array_to_string: None,
             error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
@@ -821,6 +833,10 @@ impl Trace for Realm {
         self.global_object.trace(tracer);
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
+        self.array_constructor.trace(tracer);
+        self.array_prototype.trace(tracer);
+        self.array_concat.trace(tracer);
+        self.array_to_string.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
@@ -1131,6 +1147,7 @@ impl Isolate {
         self.initialize_function_intrinsics()?;
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
+        self.initialize_array_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -1192,6 +1209,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"SyntaxError")?,
                 self.intern_intrinsic_name(b"TypeError")?,
             ],
+            array: self.intern_intrinsic_name(b"Array")?,
         })
     }
 
@@ -1233,6 +1251,56 @@ impl Isolate {
         Ok(())
     }
 
+    /// Builds the ordinary Array constructor/prototype pair and its first indexed method.
+    fn initialize_array_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before Array intrinsics");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            storage: None,
+            prototype: Value::from_immediate(Immediate::Null),
+        })?;
+        self.realm.array_prototype = Some(prototype);
+        let constructor = self.allocate_native_function(
+            NativeFunction::ArrayConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_constructor = Some(constructor);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_own_data_property(prototype, constructor_atom, constructor)?;
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(prototype, length_atom, Value::from_i32(0))?;
+        let concat = self.allocate_native_function(
+            NativeFunction::ArrayConcat,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_concat = Some(concat);
+        let concat_atom = self.intern_intrinsic_name(b"concat")?;
+        self.set_own_data_property(prototype, concat_atom, concat)?;
+        let to_string = self.allocate_native_function(
+            NativeFunction::ArrayToString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_to_string = Some(to_string);
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_own_data_property(prototype, to_string_atom, to_string)
+    }
+
     /// Publishes all mandatory names without charging the host quota for user-created globals.
     fn publish_realm_intrinsic_bindings(
         &mut self,
@@ -1261,6 +1329,13 @@ impl Isolate {
             self.realm
                 .publish_intrinsic(atoms.error(kind), constructor, true)?;
         }
+        self.realm.publish_intrinsic(
+            atoms.array,
+            self.realm
+                .array_constructor
+                .expect("Array initializes before global publication"),
+            true,
+        )?;
         Ok(())
     }
 
@@ -1355,6 +1430,233 @@ impl Isolate {
             )
             .map_err(ExecutionError::HeapAllocation)?;
         Ok(Value::from_heap_ref(object.raw()))
+    }
+
+    /// Creates an Array-shaped ordinary object from one native call/construct argument window.
+    fn create_array_from_site(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let count = usize::try_from(site.argument_count)
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
+        let mut arguments = Vec::new();
+        arguments
+            .try_reserve_exact(count)
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
+        for index in 0..site.argument_count {
+            arguments.push(
+                self.call_argument(site, index)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            );
+        }
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before Array construction");
+        let array = self.create_ordinary_object_with_prototype(prototype)?;
+        self.write(site.caller_base, site.destination, array)?;
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        if arguments.len() == 1
+            && let Some(length) = arguments[0].as_i32()
+            && length >= 0
+        {
+            self.set_own_data_property(array, length_atom, arguments[0])?;
+            return Ok(array);
+        }
+        for (index, value) in arguments.into_iter().enumerate() {
+            let index = i32::try_from(index)
+                .map_err(|_| ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
+            let key = self.property_key_atom(Value::from_i32(index))?;
+            self.set_own_data_property(array, key, value)?;
+        }
+        let length = Value::from_i32(
+            i32::try_from(count)
+                .map_err(|_| ExecutionError::RegisterWindowTooLarge(site.argument_count))?,
+        );
+        self.set_own_data_property(array, length_atom, length)?;
+        Ok(array)
+    }
+
+    /// Appends one array-like source while preserving holes as length-only positions.
+    fn append_array_source(
+        &mut self,
+        destination: Value,
+        source: Value,
+        next_index: &mut i32,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_array_value(source)? {
+            let key = self.property_key_atom(Value::from_i32(*next_index))?;
+            self.set_own_data_property(destination, key, source)?;
+            *next_index = next_index
+                .checked_add(1)
+                .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+            return Ok(());
+        }
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        let length_value = self
+            .get_data_property(source, length_atom)?
+            .expect("every Tachyon Array has a length property");
+        let Some(length) = length_value.as_i32() else {
+            return Err(ExecutionError::UnsupportedNumberConversion(length_value));
+        };
+        if length < 0 {
+            return Err(ExecutionError::UnsupportedNumberConversion(length_value));
+        }
+        for index in 0..length {
+            let key = self.property_key_atom(Value::from_i32(index))?;
+            if let Some(value) = self.get_data_property(source, key)? {
+                let destination_key = self.property_key_atom(Value::from_i32(*next_index))?;
+                self.set_own_data_property(destination, destination_key, value)?;
+            }
+            *next_index = next_index
+                .checked_add(1)
+                .ok_or(ExecutionError::RegisterWindowTooLarge(length as u32))?;
+        }
+        Ok(())
+    }
+
+    /// Identifies this Array subset by its realm-local prototype chain.
+    fn is_array_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        if !self.is_object_value(value) {
+            return Ok(false);
+        }
+        let array_prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before execution");
+        if value == array_prototype {
+            return Ok(true);
+        }
+        let (_, mut snapshot) = self.object_snapshot(value)?;
+        loop {
+            if snapshot.prototype == array_prototype {
+                return Ok(true);
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(false);
+            }
+            let (_, next) = self.object_snapshot(snapshot.prototype)?;
+            snapshot = next;
+        }
+    }
+
+    /// Implements the basic Array.prototype.concat flattening contract for ordinary arrays.
+    fn array_concat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        let mut next_index = 0_i32;
+        self.append_array_source(result, site.this_value, &mut next_index)?;
+        for index in 0..site.argument_count {
+            let argument = self
+                .call_argument(site, index)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            self.append_array_source(result, argument, &mut next_index)?;
+        }
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(result, length_atom, Value::from_i32(next_index))?;
+        Ok(result)
+    }
+
+    /// Implements Array.prototype.toString as comma-joined primitive elements for this subset.
+    fn array_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        let length = self
+            .get_data_property(receiver, length_atom)?
+            .and_then(Value::as_i32)
+            .unwrap_or(0)
+            .max(0);
+        let mut units = Vec::new();
+        for index in 0..length {
+            if index != 0 {
+                units.push(u16::from(b','));
+            }
+            let key = self.property_key_atom(Value::from_i32(index))?;
+            let Some(value) = self.get_data_property(receiver, key)? else {
+                continue;
+            };
+            if matches!(
+                value.as_immediate(),
+                Some(Immediate::Undefined | Immediate::Null)
+            ) {
+                continue;
+            }
+            self.append_primitive_string_units(value, &mut units)?;
+        }
+        let string = JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(string)
+    }
+
+    /// Appends the currently supported ECMAScript primitive string conversion without heap allocation.
+    fn append_primitive_string_units(
+        &mut self,
+        value: Value,
+        output: &mut Vec<u16>,
+    ) -> Result<(), ExecutionError> {
+        if let Some(immediate) = value.as_immediate() {
+            let bytes = match immediate {
+                Immediate::True => b"true".as_slice(),
+                Immediate::False => b"false".as_slice(),
+                Immediate::Undefined => b"undefined".as_slice(),
+                Immediate::Null => b"null".as_slice(),
+                Immediate::Hole | Immediate::Uninitialized => {
+                    return Err(ExecutionError::UnsupportedErrorMessage(value));
+                }
+            };
+            output.extend(bytes.iter().map(|&byte| u16::from(byte)));
+            return Ok(());
+        }
+        if let Some(number) = numeric_value(value) {
+            let mut buffer = ryu_js::Buffer::new();
+            let printed = if number == 0.0 {
+                "0"
+            } else {
+                buffer.format(number)
+            };
+            output.extend(printed.bytes().map(u16::from));
+            return Ok(());
+        }
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedErrorMessage(value))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedErrorMessage(value))?;
+        self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let string = no_gc
+                    .borrow(string, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                match string.as_view() {
+                    JsStringView::Latin1(bytes) => {
+                        output.extend(bytes.iter().map(|&byte| u16::from(byte)));
+                    }
+                    JsStringView::Utf16(units) => output.extend_from_slice(units),
+                }
+                Ok(())
+            })
+        })
+    }
+
+    /// Publishes one runtime-created string through the ordinary managed external allocation path.
+    fn allocate_runtime_string(&mut self, string: JsString) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let value = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.string,
+                0,
+                string,
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok(Value::from_heap_ref(value.raw()))
     }
 
     /// Walks ordinary prototype links without allocating or invoking accessor/exotic behavior.
@@ -2646,6 +2948,14 @@ impl Isolate {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
             }
+            Opcode::CreateArray => {
+                let prototype = self
+                    .realm
+                    .array_prototype
+                    .expect("Array prototype initializes before array literals");
+                let object = self.create_ordinary_object_with_prototype(prototype)?;
+                self.write(base, operands[0], object)?;
+            }
             Opcode::LoadException => {
                 let value = self
                     .fiber
@@ -3136,6 +3446,24 @@ impl Isolate {
                 let error = self.create_native_error(kind, message)?;
                 return self.write(caller_base, destination, error);
             }
+            FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
+                let site = CallSite {
+                    caller_base,
+                    destination,
+                    callee: constructor,
+                    argument_base: caller_base
+                        .checked_add(callee_register)
+                        .and_then(|base| base.checked_add(1))
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+                    argument_count,
+                    this_value: Value::from_immediate(Immediate::Undefined),
+                    new_target: constructor,
+                    construct_receiver: None,
+                    call_site,
+                };
+                let array = self.create_array_from_site(&site)?;
+                return self.write(caller_base, destination, array);
+            }
             FunctionExecutable::Bytecode { .. } => {}
             FunctionExecutable::Native(_) => {
                 return Err(ExecutionError::NonConstructor(constructor));
@@ -3218,6 +3546,18 @@ impl Isolate {
                     let message = self.call_argument(&site, 0)?;
                     let error = self.create_native_error(kind, message)?;
                     return self.write(site.caller_base, site.destination, error);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
+                    let array = self.create_array_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, array);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayConcat) => {
+                    let array = self.array_concat(&site)?;
+                    return self.write(site.caller_base, site.destination, array);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayToString) => {
+                    let value = self.array_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
             }
         }

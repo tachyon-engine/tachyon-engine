@@ -1800,9 +1800,14 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
-            HirExpressionKind::Object(properties) => {
+            HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
                 let object = self.register()?;
-                self.emit(Opcode::CreateObject, &[object.index()], expression.span)?;
+                let create = if matches!(&expression.kind, HirExpressionKind::Array(_)) {
+                    Opcode::CreateArray
+                } else {
+                    Opcode::CreateObject
+                };
+                self.emit(create, &[object.index()], expression.span)?;
                 for property in properties.iter() {
                     let (opcode, key) = match &property.key {
                         HirObjectPropertyKey::Static(key) => {
@@ -3197,7 +3202,7 @@ fn switch_scope_name_count(
 fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
-        HirExpressionKind::Object(properties) => {
+        HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {
                 count = checked_count_add(
@@ -3484,7 +3489,7 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Object(properties) => {
+        HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 1;
             for property in properties.iter() {
                 count = checked_count_add(
@@ -4305,7 +4310,7 @@ fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileEr
 /// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
 fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Object(properties) => {
+        HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {
                 count = checked_count_add(
@@ -4402,7 +4407,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
 
 fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Object(properties) => {
+        HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {
                 count = checked_count_add(
