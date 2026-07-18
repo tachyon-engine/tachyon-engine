@@ -948,6 +948,19 @@ impl Lowerer<'_> {
                     Ok(destination)
                 }
             },
+            HirExpressionKind::Function(function) => {
+                let destination = self.register()?;
+                let function = function
+                    .index()
+                    .checked_add(1)
+                    .ok_or(CompileError::RegisterOverflow)?;
+                self.emit(
+                    Opcode::CreateClosure,
+                    &[destination.index(), function],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let destination = self.register()?;
@@ -1578,7 +1591,8 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         HirExpressionKind::Number(_)
         | HirExpressionKind::String(_)
         | HirExpressionKind::Boolean(_)
-        | HirExpressionKind::Null => Ok(0),
+        | HirExpressionKind::Null
+        | HirExpressionKind::Function(_) => Ok(0),
     }
 }
 

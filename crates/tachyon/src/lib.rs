@@ -648,4 +648,24 @@ mod tests {
         );
         assert_eq!(value.as_i32(), Some(42));
     }
+
+    #[test]
+    fn function_expressions_are_callable_and_function_objects_hold_methods() {
+        assert_eq!(
+            execute_source(
+                30,
+                "let outer = function () { return function () { return 42; }; }; outer()();",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                31,
+                "function assert() {} assert._isSameValue = function (value) { return value + 1; }; assert._isSameValue(41);",
+            )
+            .as_i32(),
+            Some(42)
+        );
+    }
 }

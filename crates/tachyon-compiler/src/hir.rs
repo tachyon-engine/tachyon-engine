@@ -129,7 +129,7 @@ pub struct HirFunctionDeclaration {
 pub struct HirFunction {
     pub id: FunctionStencilId,
     pub span: SourceSpan,
-    pub name: Arc<str>,
+    pub name: Option<Arc<str>>,
     pub parameters: Arc<[HirBinding]>,
     pub body: Arc<[HirStatement]>,
 }
@@ -186,6 +186,7 @@ pub enum HirExpressionKind {
     Boolean(bool),
     Null,
     Identifier(Arc<str>),
+    Function(FunctionStencilId),
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -270,7 +271,7 @@ pub(crate) fn lower(
     source: &SourceText,
 ) -> Result<HirProgram, CompileError> {
     let mut statements = Vec::with_capacity(program.body.len());
-    let mut functions = Vec::new();
+    let mut functions = Vec::with_capacity(program.body.len());
     let mut next_binding = 0;
     for statement in &program.body {
         statements.push(lower_statement(
@@ -301,7 +302,12 @@ fn lower_statement(
         Statement::ExpressionStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Value,
-            kind: HirStatementKind::Expression(lower_expression(&statement.expression, source)?),
+            kind: HirStatementKind::Expression(lower_expression(
+                &statement.expression,
+                source,
+                next_binding,
+                functions,
+            )?),
         }),
         Statement::EmptyStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
@@ -315,6 +321,7 @@ fn lower_statement(
                 declaration,
                 source,
                 next_binding,
+                functions,
             )?),
         }),
         Statement::FunctionDeclaration(function) if allow_function_declaration => {
@@ -341,7 +348,7 @@ fn lower_statement(
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
             kind: HirStatementKind::If {
-                test: lower_expression(&statement.test, source)?,
+                test: lower_expression(&statement.test, source, next_binding, functions)?,
                 consequent: Box::new(lower_statement(
                     &statement.consequent,
                     source,
@@ -382,14 +389,19 @@ fn lower_statement(
                 statement
                     .argument
                     .as_ref()
-                    .map(|argument| lower_expression(argument, source))
+                    .map(|argument| lower_expression(argument, source, next_binding, functions))
                     .transpose()?,
             ),
         }),
         Statement::ThrowStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
-            kind: HirStatementKind::Throw(lower_expression(&statement.argument, source)?),
+            kind: HirStatementKind::Throw(lower_expression(
+                &statement.argument,
+                source,
+                next_binding,
+                functions,
+            )?),
         }),
         _ => Err(unsupported(
             source.name(),
@@ -505,7 +517,7 @@ fn lower_switch_statement(
             test: case
                 .test
                 .as_ref()
-                .map(|test| lower_expression(test, source))
+                .map(|test| lower_expression(test, source, next_binding, functions))
                 .transpose()?,
             consequent: consequent.into(),
         });
@@ -514,7 +526,12 @@ fn lower_switch_statement(
         span: source_span(statement.span),
         completion: StatementCompletion::Empty,
         kind: HirStatementKind::Switch {
-            discriminant: lower_expression(&statement.discriminant, source)?,
+            discriminant: lower_expression(
+                &statement.discriminant,
+                source,
+                next_binding,
+                functions,
+            )?,
             cases: cases.into(),
         },
     })
@@ -527,13 +544,6 @@ fn lower_function_declaration(
     next_binding: &mut u32,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirStatement, CompileError> {
-    if function.generator || function.r#async || function.params.rest.is_some() {
-        return Err(unsupported(
-            source.name(),
-            source_span(function.span),
-            "generator/async/rest function declaration",
-        ));
-    }
     let identifier = function.id.as_ref().ok_or_else(|| {
         unsupported(
             source.name(),
@@ -541,18 +551,50 @@ fn lower_function_declaration(
             "anonymous function declaration",
         )
     })?;
-    let body = function.body.as_ref().ok_or_else(|| {
-        unsupported(
-            source.name(),
-            source_span(function.span),
-            "function declaration without body",
-        )
-    })?;
     let declaration_binding = new_binding(
         identifier.name.as_str(),
         source_span(identifier.span),
         next_binding,
     )?;
+    let id = lower_function_stencil(
+        function,
+        Some(Arc::from(identifier.name.as_str())),
+        source,
+        next_binding,
+        functions,
+    )?;
+    Ok(HirStatement {
+        span: source_span(function.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::FunctionDeclaration(HirFunctionDeclaration {
+            binding: declaration_binding,
+            function: id,
+        }),
+    })
+}
+
+/// Copies parameters and body into the next stable stencil after nested functions are lowered.
+fn lower_function_stencil(
+    function: &oxc::ast::ast::Function<'_>,
+    name: Option<Arc<str>>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<FunctionStencilId, CompileError> {
+    if function.generator || function.r#async || function.params.rest.is_some() {
+        return Err(unsupported(
+            source.name(),
+            source_span(function.span),
+            "generator/async/rest function",
+        ));
+    }
+    let body = function.body.as_ref().ok_or_else(|| {
+        unsupported(
+            source.name(),
+            source_span(function.span),
+            "function without body",
+        )
+    })?;
     let mut parameters = Vec::with_capacity(function.params.items.len());
     for parameter in &function.params.items {
         if parameter.initializer.is_some() {
@@ -591,18 +633,11 @@ fn lower_function_declaration(
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
-        name: Arc::from(identifier.name.as_str()),
+        name,
         parameters: parameters.into(),
         body: statements.into(),
     });
-    Ok(HirStatement {
-        span: source_span(function.span),
-        completion: StatementCompletion::Empty,
-        kind: HirStatementKind::FunctionDeclaration(HirFunctionDeclaration {
-            binding: declaration_binding,
-            function: id,
-        }),
-    })
+    Ok(id)
 }
 
 fn new_binding(
@@ -626,6 +661,7 @@ fn lower_variable_declaration(
     declaration: &VariableDeclaration<'_>,
     source: &SourceText,
     next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
 ) -> Result<HirVariableDeclaration, CompileError> {
     let mut declarators = Vec::with_capacity(declaration.declarations.len());
     for declarator in &declaration.declarations {
@@ -647,7 +683,7 @@ fn lower_variable_declaration(
             initializer: declarator
                 .init
                 .as_ref()
-                .map(|initializer| lower_expression(initializer, source))
+                .map(|initializer| lower_expression(initializer, source, next_binding, functions))
                 .transpose()?,
         });
     }
@@ -671,6 +707,8 @@ fn lower_variable_declaration_kind(kind: VariableDeclarationKind) -> HirVariable
 fn lower_expression(
     expression: &Expression<'_>,
     source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
 ) -> Result<HirExpression, CompileError> {
     let span = source_span(expression.span());
     let kind = match expression {
@@ -683,34 +721,106 @@ fn lower_expression(
         Expression::Identifier(identifier) => {
             HirExpressionKind::Identifier(Arc::from(identifier.name.as_str()))
         }
+        Expression::FunctionExpression(function) if function.id.is_none() => {
+            HirExpressionKind::Function(lower_function_stencil(
+                function,
+                None,
+                source,
+                next_binding,
+                functions,
+            )?)
+        }
+        Expression::FunctionExpression(_) => {
+            return Err(unsupported(
+                source.name(),
+                span,
+                "named function expression",
+            ));
+        }
         Expression::StaticMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::StaticMember {
-                object: Box::new(lower_expression(&expression.object, source)?),
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
                 property: Arc::from(expression.property.name.as_str()),
             }
         }
         Expression::UnaryExpression(expression) => HirExpressionKind::Unary {
             operator: lower_unary_operator(expression.operator),
-            argument: Box::new(lower_expression(&expression.argument, source)?),
+            argument: Box::new(lower_expression(
+                &expression.argument,
+                source,
+                next_binding,
+                functions,
+            )?),
         },
         Expression::BinaryExpression(expression) => HirExpressionKind::Binary {
             operator: lower_binary_operator(expression.operator),
-            left: Box::new(lower_expression(&expression.left, source)?),
-            right: Box::new(lower_expression(&expression.right, source)?),
+            left: Box::new(lower_expression(
+                &expression.left,
+                source,
+                next_binding,
+                functions,
+            )?),
+            right: Box::new(lower_expression(
+                &expression.right,
+                source,
+                next_binding,
+                functions,
+            )?),
         },
         Expression::LogicalExpression(expression) => HirExpressionKind::Logical {
             operator: lower_logical_operator(expression.operator),
-            left: Box::new(lower_expression(&expression.left, source)?),
-            right: Box::new(lower_expression(&expression.right, source)?),
+            left: Box::new(lower_expression(
+                &expression.left,
+                source,
+                next_binding,
+                functions,
+            )?),
+            right: Box::new(lower_expression(
+                &expression.right,
+                source,
+                next_binding,
+                functions,
+            )?),
         },
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
-            target: lower_assignment_target(&expression.left, expression.operator, source)?,
-            value: Box::new(lower_expression(&expression.right, source)?),
+            target: lower_assignment_target(
+                &expression.left,
+                expression.operator,
+                source,
+                next_binding,
+                functions,
+            )?,
+            value: Box::new(lower_expression(
+                &expression.right,
+                source,
+                next_binding,
+                functions,
+            )?),
         },
         Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
-            test: Box::new(lower_expression(&expression.test, source)?),
-            consequent: Box::new(lower_expression(&expression.consequent, source)?),
-            alternate: Box::new(lower_expression(&expression.alternate, source)?),
+            test: Box::new(lower_expression(
+                &expression.test,
+                source,
+                next_binding,
+                functions,
+            )?),
+            consequent: Box::new(lower_expression(
+                &expression.consequent,
+                source,
+                next_binding,
+                functions,
+            )?),
+            alternate: Box::new(lower_expression(
+                &expression.alternate,
+                source,
+                next_binding,
+                functions,
+            )?),
         },
         Expression::CallExpression(expression) if !expression.optional => {
             let mut arguments = Vec::with_capacity(expression.arguments.len());
@@ -722,15 +832,21 @@ fn lower_expression(
                         "spread argument",
                     )
                 })?;
-                arguments.push(lower_expression(argument, source)?);
+                arguments.push(lower_expression(argument, source, next_binding, functions)?);
             }
             HirExpressionKind::Call {
-                callee: Box::new(lower_expression(&expression.callee, source)?),
+                callee: Box::new(lower_expression(
+                    &expression.callee,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
                 arguments: arguments.into(),
             }
         }
         Expression::ParenthesizedExpression(expression) => {
-            let mut lowered = lower_expression(&expression.expression, source)?;
+            let mut lowered =
+                lower_expression(&expression.expression, source, next_binding, functions)?;
             lowered.span = span;
             return Ok(lowered);
         }
@@ -744,6 +860,8 @@ fn lower_assignment_target(
     target: &AssignmentTarget<'_>,
     operator: AssignmentOperator,
     source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
 ) -> Result<HirAssignmentTarget, CompileError> {
     if !operator.is_assign() {
         return Err(unsupported(
@@ -758,7 +876,12 @@ fn lower_assignment_target(
         ),
         AssignmentTarget::StaticMemberExpression(expression) if !expression.optional => {
             Ok(HirAssignmentTarget::StaticMember {
-                object: Box::new(lower_expression(&expression.object, source)?),
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
                 property: Arc::from(expression.property.name.as_str()),
             })
         }

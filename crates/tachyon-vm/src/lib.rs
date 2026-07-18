@@ -184,6 +184,23 @@ struct FunctionObject {
     code: CodeId,
     function: FunctionId,
     environment: Option<GcRef<Environment>>,
+    ordinary: OrdinaryObject,
+}
+
+#[derive(Clone, Copy)]
+enum ObjectReceiver {
+    Ordinary(GcRef<OrdinaryObject>),
+    Function(GcRef<FunctionObject>),
+}
+
+impl ObjectReceiver {
+    #[inline(always)]
+    fn value(self) -> Value {
+        match self {
+            Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
+            Self::Function(function) => Value::from_heap_ref(function.raw()),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +224,7 @@ impl Trace for FunctionObject {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.environment.trace(tracer);
+        self.ordinary.trace(tracer);
     }
 }
 
@@ -510,16 +528,7 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<Option<Value>, ExecutionError> {
-        let object = self.ordinary_object_reference(receiver)?;
-        let snapshot = self.heap.with_running_scope(|scope| {
-            let local = scope.root(object).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(local, self.types.ordinary_object)
-                    .copied()
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })?;
+        let (_, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             return Ok(None);
         };
@@ -545,16 +554,7 @@ impl Isolate {
         key: AtomId,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        let object = self.ordinary_object_reference(receiver)?;
-        let snapshot = self.heap.with_running_scope(|scope| {
-            let local = scope.root(object).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(local, self.types.ordinary_object)
-                    .copied()
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })?;
+        let (object, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
             return self.update_property_slot(snapshot, property.slot, value);
@@ -591,7 +591,7 @@ impl Isolate {
     /// Copies old slots into a traced pending backing, allocates it, then switches the object edge.
     fn add_property_slot(
         &mut self,
-        object: GcRef<OrdinaryObject>,
+        object: ObjectReceiver,
         snapshot: OrdinaryObject,
         key: AtomId,
         value: Value,
@@ -626,7 +626,7 @@ impl Isolate {
                     finalization_jobs: &mut self.finalization_jobs,
                     realm: &mut self.realm,
                 },
-                receiver: Value::from_heap_ref(object.raw()),
+                receiver: object.value(),
             };
             let storage = self
                 .heap
@@ -642,36 +642,88 @@ impl Isolate {
                 .map_err(ExecutionError::HeapAllocation)?;
             (storage, roots.receiver)
         };
-        let object = self.ordinary_object_reference(receiver)?;
-        self.heap.with_running_scope(|scope| {
-            let object_local = scope.root(object).map_err(ExecutionError::Root)?;
-            let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let object = no_gc
-                    .borrow_mut(object_local, self.types.ordinary_object)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                object.shape = new_shape;
-                object.storage = Some(storage);
-                Ok::<(), ExecutionError>(())
-            })?;
-            scope
-                .write_barrier(object_local, storage_local)
-                .map_err(ExecutionError::HeapReference)?;
-            Ok(())
-        })
+        let (object, _) = self.object_snapshot(receiver)?;
+        self.attach_property_storage(object, new_shape, storage)
     }
 
+    /// Resolves either ordinary or callable payloads to their shared ordinary-property snapshot.
     #[inline(always)]
-    fn ordinary_object_reference(
-        &self,
+    fn object_snapshot(
+        &mut self,
         value: Value,
-    ) -> Result<GcRef<OrdinaryObject>, ExecutionError> {
+    ) -> Result<(ObjectReceiver, OrdinaryObject), ExecutionError> {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::NotObject(value))?;
-        self.heap
-            .checked_reference(raw, self.types.ordinary_object)
-            .map_err(|_| ExecutionError::NotObject(value))
+        if let Ok(object) = self.heap.checked_reference(raw, self.types.ordinary_object) {
+            let snapshot = self.heap.with_running_scope(|scope| {
+                let local = scope.root(object).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.ordinary_object)
+                        .copied()
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Ordinary(object), snapshot));
+        }
+        let function = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        let ordinary = self.heap.with_running_scope(|scope| {
+            let local = scope.root(function).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.function)
+                    .map(|function| function.ordinary)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        Ok((ObjectReceiver::Function(function), ordinary))
+    }
+
+    /// Publishes a replacement storage edge through the receiver's concrete typed payload.
+    fn attach_property_storage(
+        &mut self,
+        receiver: ObjectReceiver,
+        shape: ShapeId,
+        storage: GcRef<PropertyStorage>,
+    ) -> Result<(), ExecutionError> {
+        match receiver {
+            ObjectReceiver::Ordinary(object) => self.heap.with_running_scope(|scope| {
+                let object = scope.root(object).map_err(ExecutionError::Root)?;
+                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let object = no_gc
+                        .borrow_mut(object, self.types.ordinary_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    object.shape = shape;
+                    object.storage = Some(storage);
+                    Ok::<(), ExecutionError>(())
+                })?;
+                scope
+                    .write_barrier(object, storage_local)
+                    .map_err(ExecutionError::HeapReference)?;
+                Ok(())
+            }),
+            ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
+                let function = scope.root(function).map_err(ExecutionError::Root)?;
+                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let function = no_gc
+                        .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    function.ordinary.shape = shape;
+                    function.ordinary.storage = Some(storage);
+                    Ok::<(), ExecutionError>(())
+                })?;
+                scope
+                    .write_barrier(function, storage_local)
+                    .map_err(ExecutionError::HeapReference)?;
+                Ok(())
+            }),
+        }
     }
 
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
@@ -1099,6 +1151,10 @@ impl Isolate {
                     code,
                     function,
                     environment,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        storage: None,
+                    },
                 },
                 AllocationSpace::Young,
                 roots,
@@ -1802,16 +1858,18 @@ mod tests {
     }
 
     fn assert_property_batch<const N: usize>() {
-        let outcome = test_isolate()
-            .execute_with_batch::<N>(
-                &property_module(),
-                ExecutionBudget {
-                    fuel: 32,
-                    quantum: 32,
-                },
-            )
-            .unwrap();
-        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+        for module in [property_module(), function_property_module()] {
+            let outcome = test_isolate()
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 32,
+                        quantum: 32,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+        }
     }
 
     fn assert_method_receiver_batch<const N: usize>() {
@@ -1990,23 +2048,28 @@ mod tests {
 
     #[test]
     fn property_publication_roots_receiver_and_heap_value_across_forced_major() {
-        let mut isolate = test_isolate();
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
-        let outcome = isolate
-            .execute(
-                &heap_value_property_module(),
-                ExecutionBudget {
-                    fuel: 16,
-                    quantum: 16,
-                },
-            )
-            .unwrap();
-        let RunOutcome::Completed(child) = outcome else {
-            panic!("property fixture must complete");
-        };
-        assert!(isolate.ordinary_object_reference(child).is_ok());
+        for module in [
+            heap_value_property_module(),
+            function_heap_value_property_module(),
+        ] {
+            let mut isolate = test_isolate();
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+            let outcome = isolate
+                .execute(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 16,
+                        quantum: 16,
+                    },
+                )
+                .unwrap();
+            let RunOutcome::Completed(child) = outcome else {
+                panic!("property fixture must complete");
+            };
+            assert!(isolate.object_snapshot(child).is_ok());
+        }
     }
 
     #[test]
@@ -2408,6 +2471,49 @@ mod tests {
         .unwrap()
     }
 
+    /// Builds a callable carrying the same shape/storage path as an ordinary object.
+    fn function_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(6, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[1, 42], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::GetById, &[2, 0, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::LoadUndefined, &[0], span).unwrap();
+        callee.emit(Opcode::Return, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let callee_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callee_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callee_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("function property"),
+            Vec::new(),
+            vec![Arc::from("answer")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
     /// Builds a method call that stops immediately after pushing its receiver-bearing frame.
     fn method_receiver_module() -> CompiledModule {
         let span = SourceSpan { start: 0, end: 1 };
@@ -2482,6 +2588,49 @@ mod tests {
                 bytecode,
                 metadata,
             )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Stores a young object through a callable's embedded ordinary-property edge.
+    fn function_heap_value_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(6, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[1], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::GetById, &[2, 0, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::LoadUndefined, &[0], span).unwrap();
+        callee.emit(Opcode::Return, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let callee_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callee_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callee_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("function heap property"),
+            Vec::new(),
+            vec![Arc::from("child")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
             FunctionId::new(0),
         )
         .unwrap()

@@ -283,7 +283,7 @@ mod tests {
         let [function] = hir.functions() else {
             panic!("expected one owned function stencil");
         };
-        assert_eq!(function.name.as_ref(), "addTwo");
+        assert_eq!(function.name.as_deref(), Some("addTwo"));
         assert_eq!(function.parameters[0].name.as_ref(), "value");
         assert!(matches!(function.body[0].kind, HirStatementKind::Return(_)));
         assert!(matches!(
@@ -544,6 +544,37 @@ mod tests {
                 .iter()
                 .any(|name| name.as_ref() == "method")
         );
+    }
+
+    #[test]
+    fn compiler_owns_anonymous_and_nested_function_expression_stencils() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "let outer = function () { return function () { return 42; }; }; outer()();",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(hir.functions().len(), 2);
+        assert!(
+            hir.functions()
+                .iter()
+                .all(|function| function.name.is_none())
+        );
+        assert_eq!(hir.functions()[0].id.index(), 0);
+        assert_eq!(hir.functions()[1].id.index(), 1);
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "let outer = function () { return function () { return 42; }; }; outer()();",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(module.functions().len(), 3);
     }
 
     proptest! {
