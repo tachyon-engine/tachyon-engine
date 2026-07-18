@@ -1144,6 +1144,35 @@ mod tests {
     }
 
     #[test]
+    /// Covers pre-test/post-test ordering, continue targets, breaks, and script completion values.
+    fn while_and_do_while_preserve_loop_control_and_completion() {
+        assert_eq!(
+            execute_source(
+                55,
+                "let sum = 0; let index = 0; while (index < 5) { index++; if (index === 2) continue; sum += index; if (index === 4) break; } sum;",
+            )
+            .as_i32(),
+            Some(8)
+        );
+        assert_eq!(
+            execute_source(56, "do { 42; break; } while (true);").as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                57,
+                "function total() { let index = 0; let sum = 0; do { index++; if (index < 3) continue; sum += index; } while (index < 4); return sum; } total();",
+            )
+            .as_i32(),
+            Some(7)
+        );
+        assert_eq!(
+            execute_source(58, "while (false) { 1; }").as_immediate(),
+            Some(tachyon_value::Immediate::Undefined)
+        );
+    }
+
+    #[test]
     /// Checks update results and one-shot object/key evaluation through source compilation.
     fn computed_members_preserve_reference_evaluation_and_updates() {
         assert_eq!(

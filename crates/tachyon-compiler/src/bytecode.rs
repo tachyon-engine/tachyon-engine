@@ -72,6 +72,7 @@ fn lower_entry(
             HirStatementKind::Block(_)
                 | HirStatementKind::If { .. }
                 | HirStatementKind::For { .. }
+                | HirStatementKind::Loop { .. }
                 | HirStatementKind::Switch { .. }
                 | HirStatementKind::Try { .. }
                 | HirStatementKind::Break
@@ -186,6 +187,7 @@ fn lower_entry(
                         HirStatementKind::Block(_)
                         | HirStatementKind::If { .. }
                         | HirStatementKind::For { .. }
+                        | HirStatementKind::Loop { .. }
                         | HirStatementKind::Switch { .. }
                         | HirStatementKind::Try { .. }
                         | HirStatementKind::Break
@@ -457,6 +459,9 @@ fn collect_captured_slots(
                         push_captured_slot(&declarator.binding, mutable, slots)?;
                     }
                 }
+                collect_captured_slots(core::slice::from_ref(body), slots)?;
+            }
+            HirStatementKind::Loop { body, .. } => {
                 collect_captured_slots(core::slice::from_ref(body), slots)?;
             }
             HirStatementKind::Switch { cases, .. } => {
@@ -798,6 +803,14 @@ impl Lowerer<'_> {
                 )?;
                 Ok(false)
             }
+            HirStatementKind::Loop {
+                test,
+                body,
+                test_first,
+            } => {
+                self.entry_loop_statement(test, body, result, *test_first, statement.span)?;
+                Ok(false)
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -920,6 +933,46 @@ impl Lowerer<'_> {
         Ok(())
     }
 
+    /// Emits a script while/do-while loop with the condition as the continue destination.
+    fn entry_loop_statement(
+        &mut self,
+        test: &HirExpression,
+        body: &HirStatement,
+        result: RegisterId,
+        test_first: bool,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let body_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        if test_first {
+            self.emit_jump(condition, span)?;
+        }
+        self.builder
+            .bind_label(body_label)
+            .map_err(CompileError::Builder)?;
+        self.break_targets.push(end);
+        self.continue_targets.push(condition);
+        self.entry_statement(body, result)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        let test = self.expression(test)?;
+        self.builder
+            .emit_jump_if_true(
+                test,
+                body_label,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        self.builder.bind_label(end).map_err(CompileError::Builder)
+    }
+
     /// Lowers one function-body statement and reports whether it ends in an abrupt completion.
     fn function_statement(&mut self, statement: &HirStatement) -> Result<bool, CompileError> {
         match &statement.kind {
@@ -978,6 +1031,14 @@ impl Lowerer<'_> {
                     body,
                     statement.span,
                 )?;
+                Ok(false)
+            }
+            HirStatementKind::Loop {
+                test,
+                body,
+                test_first,
+            } => {
+                self.function_loop_statement(test, body, *test_first, statement.span)?;
                 Ok(false)
             }
             HirStatementKind::Switch {
@@ -1063,6 +1124,45 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)?;
         self.restore_for_scope(initializer, checkpoint);
         Ok(())
+    }
+
+    /// Emits an ordinary-function while/do-while loop without entering the Rust call stack.
+    fn function_loop_statement(
+        &mut self,
+        test: &HirExpression,
+        body: &HirStatement,
+        test_first: bool,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let body_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        if test_first {
+            self.emit_jump(condition, span)?;
+        }
+        self.builder
+            .bind_label(body_label)
+            .map_err(CompileError::Builder)?;
+        self.break_targets.push(end);
+        self.continue_targets.push(condition);
+        self.function_statement(body)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        let test = self.expression(test)?;
+        self.builder
+            .emit_jump_if_true(
+                test,
+                body_label,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        self.builder.bind_label(end).map_err(CompileError::Builder)
     }
 
     fn for_initializer(
@@ -2474,6 +2574,9 @@ fn collect_var_declared_bindings(
                 }
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
+            HirStatementKind::Loop { body, .. } => {
+                collect_var_declared_bindings(core::slice::from_ref(body), bindings);
+            }
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
                     collect_var_declared_bindings(&case.consequent, bindings);
@@ -2566,7 +2669,7 @@ fn statements_handler_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } => {
+            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
                 statements_handler_count(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => {
@@ -2627,7 +2730,7 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
                     .unwrap_or(0);
                 consequent.max(alternate)
             }
-            HirStatementKind::For { body, .. } => {
+            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
                 statements_handler_depth(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => {
@@ -2739,6 +2842,11 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 update,
                 body,
             } => for_scope_name_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::Loop { test, body, .. } => checked_count_add(
+                expression_scope_name_count(test)?,
+                statements_scope_name_count(core::slice::from_ref(body))?,
+                "scope names",
+            )?,
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -2968,6 +3076,23 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 update,
                 body,
             } => for_instruction_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::Loop {
+                test,
+                body,
+                test_first,
+            } => {
+                let mut nested = expression_instruction_count(test)?;
+                nested = checked_count_add(
+                    nested,
+                    statements_instruction_count(core::slice::from_ref(body))?,
+                    "bytecode instructions",
+                )?;
+                checked_count_add(
+                    nested,
+                    1 + usize::from(*test_first),
+                    "bytecode instructions",
+                )?
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -3274,6 +3399,11 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 update,
                 body,
             } => for_literal_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::Loop { test, body, .. } => checked_count_add(
+                expression_literal_count(test)?,
+                statements_literal_count(core::slice::from_ref(body))?,
+                "bytecode constants",
+            )?,
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -3397,6 +3527,9 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
                     "local bindings",
                 )?
             }
+            HirStatementKind::Loop { body, .. } => {
+                statements_binding_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::Switch { cases, .. } => switch_binding_count(cases)?,
             HirStatementKind::Try {
                 block,
@@ -3459,6 +3592,15 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                 count = checked_count_add(
                     count,
                     expression_label_count(expression)?,
+                    "bytecode labels",
+                )?;
+            }
+            HirStatementKind::Loop { test, body, .. } => {
+                count = checked_count_add(count, 3, "bytecode labels")?;
+                count = checked_count_add(count, expression_label_count(test)?, "bytecode labels")?;
+                count = checked_count_add(
+                    count,
+                    statements_label_count(core::slice::from_ref(body))?,
                     "bytecode labels",
                 )?;
             }
@@ -3654,7 +3796,7 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } => {
+            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
                 statements_expression_count(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => switch_expression_count(cases)?,
@@ -3716,11 +3858,13 @@ fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, Compile
                 }
                 count
             }
-            HirStatementKind::For { body, .. } => checked_count_add(
-                1,
-                statements_switch_count(core::slice::from_ref(body))?,
-                "switch control targets",
-            )?,
+            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
+                checked_count_add(
+                    1,
+                    statements_switch_count(core::slice::from_ref(body))?,
+                    "switch control targets",
+                )?
+            }
             HirStatementKind::Switch { cases, .. } => {
                 let mut count = 1;
                 for case in cases.iter() {
@@ -3778,11 +3922,13 @@ fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileEr
                 }
                 nested
             }
-            HirStatementKind::For { body, .. } => checked_count_add(
-                1,
-                statements_loop_count(core::slice::from_ref(body))?,
-                "loop continue targets",
-            )?,
+            HirStatementKind::For { body, .. } | HirStatementKind::Loop { body, .. } => {
+                checked_count_add(
+                    1,
+                    statements_loop_count(core::slice::from_ref(body))?,
+                    "loop continue targets",
+                )?
+            }
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
                 for case in cases.iter() {

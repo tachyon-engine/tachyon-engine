@@ -695,6 +695,37 @@ mod tests {
     }
 
     #[test]
+    /// Keeps pre-test and post-test loop ordering explicit after the Oxc arena is dropped.
+    fn hir_distinguishes_while_and_do_while_evaluation_order() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "while (false) { 1; } do { 2; } while (false);",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [while_statement, do_while_statement] = hir.statements() else {
+            panic!("expected two loop statements");
+        };
+        assert!(matches!(
+            while_statement.kind,
+            HirStatementKind::Loop {
+                test_first: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            do_while_statement.kind,
+            HirStatementKind::Loop {
+                test_first: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     /// Confirms structured entry lowering produces verifier-accepted branch and abrupt opcodes.
     fn compiler_emits_verified_top_level_branch_and_throw() {
         let module = Compiler

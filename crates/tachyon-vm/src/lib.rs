@@ -4477,6 +4477,15 @@ mod tests {
     }
 
     #[test]
+    fn interpreter_restarts_dispatch_after_backward_jumps() {
+        assert_backedge_batch::<1>();
+        assert_backedge_batch::<2>();
+        assert_backedge_batch::<4>();
+        assert_backedge_batch::<8>();
+        assert_backedge_batch::<16>();
+    }
+
+    #[test]
     fn logical_short_circuit_preserves_operands_for_every_dispatch_batch() {
         assert_logical_batch::<1>();
         assert_logical_batch::<2>();
@@ -5118,6 +5127,19 @@ mod tests {
         }
     }
 
+    fn assert_backedge_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &backedge_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
+
     /// Checks both paths of all logical branches under one dispatch batch monomorphization.
     fn assert_logical_batch<const N: usize>() {
         let cases = [
@@ -5213,6 +5235,27 @@ mod tests {
             FunctionId::new(0),
         )
         .unwrap()
+    }
+
+    /// Builds a verified counting loop so every dispatch batch exercises a taken backward jump.
+    fn backedge_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(9, 2);
+        let condition = builder.new_label().unwrap();
+        let end = builder.new_label().unwrap();
+        builder.emit(Opcode::LoadImmediate, &[0, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 3], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 1], span).unwrap();
+        builder.bind_label(condition).unwrap();
+        builder.emit(Opcode::LessThan, &[3, 0, 1], span).unwrap();
+        builder
+            .emit_jump_if_false(RegisterId::new(3), end, span)
+            .unwrap();
+        builder.emit(Opcode::Add, &[0, 0, 2], span).unwrap();
+        builder.emit_jump(condition, span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[0], span).unwrap();
+        single_function_module("backedge", Vec::new(), builder)
     }
 
     /// Builds one operand-preserving short-circuit branch around a right-hand integer load.

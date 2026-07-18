@@ -147,6 +147,11 @@ pub enum HirStatementKind {
         update: Option<HirExpression>,
         body: Box<HirStatement>,
     },
+    Loop {
+        test: HirExpression,
+        body: Box<HirStatement>,
+        test_first: bool,
+    },
     Switch {
         discriminant: HirExpression,
         cases: Arc<[HirSwitchCase]>,
@@ -528,6 +533,36 @@ fn lower_statement(
         Statement::ForStatement(statement) => {
             lower_for_statement(statement, source, semantic, functions, context)
         }
+        Statement::WhileStatement(statement) => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Loop {
+                test: lower_expression(&statement.test, source, semantic, functions)?,
+                body: Box::new(lower_statement(
+                    &statement.body,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
+                )?),
+                test_first: true,
+            },
+        }),
+        Statement::DoWhileStatement(statement) => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Loop {
+                test: lower_expression(&statement.test, source, semantic, functions)?,
+                body: Box::new(lower_statement(
+                    &statement.body,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
+                )?),
+                test_first: false,
+            },
+        }),
         Statement::SwitchStatement(statement) => {
             lower_switch_statement(statement, source, semantic, functions, context)
         }
