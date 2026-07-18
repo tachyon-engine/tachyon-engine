@@ -1931,6 +1931,14 @@ mod tests {
             execute_source(69, "Boolean(0) === false && Boolean('x') === true;").as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                158,
+                "Number.isNaN(NaN) && !Number.isNaN('NaN') && Number.isFinite(1.5) && !Number.isFinite(Infinity) && Number.isInteger(-0) && !Number.isInteger(1.5);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.

@@ -259,6 +259,9 @@ enum NativeFunction {
     ObjectPreventExtensions,
     StringConstructor,
     NumberConstructor,
+    NumberIsNaN,
+    NumberIsFinite,
+    NumberIsInteger,
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
@@ -350,6 +353,7 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
+            Self::NumberIsNaN | Self::NumberIsFinite | Self::NumberIsInteger => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -379,6 +383,9 @@ impl NativeFunction {
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
             Self::NumberConstructor => "Number",
+            Self::NumberIsNaN => "isNaN",
+            Self::NumberIsFinite => "isFinite",
+            Self::NumberIsInteger => "isInteger",
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
@@ -829,6 +836,9 @@ struct Realm {
     object_prevent_extensions: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
+    number_is_nan: Option<Value>,
+    number_is_finite: Option<Value>,
+    number_is_integer: Option<Value>,
     boolean_constructor: Option<Value>,
     function_constructor: Option<Value>,
     math_object: Option<Value>,
@@ -892,6 +902,9 @@ impl Realm {
             object_prevent_extensions: None,
             string_constructor: None,
             number_constructor: None,
+            number_is_nan: None,
+            number_is_finite: None,
+            number_is_integer: None,
             boolean_constructor: None,
             function_constructor: None,
             math_object: None,
@@ -1182,6 +1195,9 @@ impl Trace for Realm {
         self.object_prevent_extensions.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
+        self.number_is_nan.trace(tracer);
+        self.number_is_finite.trace(tracer);
+        self.number_is_integer.trace(tracer);
         self.boolean_constructor.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
@@ -1818,7 +1834,20 @@ impl Isolate {
             )
         };
         self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
-        self.realm.number_constructor = Some(allocate(self, NativeFunction::NumberConstructor)?);
+        let number = allocate(self, NativeFunction::NumberConstructor)?;
+        self.realm.number_constructor = Some(number);
+        let is_nan = allocate(self, NativeFunction::NumberIsNaN)?;
+        self.realm.number_is_nan = Some(is_nan);
+        let is_nan_atom = self.intern_intrinsic_name(b"isNaN")?;
+        self.set_intrinsic_data_property(number, is_nan_atom, is_nan, true)?;
+        let is_finite = allocate(self, NativeFunction::NumberIsFinite)?;
+        self.realm.number_is_finite = Some(is_finite);
+        let is_finite_atom = self.intern_intrinsic_name(b"isFinite")?;
+        self.set_intrinsic_data_property(number, is_finite_atom, is_finite, true)?;
+        let is_integer = allocate(self, NativeFunction::NumberIsInteger)?;
+        self.realm.number_is_integer = Some(is_integer);
+        let is_integer_atom = self.intern_intrinsic_name(b"isInteger")?;
+        self.set_intrinsic_data_property(number, is_integer_atom, is_integer, true)?;
         self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
         Ok(())
     }
@@ -6644,6 +6673,32 @@ impl Isolate {
                         site.caller_base,
                         site.destination,
                         Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::NumberIsNaN
+                    | NativeFunction::NumberIsFinite
+                    | NativeFunction::NumberIsInteger),
+                ) => {
+                    let argument = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = numeric_value(argument).is_some_and(|number| match native {
+                        NativeFunction::NumberIsNaN => number.is_nan(),
+                        NativeFunction::NumberIsFinite => number.is_finite(),
+                        NativeFunction::NumberIsInteger => {
+                            number.is_finite() && number.fract() == 0.0
+                        }
+                        _ => unreachable!("numeric predicate dispatch is exhaustive"),
+                    });
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
