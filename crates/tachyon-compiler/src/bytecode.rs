@@ -1708,6 +1708,7 @@ impl Lowerer<'_> {
                     )?;
                     Ok(destination)
                 }
+                HirExpressionKind::Identifier(_) => self.load_boolean(true, expression.span),
                 _ => {
                     self.expression(argument)?;
                     self.load_boolean(true, expression.span)
