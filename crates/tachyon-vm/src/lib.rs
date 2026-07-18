@@ -38,7 +38,9 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
-use object::{OrdinaryObject, PropertyAttributes, PropertyStorage, ShapeId, ShapeTable};
+use object::{
+    OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId, ShapeTable,
+};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
 #[derive(Clone, Copy, Debug, Default)]
@@ -188,6 +190,9 @@ pub enum ExecutionError {
     UnsupportedErrorMessage(Value),
     UnsupportedDynamicFunctionConstructor,
     NonExtensibleObject(Value),
+    ReadOnlyProperty(Value),
+    InvalidPropertyRedefinition(Value),
+    UnsupportedAccessorDescriptor,
     NotObject(Value),
 }
 
@@ -223,6 +228,7 @@ impl GcExternalMemory for Environment {
 enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
+    ObjectGetOwnPropertyDescriptor,
     ObjectHasOwnProperty,
     ObjectToString,
     ObjectAssign,
@@ -253,7 +259,11 @@ impl NativeFunction {
     const fn length(self) -> i32 {
         match self {
             Self::ObjectDefineProperty => 3,
-            Self::ObjectAssign | Self::ObjectHasOwn | Self::ObjectIs | Self::ObjectCreate => 2,
+            Self::ObjectAssign
+            | Self::ObjectHasOwn
+            | Self::ObjectIs
+            | Self::ObjectCreate
+            | Self::ObjectGetOwnPropertyDescriptor => 2,
             Self::ObjectConstructor
             | Self::ObjectHasOwnProperty
             | Self::ObjectKeys
@@ -280,6 +290,7 @@ impl NativeFunction {
         match self {
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
+            Self::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
             Self::ObjectHasOwnProperty => "hasOwnProperty",
             Self::ObjectToString => "toString",
             Self::ObjectAssign => "assign",
@@ -411,6 +422,14 @@ struct ResolvedCallTarget {
     environment: Option<GcRef<Environment>>,
     layout: FunctionLayout,
     strictness: FunctionStrictness,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DataPropertyDescriptor {
+    value: Option<Value>,
+    writable: Option<bool>,
+    enumerable: Option<bool>,
+    configurable: Option<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -661,6 +680,7 @@ struct Realm {
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
     object_define_property: Option<Value>,
+    object_get_own_property_descriptor: Option<Value>,
     object_has_own_property: Option<Value>,
     object_to_string: Option<Value>,
     object_assign: Option<Value>,
@@ -702,6 +722,7 @@ impl Realm {
             object_constructor: None,
             object_prototype: None,
             object_define_property: None,
+            object_get_own_property_descriptor: None,
             object_has_own_property: None,
             object_to_string: None,
             object_assign: None,
@@ -970,6 +991,7 @@ impl Trace for Realm {
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
+        self.object_get_own_property_descriptor.trace(tracer);
         self.object_has_own_property.trace(tracer);
         self.object_to_string.trace(tracer);
         self.object_assign.trace(tracer);
@@ -1346,6 +1368,22 @@ impl Isolate {
         self.realm.object_define_property = Some(define_property);
         let define_atom = self.intern_intrinsic_name(b"defineProperty")?;
         self.set_own_data_property(constructor, define_atom, define_property)?;
+        let get_own_property_descriptor = self.allocate_native_function(
+            NativeFunction::ObjectGetOwnPropertyDescriptor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_get_own_property_descriptor = Some(get_own_property_descriptor);
+        let get_own_descriptor_atom = self.intern_intrinsic_name(b"getOwnPropertyDescriptor")?;
+        self.set_own_data_property(
+            constructor,
+            get_own_descriptor_atom,
+            get_own_property_descriptor,
+        )?;
         let has_own_property = self.allocate_native_function(
             NativeFunction::ObjectHasOwnProperty,
             OrdinaryObject {
@@ -2149,12 +2187,15 @@ impl Isolate {
         }
     }
 
-    /// Converts the small property-key subset while handling the ubiquitous undefined key.
+    /// Converts the non-numeric primitive PropertyKeys handled before the shared numeric path.
     fn property_key_atom_or_undefined(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
-        if value.as_immediate() == Some(Immediate::Undefined) {
-            return self.intern_intrinsic_name(b"undefined");
+        match value.as_immediate() {
+            Some(Immediate::Undefined) => self.intern_intrinsic_name(b"undefined"),
+            Some(Immediate::Null) => self.intern_intrinsic_name(b"null"),
+            Some(Immediate::True) => self.intern_intrinsic_name(b"true"),
+            Some(Immediate::False) => self.intern_intrinsic_name(b"false"),
+            _ => self.property_key_atom(value),
         }
-        self.property_key_atom(value)
     }
 
     /// Implements the basic Array.prototype.concat flattening contract for ordinary arrays.
@@ -2314,14 +2355,32 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<bool, ExecutionError> {
-        if self
-            .native_function_metadata_property(receiver, key)?
-            .is_some()
-        {
-            return Ok(true);
+        Ok(self
+            .own_data_property_with_attributes(receiver, key)?
+            .is_some())
+    }
+
+    /// Resolves virtual function fields and ordinary own slots with their exact data flags.
+    fn own_data_property_with_attributes(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<Option<(Value, PropertyAttributes)>, ExecutionError> {
+        if let Some(value) = self.native_function_metadata_property(receiver, key)? {
+            return Ok(Some((value, PropertyAttributes::data(false, false, true))));
+        }
+        if self.is_function_prototype_property(receiver, key) {
+            self.intrinsic_property_atoms.prototype = Some(key);
+            let value = self.ensure_function_prototype(receiver)?;
+            return Ok(Some((value, PropertyAttributes::data(true, false, false))));
         }
         let (_, snapshot) = self.object_snapshot(receiver)?;
-        Ok(self.data_property_from_snapshot(snapshot, key)?.is_some())
+        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            return Ok(None);
+        };
+        Ok(self
+            .property_value_from_snapshot(snapshot, property)?
+            .map(|value| (value, property.attributes)))
     }
 
     /// Exposes native callable name/length as non-enumerable own virtual data properties.
@@ -2362,6 +2421,15 @@ impl Isolate {
             .own_keys(snapshot.shape)
             .map_err(ExecutionError::Shape)?;
         for key in keys {
+            if !self
+                .shapes
+                .lookup(snapshot.shape, key)
+                .expect("own key resolves in its source shape")
+                .attributes
+                .enumerable()
+            {
+                continue;
+            }
             if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
                 self.set_own_data_property(target, key, value)?;
             }
@@ -2369,7 +2437,186 @@ impl Isolate {
         Ok(())
     }
 
-    /// Applies the data-value subset of an Object.create/defineProperties descriptor map.
+    /// Parses the supported data fields while preserving absent versus present-undefined.
+    fn parse_data_property_descriptor(
+        &mut self,
+        descriptor: Value,
+    ) -> Result<DataPropertyDescriptor, ExecutionError> {
+        if !self.is_object_value(descriptor) {
+            return Err(ExecutionError::NotObject(descriptor));
+        }
+        let value_atom = self.intern_intrinsic_name(b"value")?;
+        let writable_atom = self.intern_intrinsic_name(b"writable")?;
+        let enumerable_atom = self.intern_intrinsic_name(b"enumerable")?;
+        let configurable_atom = self.intern_intrinsic_name(b"configurable")?;
+        let get_atom = self.intern_intrinsic_name(b"get")?;
+        let set_atom = self.intern_intrinsic_name(b"set")?;
+        let value = self.get_data_property(descriptor, value_atom)?;
+        let writable = self
+            .get_data_property(descriptor, writable_atom)?
+            .map(|value| self.is_truthy_value(value))
+            .transpose()?;
+        let enumerable = self
+            .get_data_property(descriptor, enumerable_atom)?
+            .map(|value| self.is_truthy_value(value))
+            .transpose()?;
+        let configurable = self
+            .get_data_property(descriptor, configurable_atom)?
+            .map(|value| self.is_truthy_value(value))
+            .transpose()?;
+        let getter = self.get_data_property(descriptor, get_atom)?;
+        let setter = self.get_data_property(descriptor, set_atom)?;
+        if getter.is_some() || setter.is_some() {
+            return Err(ExecutionError::UnsupportedAccessorDescriptor);
+        }
+        Ok(DataPropertyDescriptor {
+            value,
+            writable,
+            enumerable,
+            configurable,
+        })
+    }
+
+    /// Implements ValidateAndApplyPropertyDescriptor for ordinary data properties.
+    fn define_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        descriptor: DataPropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        if self.is_function_prototype_property(receiver, key)
+            || self
+                .native_function_metadata_property(receiver, key)?
+                .is_some()
+        {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+        let (object, snapshot) = self.object_snapshot(receiver)?;
+        let property = self.shapes.lookup(snapshot.shape, key);
+        let current = property
+            .map(|property| self.property_value_from_snapshot(snapshot, property))
+            .transpose()?
+            .flatten();
+        let Some(current_value) = current else {
+            if !snapshot.extensible {
+                return Err(ExecutionError::NonExtensibleObject(receiver));
+            }
+            let attributes = PropertyAttributes::data(
+                descriptor.writable.unwrap_or(false),
+                descriptor.enumerable.unwrap_or(false),
+                descriptor.configurable.unwrap_or(false),
+            );
+            let value = descriptor
+                .value
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            if let Some(property) = property {
+                let shape = self
+                    .shapes
+                    .transition_reconfigure(snapshot.shape, key, attributes)
+                    .map_err(ExecutionError::Shape)?;
+                self.update_property_slot(snapshot, property.slot, value)?;
+                return self.set_object_shape(object, shape);
+            }
+            return self.add_property_slot(object, snapshot, key, value, attributes);
+        };
+        let property = property.expect("present property value has shape metadata");
+        self.validate_data_property_redefinition(
+            receiver,
+            current_value,
+            property.attributes,
+            descriptor,
+        )?;
+        let attributes = PropertyAttributes::data(
+            descriptor
+                .writable
+                .unwrap_or_else(|| property.attributes.writable()),
+            descriptor
+                .enumerable
+                .unwrap_or_else(|| property.attributes.enumerable()),
+            descriptor
+                .configurable
+                .unwrap_or_else(|| property.attributes.configurable()),
+        );
+        let shape = self
+            .shapes
+            .transition_reconfigure(snapshot.shape, key, attributes)
+            .map_err(ExecutionError::Shape)?;
+        if let Some(value) = descriptor.value {
+            self.update_property_slot(snapshot, property.slot, value)?;
+        }
+        self.set_object_shape(object, shape)
+    }
+
+    /// Rejects the immutable combinations required by data descriptor compatibility.
+    fn validate_data_property_redefinition(
+        &mut self,
+        receiver: Value,
+        current_value: Value,
+        current: PropertyAttributes,
+        descriptor: DataPropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        if current.configurable() {
+            return Ok(());
+        }
+        if descriptor.configurable == Some(true)
+            || descriptor
+                .enumerable
+                .is_some_and(|enumerable| enumerable != current.enumerable())
+            || (!current.writable() && descriptor.writable == Some(true))
+        {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+        if !current.writable()
+            && let Some(value) = descriptor.value
+            && !self.same_value(value, current_value)?
+        {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+        Ok(())
+    }
+
+    /// Populates a rooted fresh object with the four standard data descriptor fields.
+    fn materialize_data_property_descriptor(
+        &mut self,
+        result: Value,
+        value: Value,
+        attributes: PropertyAttributes,
+    ) -> Result<(), ExecutionError> {
+        let value_atom = self.intern_intrinsic_name(b"value")?;
+        self.set_own_data_property(result, value_atom, value)?;
+        let writable_atom = self.intern_intrinsic_name(b"writable")?;
+        self.set_own_data_property(
+            result,
+            writable_atom,
+            Value::from_immediate(if attributes.writable() {
+                Immediate::True
+            } else {
+                Immediate::False
+            }),
+        )?;
+        let enumerable_atom = self.intern_intrinsic_name(b"enumerable")?;
+        self.set_own_data_property(
+            result,
+            enumerable_atom,
+            Value::from_immediate(if attributes.enumerable() {
+                Immediate::True
+            } else {
+                Immediate::False
+            }),
+        )?;
+        let configurable_atom = self.intern_intrinsic_name(b"configurable")?;
+        self.set_own_data_property(
+            result,
+            configurable_atom,
+            Value::from_immediate(if attributes.configurable() {
+                Immediate::True
+            } else {
+                Immediate::False
+            }),
+        )
+    }
+
+    /// Applies ordinary data descriptors from an Object.create/defineProperties descriptor map.
     fn define_ordinary_properties(
         &mut self,
         target: Value,
@@ -2383,7 +2630,6 @@ impl Isolate {
             .shapes
             .own_keys(snapshot.shape)
             .map_err(ExecutionError::Shape)?;
-        let value_atom = self.intern_intrinsic_name(b"value")?;
         for key in keys {
             let Some(descriptor) = self.data_property_from_snapshot(snapshot, key)? else {
                 continue;
@@ -2391,10 +2637,8 @@ impl Isolate {
             if !self.is_object_value(descriptor) {
                 return Err(ExecutionError::NotObject(descriptor));
             }
-            let value = self
-                .get_data_property(descriptor, value_atom)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            self.set_own_data_property(target, key, value)?;
+            let descriptor = self.parse_data_property_descriptor(descriptor)?;
+            self.define_data_property(target, key, descriptor)?;
         }
         Ok(())
     }
@@ -2452,6 +2696,15 @@ impl Isolate {
             .map_err(ExecutionError::Shape)?;
         let mut output_index = 0_i32;
         for key in keys {
+            if !self
+                .shapes
+                .lookup(snapshot.shape, key)
+                .expect("own key resolves in its source shape")
+                .attributes
+                .enumerable()
+            {
+                continue;
+            }
             let Some(value) = self.data_property_from_snapshot(snapshot, key)? else {
                 continue;
             };
@@ -2616,7 +2869,15 @@ impl Isolate {
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             return Ok(None);
         };
-        debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
+        self.property_value_from_snapshot(snapshot, property)
+    }
+
+    /// Reads one resolved fixed slot and maps the retained deletion sentinel back to absence.
+    fn property_value_from_snapshot(
+        &mut self,
+        snapshot: OrdinaryObject,
+        property: PropertyLookup,
+    ) -> Result<Option<Value>, ExecutionError> {
         let storage = snapshot
             .storage
             .expect("a non-empty shape always owns property storage");
@@ -2925,13 +3186,35 @@ impl Isolate {
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
-            debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
+            if self
+                .property_value_from_snapshot(snapshot, property)?
+                .is_some()
+            {
+                if !property.attributes.writable() {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
+                return self.update_property_slot(snapshot, property.slot, value);
+            }
+            if !snapshot.extensible {
+                return Err(ExecutionError::NonExtensibleObject(receiver));
+            }
+            let shape = self
+                .shapes
+                .transition_reconfigure(snapshot.shape, key, PropertyAttributes::DEFAULT_DATA)
+                .map_err(ExecutionError::Shape)?;
+            self.set_object_shape(object, shape)?;
             return self.update_property_slot(snapshot, property.slot, value);
         }
         if !snapshot.extensible {
             return Err(ExecutionError::NonExtensibleObject(receiver));
         }
-        self.add_property_slot(object, snapshot, key, value)
+        self.add_property_slot(
+            object,
+            snapshot,
+            key,
+            value,
+            PropertyAttributes::DEFAULT_DATA,
+        )
     }
 
     /// Applies assignment failure semantics without weakening throwing descriptor operations.
@@ -2948,7 +3231,7 @@ impl Isolate {
             .expect("property assignment always has an active frame")
             .strictness;
         match self.set_own_data_property(receiver, key, value) {
-            Err(ExecutionError::NonExtensibleObject(_))
+            Err(ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_))
                 if strictness == FunctionStrictness::Sloppy =>
             {
                 Ok(())
@@ -2967,6 +3250,9 @@ impl Isolate {
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             return Ok(true);
         };
+        if !property.attributes.configurable() {
+            return Ok(false);
+        }
         self.update_property_slot(
             snapshot,
             property.slot,
@@ -3008,10 +3294,11 @@ impl Isolate {
         snapshot: OrdinaryObject,
         key: AtomId,
         value: Value,
+        attributes: PropertyAttributes,
     ) -> Result<(), ExecutionError> {
         let new_shape = self
             .shapes
-            .transition_add(snapshot.shape, key, PropertyAttributes::DEFAULT_DATA)
+            .transition_add(snapshot.shape, key, attributes)
             .map_err(ExecutionError::Shape)?;
         let new_length = self.shapes.property_count(new_shape) as usize;
         let mut slots = Vec::new();
@@ -3122,6 +3409,37 @@ impl Isolate {
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .extensible = extensible;
+                    Ok(())
+                })
+            }),
+        }
+    }
+
+    /// Switches immutable shape metadata without touching the unchanged storage edge.
+    fn set_object_shape(
+        &mut self,
+        receiver: ObjectReceiver,
+        shape: ShapeId,
+    ) -> Result<(), ExecutionError> {
+        match receiver {
+            ObjectReceiver::Ordinary(object) => self.heap.with_running_scope(|scope| {
+                let object = scope.root(object).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(object, self.types.ordinary_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
+                let function = scope.root(function).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
                     Ok(())
                 })
             }),
@@ -4607,12 +4925,41 @@ impl Isolate {
                         .call_argument(&site, 2)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let key = self.property_key_atom_or_undefined(key)?;
-                    let value_atom = self.intern_intrinsic_name(b"value")?;
-                    let value = self
-                        .get_data_property(descriptor, value_atom)?
-                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                    self.set_own_data_property(object, key, value)?;
+                    let descriptor = self.parse_data_property_descriptor(descriptor)?;
+                    self.define_data_property(object, key, descriptor)?;
                     return self.write(site.caller_base, site.destination, object);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
+                    let object = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if matches!(
+                        object.as_immediate(),
+                        Some(Immediate::Undefined | Immediate::Null)
+                    ) {
+                        return Err(ExecutionError::NotObject(object));
+                    }
+                    let key = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self.property_key_atom_or_undefined(key)?;
+                    let property = if self.is_object_value(object) {
+                        self.own_data_property_with_attributes(object, key)?
+                    } else {
+                        None
+                    };
+                    let Some((value, attributes)) = property else {
+                        return self.write(
+                            site.caller_base,
+                            site.destination,
+                            Value::from_immediate(Immediate::Undefined),
+                        );
+                    };
+                    self.write(site.caller_base, site.destination, value)?;
+                    let result = self.create_ordinary_object()?;
+                    self.write(site.caller_base, site.destination, result)?;
+                    self.materialize_data_property_descriptor(result, value, attributes)?;
+                    return Ok(());
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwnProperty) => {
                     let key = self
@@ -5114,6 +5461,8 @@ fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
         | ExecutionError::ReadOnlyBinding(_)
         | ExecutionError::ImmutableBinding(_)
         | ExecutionError::NonExtensibleObject(_)
+        | ExecutionError::ReadOnlyProperty(_)
+        | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),

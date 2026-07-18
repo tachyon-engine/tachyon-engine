@@ -1488,6 +1488,43 @@ mod tests {
         );
     }
 
+    /// Verifies data descriptor defaults, reconfiguration, enumeration, and native metadata.
+    #[test]
+    fn data_property_descriptors_preserve_flags_and_values() {
+        assert_eq!(
+            execute_source(
+                83,
+                "let object = {}; Object.defineProperty(object, 'hidden', { value: 1 }); let descriptor = Object.getOwnPropertyDescriptor(object, 'hidden'); object.hidden = 2; descriptor.value === 1 && !descriptor.writable && !descriptor.enumerable && !descriptor.configurable && object.hidden === 1 && Object.keys(object).length === 0;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                84,
+                "let object = {}; Object.defineProperty(object, 'first', { value: 1, writable: true, enumerable: true, configurable: true }); Object.defineProperty(object, 'second', { value: 2, enumerable: true }); Object.defineProperty(object, 'first', { value: 3, writable: false, enumerable: false, configurable: false }); let descriptor = Object.getOwnPropertyDescriptor(object, 'first'); Object.keys(object)[0] === 'second' && descriptor.value === 3 && !descriptor.writable && !descriptor.enumerable && !descriptor.configurable && delete object.first === false;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                85,
+                "let method = Object.preventExtensions; let metadata = Object.getOwnPropertyDescriptor(method, 'name'); let object = {}; Object.defineProperty(object, 'fixed', { value: 1 }); let threw = false; try { Object.defineProperty(object, 'fixed', { configurable: true }); } catch (error) { threw = error instanceof TypeError; } metadata.value === 'preventExtensions' && !metadata.writable && !metadata.enumerable && metadata.configurable && threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                86,
+                "var object = { property: 1 }; var descriptor = Object.getOwnPropertyDescriptor(object, 'property'); if (!('writable' in descriptor)) { 0; } else if (!delete descriptor.writable) { 2; } else if ('writable' in descriptor) { 3; } else { 1; }",
+            )
+            .as_i32(),
+            Some(1),
+        );
+    }
+
     /// Verifies primitive constructors reuse the VM numeric, truthiness, and string contracts.
     #[test]
     fn primitive_constructors_convert_values() {
