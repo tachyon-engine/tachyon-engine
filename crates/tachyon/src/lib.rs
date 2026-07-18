@@ -150,6 +150,86 @@ mod tests {
     }
 
     #[test]
+    /// Covers entry hoisting, block escape, duplicate declarations, and parameter var reuse.
+    fn var_bindings_follow_function_and_script_scope() {
+        assert_eq!(
+            execute_source(40, "typeof before === 'undefined'; var before = 3;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(41, "{ var escaped = 4; } escaped;").as_i32(),
+            Some(4)
+        );
+        assert_eq!(
+            execute_source(42, "var value = 1; var value = value + 2; value;").as_i32(),
+            Some(3)
+        );
+        assert_eq!(
+            execute_source(
+                43,
+                "function preserve(value) { var value; return value; } preserve(8);",
+            )
+            .as_i32(),
+            Some(8)
+        );
+        assert_eq!(
+            execute_source(
+                44,
+                "function read() { return typeof local; var local = 1; } read() === 'undefined';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// A later script declaration must not reset an existing global var binding to undefined.
+    fn global_var_declaration_preserves_prior_source_unit_value() {
+        let first = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(45),
+                    SourceName::new("first"),
+                    MediaType::JavaScript,
+                    Arc::from("var retained = 9;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let second = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(46),
+                    SourceName::new("second"),
+                    MediaType::JavaScript,
+                    Arc::from("var retained; retained;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut isolate = test_isolate();
+        isolate
+            .execute(
+                &first,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute(
+                &second,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(9)));
+    }
+
+    #[test]
     fn later_declarator_reads_preceding_local_binding() {
         let source = SourceText::new(
             SourceId::new(4),

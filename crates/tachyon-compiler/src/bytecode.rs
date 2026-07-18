@@ -53,6 +53,7 @@ fn lower_entry(
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
+    let var_names = var_declared_names(hir.statements())?;
     let has_control_flow = hir.statements().iter().any(|statement| {
         matches!(
             statement.kind,
@@ -82,6 +83,10 @@ fn lower_entry(
         2
     };
     let instruction_upper_bound = hir_instruction_count(hir)?
+        .checked_add(var_names.len())
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "global var instantiation instructions",
+        })?
         .checked_add(result_instruction_count)
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "bytecode instructions",
@@ -103,11 +108,20 @@ fn lower_entry(
         handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
+        script_scope: true,
     };
     for statement in hir.statements() {
         if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
             lowerer.function_declaration(declaration, statement.span)?;
         }
+    }
+    for name in &var_names {
+        let scope_name = lowerer.scope_name(name)?;
+        lowerer.emit(
+            Opcode::DeclareScope,
+            &[scope_name],
+            SourceSpan { start: 0, end: 0 },
+        )?;
     }
     let result = if has_control_flow {
         let result = lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?;
@@ -197,8 +211,19 @@ fn lower_function(
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
+    let var_names = var_declared_names(&function.body)?;
+    let var_initialization_count = var_names
+        .iter()
+        .filter(|name| {
+            !function
+                .parameters
+                .iter()
+                .any(|parameter| parameter.name.as_ref() == name.as_ref())
+        })
+        .count();
     let instruction_capacity = statements_instruction_count(&function.body)?
-        .checked_add(2)
+        .checked_add(var_initialization_count)
+        .and_then(|count| count.checked_add(2))
         .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function bytecode words",
@@ -226,11 +251,23 @@ fn lower_function(
         handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
+        script_scope: false,
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
         lowerer.locals.push(LocalBinding {
             name: parameter.name.clone(),
+            register,
+            mutable: true,
+        });
+    }
+    for name in var_names {
+        if lowerer.local(&name).is_some() {
+            continue;
+        }
+        let register = lowerer.load_undefined(function.span)?;
+        lowerer.locals.push(LocalBinding {
+            name,
             register,
             mutable: true,
         });
@@ -285,6 +322,7 @@ struct Lowerer<'a> {
     handlers: Vec<Option<HandlerEntry>>,
     next_register: u32,
     source_name: SourceName,
+    script_scope: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -742,7 +780,9 @@ impl Lowerer<'_> {
         let protected_start = self.emit_marker(span)?;
         let try_terminal = self.entry_statement_list(block, result)?;
         let end = self.builder.new_label().map_err(CompileError::Builder)?;
-        self.emit_jump(end, span)?;
+        if !try_terminal {
+            self.emit_jump(end, span)?;
+        }
         let checkpoint = self.locals.len();
         let handler_offset = self.emit_catch_binding(handler)?;
         let catch_terminal = self.entry_statement_list(&handler.body, result)?;
@@ -770,7 +810,9 @@ impl Lowerer<'_> {
         let protected_start = self.emit_marker(span)?;
         let try_terminal = self.function_statement_list(block)?;
         let end = self.builder.new_label().map_err(CompileError::Builder)?;
-        self.emit_jump(end, span)?;
+        if !try_terminal {
+            self.emit_jump(end, span)?;
+        }
         let checkpoint = self.locals.len();
         let handler_offset = self.emit_catch_binding(handler)?;
         let catch_terminal = self.function_statement_list(&handler.body)?;
@@ -1634,6 +1676,9 @@ impl Lowerer<'_> {
         &mut self,
         declaration: &HirVariableDeclaration,
     ) -> Result<(), CompileError> {
+        if declaration.kind == HirVariableDeclarationKind::Var {
+            return self.var_initializers(declaration);
+        }
         if !matches!(
             declaration.kind,
             HirVariableDeclarationKind::Let | HirVariableDeclarationKind::Const
@@ -1668,6 +1713,36 @@ impl Lowerer<'_> {
                 register,
                 mutable: declaration.kind == HirVariableDeclarationKind::Let,
             });
+        }
+        Ok(())
+    }
+
+    /// Executes var initializers at their source position against bindings instantiated at entry.
+    fn var_initializers(
+        &mut self,
+        declaration: &HirVariableDeclaration,
+    ) -> Result<(), CompileError> {
+        for declarator in declaration.declarators.iter() {
+            let Some(initializer) = declarator.initializer.as_ref() else {
+                continue;
+            };
+            let value = self.expression(initializer)?;
+            if let Some(binding) = self.local(&declarator.binding.name).cloned() {
+                self.emit(
+                    Opcode::Move,
+                    &[binding.register.index(), value.index()],
+                    declarator.span,
+                )?;
+            } else if self.script_scope {
+                let scope_name = self.scope_name(&declarator.binding.name)?;
+                self.emit(
+                    Opcode::StoreScope,
+                    &[value.index(), scope_name],
+                    declarator.span,
+                )?;
+            } else {
+                return Err(self.unsupported(declarator.span, "uninstantiated var binding"));
+            }
         }
         Ok(())
     }
@@ -1736,6 +1811,88 @@ impl Lowerer<'_> {
 
 fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
     statements_instruction_count(hir.statements())
+}
+
+/// Collects function/script-scoped var names once with a source-derived no-growth capacity.
+fn var_declared_names(
+    statements: &[HirStatement],
+) -> Result<Vec<std::sync::Arc<str>>, CompileError> {
+    let mut names = Vec::with_capacity(statements_binding_count(statements)?);
+    collect_var_declared_names(statements, &mut names);
+    Ok(names)
+}
+
+/// Walks statement containers but deliberately stops at separately owned function stencils.
+fn collect_var_declared_names(statements: &[HirStatement], names: &mut Vec<std::sync::Arc<str>>) {
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => {
+                if declaration.kind == HirVariableDeclarationKind::Var {
+                    push_var_declaration_names(declaration, names);
+                }
+            }
+            HirStatementKind::Block(statements) => collect_var_declared_names(statements, names),
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_var_declared_names(core::slice::from_ref(consequent), names);
+                if let Some(alternate) = alternate {
+                    collect_var_declared_names(core::slice::from_ref(alternate), names);
+                }
+            }
+            HirStatementKind::For {
+                initializer, body, ..
+            } => {
+                if let Some(HirForInitializer::Variable(declaration)) = initializer
+                    && declaration.kind == HirVariableDeclarationKind::Var
+                {
+                    push_var_declaration_names(declaration, names);
+                }
+                collect_var_declared_names(core::slice::from_ref(body), names);
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_var_declared_names(&case.consequent, names);
+                }
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                collect_var_declared_names(block, names);
+                if let Some(handler) = handler {
+                    collect_var_declared_names(&handler.body, names);
+                }
+                if let Some(finalizer) = finalizer {
+                    collect_var_declared_names(finalizer, names);
+                }
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => {}
+        }
+    }
+}
+
+fn push_var_declaration_names(
+    declaration: &HirVariableDeclaration,
+    names: &mut Vec<std::sync::Arc<str>>,
+) {
+    for declarator in declaration.declarators.iter() {
+        if names
+            .iter()
+            .all(|name| name.as_ref() != declarator.binding.name.as_ref())
+        {
+            names.push(declarator.binding.name.clone());
+        }
+    }
 }
 
 /// Adds every owned try child with the same checked collection-specific counter.
@@ -1896,7 +2053,11 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
 
 /// Computes a checked upper bound for module scope-name interning before HIR lowering starts.
 fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
-    let mut count = statements_scope_name_count(hir.statements())?;
+    let mut count = checked_count_add(
+        statements_scope_name_count(hir.statements())?,
+        var_declared_names(hir.statements())?.len(),
+        "scope names",
+    )?;
     for function in hir.functions() {
         count = checked_count_add(
             count,
@@ -2287,12 +2448,18 @@ fn declaration_instruction_count(
 ) -> Result<usize, CompileError> {
     let mut count = 0;
     for declarator in declaration.declarators.iter() {
-        let initializer_count = declarator
-            .initializer
-            .as_ref()
-            .map(expression_instruction_count)
-            .transpose()?
-            .unwrap_or(1);
+        let initializer_count = match declarator.initializer.as_ref() {
+            Some(initializer) => {
+                let count = expression_instruction_count(initializer)?;
+                if declaration.kind == HirVariableDeclarationKind::Var {
+                    checked_count_add(count, 1, "bytecode instructions")?
+                } else {
+                    count
+                }
+            }
+            None if declaration.kind == HirVariableDeclarationKind::Var => 0,
+            None => 1,
+        };
         count = checked_count_add(count, initializer_count, "bytecode instructions")?;
     }
     Ok(count)

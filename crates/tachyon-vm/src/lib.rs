@@ -1296,6 +1296,10 @@ impl Isolate {
                 let value = self.read(base, operands[0])?;
                 self.realm.set(name, value)?;
             }
+            Opcode::DeclareScope => {
+                let name = self.scope_atom(code, operands[0])?;
+                self.declare_scope(name)?;
+            }
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
             }
@@ -1416,6 +1420,15 @@ impl Isolate {
             _ => None,
         };
         intrinsic.or_else(|| self.realm.get(name))
+    }
+
+    #[inline(always)]
+    fn declare_scope(&mut self, name: AtomId) -> Result<(), ExecutionError> {
+        if self.scope_value(name).is_some() {
+            return Ok(());
+        }
+        self.realm
+            .set(name, Value::from_immediate(Immediate::Undefined))
     }
 
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
@@ -2027,6 +2040,38 @@ mod tests {
         )
     }
 
+    /// Declares one global twice around a write so dispatch tests prove redeclaration is a no-op.
+    fn scoped_var_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(6, 0);
+        builder.emit(Opcode::DeclareScope, &[0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[0, 7], span).unwrap();
+        builder.emit(Opcode::StoreScope, &[0, 0], span).unwrap();
+        builder.emit(Opcode::DeclareScope, &[0], span).unwrap();
+        builder.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        CompiledModule::new(
+            Arc::from("var answer = 7; var answer; answer;"),
+            Vec::new(),
+            vec![Arc::from("answer")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count,
+                        ..FunctionLayout::default()
+                    },
+                    source_map,
+                    ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                },
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
     /// Freezes one builder into a script module with caller-provided immutable constants.
     fn single_function_module(
         source: &'static str,
@@ -2436,6 +2481,15 @@ mod tests {
     }
 
     #[test]
+    fn script_var_declaration_works_for_every_dispatch_batch() {
+        assert_scope_batch::<1>();
+        assert_scope_batch::<2>();
+        assert_scope_batch::<4>();
+        assert_scope_batch::<8>();
+        assert_scope_batch::<16>();
+    }
+
+    #[test]
     /// Forces collection between loaded literals so pending and published caches must both trace.
     fn loaded_string_constants_survive_forced_major_during_module_load() {
         let mut isolate = test_isolate();
@@ -2484,6 +2538,17 @@ mod tests {
             isolate.scope_value(infinity).and_then(Value::as_f64),
             Some(f64::INFINITY)
         );
+    }
+
+    #[test]
+    fn var_declaration_does_not_publish_over_primitive_realm_intrinsics() {
+        let mut isolate = test_isolate();
+        let infinity = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("Infinity").unwrap())
+            .unwrap();
+        isolate.declare_scope(infinity).unwrap();
+        assert!(isolate.realm.globals.is_empty());
     }
 
     #[test]
@@ -2866,6 +2931,19 @@ mod tests {
             RunOutcome::Completed(value)
                 if value.as_immediate() == Some(Immediate::True)
         ));
+    }
+
+    fn assert_scope_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &scoped_var_module(),
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(7)));
     }
 
     fn assert_batch_budget<const N: usize>() {

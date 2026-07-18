@@ -329,6 +329,54 @@ mod tests {
     }
 
     #[test]
+    /// Confirms script vars become deduplicated global declarations while function vars use frames.
+    fn compiler_instantiates_var_bindings_at_their_scope_entry() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "var outer; { var inner = 2; } function read(value) { return typeof local; var local = value; } inner;",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let entry = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        let function = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entry.matches("DeclareScope").count(), 2);
+        assert!(entry.contains("StoreScope"));
+        assert!(function.contains("LoadUndefined"));
+        assert!(function.contains("Typeof"));
+    }
+
+    #[test]
+    /// A fully terminal try/catch must not leave a jump whose target is the function code end.
+    fn terminal_try_catch_freezes_only_instruction_boundary_targets() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function render(value) { var basic = value; if (basic) return basic; try { return value; } catch (error) { if (error) { return 1; } throw error; } } render(2);",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let function = module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap();
+        assert!(tachyon_bytecode::disassemble(function).is_ok());
+    }
+
+    #[test]
     /// Confirms control-flow HIR owns every nested node after the Oxc arena is dropped.
     fn hir_owns_nested_block_if_and_throw_statements() {
         let hir = Compiler

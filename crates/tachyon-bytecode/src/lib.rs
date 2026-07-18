@@ -152,6 +152,8 @@ pub enum Opcode {
     SetByValue = 37,
     /// Loads the ECMAScript typeof result for register 1.
     Typeof = 38,
+    /// Creates a script-scoped var binding only when the global does not already exist.
+    DeclareScope = 39,
 }
 
 impl Opcode {
@@ -165,7 +167,8 @@ impl Opcode {
             | Self::LoadTrue
             | Self::Jump
             | Self::Return
-            | Self::Throw => 1,
+            | Self::Throw
+            | Self::DeclareScope => 1,
             Self::LoadImmediate
             | Self::LoadConstant
             | Self::Move
@@ -240,6 +243,7 @@ impl Opcode {
             36 => Some(Self::GetByValue),
             37 => Some(Self::SetByValue),
             38 => Some(Self::Typeof),
+            39 => Some(Self::DeclareScope),
             _ => None,
         }
     }
@@ -735,7 +739,7 @@ impl BytecodeBuilder {
 
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
-            Opcode::Nop | Opcode::Jump => &[],
+            Opcode::Nop | Opcode::Jump | Opcode::DeclareScope => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -1584,7 +1588,7 @@ fn verify_instruction(
         }
     };
     match instruction.opcode {
-        Opcode::Nop | Opcode::Jump => {}
+        Opcode::Nop | Opcode::Jump | Opcode::DeclareScope => {}
         Opcode::LoadUndefined
         | Opcode::LoadNull
         | Opcode::LoadFalse
@@ -1671,6 +1675,7 @@ fn verify_instruction(
     }
     let scope_name = match instruction.opcode {
         Opcode::LoadScope | Opcode::StoreScope => Some(operands[1]),
+        Opcode::DeclareScope => Some(operands[0]),
         Opcode::GetById | Opcode::SetById => Some(operands[2]),
         _ => None,
     };
