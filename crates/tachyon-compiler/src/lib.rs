@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
-    BindingId, FunctionStencilId, HirAssignmentTarget, HirBinaryOperator, HirBinding,
-    HirCatchClause, HirExpression, HirExpressionKind, HirFunction, HirFunctionDeclaration,
-    HirLogicalOperator, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
-    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
-    ReferenceId, ScopeId, StatementCompletion,
+    BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
+    HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirFunction,
+    HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
+    HirSwitchCase, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -469,6 +469,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compiler_lowers_compound_assignment_through_the_shared_binary_path() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "let value = 1; value += 2;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("Add"));
     }
 
     #[test]

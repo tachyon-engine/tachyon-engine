@@ -704,4 +704,20 @@ mod tests {
             Some(tachyon_value::Immediate::True)
         );
     }
+
+    #[test]
+    fn compound_assignment_reads_old_value_before_rhs_and_evaluates_receiver_once() {
+        assert_eq!(
+            execute_source(36, "let value = 1; value += (value = 2); value;").as_i32(),
+            Some(3)
+        );
+        assert_eq!(
+            execute_source(
+                37,
+                "function Box() { this.value = 1; this.calls = 0; } function target(receiver) { receiver.calls += 1; return receiver; } let box = new Box(); target(box).value += 2; box.calls === 1 && box.value === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
 }

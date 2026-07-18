@@ -6,7 +6,7 @@ use tachyon_bytecode::{
     MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
-use crate::hir::HirAssignmentTarget;
+use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
 use crate::{
     CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind, HirFunction,
     HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
@@ -906,29 +906,9 @@ impl Lowerer<'_> {
                 left,
                 right,
             } => {
-                let opcode = match operator {
-                    HirBinaryOperator::Add => Opcode::Add,
-                    HirBinaryOperator::Subtract => Opcode::Sub,
-                    HirBinaryOperator::Multiply => Opcode::Mul,
-                    HirBinaryOperator::Divide => Opcode::Div,
-                    HirBinaryOperator::StrictEqual => Opcode::StrictEqual,
-                    _ => {
-                        return Err(CompileError::UnsupportedSyntax {
-                            source_name: self.source_name.clone(),
-                            span: expression.span,
-                            syntax: "binary operator",
-                        });
-                    }
-                };
                 let left = self.expression(left)?;
                 let right = self.expression(right)?;
-                let destination = self.register()?;
-                self.emit(
-                    opcode,
-                    &[destination.index(), left.index(), right.index()],
-                    expression.span,
-                )?;
-                Ok(destination)
+                self.emit_binary(*operator, left, right, expression.span)
             }
             HirExpressionKind::Logical {
                 operator,
@@ -986,42 +966,11 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
-            HirExpressionKind::Assignment { target, value } => match target {
-                HirAssignmentTarget::Identifier(target) => {
-                    let binding = self.local(target).cloned().ok_or_else(|| {
-                        CompileError::UnsupportedSyntax {
-                            source_name: self.source_name.clone(),
-                            span: expression.span,
-                            syntax: "unresolved assignment target",
-                        }
-                    })?;
-                    if !binding.mutable {
-                        return Err(CompileError::UnsupportedSyntax {
-                            source_name: self.source_name.clone(),
-                            span: expression.span,
-                            syntax: "assignment to immutable local",
-                        });
-                    }
-                    let value = self.expression(value)?;
-                    self.emit(
-                        Opcode::Move,
-                        &[binding.register.index(), value.index()],
-                        expression.span,
-                    )?;
-                    Ok(value)
-                }
-                HirAssignmentTarget::StaticMember { object, property } => {
-                    let receiver = self.expression(object)?;
-                    let value = self.expression(value)?;
-                    let property = self.scope_name(property)?;
-                    self.emit(
-                        Opcode::SetById,
-                        &[receiver.index(), value.index(), property],
-                        expression.span,
-                    )?;
-                    Ok(value)
-                }
-            },
+            HirExpressionKind::Assignment {
+                operator,
+                target,
+                value,
+            } => self.assignment_expression(*operator, target, value, expression.span),
             HirExpressionKind::Conditional {
                 test,
                 consequent,
@@ -1039,6 +988,108 @@ impl Lowerer<'_> {
                 syntax: "expression",
             }),
         }
+    }
+
+    /// Reads a compound target before its RHS, computes once, and publishes the resulting value.
+    fn assignment_expression(
+        &mut self,
+        operator: HirAssignmentOperator,
+        target: &HirAssignmentTarget,
+        value: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        match target {
+            HirAssignmentTarget::Identifier(target) => {
+                let binding =
+                    self.local(target)
+                        .cloned()
+                        .ok_or_else(|| CompileError::UnsupportedSyntax {
+                            source_name: self.source_name.clone(),
+                            span,
+                            syntax: "unresolved assignment target",
+                        })?;
+                if !binding.mutable {
+                    return Err(CompileError::UnsupportedSyntax {
+                        source_name: self.source_name.clone(),
+                        span,
+                        syntax: "assignment to immutable local",
+                    });
+                }
+                let result = match operator {
+                    HirAssignmentOperator::Assign => self.expression(value)?,
+                    HirAssignmentOperator::Binary(operator) => {
+                        let old_value = self.register()?;
+                        self.emit(
+                            Opcode::Move,
+                            &[old_value.index(), binding.register.index()],
+                            span,
+                        )?;
+                        let right = self.expression(value)?;
+                        self.emit_binary(operator, old_value, right, span)?
+                    }
+                };
+                self.emit(
+                    Opcode::Move,
+                    &[binding.register.index(), result.index()],
+                    span,
+                )?;
+                Ok(result)
+            }
+            HirAssignmentTarget::StaticMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.scope_name(property)?;
+                let result = match operator {
+                    HirAssignmentOperator::Assign => self.expression(value)?,
+                    HirAssignmentOperator::Binary(operator) => {
+                        let old_value = self.register()?;
+                        self.emit(
+                            Opcode::GetById,
+                            &[old_value.index(), receiver.index(), property],
+                            span,
+                        )?;
+                        let right = self.expression(value)?;
+                        self.emit_binary(operator, old_value, right, span)?
+                    }
+                };
+                self.emit(
+                    Opcode::SetById,
+                    &[receiver.index(), result.index(), property],
+                    span,
+                )?;
+                Ok(result)
+            }
+        }
+    }
+
+    /// Emits one supported binary operation over already evaluated values.
+    fn emit_binary(
+        &mut self,
+        operator: HirBinaryOperator,
+        left: RegisterId,
+        right: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let opcode = match operator {
+            HirBinaryOperator::Add => Opcode::Add,
+            HirBinaryOperator::Subtract => Opcode::Sub,
+            HirBinaryOperator::Multiply => Opcode::Mul,
+            HirBinaryOperator::Divide => Opcode::Div,
+            HirBinaryOperator::StrictEqual => Opcode::StrictEqual,
+            _ => {
+                return Err(CompileError::UnsupportedSyntax {
+                    source_name: self.source_name.clone(),
+                    span,
+                    syntax: "binary operator",
+                });
+            }
+        };
+        let destination = self.register()?;
+        self.emit(
+            opcode,
+            &[destination.index(), left.index(), right.index()],
+            span,
+        )?;
+        Ok(destination)
     }
 
     /// Preserves the left operand value and evaluates the right operand only when required.
@@ -1605,7 +1656,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             expression_scope_name_count(right)?,
             "scope names",
         ),
-        HirExpressionKind::Assignment { target, value } => {
+        HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {
@@ -1792,7 +1843,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             1,
             "bytecode instructions",
         ),
-        HirExpressionKind::Assignment { target, value } => {
+        HirExpressionKind::Assignment {
+            operator,
+            target,
+            value,
+        } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {
@@ -1804,7 +1859,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 expression_instruction_count(value)?,
                 "bytecode instructions",
             )?;
-            checked_count_add(operands, 1, "bytecode instructions")
+            let own_instructions = match (operator, target) {
+                (HirAssignmentOperator::Assign, _) => 1,
+                (HirAssignmentOperator::Binary(_), _) => 3,
+            };
+            checked_count_add(operands, own_instructions, "bytecode instructions")
         }
         HirExpressionKind::Unary { argument, .. } => checked_count_add(
             expression_instruction_count(argument)?,
@@ -2286,7 +2345,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             checked_count_add(nested, 1, "bytecode labels")
         }
         HirExpressionKind::StaticMember { object, .. } => expression_label_count(object),
-        HirExpressionKind::Assignment { target, value } => {
+        HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object)?,
@@ -2337,7 +2396,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::StaticMember { object, .. } => expression_literal_count(object),
-        HirExpressionKind::Assignment { target, value } => {
+        HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {

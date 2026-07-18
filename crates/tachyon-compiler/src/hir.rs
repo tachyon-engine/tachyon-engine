@@ -7,7 +7,7 @@ use oxc::{
         AssignmentTarget, BindingPattern, Expression, Program, Statement, VariableDeclaration,
         VariableDeclarationKind,
     },
-    span::GetSpan,
+    span::{GetSpan, Span},
     syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
 };
 
@@ -179,6 +179,12 @@ pub enum HirAssignmentTarget {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirAssignmentOperator {
+    Assign,
+    Binary(HirBinaryOperator),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirExpressionKind {
     Number(u64),
@@ -208,6 +214,7 @@ pub enum HirExpressionKind {
         right: Box<HirExpression>,
     },
     Assignment {
+        operator: HirAssignmentOperator,
         target: HirAssignmentTarget,
         value: Box<HirExpression>,
     },
@@ -800,13 +807,8 @@ fn lower_expression(
             )?),
         },
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
-            target: lower_assignment_target(
-                &expression.left,
-                expression.operator,
-                source,
-                next_binding,
-                functions,
-            )?,
+            operator: lower_assignment_operator(expression.operator, source, expression.span)?,
+            target: lower_assignment_target(&expression.left, source, next_binding, functions)?,
             value: Box::new(lower_expression(
                 &expression.right,
                 source,
@@ -889,21 +891,29 @@ fn lower_expression(
     Ok(HirExpression { span, kind })
 }
 
-/// Retains only an identifier target because member and pattern assignments need object/iterator semantics.
+/// Converts assignment operators without hiding unsupported short-circuit assignment semantics.
+fn lower_assignment_operator(
+    operator: AssignmentOperator,
+    source: &SourceText,
+    span: Span,
+) -> Result<HirAssignmentOperator, CompileError> {
+    if operator.is_assign() {
+        return Ok(HirAssignmentOperator::Assign);
+    }
+    operator
+        .to_binary_operator()
+        .map(lower_binary_operator)
+        .map(HirAssignmentOperator::Binary)
+        .ok_or_else(|| unsupported(source.name(), source_span(span), "assignment operator"))
+}
+
+/// Owns identifier and static-member references while rejecting patterns and computed properties.
 fn lower_assignment_target(
     target: &AssignmentTarget<'_>,
-    operator: AssignmentOperator,
     source: &SourceText,
     next_binding: &mut u32,
     functions: &mut Vec<HirFunction>,
 ) -> Result<HirAssignmentTarget, CompileError> {
-    if !operator.is_assign() {
-        return Err(unsupported(
-            source.name(),
-            source_span(target.span()),
-            "assignment operator",
-        ));
-    }
     match target {
         AssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok(
             HirAssignmentTarget::Identifier(Arc::from(identifier.name.as_str())),
