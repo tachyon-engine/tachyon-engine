@@ -1173,6 +1173,27 @@ mod tests {
     }
 
     #[test]
+    /// Exercises object literal creation, ordered data-property publication, and shape-backed updates.
+    fn object_literals_publish_and_update_plain_data_properties() {
+        assert_eq!(
+            execute_source(
+                59,
+                "let object = { answer: 40, label: 'ok' }; object.answer + 2;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                60,
+                "let object = { answer: 1 }; object.answer += 1; object.answer;",
+            )
+            .as_i32(),
+            Some(2)
+        );
+    }
+
+    #[test]
     /// Checks update results and one-shot object/key evaluation through source compilation.
     fn computed_members_preserve_reference_evaluation_and_updates() {
         assert_eq!(

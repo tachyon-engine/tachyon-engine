@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        AssignmentTarget, BindingPattern, Expression, ForStatementInit, Program,
-        SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+        AssignmentTarget, BindingPattern, Expression, ForStatementInit, ObjectPropertyKind,
+        Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration,
+        VariableDeclarationKind,
     },
     semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::{GetSpan, Span},
@@ -249,6 +250,13 @@ pub struct HirVariableDeclaration {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct HirObjectProperty {
+    pub span: SourceSpan,
+    pub key: Arc<str>,
+    pub value: HirExpression,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct HirExpression {
     pub span: SourceSpan,
     pub kind: HirExpressionKind,
@@ -283,6 +291,7 @@ pub enum HirExpressionKind {
     Function(FunctionStencilId),
     This,
     NewTarget,
+    Object(Arc<[HirObjectProperty]>),
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -1015,6 +1024,42 @@ fn lower_expression(
             if property.meta.name == "new" && property.property.name == "target" =>
         {
             HirExpressionKind::NewTarget
+        }
+        Expression::ObjectExpression(expression) => {
+            let mut properties = Vec::with_capacity(expression.properties.len());
+            for property in &expression.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(property.span()),
+                        "object spread",
+                    ));
+                };
+                if property.kind != PropertyKind::Init || property.method || property.computed {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(property.span),
+                        "object accessor or computed property",
+                    ));
+                }
+                let key = match &property.key {
+                    PropertyKey::StaticIdentifier(identifier) => identifier.name.as_str(),
+                    PropertyKey::StringLiteral(literal) => literal.value.as_str(),
+                    _ => {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(property.key.span()),
+                            "object property key",
+                        ));
+                    }
+                };
+                properties.push(HirObjectProperty {
+                    span: source_span(property.span),
+                    key: Arc::from(key),
+                    value: lower_expression(&property.value, source, semantic, functions)?,
+                });
+            }
+            HirExpressionKind::Object(properties.into())
         }
         Expression::StaticMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::StaticMember {

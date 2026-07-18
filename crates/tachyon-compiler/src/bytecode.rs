@@ -1667,6 +1667,20 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Object(properties) => {
+                let object = self.register()?;
+                self.emit(Opcode::CreateObject, &[object.index()], expression.span)?;
+                for property in properties.iter() {
+                    let value = self.expression(&property.value)?;
+                    let key = self.scope_name(&property.key)?;
+                    self.emit(
+                        Opcode::SetById,
+                        &[object.index(), value.index(), key],
+                        property.span,
+                    )?;
+                }
+                Ok(object)
+            }
             HirExpressionKind::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let destination = self.register()?;
@@ -2945,6 +2959,18 @@ fn switch_scope_name_count(
 fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
+        HirExpressionKind::Object(properties) => {
+            let mut count = 0;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(&property.value)?,
+                    "scope names",
+                )?;
+                count = checked_count_add(count, 1, "scope names")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::StaticMember { object, .. } => {
             checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
         }
@@ -3214,6 +3240,18 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Object(properties) => {
+            let mut count = 1;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(&property.value)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Binary {
             operator,
             left,
@@ -3968,6 +4006,17 @@ fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileEr
 /// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
 fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Object(properties) => {
+            let mut count = 0;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_label_count(&property.value)?,
+                    "bytecode labels",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_label_count(left)?,
             expression_label_count(right)?,
@@ -4040,6 +4089,17 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
 
 fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Object(properties) => {
+            let mut count = 0;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_literal_count(&property.value)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Number(_) => Ok(1),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_literal_count(left)?,

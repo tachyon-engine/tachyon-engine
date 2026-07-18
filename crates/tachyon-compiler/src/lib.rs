@@ -21,10 +21,10 @@ pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, Sour
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
     HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirForInitializer, HirFunction,
-    HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator, HirProgram, HirScope,
-    HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
-    HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
-    ReferenceId, ScopeId, StatementCompletion,
+    HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator, HirObjectProperty,
+    HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase,
+    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -722,6 +722,41 @@ mod tests {
                 test_first: false,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    /// Owns ordinary object data properties and rejects descriptor-bearing syntax at the boundary.
+    fn hir_owns_plain_object_literal_properties() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, "({ answer: 40, label: 'ok' });"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let Some(HirStatement {
+            kind:
+                HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Object(properties),
+                    ..
+                }),
+            ..
+        }) = hir.statements().first()
+        else {
+            panic!("expected owned object literal");
+        };
+        assert_eq!(properties.len(), 2);
+        assert_eq!(properties[0].key.as_ref(), "answer");
+        assert_eq!(properties[1].key.as_ref(), "label");
+        assert!(matches!(
+            Compiler.lower_to_hir(
+                source(MediaType::JavaScript, "({ ...other });"),
+                CompileOptions::default(),
+            ),
+            Err(CompileError::UnsupportedSyntax {
+                syntax: "object spread",
+                ..
+            })
         ));
     }
 
