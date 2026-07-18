@@ -201,6 +201,7 @@ pub struct HirFunction {
     pub span: SourceSpan,
     pub name: Option<Arc<str>>,
     pub parameters: Arc<[HirBinding]>,
+    pub parameter_initializers: Arc<[Option<HirExpression>]>,
     pub body: Arc<[HirStatement]>,
     pub scope: ScopeId,
     pub strict: bool,
@@ -857,14 +858,8 @@ fn lower_function_stencil(
         )
     })?;
     let mut parameters = Vec::with_capacity(function.params.items.len());
+    let mut parameter_initializers = Vec::with_capacity(function.params.items.len());
     for parameter in &function.params.items {
-        if parameter.initializer.is_some() {
-            return Err(unsupported(
-                source.name(),
-                source_span(parameter.span),
-                "default parameter",
-            ));
-        }
         let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
             return Err(unsupported(
                 source.name(),
@@ -873,6 +868,13 @@ fn lower_function_stencil(
             ));
         };
         parameters.push(new_binding(identifier, source, semantic)?);
+        parameter_initializers.push(
+            parameter
+                .initializer
+                .as_ref()
+                .map(|initializer| lower_expression(initializer, source, semantic, functions))
+                .transpose()?,
+        );
     }
     let mut statements = Vec::with_capacity(body.statements.len());
     for statement in &body.statements {
@@ -896,6 +898,7 @@ fn lower_function_stencil(
         span: source_span(function.span),
         name,
         parameters: parameters.into(),
+        parameter_initializers: parameter_initializers.into(),
         body: statements.into(),
         scope: to_scope_id(oxc_scope),
         strict: semantic

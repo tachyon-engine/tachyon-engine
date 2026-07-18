@@ -1215,6 +1215,43 @@ mod tests {
     }
 
     #[test]
+    /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
+    fn default_parameters_use_undefined_only_and_see_prior_parameters() {
+        assert_eq!(
+            execute_source(
+                63,
+                "function add(value = 40, next = value + 1) { return next; } add();",
+            )
+            .as_i32(),
+            Some(41)
+        );
+        assert_eq!(
+            execute_source(
+                64,
+                "function add(value = 40, next = value + 1) { return next; } add(undefined);",
+            )
+            .as_i32(),
+            Some(41)
+        );
+        assert!(
+            execute_source(
+                65,
+                "function add(value = 40, next = value + 1) { return next; } add(null);",
+            )
+            .as_f64()
+            .is_some_and(f64::is_nan)
+        );
+        assert_eq!(
+            execute_source(
+                66,
+                "function add(value = 40, next = value + 1) { return next; } add(10);",
+            )
+            .as_i32(),
+            Some(11)
+        );
+    }
+
+    #[test]
     /// Checks update results and one-shot object/key evaluation through source compilation.
     fn computed_members_preserve_reference_evaluation_and_updates() {
         assert_eq!(

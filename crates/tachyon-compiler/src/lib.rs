@@ -431,6 +431,32 @@ mod tests {
     }
 
     #[test]
+    /// Preserves parameter initializer expressions in owned HIR after the Oxc arena is discarded.
+    fn function_hir_owns_default_parameter_initializers() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "function add(value = 40, next = value + 1) { return next; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [function] = hir.functions() else {
+            panic!("expected one function stencil");
+        };
+        assert_eq!(function.parameter_initializers.len(), 2);
+        assert!(function.parameter_initializers[0].is_some());
+        assert!(matches!(
+            function.parameter_initializers[1],
+            Some(HirExpression {
+                kind: HirExpressionKind::Binary { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn compiler_emits_hoisted_closure_call_and_ordinary_function() {
         let module = Compiler
             .compile(

@@ -516,9 +516,17 @@ fn lower_function(
                 .any(|parameter| parameter.id == binding.id)
         })
         .count();
+    let parameter_initializer_count = function
+        .parameter_initializers
+        .iter()
+        .filter(|initializer| initializer.is_some())
+        .count();
+    let parameter_initializer_instructions =
+        parameter_initializer_instruction_count(&function.parameter_initializers)?;
     let instruction_capacity = statements_instruction_count(&function.body)?
         .checked_add(var_initialization_count)
         .and_then(|count| count.checked_add(function.parameters.len()))
+        .and_then(|count| count.checked_add(parameter_initializer_instructions))
         .and_then(|count| count.checked_add(2))
         .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
         .ok_or(CompileError::LoweringCapacityOverflow {
@@ -533,15 +541,21 @@ fn lower_function(
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function local bindings",
         })?;
+    let parameter_scope_names = parameter_scope_name_count(&function.parameter_initializers)?;
     let binding_plan_capacity = local_binding_capacity
         .checked_add(statements_scope_name_count(&function.body)?)
+        .and_then(|count| count.checked_add(parameter_scope_names))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function binding plan",
         })?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(
             instruction_capacity,
-            statements_label_count(&function.body)?,
+            statements_label_count(&function.body)?
+                .checked_add(parameter_initializer_count)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "bytecode labels",
+                })?,
         ),
         constants,
         scope_names,
@@ -560,6 +574,13 @@ fn lower_function(
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
         lowerer.add_local(parameter, Some(register), true)?;
+    }
+    for (index, initializer) in function.parameter_initializers.iter().enumerate() {
+        if let Some(initializer) = initializer {
+            let parameter =
+                RegisterId::new(u32::try_from(index).map_err(|_| CompileError::RegisterOverflow)?);
+            lowerer.parameter_initializer(parameter, initializer)?;
+        }
     }
     for binding in &var_bindings {
         if lowerer.local_by_id(binding.id).is_some() {
@@ -736,6 +757,39 @@ impl Lowerer<'_> {
             .ok_or(CompileError::RegisterOverflow)?;
         self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
         self.add_local(&declaration.binding, Some(register), true)
+    }
+
+    /// Emits one parameter default prologue, applying it only when the argument is undefined.
+    fn parameter_initializer(
+        &mut self,
+        parameter: RegisterId,
+        initializer: &HirExpression,
+    ) -> Result<(), CompileError> {
+        let undefined = self.load_undefined(initializer.span)?;
+        let is_undefined = self.register()?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[is_undefined.index(), parameter.index(), undefined.index()],
+            initializer.span,
+        )?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .emit_jump_if_false(
+                is_undefined,
+                end,
+                BytecodeSourceSpan {
+                    start: initializer.span.start,
+                    end: initializer.span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let value = self.expression(initializer)?;
+        self.emit(
+            Opcode::Move,
+            &[parameter.index(), value.index()],
+            initializer.span,
+        )?;
+        self.builder.bind_label(end).map_err(CompileError::Builder)
     }
 
     /// Lowers one script statement while preserving the most recent non-empty completion value.
@@ -2806,6 +2860,11 @@ fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
             statements_scope_name_count(&function.body)?,
             "scope names",
         )?;
+        count = checked_count_add(
+            count,
+            parameter_scope_name_count(&function.parameter_initializers)?,
+            "scope names",
+        )?;
     }
     Ok(count)
 }
@@ -3405,6 +3464,53 @@ fn hir_literal_count(hir: &HirProgram) -> Result<usize, CompileError> {
         count = checked_count_add(
             count,
             statements_literal_count(&function.body)?,
+            "bytecode constants",
+        )?;
+        count = checked_count_add(
+            count,
+            parameter_literal_count(&function.parameter_initializers)?,
+            "bytecode constants",
+        )?;
+    }
+    Ok(count)
+}
+
+/// Counts the prologue and expression instructions needed by default parameter initializers.
+fn parameter_initializer_instruction_count(
+    initializers: &[Option<HirExpression>],
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for initializer in initializers.iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(initializer)?,
+            "function parameter instructions",
+        )?;
+        count = checked_count_add(count, 4, "function parameter instructions")?;
+    }
+    Ok(count)
+}
+
+fn parameter_scope_name_count(
+    initializers: &[Option<HirExpression>],
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for initializer in initializers.iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_scope_name_count(initializer)?,
+            "scope names",
+        )?;
+    }
+    Ok(count)
+}
+
+fn parameter_literal_count(initializers: &[Option<HirExpression>]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for initializer in initializers.iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_literal_count(initializer)?,
             "bytecode constants",
         )?;
     }
