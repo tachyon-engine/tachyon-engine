@@ -2028,6 +2028,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                165,
+                "let rangeError = false; let primitiveError = false; try { (3).toFixed(101); } catch (error) { rangeError = error instanceof RangeError; } try { Number.prototype.toFixed.call(0, { valueOf: undefined, toString: undefined }); } catch (error) { primitiveError = error instanceof TypeError; } (1.25).toFixed(1) === '1.3' && (1000000000000000128).toFixed(0) === '1000000000000000128' && Number.NaN.toFixed(2) === 'NaN' && (3).toFixed(2) === '3.00' && Number.prototype.toFixed.length === 1 && rangeError && primitiveError;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.

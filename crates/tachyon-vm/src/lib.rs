@@ -177,6 +177,7 @@ pub enum ExecutionError {
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
     InvalidNumberRadix(Value),
+    InvalidNumberPrecision(Value),
     NumberFormatBufferExhausted,
     NumberFormatInvalidDigit,
     NumberStringAllocationFailed,
@@ -268,6 +269,7 @@ enum NativeFunction {
     NumberIsFinite,
     NumberIsInteger,
     NumberIsSafeInteger,
+    NumberToFixed,
     NumberToString,
     NumberValueOf,
     BooleanConstructor,
@@ -365,6 +367,7 @@ impl NativeFunction {
             | Self::NumberIsFinite
             | Self::NumberIsInteger
             | Self::NumberIsSafeInteger
+            | Self::NumberToFixed
             | Self::NumberToString => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
@@ -402,6 +405,7 @@ impl NativeFunction {
             Self::NumberIsFinite => "isFinite",
             Self::NumberIsInteger => "isInteger",
             Self::NumberIsSafeInteger => "isSafeInteger",
+            Self::NumberToFixed => "toFixed",
             Self::NumberToString => "toString",
             Self::NumberValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
@@ -871,6 +875,7 @@ struct Realm {
     number_is_finite: Option<Value>,
     number_is_integer: Option<Value>,
     number_is_safe_integer: Option<Value>,
+    number_to_fixed: Option<Value>,
     number_to_string: Option<Value>,
     number_value_of: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -941,6 +946,7 @@ impl Realm {
             number_is_finite: None,
             number_is_integer: None,
             number_is_safe_integer: None,
+            number_to_fixed: None,
             number_to_string: None,
             number_value_of: None,
             boolean_constructor: None,
@@ -1238,6 +1244,7 @@ impl Trace for Realm {
         self.number_is_finite.trace(tracer);
         self.number_is_integer.trace(tracer);
         self.number_is_safe_integer.trace(tracer);
+        self.number_to_fixed.trace(tracer);
         self.number_to_string.trace(tracer);
         self.number_value_of.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1894,6 +1901,10 @@ impl Isolate {
         self.set_function_prototype(number, number_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(number_prototype, constructor_atom, number, true)?;
+        let to_fixed = allocate(self, NativeFunction::NumberToFixed)?;
+        self.realm.number_to_fixed = Some(to_fixed);
+        let to_fixed_atom = self.intern_intrinsic_name(b"toFixed")?;
+        self.set_intrinsic_data_property(number_prototype, to_fixed_atom, to_fixed, true)?;
         let to_string = allocate(self, NativeFunction::NumberToString)?;
         self.realm.number_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
@@ -2997,6 +3008,49 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })
+    }
+
+    /// Applies the primitive subset of ToIntegerOrInfinity with an undefined default.
+    fn integer_or_infinity_argument(
+        &mut self,
+        argument: Option<Value>,
+        default: f64,
+    ) -> Result<f64, ExecutionError> {
+        let Some(argument) = argument else {
+            return Ok(default);
+        };
+        if argument.as_immediate() == Some(Immediate::Undefined) {
+            return Ok(default);
+        }
+        let converted = self.convert_to_number(argument)?;
+        let number = numeric_value(converted)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(argument))?;
+        if number.is_nan() || number == 0.0 {
+            return Ok(0.0);
+        }
+        Ok(number.trunc())
+    }
+
+    /// Implements Number.prototype.toFixed with the pinned ECMAScript decimal formatter.
+    fn number_to_fixed(
+        &mut self,
+        receiver: Value,
+        fraction_digits: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let number = self.this_number_value(receiver)?;
+        let fraction_digits = self.integer_or_infinity_argument(fraction_digits, 0.0)?;
+        if !(0.0..=100.0).contains(&fraction_digits) {
+            return Err(ExecutionError::InvalidNumberPrecision(Value::from_f64(
+                fraction_digits,
+            )));
+        }
+        let number = numeric_value(number).expect("thisNumberValue always returns a number");
+        let mut buffer = ryu_js::Buffer::new();
+        let formatted = buffer.format_to_fixed(number, fraction_digits as u8);
+        self.allocate_runtime_string(
+            JsString::try_from_latin1(formatted.as_bytes())
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
     }
 
     /// Implements Number::toString for decimal and shortest round-trip radix representations.
@@ -5793,10 +5847,22 @@ impl Isolate {
                 let raw = value
                     .as_heap_ref()
                     .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-                let reference = self
-                    .heap
-                    .checked_reference(raw, self.types.string)
-                    .map_err(|_| ExecutionError::UnsupportedNumberConversion(value))?;
+                let Ok(reference) = self.heap.checked_reference(raw, self.types.string) else {
+                    if self.is_object_value(value) {
+                        let value_of = self.intern_intrinsic_name(b"valueOf")?;
+                        let to_string = self.intern_intrinsic_name(b"toString")?;
+                        let value_of = self.get_data_property(value, value_of)?;
+                        let to_string = self.get_data_property(value, to_string)?;
+                        let has_callable = [value_of, to_string]
+                            .into_iter()
+                            .flatten()
+                            .any(|method| self.resolve_function_object(method).is_ok());
+                        if !has_callable {
+                            return Err(ExecutionError::NotObject(value));
+                        }
+                    }
+                    return Err(ExecutionError::UnsupportedNumberConversion(value));
+                };
                 let units = self.heap.with_running_scope(|scope| {
                     let root = scope.root(reference).map_err(ExecutionError::Root)?;
                     scope.with_no_gc_scope(|no_gc| {
@@ -7016,6 +7082,11 @@ impl Isolate {
                     let value = self.this_number_value(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::NumberToFixed) => {
+                    let fraction_digits = self.call_argument(&site, 0)?;
+                    let value = self.number_to_fixed(site.this_value, fraction_digits)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::NumberToString) => {
                     let radix = self.call_argument(&site, 0)?;
                     let value = self.number_to_string(site.this_value, radix)?;
@@ -7721,7 +7792,9 @@ fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),
-        ExecutionError::InvalidNumberRadix(_) => Some(NativeErrorKind::Range),
+        ExecutionError::InvalidNumberRadix(_) | ExecutionError::InvalidNumberPrecision(_) => {
+            Some(NativeErrorKind::Range)
+        }
         _ => None,
     }
 }
