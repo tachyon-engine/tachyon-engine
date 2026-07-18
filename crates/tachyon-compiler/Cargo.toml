@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 oxc = { version = "=0.140.0", features = ["semantic"] }
+ryu-js = "=1.0.3"
 tachyon-bytecode = { path = "../tachyon-bytecode" }
 
 [dev-dependencies]

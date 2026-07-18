@@ -1276,9 +1276,20 @@ fn lower_expression(
                         functions,
                     )?)
                 } else {
-                    let key = match &property.key {
-                        PropertyKey::StaticIdentifier(identifier) => identifier.name.as_str(),
-                        PropertyKey::StringLiteral(literal) => literal.value.as_str(),
+                    let key: Arc<str> = match &property.key {
+                        PropertyKey::StaticIdentifier(identifier) => {
+                            Arc::from(identifier.name.as_str())
+                        }
+                        PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+                        PropertyKey::NumericLiteral(literal) => {
+                            let mut buffer = ryu_js::Buffer::new();
+                            let key = if literal.value == 0.0 {
+                                "0"
+                            } else {
+                                buffer.format(literal.value)
+                            };
+                            Arc::from(key)
+                        }
                         _ => {
                             return Err(unsupported(
                                 source.name(),
@@ -1287,7 +1298,7 @@ fn lower_expression(
                             ));
                         }
                     };
-                    HirObjectPropertyKey::Static(Arc::from(key))
+                    HirObjectPropertyKey::Static(key)
                 };
                 let value = if property.method {
                     let Expression::FunctionExpression(function) = &property.value else {

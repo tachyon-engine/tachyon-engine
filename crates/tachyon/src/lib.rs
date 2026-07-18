@@ -1377,6 +1377,14 @@ mod tests {
             .as_i32(),
             Some(2)
         );
+        assert_eq!(
+            execute_source(
+                154,
+                "let object = { 0: 'zero', 0x10: 'hex', 1e2: 'exp' }; object[0] === 'zero' && object[16] === 'hex' && object[100] === 'exp';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
     }
 
     #[test]
