@@ -436,7 +436,13 @@ impl Isolate {
                 self.create_closure(module, base, operands[0], FunctionId::new(operands[1]))?
             }
             Opcode::Call => self.call(module, base, operands[0], operands[1], operands[2])?,
-            Opcode::Return => return self.return_from_frame(base, operands[0]),
+            Opcode::Return => {
+                let value = self.read(base, operands[0])?;
+                if self.fiber.frames.len() == 1 {
+                    return Ok(Some(RunOutcome::Completed(value)));
+                }
+                return self.return_from_callee(value);
+            }
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
@@ -632,35 +638,23 @@ impl Isolate {
         Ok(())
     }
 
-    /// Pops one explicit frame, restores its stack checkpoints, and writes into the caller result slot.
-    #[inline(always)]
-    fn return_from_frame(
-        &mut self,
-        base: u32,
-        source: u32,
-    ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let value = self.read(base, source)?;
-        if self
-            .fiber
-            .frames
-            .last()
-            .is_some_and(|frame| frame.return_register.is_none())
-        {
-            return Ok(Some(RunOutcome::Completed(value)));
-        }
+    /// Pops a non-entry frame and restores the caller checkpoints outside the top-level Return path.
+    #[cold]
+    #[inline(never)]
+    fn return_from_callee(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
         let frame = self
             .fiber
             .frames
             .pop()
-            .expect("an executing return always has an active frame");
+            .expect("callee return always has an active frame");
         self.fiber.registers.truncate(frame.base as usize);
         self.fiber.handlers.truncate(frame.handler_base as usize);
         self.fiber
             .completions
             .truncate(frame.completion_base as usize);
-        let Some(destination) = frame.return_register else {
-            return Ok(Some(RunOutcome::Completed(value)));
-        };
+        let destination = frame
+            .return_register
+            .expect("non-entry frames always retain a caller destination");
         let caller_base = self
             .fiber
             .frames
