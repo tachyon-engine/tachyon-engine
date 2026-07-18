@@ -166,6 +166,7 @@ pub enum ExecutionError {
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
+    NumberStringAllocationFailed,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
@@ -2104,7 +2105,7 @@ impl Isolate {
 
     /// Converts the primitive values represented by the current numeric VM subset.
     #[inline(always)]
-    fn to_number(&self, value: Value) -> Result<Value, ExecutionError> {
+    fn convert_to_number(&mut self, value: Value) -> Result<Value, ExecutionError> {
         if value.as_i32().is_some() || value.as_f64().is_some() {
             return Ok(value);
         }
@@ -2112,8 +2113,33 @@ impl Isolate {
             Some(Immediate::True) => Ok(Value::from_i32(1)),
             Some(Immediate::False | Immediate::Null) => Ok(Value::from_i32(0)),
             Some(Immediate::Undefined) => Ok(Value::from_f64(f64::NAN)),
-            Some(Immediate::Hole | Immediate::Uninitialized) | None => {
+            Some(Immediate::Hole | Immediate::Uninitialized) => {
                 Err(ExecutionError::UnsupportedNumberConversion(value))
+            }
+            None => {
+                let raw = value
+                    .as_heap_ref()
+                    .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+                let reference = self
+                    .heap
+                    .checked_reference(raw, self.types.string)
+                    .map_err(|_| ExecutionError::UnsupportedNumberConversion(value))?;
+                let units = self.heap.with_running_scope(|scope| {
+                    let root = scope.root(reference).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        let string = no_gc
+                            .borrow(root, self.types.string)
+                            .map_err(ExecutionError::NoGcBorrow)?;
+                        let units = match string.as_view() {
+                            JsStringView::Latin1(bytes) => {
+                                bytes.iter().map(|&byte| u16::from(byte)).collect()
+                            }
+                            JsStringView::Utf16(units) => units.to_vec(),
+                        };
+                        Ok::<_, ExecutionError>(units)
+                    })
+                })?;
+                Ok(Value::from_f64(parse_number_code_units(&units)))
             }
         }
     }
@@ -2371,7 +2397,7 @@ impl Isolate {
                 self.write(base, operands[0], value)?;
             }
             Opcode::ToNumber => {
-                let value = self.to_number(self.read(base, operands[1])?)?;
+                let value = self.convert_to_number(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
@@ -3459,6 +3485,41 @@ fn numeric_negate(value: Value) -> Value {
 #[inline(always)]
 fn numeric_value(value: Value) -> Option<f64> {
     value.as_i32().map(f64::from).or_else(|| value.as_f64())
+}
+
+/// Parses ECMAScript numeric string forms after the string has been detached from the heap.
+fn parse_number_code_units(units: &[u16]) -> f64 {
+    let text = String::from_utf16_lossy(units);
+    let text = text.trim_matches(is_ecmascript_whitespace);
+    if text.is_empty() {
+        return 0.0;
+    }
+    let (radix, digits) = if let Some(digits) = text.strip_prefix("0x") {
+        (16, digits)
+    } else if let Some(digits) = text.strip_prefix("0X") {
+        (16, digits)
+    } else if let Some(digits) = text.strip_prefix("0b") {
+        (2, digits)
+    } else if let Some(digits) = text.strip_prefix("0B") {
+        (2, digits)
+    } else if let Some(digits) = text.strip_prefix("0o") {
+        (8, digits)
+    } else if let Some(digits) = text.strip_prefix("0O") {
+        (8, digits)
+    } else {
+        return text.parse::<f64>().unwrap_or(f64::NAN);
+    };
+    if digits.is_empty() {
+        return f64::NAN;
+    }
+    u64::from_str_radix(digits, radix)
+        .map(|value| value as f64)
+        .unwrap_or(f64::NAN)
+}
+
+#[inline]
+fn is_ecmascript_whitespace(character: char) -> bool {
+    character.is_whitespace() || character == '\u{feff}'
 }
 
 #[inline(always)]

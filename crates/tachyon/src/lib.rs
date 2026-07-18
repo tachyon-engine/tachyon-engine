@@ -1256,6 +1256,8 @@ mod tests {
                 .as_f64()
                 .is_some_and(f64::is_nan)
         );
+        assert_eq!(execute_source(88, "+'0x10';").as_f64(), Some(16.0));
+        assert_eq!(execute_source(89, "+'  1.5  ';").as_f64(), Some(1.5));
     }
 
     #[test]
