@@ -2208,43 +2208,31 @@ impl Isolate {
                 .pc = next_pc;
             budget.fuel -= 1;
             budget.quantum -= 1;
-            if let Some(outcome) = self.dispatch(
+            let outcome = match self.dispatch(
                 frame.code,
                 frame.pc,
                 instruction.opcode,
                 instruction.operands,
                 frame.base,
-            )? {
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let Some(kind) = execution_error_kind(&error) else {
+                        return Err(error);
+                    };
+                    self.throw_native_error(kind, frame.pc)?
+                }
+            };
+            if let Some(outcome) = outcome {
                 return Ok(Some(outcome));
             }
         }
         Ok(None)
     }
 
-    /// Converts only specification-level failures into JavaScript abrupt completion at the opcode site.
-    #[inline(always)]
-    fn dispatch(
-        &mut self,
-        code: CodeId,
-        instruction_offset: WordOffset,
-        opcode: Opcode,
-        operands: [u32; 3],
-        base: u32,
-    ) -> Result<Option<RunOutcome>, ExecutionError> {
-        match self.dispatch_instruction(code, instruction_offset, opcode, operands, base) {
-            Err(error) => {
-                let Some(kind) = execution_error_kind(&error) else {
-                    return Err(error);
-                };
-                self.throw_native_error(kind, instruction_offset)
-            }
-            result => result,
-        }
-    }
-
     /// Implements one verified opcode without conflating engine faults with language exceptions.
     #[inline(always)]
-    fn dispatch_instruction(
+    fn dispatch(
         &mut self,
         code: CodeId,
         instruction_offset: WordOffset,
