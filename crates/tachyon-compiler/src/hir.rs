@@ -90,9 +90,21 @@ pub enum HirStatementKind {
         consequent: Box<HirStatement>,
         alternate: Option<Box<HirStatement>>,
     },
+    Switch {
+        discriminant: HirExpression,
+        cases: Arc<[HirSwitchCase]>,
+    },
+    Break,
     Return(Option<HirExpression>),
     Throw(HirExpression),
     Empty,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirSwitchCase {
+    pub span: SourceSpan,
+    pub test: Option<HirExpression>,
+    pub consequent: Arc<[HirStatement]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -322,6 +334,19 @@ fn lower_statement(
                     .transpose()?,
             },
         }),
+        Statement::SwitchStatement(statement) => {
+            lower_switch_statement(statement, source, next_binding, functions)
+        }
+        Statement::BreakStatement(statement) if statement.label.is_none() => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Break,
+        }),
+        Statement::BreakStatement(statement) => Err(unsupported(
+            source.name(),
+            source_span(statement.span),
+            "labelled break",
+        )),
         Statement::ReturnStatement(statement) if !allow_function_declaration => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
@@ -344,6 +369,45 @@ fn lower_statement(
             "statement",
         )),
     }
+}
+
+/// Copies switch clause order exactly because default placement controls subsequent fallthrough.
+fn lower_switch_statement(
+    statement: &oxc::ast::ast::SwitchStatement<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirStatement, CompileError> {
+    let mut cases = Vec::with_capacity(statement.cases.len());
+    for case in &statement.cases {
+        let mut consequent = Vec::with_capacity(case.consequent.len());
+        for statement in &case.consequent {
+            consequent.push(lower_statement(
+                statement,
+                source,
+                next_binding,
+                functions,
+                false,
+            )?);
+        }
+        cases.push(HirSwitchCase {
+            span: source_span(case.span),
+            test: case
+                .test
+                .as_ref()
+                .map(|test| lower_expression(test, source))
+                .transpose()?,
+            consequent: consequent.into(),
+        });
+    }
+    Ok(HirStatement {
+        span: source_span(statement.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::Switch {
+            discriminant: lower_expression(&statement.discriminant, source)?,
+            cases: cases.into(),
+        },
+    })
 }
 
 /// Copies one ordinary declaration and its simple parameters/body into an owned function stencil.

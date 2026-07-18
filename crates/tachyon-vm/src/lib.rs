@@ -1509,6 +1509,15 @@ mod tests {
     }
 
     #[test]
+    fn switch_dispatch_chain_is_stable_for_every_dispatch_batch() {
+        assert_switch_batch::<1>();
+        assert_switch_batch::<2>();
+        assert_switch_batch::<4>();
+        assert_switch_batch::<8>();
+        assert_switch_batch::<16>();
+    }
+
+    #[test]
     fn explicit_function_frames_work_for_every_dispatch_batch() {
         assert_call_batch::<1>();
         assert_call_batch::<2>();
@@ -1735,6 +1744,23 @@ mod tests {
         }
     }
 
+    fn assert_switch_batch<const N: usize>() {
+        for (discriminant, expected) in [(1, 10), (2, 20), (9, 20)] {
+            let outcome = test_isolate()
+                .execute_with_batch::<N>(
+                    &switch_module(discriminant),
+                    ExecutionBudget {
+                        fuel: 16,
+                        quantum: 16,
+                    },
+                )
+                .unwrap();
+            assert!(
+                matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(expected))
+            );
+        }
+    }
+
     /// Builds a verified branch program with explicit labels to exercise PC changes inside one dispatch batch.
     fn conditional_module(test: Opcode) -> CompiledModule {
         let span = SourceSpan { start: 0, end: 1 };
@@ -1809,6 +1835,61 @@ mod tests {
         };
         CompiledModule::new(
             Arc::from("logical"),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a two-case dispatch whose middle default deliberately falls through into case two.
+    fn switch_module(discriminant: u32) -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(16, 4);
+        let case_one = builder.new_label().unwrap();
+        let default = builder.new_label().unwrap();
+        let case_two = builder.new_label().unwrap();
+        let end = builder.new_label().unwrap();
+        builder
+            .emit(Opcode::LoadImmediate, &[0, discriminant], span)
+            .unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+        builder.emit(Opcode::StrictEqual, &[2, 0, 1], span).unwrap();
+        builder
+            .emit_jump_if_true(RegisterId::new(2), case_one, span)
+            .unwrap();
+        builder.emit(Opcode::LoadImmediate, &[3, 2], span).unwrap();
+        builder.emit(Opcode::StrictEqual, &[4, 0, 3], span).unwrap();
+        builder
+            .emit_jump_if_true(RegisterId::new(4), case_two, span)
+            .unwrap();
+        builder.emit_jump(default, span).unwrap();
+        builder.bind_label(case_one).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[5, 10], span).unwrap();
+        builder.emit_jump(end, span).unwrap();
+        builder.bind_label(default).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[5, 30], span).unwrap();
+        builder.bind_label(case_two).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[5, 20], span).unwrap();
+        builder.emit_jump(end, span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[5], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("switch"),
             Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(

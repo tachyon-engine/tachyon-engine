@@ -319,6 +319,67 @@ mod tests {
     }
 
     #[test]
+    /// Exercises dispatch order, default placement, fallthrough, and nearest-target break semantics.
+    fn switch_preserves_ecmascript_clause_control_flow() {
+        assert_eq!(
+            execute_source(
+                25,
+                "let seen = 0; switch (1) { case (seen = seen + 1): break; case (seen = seen + 1): break; } seen;",
+            )
+            .as_i32(),
+            Some(1)
+        );
+        assert_eq!(
+            execute_source(
+                26,
+                "let value = 0; switch (9) { case 1: value = 1; break; default: value = 3; case 2: value = value + 4; break; } value;",
+            )
+            .as_i32(),
+            Some(7)
+        );
+        assert_eq!(
+            execute_source(
+                27,
+                "let value = 0; switch (1) { case 1: value = 1; case 2: value = value + 2; break; default: value = 9; } value;",
+            )
+            .as_i32(),
+            Some(3)
+        );
+        assert_eq!(
+            execute_source(
+                28,
+                "let value = 0; switch (1) { case 1: switch (2) { case 2: value = 3; break; default: value = 9; } value = value + 4; break; default: value = 99; } value;",
+            )
+            .as_i32(),
+            Some(7)
+        );
+        assert_eq!(
+            execute_source(29, "1; switch (9) { default: 2; }").as_i32(),
+            Some(2)
+        );
+        assert_eq!(
+            execute_source(30, "1; switch (9) { case 2: 3; }").as_i32(),
+            Some(1)
+        );
+        assert_eq!(
+            execute_source(
+                31,
+                "function select(value) { switch (value) { case 1: return 10; default: return 20; } } select(2);",
+            )
+            .as_i32(),
+            Some(20)
+        );
+        assert_eq!(
+            execute_source(
+                32,
+                "let key = 1; let hit = 0; switch (key) { case (key = 2): hit = 1; break; default: hit = 3; } hit;",
+            )
+            .as_i32(),
+            Some(3)
+        );
+    }
+
+    #[test]
     /// Exercises source-level branch lowering inside an explicit JavaScript call frame.
     fn function_if_selects_return_without_rust_recursion() {
         let source = SourceText::new(

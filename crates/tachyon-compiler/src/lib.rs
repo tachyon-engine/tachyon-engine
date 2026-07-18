@@ -21,8 +21,8 @@ pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, Sour
 pub use hir::{
     BindingId, FunctionStencilId, HirBinaryOperator, HirBinding, HirExpression, HirExpressionKind,
     HirFunction, HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement,
-    HirStatementKind, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirStatementKind, HirSwitchCase, HirUnaryOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -357,6 +357,42 @@ mod tests {
     }
 
     #[test]
+    /// Confirms switch clause order, default placement, and break survive arena teardown.
+    fn hir_owns_switch_cases_in_source_order() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "switch (2) { case 1: break; default: 3; case 2: 4; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [statement] = hir.statements() else {
+            panic!("expected one switch statement");
+        };
+        let HirStatementKind::Switch {
+            discriminant,
+            cases,
+        } = &statement.kind
+        else {
+            panic!("expected owned switch HIR");
+        };
+        assert_eq!(
+            discriminant.kind,
+            HirExpressionKind::Number(2.0_f64.to_bits())
+        );
+        assert_eq!(cases.len(), 3);
+        assert!(cases[0].test.is_some());
+        assert!(matches!(
+            cases[0].consequent[0].kind,
+            HirStatementKind::Break
+        ));
+        assert!(cases[1].test.is_none());
+        assert!(cases[2].test.is_some());
+    }
+
+    #[test]
     /// Confirms structured entry lowering produces verifier-accepted branch and abrupt opcodes.
     fn compiler_emits_verified_top_level_branch_and_throw() {
         let module = Compiler
@@ -392,6 +428,28 @@ mod tests {
         assert!(disassembly.contains("JumpIfFalse"));
         assert!(disassembly.contains("JumpIfTrue"));
         assert!(disassembly.contains("JumpIfNotNullish"));
+    }
+
+    #[test]
+    fn compiler_emits_verified_switch_dispatch_and_break_targets() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "switch (2) { case 1: break; default: 3; case 2: break; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disassembly.matches("StrictEqual").count(), 2);
+        assert_eq!(disassembly.matches("JumpIfTrue").count(), 2);
+        assert!(disassembly.matches("Jump").count() >= 4);
     }
 
     #[test]

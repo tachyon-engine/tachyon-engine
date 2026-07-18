@@ -2,15 +2,15 @@
 
 use tachyon_bytecode::{
     BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule, FunctionId,
-    FunctionKind, FunctionLayout, FunctionMetadata, MAX_ENCODED_INSTRUCTION_WORDS, Opcode,
+    FunctionKind, FunctionLayout, FunctionMetadata, Label, MAX_ENCODED_INSTRUCTION_WORDS, Opcode,
     RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction,
     HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
-    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName,
-    SourceSpan, SourceText,
+    HirSwitchCase, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    ProgramKind, SourceName, SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -54,7 +54,11 @@ fn lower_entry(
     let has_control_flow = hir.statements().iter().any(|statement| {
         matches!(
             statement.kind,
-            HirStatementKind::Block(_) | HirStatementKind::If { .. } | HirStatementKind::Throw(_)
+            HirStatementKind::Block(_)
+                | HirStatementKind::If { .. }
+                | HirStatementKind::Switch { .. }
+                | HirStatementKind::Break
+                | HirStatementKind::Throw(_)
         )
     });
     let has_expression = hir
@@ -87,6 +91,7 @@ fn lower_entry(
         constants,
         scope_names,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
+        break_targets: Vec::with_capacity(statements_switch_count(hir.statements())?),
         next_register: 0,
         source_name: source.name().clone(),
     };
@@ -126,6 +131,8 @@ fn lower_entry(
                         }
                         HirStatementKind::Block(_)
                         | HirStatementKind::If { .. }
+                        | HirStatementKind::Switch { .. }
+                        | HirStatementKind::Break
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
                         }
@@ -198,6 +205,7 @@ fn lower_function(
                     collection: "function local bindings",
                 })?,
         ),
+        break_targets: Vec::with_capacity(statements_switch_count(&function.body)?),
         next_register: 0,
         source_name: source.name().clone(),
     };
@@ -252,6 +260,7 @@ struct Lowerer<'a> {
     constants: &'a mut Vec<BytecodeConstant>,
     scope_names: &'a mut Vec<std::sync::Arc<str>>,
     locals: Vec<LocalBinding>,
+    break_targets: Vec<Label>,
     next_register: u32,
     source_name: SourceName,
 }
@@ -356,6 +365,18 @@ impl Lowerer<'_> {
                 result,
                 statement.span,
             ),
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                self.entry_switch_statement(discriminant, cases, result, statement.span)?;
+                Ok(false)
+            }
+            HirStatementKind::Break => {
+                let target = self.current_break_target(statement.span)?;
+                self.emit_jump(target, statement.span)?;
+                Ok(true)
+            }
             HirStatementKind::Return(_) => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span: statement.span,
@@ -444,6 +465,18 @@ impl Lowerer<'_> {
                 self.if_statement(test, consequent, alternate.as_deref(), statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                self.function_switch_statement(discriminant, cases, statement.span)?;
+                Ok(false)
+            }
+            HirStatementKind::Break => {
+                let target = self.current_break_target(statement.span)?;
+                self.emit_jump(target, statement.span)?;
+                Ok(true)
+            }
             HirStatementKind::Empty => Ok(false),
             HirStatementKind::FunctionDeclaration(_) => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
@@ -484,6 +517,134 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(end_label)
             .map_err(CompileError::Builder)
+    }
+
+    /// Emits switch dispatch and script clause bodies while preserving UpdateEmpty completion state.
+    fn entry_switch_statement(
+        &mut self,
+        discriminant: &HirExpression,
+        cases: &[HirSwitchCase],
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (case_labels, end) = self.emit_switch_dispatch(discriminant, cases, span)?;
+        self.break_targets.push(end);
+        for (case, label) in cases.iter().zip(case_labels) {
+            self.builder
+                .bind_label(label)
+                .map_err(CompileError::Builder)?;
+            for statement in case.consequent.iter() {
+                if self.entry_statement(statement, result)? {
+                    break;
+                }
+            }
+        }
+        self.break_targets.pop();
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.locals.truncate(checkpoint);
+        Ok(())
+    }
+
+    /// Emits switch dispatch and ordinary-function clause bodies with source-order fallthrough.
+    fn function_switch_statement(
+        &mut self,
+        discriminant: &HirExpression,
+        cases: &[HirSwitchCase],
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (case_labels, end) = self.emit_switch_dispatch(discriminant, cases, span)?;
+        self.break_targets.push(end);
+        for (case, label) in cases.iter().zip(case_labels) {
+            self.builder
+                .bind_label(label)
+                .map_err(CompileError::Builder)?;
+            for statement in case.consequent.iter() {
+                if self.function_statement(statement)? {
+                    break;
+                }
+            }
+        }
+        self.break_targets.pop();
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.locals.truncate(checkpoint);
+        Ok(())
+    }
+
+    /// Evaluates case tests in source order and returns exact labels for contiguous clause bodies.
+    fn emit_switch_dispatch(
+        &mut self,
+        discriminant: &HirExpression,
+        cases: &[HirSwitchCase],
+        span: SourceSpan,
+    ) -> Result<(Vec<Label>, Label), CompileError> {
+        let discriminant_value = self.expression(discriminant)?;
+        let discriminant = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[discriminant.index(), discriminant_value.index()],
+            span,
+        )?;
+        let mut labels = Vec::with_capacity(cases.len());
+        for _ in cases {
+            labels.push(self.builder.new_label().map_err(CompileError::Builder)?);
+        }
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let mut default = None;
+        for (case, label) in cases.iter().zip(labels.iter().copied()) {
+            let Some(test) = case.test.as_ref() else {
+                default = Some(label);
+                continue;
+            };
+            let test = self.expression(test)?;
+            let equal = self.register()?;
+            self.emit(
+                Opcode::StrictEqual,
+                &[equal.index(), discriminant.index(), test.index()],
+                case.span,
+            )?;
+            self.builder
+                .emit_jump_if_true(
+                    equal,
+                    label,
+                    BytecodeSourceSpan {
+                        start: case.span.start,
+                        end: case.span.end,
+                    },
+                )
+                .map_err(CompileError::Builder)?;
+        }
+        self.emit_jump(default.unwrap_or(end), span)?;
+        Ok((labels, end))
+    }
+
+    fn emit_jump(&mut self, target: Label, span: SourceSpan) -> Result<(), CompileError> {
+        self.builder
+            .emit_jump(
+                target,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map(|_| ())
+            .map_err(CompileError::Builder)
+    }
+
+    fn current_break_target(&self, span: SourceSpan) -> Result<Label, CompileError> {
+        self.break_targets
+            .last()
+            .copied()
+            .ok_or_else(|| CompileError::UnsupportedSyntax {
+                source_name: self.source_name.clone(),
+                span,
+                syntax: "break outside breakable statement",
+            })
     }
 
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
@@ -899,15 +1060,38 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => switch_scope_name_count(discriminant, cases)?,
             HirStatementKind::Return(argument) => argument
                 .as_ref()
                 .map(expression_scope_name_count)
                 .transpose()?
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
-            HirStatementKind::Empty => 0,
+            HirStatementKind::Break | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "scope names")?;
+    }
+    Ok(count)
+}
+
+/// Counts discriminant, case-test, and clause-body identifiers without flattening case order.
+fn switch_scope_name_count(
+    discriminant: &HirExpression,
+    cases: &[HirSwitchCase],
+) -> Result<usize, CompileError> {
+    let mut count = expression_scope_name_count(discriminant)?;
+    for case in cases {
+        if let Some(test) = case.test.as_ref() {
+            count = checked_count_add(count, expression_scope_name_count(test)?, "scope names")?;
+        }
+        count = checked_count_add(
+            count,
+            statements_scope_name_count(&case.consequent)?,
+            "scope names",
+        )?;
     }
     Ok(count)
 }
@@ -1005,9 +1189,42 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 }
                 count
             }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => switch_instruction_count(discriminant, cases)?,
+            HirStatementKind::Break => 1,
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
+    }
+    Ok(count)
+}
+
+/// Includes dispatch comparisons, conditional branches, fallback jump, and every clause body.
+fn switch_instruction_count(
+    discriminant: &HirExpression,
+    cases: &[HirSwitchCase],
+) -> Result<usize, CompileError> {
+    let mut count = checked_count_add(
+        expression_instruction_count(discriminant)?,
+        2,
+        "bytecode instructions",
+    )?;
+    for case in cases {
+        if let Some(test) = case.test.as_ref() {
+            count = checked_count_add(
+                count,
+                expression_instruction_count(test)?,
+                "bytecode instructions",
+            )?;
+            count = checked_count_add(count, 2, "bytecode instructions")?;
+        }
+        count = checked_count_add(
+            count,
+            statements_instruction_count(&case.consequent)?,
+            "bytecode instructions",
+        )?;
     }
     Ok(count)
 }
@@ -1138,10 +1355,34 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 count
             }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => switch_literal_count(discriminant, cases)?,
             HirStatementKind::FunctionDeclaration(_) => 0,
-            HirStatementKind::Empty => 0,
+            HirStatementKind::Break | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
+    }
+    Ok(count)
+}
+
+/// Counts constants in both dispatch expressions and source-ordered clause bodies.
+fn switch_literal_count(
+    discriminant: &HirExpression,
+    cases: &[HirSwitchCase],
+) -> Result<usize, CompileError> {
+    let mut count = expression_literal_count(discriminant)?;
+    for case in cases {
+        if let Some(test) = case.test.as_ref() {
+            count =
+                checked_count_add(count, expression_literal_count(test)?, "bytecode constants")?;
+        }
+        count = checked_count_add(
+            count,
+            statements_literal_count(&case.consequent)?,
+            "bytecode constants",
+        )?;
     }
     Ok(count)
 }
@@ -1187,12 +1428,27 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 nested
             }
+            HirStatementKind::Switch { cases, .. } => switch_binding_count(cases)?,
             HirStatementKind::Expression(_)
+            | HirStatementKind::Break
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "local bindings")?;
+    }
+    Ok(count)
+}
+
+/// Counts all case-block bindings as one conservative switch-scope capacity bound.
+fn switch_binding_count(cases: &[HirSwitchCase]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for case in cases {
+        count = checked_count_add(
+            count,
+            statements_binding_count(&case.consequent)?,
+            "local bindings",
+        )?;
     }
     Ok(count)
 }
@@ -1267,8 +1523,41 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                     )?;
                 }
             }
-            HirStatementKind::FunctionDeclaration(_) | HirStatementKind::Empty => {}
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                count = checked_count_add(
+                    count,
+                    switch_label_count(discriminant, cases)?,
+                    "bytecode labels",
+                )?;
+            }
+            HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Empty => {}
         }
+    }
+    Ok(count)
+}
+
+/// Reserves one label per clause, one shared end label, and every nested expression/body label.
+fn switch_label_count(
+    discriminant: &HirExpression,
+    cases: &[HirSwitchCase],
+) -> Result<usize, CompileError> {
+    let mut count = expression_label_count(discriminant)?;
+    count = checked_count_add(count, cases.len(), "bytecode labels")?;
+    count = checked_count_add(count, 1, "bytecode labels")?;
+    for case in cases {
+        if let Some(test) = case.test.as_ref() {
+            count = checked_count_add(count, expression_label_count(test)?, "bytecode labels")?;
+        }
+        count = checked_count_add(
+            count,
+            statements_label_count(&case.consequent)?,
+            "bytecode labels",
+        )?;
     }
     Ok(count)
 }
@@ -1295,13 +1584,73 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
+            HirStatementKind::Switch { cases, .. } => switch_expression_count(cases)?,
             HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "entry completion instructions")?;
+    }
+    Ok(count)
+}
+
+/// Counts clause expression statements that can update script completion after dispatch.
+fn switch_expression_count(cases: &[HirSwitchCase]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for case in cases {
+        count = checked_count_add(
+            count,
+            statements_expression_count(&case.consequent)?,
+            "entry completion instructions",
+        )?;
+    }
+    Ok(count)
+}
+
+/// Counts switch nodes as an exact-capacity upper bound for the active break-target stack.
+fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Block(statements) => statements_switch_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut count = statements_switch_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    count = checked_count_add(
+                        count,
+                        statements_switch_count(core::slice::from_ref(alternate))?,
+                        "switch control targets",
+                    )?;
+                }
+                count
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                let mut count = 1;
+                for case in cases.iter() {
+                    count = checked_count_add(
+                        count,
+                        statements_switch_count(&case.consequent)?,
+                        "switch control targets",
+                    )?;
+                }
+                count
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, nested, "switch control targets")?;
     }
     Ok(count)
 }
