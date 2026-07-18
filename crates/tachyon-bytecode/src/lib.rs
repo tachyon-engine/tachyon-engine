@@ -175,6 +175,9 @@ pub enum Opcode {
     BitwiseAnd = 49,
     BitwiseOr = 50,
     BitwiseXor = 51,
+    ShiftLeft = 52,
+    ShiftRight = 53,
+    ShiftRightUnsigned = 54,
 }
 
 impl Opcode {
@@ -219,7 +222,12 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
-            Self::BitwiseAnd | Self::BitwiseOr | Self::BitwiseXor => 3,
+            Self::BitwiseAnd
+            | Self::BitwiseOr
+            | Self::BitwiseXor
+            | Self::ShiftLeft
+            | Self::ShiftRight
+            | Self::ShiftRightUnsigned => 3,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -287,6 +295,9 @@ impl Opcode {
             49 => Some(Self::BitwiseAnd),
             50 => Some(Self::BitwiseOr),
             51 => Some(Self::BitwiseXor),
+            52 => Some(Self::ShiftLeft),
+            53 => Some(Self::ShiftRight),
+            54 => Some(Self::ShiftRightUnsigned),
             _ => None,
         }
     }
@@ -830,6 +841,9 @@ impl BytecodeBuilder {
             | Opcode::BitwiseAnd
             | Opcode::BitwiseOr
             | Opcode::BitwiseXor
+            | Opcode::ShiftLeft
+            | Opcode::ShiftRight
+            | Opcode::ShiftRightUnsigned
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
@@ -1813,6 +1827,9 @@ fn verify_instruction(
         | Opcode::BitwiseAnd
         | Opcode::BitwiseOr
         | Opcode::BitwiseXor
+        | Opcode::ShiftLeft
+        | Opcode::ShiftRight
+        | Opcode::ShiftRightUnsigned
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {

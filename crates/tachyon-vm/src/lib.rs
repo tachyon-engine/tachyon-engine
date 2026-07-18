@@ -2418,6 +2418,11 @@ impl Isolate {
                     numeric_bitwise_binary(opcode, left, right),
                 )?;
             }
+            Opcode::ShiftLeft | Opcode::ShiftRight | Opcode::ShiftRightUnsigned => {
+                let left = self.convert_to_number(self.read(base, operands[1])?)?;
+                let right = self.convert_to_number(self.read(base, operands[2])?)?;
+                self.write(base, operands[0], numeric_shift(opcode, left, right))?;
+            }
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -3545,6 +3550,38 @@ fn numeric_bitwise_int32(value: Value) -> i32 {
         };
         signed as i32
     })
+}
+
+/// Applies ECMAScript shift-count masking and signed/unsigned left operand conversion.
+#[inline(always)]
+fn numeric_shift(opcode: Opcode, left: Value, right: Value) -> Value {
+    let left_number = left
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| left.as_f64())
+        .unwrap_or(f64::NAN);
+    let right_number = right
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| right.as_f64())
+        .unwrap_or(f64::NAN);
+    let shift = numeric_bitwise_uint32(right_number) & 31;
+    match opcode {
+        Opcode::ShiftLeft => Value::from_i32(numeric_bitwise_int32(left) << shift),
+        Opcode::ShiftRight => Value::from_i32(numeric_bitwise_int32(left) >> shift),
+        Opcode::ShiftRightUnsigned => {
+            Value::from_f64(f64::from(numeric_bitwise_uint32(left_number) >> shift))
+        }
+        _ => unreachable!("shift dispatch only supplies shift opcodes"),
+    }
+}
+
+#[inline(always)]
+fn numeric_bitwise_uint32(number: f64) -> u32 {
+    if !number.is_finite() || number == 0.0 {
+        return 0;
+    }
+    number.trunc().rem_euclid(4_294_967_296.0) as u32
 }
 
 #[inline(always)]

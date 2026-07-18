@@ -1285,6 +1285,14 @@ mod tests {
     }
 
     #[test]
+    /// Covers signed and unsigned shift counts and ToNumber coercion.
+    fn shifts_convert_supported_primitives() {
+        assert_eq!(execute_source(99, "5 << 1;").as_i32(), Some(10));
+        assert_eq!(execute_source(100, "'8' >> 1;").as_i32(), Some(4));
+        assert_eq!(execute_source(101, "-1 >>> 30;").as_f64(), Some(3.0));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(
