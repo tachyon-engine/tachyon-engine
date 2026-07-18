@@ -1236,6 +1236,16 @@ mod tests {
     }
 
     #[test]
+    /// Ensures void evaluates its operand for side effects and always completes undefined.
+    fn void_evaluates_operand_and_returns_undefined() {
+        assert_eq!(
+            execute_source(82, "let calls = 0; void (++calls); calls;").as_i32(),
+            Some(1)
+        );
+        assert!(execute_source(83, "void 42;").as_immediate().is_some());
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(
