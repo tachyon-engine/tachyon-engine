@@ -1533,6 +1533,22 @@ mod tests {
             execute_source(72, "let source = { answer: 42 }; ({ ...source }).answer;").as_i32(),
             Some(42),
         );
+        assert_eq!(
+            execute_source(
+                73,
+                "let source = { first: 1, second: 2 }; Object.keys(source)[1] === 'second' && Object.values(source)[0] === 1 && Object.entries(source)[1][1] === 2 && Object.values('ab')[1] === 'b' && Object.entries('ab')[0][0] === '0';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                74,
+                "let threw = false; try { Object.values(null); } catch (error) { threw = error instanceof TypeError; } threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]

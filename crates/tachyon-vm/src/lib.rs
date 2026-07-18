@@ -224,6 +224,9 @@ enum NativeFunction {
     ObjectHasOwnProperty,
     ObjectToString,
     ObjectAssign,
+    ObjectKeys,
+    ObjectValues,
+    ObjectEntries,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -586,6 +589,9 @@ struct Realm {
     object_has_own_property: Option<Value>,
     object_to_string: Option<Value>,
     object_assign: Option<Value>,
+    object_keys: Option<Value>,
+    object_values: Option<Value>,
+    object_entries: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -616,6 +622,9 @@ impl Realm {
             object_has_own_property: None,
             object_to_string: None,
             object_assign: None,
+            object_keys: None,
+            object_values: None,
+            object_entries: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -873,6 +882,9 @@ impl Trace for Realm {
         self.object_has_own_property.trace(tracer);
         self.object_to_string.trace(tracer);
         self.object_assign.trace(tracer);
+        self.object_keys.trace(tracer);
+        self.object_values.trace(tracer);
+        self.object_entries.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1263,7 +1275,40 @@ impl Isolate {
         )?;
         self.realm.object_assign = Some(assign);
         let assign_atom = self.intern_intrinsic_name(b"assign")?;
-        self.set_own_data_property(constructor, assign_atom, assign)
+        self.set_own_data_property(constructor, assign_atom, assign)?;
+        let keys = self.allocate_native_function(
+            NativeFunction::ObjectKeys,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_keys = Some(keys);
+        let keys_atom = self.intern_intrinsic_name(b"keys")?;
+        self.set_own_data_property(constructor, keys_atom, keys)?;
+        let values = self.allocate_native_function(
+            NativeFunction::ObjectValues,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_values = Some(values);
+        let values_atom = self.intern_intrinsic_name(b"values")?;
+        self.set_own_data_property(constructor, values_atom, values)?;
+        let entries = self.allocate_native_function(
+            NativeFunction::ObjectEntries,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_entries = Some(entries);
+        let entries_atom = self.intern_intrinsic_name(b"entries")?;
+        self.set_own_data_property(constructor, entries_atom, entries)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -2041,6 +2086,195 @@ impl Isolate {
             self.copy_own_data_properties(target, source)?;
         }
         Ok(target)
+    }
+
+    /// Materializes Object.keys/values/entries from ordinary enumerable data slots.
+    fn object_enumeration(
+        &mut self,
+        site: &CallSite,
+        native: NativeFunction,
+    ) -> Result<Value, ExecutionError> {
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if matches!(
+            source.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        if let Some(raw) = source.as_heap_ref()
+            && let Ok(string) = self.heap.checked_reference(raw, self.types.string)
+        {
+            return self.enumerate_string_primitive(result, string, native);
+        }
+        if !self.is_object_value(source) {
+            return Ok(result);
+        }
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let keys = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        let mut output_index = 0_i32;
+        for key in keys {
+            let Some(value) = self.data_property_from_snapshot(snapshot, key)? else {
+                continue;
+            };
+            match native {
+                NativeFunction::ObjectEntries => {
+                    self.append_object_entry(result, output_index, key, value)?;
+                }
+                NativeFunction::ObjectKeys => {
+                    let key_value = self.atom_string_value(key)?;
+                    self.append_object_enumeration_item(result, output_index, key_value, native)?;
+                }
+                NativeFunction::ObjectValues => {
+                    self.append_object_enumeration_item(result, output_index, value, native)?;
+                }
+                _ => return Err(ExecutionError::NonCallable(source)),
+            }
+            output_index = output_index
+                .checked_add(1)
+                .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+        }
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(result, length, Value::from_i32(output_index))?;
+        Ok(result)
+    }
+
+    /// Enumerates the virtual indexed properties exposed by one primitive string.
+    fn enumerate_string_primitive(
+        &mut self,
+        result: Value,
+        string: GcRef<JsString>,
+        native: NativeFunction,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let string = no_gc
+                    .borrow(string, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok::<Vec<u16>, ExecutionError>(match string.as_view() {
+                    JsStringView::Latin1(bytes) => {
+                        bytes.iter().map(|&byte| u16::from(byte)).collect()
+                    }
+                    JsStringView::Utf16(units) => units.to_vec(),
+                })
+            })
+        })?;
+        let length = i32::try_from(units.len())
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+        for (index, unit) in units.into_iter().enumerate() {
+            let index = i32::try_from(index)
+                .map_err(|_| ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+            let key_atom = self.property_key_atom(Value::from_i32(index))?;
+            match native {
+                NativeFunction::ObjectEntries => {
+                    let pair = self.create_and_root_entry_pair(result, index)?;
+                    let zero = self.property_key_atom(Value::from_i32(0))?;
+                    let key = self.atom_string_value(key_atom)?;
+                    self.set_own_data_property(pair, zero, key)?;
+                    let one = self.property_key_atom(Value::from_i32(1))?;
+                    let value = self.allocate_runtime_string(
+                        JsString::try_from_utf16(&[unit])
+                            .map_err(ExecutionError::PropertyKeyString)?,
+                    )?;
+                    self.set_own_data_property(pair, one, value)?;
+                    let pair_length = self.intern_intrinsic_name(b"length")?;
+                    self.set_own_data_property(pair, pair_length, Value::from_i32(2))?;
+                }
+                NativeFunction::ObjectKeys => {
+                    let key = self.atom_string_value(key_atom)?;
+                    self.append_object_enumeration_item(result, index, key, native)?;
+                }
+                NativeFunction::ObjectValues => {
+                    let value = self.allocate_runtime_string(
+                        JsString::try_from_utf16(&[unit])
+                            .map_err(ExecutionError::PropertyKeyString)?,
+                    )?;
+                    self.append_object_enumeration_item(result, index, value, native)?;
+                }
+                _ => return Err(ExecutionError::NonCallable(result)),
+            }
+        }
+        let length_atom = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(result, length_atom, Value::from_i32(length))?;
+        Ok(result)
+    }
+
+    /// Appends one materialized key/value/entry without duplicating Array pair construction.
+    fn append_object_enumeration_item(
+        &mut self,
+        result: Value,
+        output_index: i32,
+        item: Value,
+        native: NativeFunction,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(matches!(
+            native,
+            NativeFunction::ObjectKeys | NativeFunction::ObjectValues
+        ));
+        let result_key = self.property_key_atom(Value::from_i32(output_index))?;
+        self.set_own_data_property(result, result_key, item)
+    }
+
+    /// Creates and roots an Object.entries pair before allocating its key string.
+    fn create_and_root_entry_pair(
+        &mut self,
+        result: Value,
+        output_index: i32,
+    ) -> Result<Value, ExecutionError> {
+        let pair = self.create_unrooted_array()?;
+        let pair_key = self.property_key_atom(Value::from_i32(output_index))?;
+        self.set_own_data_property(result, pair_key, pair)?;
+        Ok(pair)
+    }
+
+    /// Appends one Object.entries pair whose source value remains rooted by the source object.
+    fn append_object_entry(
+        &mut self,
+        result: Value,
+        output_index: i32,
+        key: AtomId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let pair = self.create_and_root_entry_pair(result, output_index)?;
+        let zero = self.property_key_atom(Value::from_i32(0))?;
+        let key = self.atom_string_value(key)?;
+        self.set_own_data_property(pair, zero, key)?;
+        let one = self.property_key_atom(Value::from_i32(1))?;
+        self.set_own_data_property(pair, one, value)?;
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(pair, length, Value::from_i32(2))
+    }
+
+    /// Allocates an empty Array value whose caller immediately publishes it into a rooted owner.
+    fn create_unrooted_array(&mut self) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before Object.entries");
+        self.create_ordinary_object_with_prototype(prototype)
+    }
+
+    /// Copies an immortal atom spelling into one GC-managed ECMAScript string value.
+    fn atom_string_value(&mut self, atom: AtomId) -> Result<Value, ExecutionError> {
+        let string = self
+            .atoms
+            .get(atom)
+            .expect("shape keys always reference live isolate atoms");
+        let string = match string.as_view() {
+            JsStringView::Latin1(bytes) => JsString::try_from_latin1(bytes),
+            JsStringView::Utf16(units) => JsString::try_from_utf16(units),
+        }
+        .map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(string)
     }
 
     /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
@@ -3979,6 +4213,14 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectAssign) => {
                     let target = self.object_assign(&site)?;
                     return self.write(site.caller_base, site.destination, target);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::ObjectKeys
+                    | NativeFunction::ObjectValues
+                    | NativeFunction::ObjectEntries),
+                ) => {
+                    let result = self.object_enumeration(&site, native)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeCall) => {
                     let this_argument = self
