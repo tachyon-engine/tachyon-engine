@@ -14,3 +14,4 @@ path = "src/lib.rs"
 tachyon-bytecode = { path = "../tachyon-bytecode" }
 tachyon-gc = { path = "../tachyon-gc" }
 tachyon-value = { path = "../tachyon-value" }
+ryu-js = "=1.0.3"

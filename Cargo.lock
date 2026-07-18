@@ -1869,6 +1869,7 @@ dependencies = [
 name = "tachyon-vm"
 version = "0.1.0"
 dependencies = [
+ "ryu-js",
  "tachyon-bytecode",
  "tachyon-gc",
  "tachyon-value",

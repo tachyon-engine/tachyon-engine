@@ -2048,7 +2048,7 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
     }
 
-    /// Converts string and integer PropertyKeys, preserving the integer fast path and atom quota.
+    /// Converts supported primitive values to interned PropertyKeys.
     #[cold]
     fn property_key_atom(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
         if let Some(raw) = value.as_heap_ref()
@@ -2072,15 +2072,30 @@ impl Isolate {
                 .try_intern(string)
                 .map_err(ExecutionError::PropertyKeyAtom);
         }
-        let integer = value
-            .as_i32()
-            .ok_or(ExecutionError::UnsupportedPropertyKey(value))?;
-        let key = Int32PropertyKey::new(integer);
-        if let Some(atom) = self.atoms.find_latin1(key.as_bytes()) {
-            return Ok(atom);
+        if let Some(integer) = value.as_i32() {
+            let key = Int32PropertyKey::new(integer);
+            if let Some(atom) = self.atoms.find_latin1(key.as_bytes()) {
+                return Ok(atom);
+            }
+            let string = JsString::try_from_latin1(key.as_bytes())
+                .map_err(ExecutionError::PropertyKeyString)?;
+            return self
+                .atoms
+                .try_intern(string)
+                .map_err(ExecutionError::PropertyKeyAtom);
         }
-        let string =
-            JsString::try_from_latin1(key.as_bytes()).map_err(ExecutionError::PropertyKeyString)?;
+
+        // Number::toString is only reached after the immediate integer fast path.
+        let number = value
+            .as_f64()
+            .ok_or(ExecutionError::UnsupportedPropertyKey(value))?;
+        let mut buffer = ryu_js::Buffer::new();
+        let printed = if number == 0.0 {
+            "0"
+        } else {
+            buffer.format(number)
+        };
+        let string = JsString::try_from_str(printed).map_err(ExecutionError::PropertyKeyString)?;
         self.atoms
             .try_intern(string)
             .map_err(ExecutionError::PropertyKeyAtom)
@@ -4074,7 +4089,11 @@ mod tests {
     }
 
     fn assert_dynamic_property_batch<const N: usize>() {
-        for module in [dynamic_property_module(), dynamic_string_property_module()] {
+        for module in [
+            dynamic_property_module(),
+            dynamic_string_property_module(),
+            dynamic_numeric_property_module(),
+        ] {
             let outcome = test_isolate()
                 .execute_with_batch::<N>(
                     &module,
@@ -5467,6 +5486,27 @@ mod tests {
             vec![BytecodeConstant::string_from_utf16(
                 "answer".encode_utf16().collect(),
             )],
+            builder,
+        )
+    }
+
+    /// Builds a numeric-key write/string-key read pair to verify ECMAScript formatting.
+    fn dynamic_numeric_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(7, 2);
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::LoadConstant, &[1, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 42], span).unwrap();
+        builder.emit(Opcode::SetByValue, &[0, 2, 1], span).unwrap();
+        builder.emit(Opcode::LoadConstant, &[3, 1], span).unwrap();
+        builder.emit(Opcode::GetByValue, &[4, 0, 3], span).unwrap();
+        builder.emit(Opcode::Return, &[4], span).unwrap();
+        single_function_module(
+            "dynamic numeric property",
+            vec![
+                BytecodeConstant::NumberBits(1.2f64.to_bits()),
+                BytecodeConstant::string_from_utf16("1.2".encode_utf16().collect()),
+            ],
             builder,
         )
     }
