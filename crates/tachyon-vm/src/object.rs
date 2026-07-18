@@ -102,6 +102,25 @@ impl ShapeTable {
         self.shapes[shape.index()].slot
     }
 
+    /// Returns own property keys in insertion order for ordinary data-property enumeration.
+    pub(crate) fn own_keys(&self, shape: ShapeId) -> Result<Vec<AtomId>, ShapeError> {
+        let count =
+            usize::try_from(self.property_count(shape)).map_err(|_| ShapeError::IdOverflow)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(count)
+            .map_err(|_| ShapeError::AllocationFailed)?;
+        let mut current = shape;
+        while current != ShapeId::EMPTY {
+            let entry = &self.shapes[current.index()];
+            if let Some(key) = entry.key {
+                keys.push(key);
+            }
+            current = entry.parent.expect("non-root shapes have a parent");
+        }
+        keys.reverse();
+        Ok(keys)
+    }
+
     /// Walks the immutable parent chain; M13 replaces this slow path with guarded caches.
     #[inline]
     pub(crate) fn lookup(&self, mut shape: ShapeId, key: AtomId) -> Option<PropertyLookup> {

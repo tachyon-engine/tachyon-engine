@@ -223,6 +223,7 @@ enum NativeFunction {
     ObjectDefineProperty,
     ObjectHasOwnProperty,
     ObjectToString,
+    ObjectAssign,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -584,6 +585,7 @@ struct Realm {
     object_define_property: Option<Value>,
     object_has_own_property: Option<Value>,
     object_to_string: Option<Value>,
+    object_assign: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -613,6 +615,7 @@ impl Realm {
             object_define_property: None,
             object_has_own_property: None,
             object_to_string: None,
+            object_assign: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -869,6 +872,7 @@ impl Trace for Realm {
         self.object_define_property.trace(tracer);
         self.object_has_own_property.trace(tracer);
         self.object_to_string.trace(tracer);
+        self.object_assign.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1248,7 +1252,18 @@ impl Isolate {
         )?;
         self.realm.object_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
-        self.set_own_data_property(object_prototype, to_string_atom, to_string)
+        self.set_own_data_property(object_prototype, to_string_atom, to_string)?;
+        let assign = self.allocate_native_function(
+            NativeFunction::ObjectAssign,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_assign = Some(assign);
+        let assign_atom = self.intern_intrinsic_name(b"assign")?;
+        self.set_own_data_property(constructor, assign_atom, assign)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1985,6 +2000,47 @@ impl Isolate {
     ) -> Result<bool, ExecutionError> {
         let (_, snapshot) = self.object_snapshot(receiver)?;
         Ok(self.data_property_from_snapshot(snapshot, key)?.is_some())
+    }
+
+    /// Copies enumerable ordinary data slots in stable shape insertion order.
+    fn copy_own_data_properties(
+        &mut self,
+        target: Value,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(source) {
+            return Ok(());
+        }
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let keys = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        for key in keys {
+            if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
+                self.set_own_data_property(target, key, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Implements Object.assign for ordinary data-property sources and one target object.
+    fn object_assign(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let target = if self.is_object_value(target) {
+            target
+        } else {
+            self.create_ordinary_object()?
+        };
+        for index in 1..site.argument_count {
+            let source = self
+                .call_argument(site, index)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            self.copy_own_data_properties(target, source)?;
+        }
+        Ok(target)
     }
 
     /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
@@ -3919,6 +3975,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectAssign) => {
+                    let target = self.object_assign(&site)?;
+                    return self.write(site.caller_base, site.destination, target);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeCall) => {
                     let this_argument = self

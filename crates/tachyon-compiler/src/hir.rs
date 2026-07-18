@@ -1082,13 +1082,28 @@ fn lower_expression(
         }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());
+            let mut sources = Vec::new();
+            let mut saw_spread = false;
             for property in &expression.properties {
                 let ObjectPropertyKind::ObjectProperty(property) = property else {
-                    return Err(unsupported(
-                        source.name(),
-                        source_span(property.span()),
-                        "object spread",
-                    ));
+                    if !properties.is_empty() {
+                        sources.push(HirExpression {
+                            span,
+                            kind: HirExpressionKind::Object(properties.into()),
+                        });
+                        properties = Vec::new();
+                    }
+                    let ObjectPropertyKind::SpreadProperty(spread) = property else {
+                        unreachable!("object property pattern is exhaustive");
+                    };
+                    sources.push(lower_expression(
+                        &spread.argument,
+                        source,
+                        semantic,
+                        functions,
+                    )?);
+                    saw_spread = true;
+                    continue;
                 };
                 if property.kind != PropertyKind::Init {
                     return Err(unsupported(
@@ -1148,7 +1163,46 @@ fn lower_expression(
                     value,
                 });
             }
-            HirExpressionKind::Object(properties.into())
+            if !saw_spread {
+                HirExpressionKind::Object(properties.into())
+            } else {
+                if !properties.is_empty() {
+                    sources.push(HirExpression {
+                        span,
+                        kind: HirExpressionKind::Object(properties.into()),
+                    });
+                }
+                let target = HirExpression {
+                    span,
+                    kind: HirExpressionKind::Object(Arc::from([])),
+                };
+                let object = HirExpression {
+                    span,
+                    kind: HirExpressionKind::Identifier(HirIdentifierReference {
+                        id: ReferenceId(0),
+                        scope: ScopeId(0),
+                        binding: None,
+                        binding_scope: None,
+                        name: Arc::from("Object"),
+                        read: true,
+                        write: false,
+                    }),
+                };
+                let callee = HirExpression {
+                    span,
+                    kind: HirExpressionKind::StaticMember {
+                        object: Box::new(object),
+                        property: Arc::from("assign"),
+                    },
+                };
+                let mut arguments = Vec::with_capacity(sources.len() + 1);
+                arguments.push(target);
+                arguments.extend(sources);
+                HirExpressionKind::Call {
+                    callee: Box::new(callee),
+                    arguments: arguments.into(),
+                }
+            }
         }
         Expression::StaticMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::StaticMember {

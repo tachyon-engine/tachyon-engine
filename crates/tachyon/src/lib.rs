@@ -1518,6 +1518,23 @@ mod tests {
         );
     }
 
+    /// Verifies Object.assign copies own data slots in source order and returns its target.
+    #[test]
+    fn object_assign_copies_own_data_properties() {
+        assert_eq!(
+            execute_source(
+                71,
+                "let target = {}; let source = { first: 1, second: 2 }; Object.assign(target, source); target.first + target.second;",
+            )
+            .as_i32(),
+            Some(3),
+        );
+        assert_eq!(
+            execute_source(72, "let source = { answer: 42 }; ({ ...source }).answer;").as_i32(),
+            Some(42),
+        );
+    }
+
     #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
