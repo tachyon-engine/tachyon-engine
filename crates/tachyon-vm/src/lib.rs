@@ -243,6 +243,62 @@ enum NativeFunction {
     ArrayToString,
 }
 
+impl NativeFunction {
+    #[inline(always)]
+    const fn length(self) -> i32 {
+        match self {
+            Self::ObjectDefineProperty => 3,
+            Self::ObjectAssign | Self::ObjectHasOwn | Self::ObjectIs | Self::ObjectCreate => 2,
+            Self::ObjectConstructor
+            | Self::ObjectHasOwnProperty
+            | Self::ObjectKeys
+            | Self::ObjectValues
+            | Self::ObjectEntries
+            | Self::ObjectGetPrototypeOf
+            | Self::ObjectIsPrototypeOf
+            | Self::StringConstructor
+            | Self::NumberConstructor
+            | Self::BooleanConstructor
+            | Self::FunctionPrototypeCall
+            | Self::ErrorConstructor(_)
+            | Self::ArrayConstructor
+            | Self::ArrayConcat => 1,
+            Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
+        }
+    }
+
+    #[inline]
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ObjectConstructor => "Object",
+            Self::ObjectDefineProperty => "defineProperty",
+            Self::ObjectHasOwnProperty => "hasOwnProperty",
+            Self::ObjectToString => "toString",
+            Self::ObjectAssign => "assign",
+            Self::ObjectKeys => "keys",
+            Self::ObjectValues => "values",
+            Self::ObjectEntries => "entries",
+            Self::ObjectHasOwn => "hasOwn",
+            Self::ObjectIs => "is",
+            Self::ObjectGetPrototypeOf => "getPrototypeOf",
+            Self::ObjectCreate => "create",
+            Self::ObjectIsPrototypeOf => "isPrototypeOf",
+            Self::StringConstructor => "String",
+            Self::NumberConstructor => "Number",
+            Self::BooleanConstructor => "Boolean",
+            Self::FunctionPrototype => "",
+            Self::FunctionPrototypeCall => "call",
+            Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
+            Self::ErrorConstructor(NativeErrorKind::Reference) => "ReferenceError",
+            Self::ErrorConstructor(NativeErrorKind::Syntax) => "SyntaxError",
+            Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
+            Self::ArrayConstructor => "Array",
+            Self::ArrayConcat => "concat",
+            Self::ArrayToString => "toString",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum NativeErrorKind {
@@ -384,6 +440,8 @@ struct IntrinsicPropertyAtoms {
     prototype: Option<AtomId>,
     constructor: Option<AtomId>,
     message: Option<AtomId>,
+    name: Option<AtomId>,
+    length: Option<AtomId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2138,6 +2196,9 @@ impl Isolate {
     ) -> Result<Option<Value>, ExecutionError> {
         let mut current = receiver;
         loop {
+            if let Some(value) = self.native_function_metadata_property(current, key)? {
+                return Ok(Some(value));
+            }
             if self.is_function_prototype_property(current, key) {
                 self.intrinsic_property_atoms.prototype = Some(key);
                 return self.ensure_function_prototype(current).map(Some);
@@ -2162,8 +2223,37 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<bool, ExecutionError> {
+        if self
+            .native_function_metadata_property(receiver, key)?
+            .is_some()
+        {
+            return Ok(true);
+        }
         let (_, snapshot) = self.object_snapshot(receiver)?;
         Ok(self.data_property_from_snapshot(snapshot, key)?.is_some())
+    }
+
+    /// Exposes native callable name/length as non-enumerable own virtual data properties.
+    fn native_function_metadata_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let Ok(function) = self.resolve_function_object(receiver) else {
+            return Ok(None);
+        };
+        let FunctionExecutable::Native(native) = function.executable else {
+            return Ok(None);
+        };
+        if key == self.length_atom()? {
+            return Ok(Some(Value::from_i32(native.length())));
+        }
+        if key != self.name_atom()? {
+            return Ok(None);
+        }
+        let name = JsString::try_from_latin1(native.name().as_bytes())
+            .map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(name).map(Some)
     }
 
     /// Copies enumerable ordinary data slots in stable shape insertion order.
@@ -2184,6 +2274,36 @@ impl Isolate {
             if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
                 self.set_own_data_property(target, key, value)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Applies the data-value subset of an Object.create/defineProperties descriptor map.
+    fn define_ordinary_properties(
+        &mut self,
+        target: Value,
+        descriptors: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(descriptors) {
+            return Err(ExecutionError::NotObject(descriptors));
+        }
+        let (_, snapshot) = self.object_snapshot(descriptors)?;
+        let keys = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        let value_atom = self.intern_intrinsic_name(b"value")?;
+        for key in keys {
+            let Some(descriptor) = self.data_property_from_snapshot(snapshot, key)? else {
+                continue;
+            };
+            if !self.is_object_value(descriptor) {
+                return Err(ExecutionError::NotObject(descriptor));
+            }
+            let value = self
+                .get_data_property(descriptor, value_atom)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            self.set_own_data_property(target, key, value)?;
         }
         Ok(())
     }
@@ -2461,6 +2581,24 @@ impl Isolate {
             .try_intern(string)
             .map_err(ExecutionError::PropertyKeyAtom)?;
         self.intrinsic_property_atoms.message = Some(atom);
+        Ok(atom)
+    }
+
+    fn name_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.name {
+            return Ok(atom);
+        }
+        let atom = self.intern_intrinsic_name(b"name")?;
+        self.intrinsic_property_atoms.name = Some(atom);
+        Ok(atom)
+    }
+
+    fn length_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.length {
+            return Ok(atom);
+        }
+        let atom = self.intern_intrinsic_name(b"length")?;
+        self.intrinsic_property_atoms.length = Some(atom);
         Ok(atom)
     }
 
@@ -4399,7 +4537,13 @@ impl Isolate {
                         return Err(ExecutionError::NotObject(prototype));
                     }
                     let object = self.create_ordinary_object_with_prototype(prototype)?;
-                    return self.write(site.caller_base, site.destination, object);
+                    self.write(site.caller_base, site.destination, object)?;
+                    if let Some(descriptors) = self.call_argument(&site, 1)?
+                        && descriptors.as_immediate() != Some(Immediate::Undefined)
+                    {
+                        self.define_ordinary_properties(object, descriptors)?;
+                    }
+                    return Ok(());
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIsPrototypeOf) => {
                     let result =

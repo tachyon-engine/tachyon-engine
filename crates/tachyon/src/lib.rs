@@ -1560,7 +1560,15 @@ mod tests {
         assert_eq!(
             execute_source(
                 76,
-                "let prototype = { answer: 42 }; let object = Object.create(prototype); Object.getPrototypeOf(object) === prototype && prototype.isPrototypeOf(object) && object.answer === 42;",
+                "let prototype = { answer: 42 }; let object = Object.create(prototype, { own: { value: 7 } }); Object.getPrototypeOf(object) === prototype && prototype.isPrototypeOf(object) && object.answer === 42 && object.own === 7;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                77,
+                "Object.create.length === 2 && Object.create.name === 'create' && Object.hasOwn(Object.create, 'length');",
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
