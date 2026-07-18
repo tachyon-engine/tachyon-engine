@@ -668,4 +668,40 @@ mod tests {
             Some(42)
         );
     }
+
+    #[test]
+    fn ordinary_construct_sets_receiver_new_target_and_return_replacement() {
+        assert_eq!(
+            execute_source(
+                32,
+                "function Box(value) { this.value = value; } (new Box(42)).value;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                33,
+                "function Box() { this.value = 42; return 7; } (new Box()).value;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                34,
+                "function replacement() {} function Box() { return replacement; } new Box() === replacement;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                35,
+                "function Box() { return new.target; } let constructed = new Box() === Box; let called = Box() === undefined; constructed && called;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
 }

@@ -141,6 +141,7 @@ pub enum ExecutionError {
     UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
     NonCallable(Value),
+    NonConstructor(Value),
     HeapAllocation(ManagedAllocationError),
     HeapReference(HeapReferenceError),
     Root(RootError),
@@ -217,6 +218,8 @@ struct CallSite {
     callee_register: u32,
     argument_count: u32,
     this_value: Value,
+    new_target: Value,
+    construct_receiver: Option<Value>,
     call_site: WordOffset,
 }
 
@@ -369,6 +372,7 @@ struct Frame {
     return_register: Option<RegisterId>,
     this_value: Value,
     new_target: Value,
+    construct_receiver: Option<Value>,
     strictness: Strictness,
     argument_base: u32,
     argument_count: u32,
@@ -413,6 +417,7 @@ impl Fiber {
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);
             frame.new_target.trace(tracer);
+            frame.construct_receiver.trace(tracer);
             if let Some(return_register) = frame.return_register {
                 debug_assert!((return_register.index() as usize) < self.registers.len());
             }
@@ -726,6 +731,20 @@ impl Isolate {
         }
     }
 
+    #[inline(always)]
+    fn is_object_value(&self, value: Value) -> bool {
+        let Some(raw) = value.as_heap_ref() else {
+            return false;
+        };
+        self.heap
+            .checked_reference(raw, self.types.ordinary_object)
+            .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.function)
+                .is_ok()
+    }
+
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
     /// The collector supplies a rewrite-capable tracer. This API does not resolve logical addresses
@@ -1010,6 +1029,24 @@ impl Isolate {
                     .ok_or(ExecutionError::MissingPendingException)?;
                 self.write(base, operands[0], value)?;
             }
+            Opcode::LoadThis => {
+                let value = self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("this load always has an active frame")
+                    .this_value;
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::LoadNewTarget => {
+                let value = self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("new.target load always has an active frame")
+                    .new_target;
+                self.write(base, operands[0], value)?;
+            }
             Opcode::GetById => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
@@ -1024,25 +1061,36 @@ impl Isolate {
                 let key = self.scope_atom(code, operands[2])?;
                 self.set_own_data_property(receiver, key, value)?;
             }
-            Opcode::Call => self.call(
+            Opcode::Call => self.call(CallSite {
+                caller_base: base,
+                destination: operands[0],
+                callee_register: operands[1],
+                argument_count: operands[2],
+                this_value: Value::from_immediate(Immediate::Undefined),
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: instruction_offset,
+            })?,
+            Opcode::CallWithReceiver => {
+                let receiver = self.read(base, operands[1])?;
+                self.call(CallSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    callee_register: operands[1] + 1,
+                    argument_count: operands[2],
+                    this_value: receiver,
+                    new_target: Value::from_immediate(Immediate::Undefined),
+                    construct_receiver: None,
+                    call_site: instruction_offset,
+                })?;
+            }
+            Opcode::Construct => self.construct(
                 base,
                 operands[0],
                 operands[1],
                 operands[2],
-                Value::from_immediate(Immediate::Undefined),
                 instruction_offset,
             )?,
-            Opcode::CallWithReceiver => {
-                let receiver = self.read(base, operands[1])?;
-                self.call(
-                    base,
-                    operands[0],
-                    operands[1] + 1,
-                    operands[2],
-                    receiver,
-                    instruction_offset,
-                )?;
-            }
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
                 if self.fiber.frames.len() == 1 {
@@ -1117,6 +1165,7 @@ impl Isolate {
             argument_count: 0,
             handler_base: 0,
             completion_base: 0,
+            construct_receiver: None,
             call_site: None,
         });
         Ok(())
@@ -1163,18 +1212,40 @@ impl Isolate {
         self.write(base, destination, Value::from_heap_ref(closure.raw()))
     }
 
-    /// Resolves one callable and pushes its exact register/frame window without Rust recursion.
+    /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
     #[inline(never)]
-    fn call(
+    fn construct(
         &mut self,
         caller_base: u32,
         destination: u32,
         callee_register: u32,
         argument_count: u32,
-        this_value: Value,
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
-        let callee = self.read(caller_base, callee_register)?;
+        let constructor = self.read(caller_base, callee_register)?;
+        let raw = constructor
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonConstructor(constructor))?;
+        self.heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonConstructor(constructor))?;
+        let receiver = self.create_ordinary_object()?;
+        self.call(CallSite {
+            caller_base,
+            destination,
+            callee_register,
+            argument_count,
+            this_value: receiver,
+            new_target: constructor,
+            construct_receiver: Some(receiver),
+            call_site,
+        })
+    }
+
+    /// Resolves one callable and pushes its exact register/frame window without Rust recursion.
+    #[inline(never)]
+    fn call(&mut self, site: CallSite) -> Result<(), ExecutionError> {
+        let callee = self.read(site.caller_base, site.callee_register)?;
         let raw = callee
             .as_heap_ref()
             .ok_or(ExecutionError::NonCallable(callee))?;
@@ -1207,14 +1278,7 @@ impl Isolate {
                 layout,
                 kind,
             },
-            CallSite {
-                caller_base,
-                destination,
-                callee_register,
-                argument_count,
-                this_value,
-                call_site,
-            },
+            site,
         )
     }
 
@@ -1279,7 +1343,8 @@ impl Isolate {
             environment: target.object.environment,
             return_register: Some(RegisterId::new(site.destination)),
             this_value: site.this_value,
-            new_target: Value::from_immediate(Immediate::Undefined),
+            new_target: site.new_target,
+            construct_receiver: site.construct_receiver,
             strictness: strictness_for(target.kind),
             argument_base,
             argument_count: site.argument_count,
@@ -1299,6 +1364,10 @@ impl Isolate {
             .frames
             .pop()
             .expect("callee return always has an active frame");
+        let value = match frame.construct_receiver {
+            Some(receiver) if !self.is_object_value(value) => receiver,
+            _ => value,
+        };
         self.fiber.registers.truncate(frame.base as usize);
         self.fiber.handlers.truncate(frame.handler_base as usize);
         self.fiber
@@ -1904,6 +1973,19 @@ mod tests {
         }
     }
 
+    fn assert_construct_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &construct_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
     #[test]
     fn interpreter_executes_int32_arithmetic() {
         assert_batch_result::<1>();
@@ -2044,6 +2126,33 @@ mod tests {
         assert_catch_batch::<4>();
         assert_catch_batch::<8>();
         assert_catch_batch::<16>();
+    }
+
+    #[test]
+    fn construct_receiver_and_primitive_return_work_for_every_dispatch_batch() {
+        assert_construct_batch::<1>();
+        assert_construct_batch::<2>();
+        assert_construct_batch::<4>();
+        assert_construct_batch::<8>();
+        assert_construct_batch::<16>();
+    }
+
+    #[test]
+    fn construct_receiver_stays_rooted_across_forced_major_property_allocation() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &construct_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
     #[test]
@@ -2733,6 +2842,59 @@ mod tests {
             vec![
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a constructor that stores one argument on `this` and returns a primitive fallback.
+    fn construct_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(6, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[1, 42], span).unwrap();
+        entry.emit(Opcode::Construct, &[2, 0, 1], span).unwrap();
+        entry.emit(Opcode::GetById, &[3, 2, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[3], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut constructor = BytecodeBuilder::with_capacity(6, 0);
+        constructor.emit(Opcode::LoadThis, &[1], span).unwrap();
+        constructor.emit(Opcode::SetById, &[1, 0, 0], span).unwrap();
+        constructor
+            .emit(Opcode::LoadImmediate, &[2, 7], span)
+            .unwrap();
+        constructor.emit(Opcode::Return, &[2], span).unwrap();
+        let (constructor_bytecode, constructor_source_map, constructor_registers) =
+            constructor.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let constructor_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: constructor_registers,
+                argument_count: 1,
+                ..FunctionLayout::default()
+            },
+            source_map: constructor_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("construct"),
+            Vec::new(),
+            vec![Arc::from("value")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    constructor_bytecode,
+                    constructor_metadata,
+                ),
             ],
             FunctionId::new(0),
         )

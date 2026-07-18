@@ -961,6 +961,20 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::This => {
+                let destination = self.register()?;
+                self.emit(Opcode::LoadThis, &[destination.index()], expression.span)?;
+                Ok(destination)
+            }
+            HirExpressionKind::NewTarget => {
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::LoadNewTarget,
+                    &[destination.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let destination = self.register()?;
@@ -1015,6 +1029,9 @@ impl Lowerer<'_> {
             } => self.conditional(test, consequent, alternate, expression.span),
             HirExpressionKind::Call { callee, arguments } => {
                 self.call_expression(callee, arguments, expression.span)
+            }
+            HirExpressionKind::New { callee, arguments } => {
+                self.construct_expression(callee, arguments, expression.span)
             }
             _ => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
@@ -1087,6 +1104,39 @@ impl Lowerer<'_> {
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
             Opcode::Call,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Evaluates constructor and arguments once before emitting one verified construct window.
+    fn construct_expression(
+        &mut self,
+        callee: &HirExpression,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let callee_value = self.expression(callee)?;
+        let call_base = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[call_base.index(), callee_value.index()],
+            span,
+        )?;
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::Construct,
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
@@ -1577,7 +1627,8 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             )?,
             "scope names",
         ),
-        HirExpressionKind::Call { callee, arguments } => {
+        HirExpressionKind::Call { callee, arguments }
+        | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_scope_name_count(callee)?;
             for argument in arguments.iter() {
                 count = checked_count_add(
@@ -1592,7 +1643,9 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         | HirExpressionKind::String(_)
         | HirExpressionKind::Boolean(_)
         | HirExpressionKind::Null
-        | HirExpressionKind::Function(_) => Ok(0),
+        | HirExpressionKind::Function(_)
+        | HirExpressionKind::This
+        | HirExpressionKind::NewTarget => Ok(0),
     }
 }
 
@@ -1775,7 +1828,8 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 "bytecode instructions",
             )
         }
-        HirExpressionKind::Call { callee, arguments } => {
+        HirExpressionKind::Call { callee, arguments }
+        | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_instruction_count(callee)?;
             count = checked_count_add(count, 2, "bytecode instructions")?;
             for argument in arguments.iter() {
@@ -2256,7 +2310,8 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             )?;
             checked_count_add(nested, 2, "bytecode labels")
         }
-        HirExpressionKind::Call { callee, arguments } => {
+        HirExpressionKind::Call { callee, arguments }
+        | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_label_count(callee)?;
             for argument in arguments.iter() {
                 count =
@@ -2309,7 +2364,8 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             )?,
             "bytecode constants",
         ),
-        HirExpressionKind::Call { callee, arguments } => {
+        HirExpressionKind::Call { callee, arguments }
+        | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_literal_count(callee)?;
             for argument in arguments.iter() {
                 count = checked_count_add(

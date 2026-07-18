@@ -140,6 +140,10 @@ pub enum Opcode {
     CallWithReceiver = 30,
     /// Moves the fiber's pending thrown value into a catch-local register.
     LoadException = 31,
+    /// Constructs register 1 with register 2 arguments stored contiguously after the callee.
+    Construct = 32,
+    LoadThis = 33,
+    LoadNewTarget = 34,
 }
 
 impl Opcode {
@@ -173,8 +177,8 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
-            Self::CreateObject | Self::LoadException => 1,
-            Self::GetById | Self::SetById | Self::CallWithReceiver => 3,
+            Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
+            Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
     }
 
@@ -217,6 +221,9 @@ impl Opcode {
             29 => Some(Self::SetById),
             30 => Some(Self::CallWithReceiver),
             31 => Some(Self::LoadException),
+            32 => Some(Self::Construct),
+            33 => Some(Self::LoadThis),
+            34 => Some(Self::LoadNewTarget),
             _ => None,
         }
     }
@@ -724,14 +731,17 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::Return
             | Opcode::Throw => &[0],
-            Opcode::CreateObject | Opcode::LoadException => &[0],
+            Opcode::CreateObject
+            | Opcode::LoadException
+            | Opcode::LoadThis
+            | Opcode::LoadNewTarget => &[0],
             Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
                 &[0, 1, 2]
             }
             Opcode::GetById | Opcode::SetById => &[0, 1],
-            Opcode::Call => {
+            Opcode::Call | Opcode::Construct => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {
                         self.note_register(register)?;
@@ -1561,7 +1571,9 @@ fn verify_instruction(
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
-        Opcode::CreateObject | Opcode::LoadException => check_register(operands[0])?,
+        Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
+            check_register(operands[0])?
+        }
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1579,7 +1591,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Call => {
+        Opcode::Call | Opcode::Construct => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             if operands[1]

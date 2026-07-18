@@ -187,6 +187,8 @@ pub enum HirExpressionKind {
     Null,
     Identifier(Arc<str>),
     Function(FunctionStencilId),
+    This,
+    NewTarget,
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -215,6 +217,10 @@ pub enum HirExpressionKind {
         alternate: Box<HirExpression>,
     },
     Call {
+        callee: Box<HirExpression>,
+        arguments: Arc<[HirExpression]>,
+    },
+    New {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
     },
@@ -737,6 +743,12 @@ fn lower_expression(
                 "named function expression",
             ));
         }
+        Expression::ThisExpression(_) => HirExpressionKind::This,
+        Expression::MetaProperty(property)
+            if property.meta.name == "new" && property.property.name == "target" =>
+        {
+            HirExpressionKind::NewTarget
+        }
         Expression::StaticMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::StaticMember {
                 object: Box::new(lower_expression(
@@ -835,6 +847,28 @@ fn lower_expression(
                 arguments.push(lower_expression(argument, source, next_binding, functions)?);
             }
             HirExpressionKind::Call {
+                callee: Box::new(lower_expression(
+                    &expression.callee,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+                arguments: arguments.into(),
+            }
+        }
+        Expression::NewExpression(expression) if expression.type_arguments.is_none() => {
+            let mut arguments = Vec::with_capacity(expression.arguments.len());
+            for argument in &expression.arguments {
+                let argument = argument.as_expression().ok_or_else(|| {
+                    unsupported(
+                        source.name(),
+                        source_span(argument.span()),
+                        "spread constructor argument",
+                    )
+                })?;
+                arguments.push(lower_expression(argument, source, next_binding, functions)?);
+            }
+            HirExpressionKind::New {
                 callee: Box::new(lower_expression(
                     &expression.callee,
                     source,
