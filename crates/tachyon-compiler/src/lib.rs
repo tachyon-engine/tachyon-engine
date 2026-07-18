@@ -20,9 +20,9 @@ use std::sync::Arc;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
     BindingId, FunctionStencilId, HirBinaryOperator, HirBinding, HirExpression, HirExpressionKind,
-    HirFunction, HirFunctionDeclaration, HirProgram, HirStatement, HirStatementKind,
-    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
-    ReferenceId, ScopeId, StatementCompletion,
+    HirFunction, HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement,
+    HirStatementKind, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -194,6 +194,32 @@ mod tests {
     }
 
     #[test]
+    /// Confirms logical structure and operator identity survive after the Oxc arena is dropped.
+    fn hir_lowering_owns_logical_expression_and_operator() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, "0 && 2;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [statement] = hir.statements() else {
+            panic!("expected one HIR statement");
+        };
+        assert!(matches!(
+            &statement.kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::Logical {
+                    operator: HirLogicalOperator::And,
+                    left,
+                    right,
+                },
+                ..
+            }) if left.kind == HirExpressionKind::Number(0.0_f64.to_bits())
+                && right.kind == HirExpressionKind::Number(2.0_f64.to_bits())
+        ));
+    }
+
+    #[test]
     fn hir_lowering_copies_local_binding_without_oxc_values() {
         let hir = Compiler
             .lower_to_hir(
@@ -347,6 +373,25 @@ mod tests {
         .unwrap();
         assert!(disassembly.contains("JumpIfFalse"));
         assert!(disassembly.contains("Throw"));
+    }
+
+    #[test]
+    fn compiler_emits_each_logical_short_circuit_branch() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "0 && 1; 0 || 2; null ?? 3;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("JumpIfFalse"));
+        assert!(disassembly.contains("JumpIfTrue"));
+        assert!(disassembly.contains("JumpIfNotNullish"));
     }
 
     #[test]

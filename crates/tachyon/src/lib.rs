@@ -34,6 +34,34 @@ mod tests {
         .expect("test isolate descriptors register")
     }
 
+    /// Compiles and executes one in-memory script with enough budget for expression fixtures.
+    fn execute_source(source_id: u32, text: &str) -> tachyon_value::Value {
+        let module = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(source_id),
+                    SourceName::new("embedded-input"),
+                    MediaType::JavaScript,
+                    Arc::from(text),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        match test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
+            )
+            .unwrap()
+        {
+            RunOutcome::Completed(value) => value,
+            outcome => panic!("expression fixture did not complete: {outcome:?}"),
+        }
+    }
+
     #[test]
     fn source_to_verified_module_to_int32_result() {
         let source = SourceText::new(
@@ -495,5 +523,27 @@ mod tests {
             outcome,
             RunOutcome::Completed(value) if value.as_immediate() == Some(tachyon_value::Immediate::True)
         ));
+    }
+
+    #[test]
+    fn logical_expressions_preserve_values_and_skip_right_hand_side_effects() {
+        assert_eq!(execute_source(19, "0 || 7;").as_i32(), Some(7));
+        assert_eq!(execute_source(20, "5 && 7;").as_i32(), Some(7));
+        assert_eq!(execute_source(21, "null ?? 9;").as_i32(), Some(9));
+        assert_eq!(execute_source(22, "4 ?? 9;").as_i32(), Some(4));
+        assert_eq!(
+            execute_source(
+                23,
+                "let changed = 0; false && (changed = 1); true || (changed = 2); changed;",
+            )
+            .as_i32(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn numeric_negation_and_realm_infinity_preserve_ieee_zero_sign() {
+        let value = execute_source(24, "1 / 0 === Infinity && 1 / -0 === -Infinity;");
+        assert_eq!(value.as_immediate(), Some(tachyon_value::Immediate::True));
     }
 }

@@ -130,6 +130,9 @@ pub enum Opcode {
     LoadFalse = 21,
     LoadTrue = 22,
     Not = 23,
+    JumpIfTrue = 24,
+    JumpIfNotNullish = 25,
+    Negate = 26,
 }
 
 impl Opcode {
@@ -148,7 +151,10 @@ impl Opcode {
             | Self::LoadConstant
             | Self::Move
             | Self::Not
+            | Self::Negate
             | Self::JumpIfFalse
+            | Self::JumpIfTrue
+            | Self::JumpIfNotNullish
             | Self::CreateClosure
             | Self::LoadScope
             | Self::StoreScope => 2,
@@ -194,6 +200,9 @@ impl Opcode {
             21 => Some(Self::LoadFalse),
             22 => Some(Self::LoadTrue),
             23 => Some(Self::Not),
+            24 => Some(Self::JumpIfTrue),
+            25 => Some(Self::JumpIfNotNullish),
+            26 => Some(Self::Negate),
             _ => None,
         }
     }
@@ -593,15 +602,47 @@ impl BytecodeBuilder {
         label: Label,
         span: SourceSpan,
     ) -> Result<WordOffset, BuilderError> {
+        self.emit_conditional_jump(Opcode::JumpIfFalse, condition, label, span)
+    }
+
+    /// Emits a wide truthy conditional jump with a stable patchable target word.
+    pub fn emit_jump_if_true(
+        &mut self,
+        condition: RegisterId,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        self.emit_conditional_jump(Opcode::JumpIfTrue, condition, label, span)
+    }
+
+    /// Emits a wide non-nullish conditional jump with a stable patchable target word.
+    pub fn emit_jump_if_not_nullish(
+        &mut self,
+        condition: RegisterId,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        self.emit_conditional_jump(Opcode::JumpIfNotNullish, condition, label, span)
+    }
+
+    /// Records one register-and-target branch without allowing label patching to change its width.
+    fn emit_conditional_jump(
+        &mut self,
+        opcode: Opcode,
+        condition: RegisterId,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        debug_assert!(matches!(
+            opcode,
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish
+        ));
         self.ensure_label(label)?;
         self.note_register(condition.index())?;
         self.ensure_word_capacity(3)?;
         let offset = self.next_word_offset()?;
-        self.words.extend([
-            ((Opcode::JumpIfFalse as u8) | WIDE_FORMAT) as u32,
-            condition.index(),
-            0,
-        ]);
+        self.words
+            .extend([((opcode as u8) | WIDE_FORMAT) as u32, condition.index(), 0]);
         self.patches.push(JumpPatch {
             label,
             operand_word: WordOffset::new(offset.index() + 2),
@@ -664,9 +705,8 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::Return
             | Opcode::Throw => &[0],
-            Opcode::Move => &[0, 1],
-            Opcode::Not => &[0, 1],
-            Opcode::JumpIfFalse => &[0],
+            Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
                 &[0, 1, 2]
             }
@@ -1488,7 +1528,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Not => {
+        Opcode::Not | Opcode::Negate => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
@@ -1517,7 +1557,9 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::JumpIfFalse => check_register(operands[0])?,
+        Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => {
+            check_register(operands[0])?
+        }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
         Opcode::StoreScope => check_register(operands[0])?,
@@ -1545,15 +1587,17 @@ fn verify_instruction(
             function_count: context.function_count,
         });
     }
-    if matches!(instruction.opcode, Opcode::Jump | Opcode::JumpIfFalse)
-        && !starts
-            .get(if instruction.opcode == Opcode::Jump {
-                operands[0]
-            } else {
-                operands[1]
-            } as usize)
-            .copied()
-            .unwrap_or(false)
+    if matches!(
+        instruction.opcode,
+        Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish
+    ) && !starts
+        .get(if instruction.opcode == Opcode::Jump {
+            operands[0]
+        } else {
+            operands[1]
+        } as usize)
+        .copied()
+        .unwrap_or(false)
     {
         return Err(VerifyError::InvalidJumpTarget {
             offset,
@@ -1621,6 +1665,21 @@ mod tests {
         words.extend(encode_instruction(Opcode::Jump, &[1]).unwrap());
         let error = Bytecode::from_words(words).verify(context()).unwrap_err();
         assert!(matches!(error, VerifyError::InvalidJumpTarget { .. }));
+    }
+
+    #[test]
+    fn verifier_rejects_conditional_branches_into_operand_words() {
+        for opcode in [
+            Opcode::JumpIfFalse,
+            Opcode::JumpIfTrue,
+            Opcode::JumpIfNotNullish,
+        ] {
+            let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 256]).unwrap();
+            words.extend(encode_instruction(opcode, &[0, 1]).unwrap());
+            words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+            let error = Bytecode::from_words(words).verify(context()).unwrap_err();
+            assert!(matches!(error, VerifyError::InvalidJumpTarget { .. }));
+        }
     }
     #[test]
     fn verifier_accepts_simple_terminal_program() {
@@ -1699,6 +1758,37 @@ mod tests {
             Some(3)
         );
         assert!(bytecode.verify(context()).is_ok());
+    }
+
+    #[test]
+    /// Exercises the shared patch format for each conditional branch semantic.
+    fn builder_patches_every_conditional_branch_kind() {
+        for opcode in [
+            Opcode::JumpIfFalse,
+            Opcode::JumpIfTrue,
+            Opcode::JumpIfNotNullish,
+        ] {
+            let span = SourceSpan { start: 0, end: 1 };
+            let mut builder = BytecodeBuilder::with_capacity(4, 1);
+            let end = builder.new_label().unwrap();
+            match opcode {
+                Opcode::JumpIfFalse => builder.emit_jump_if_false(RegisterId::new(0), end, span),
+                Opcode::JumpIfTrue => builder.emit_jump_if_true(RegisterId::new(0), end, span),
+                Opcode::JumpIfNotNullish => {
+                    builder.emit_jump_if_not_nullish(RegisterId::new(0), end, span)
+                }
+                _ => unreachable!(),
+            }
+            .unwrap();
+            builder.bind_label(end).unwrap();
+            builder.emit(Opcode::Return, &[0], span).unwrap();
+            let (bytecode, _, registers) = builder.finish().unwrap();
+            let branch = decode_instruction(bytecode.words(), WordOffset::new(0)).unwrap();
+            assert_eq!(branch.opcode, opcode);
+            assert_eq!(branch.operand(1), Some(3));
+            assert_eq!(registers, 1);
+            assert!(bytecode.verify(context()).is_ok());
+        }
     }
 
     #[test]

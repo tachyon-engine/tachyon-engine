@@ -139,6 +139,16 @@ impl JsString {
         }
     }
 
+    #[must_use]
+    pub(crate) fn equals_latin1(&self, value: &[u8]) -> bool {
+        let view = self.as_view();
+        view.len() == value.len()
+            && value
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| view.code_unit_at(index) == Some(u16::from(*byte)))
+    }
+
     /// Caches the one isolate seed normally used by this string and recomputes if ownership changes.
     pub(crate) fn hash_with_seed(&self, seed: AtomHashSeed) -> u64 {
         if let Some(cached) = self.cached_hash.get()

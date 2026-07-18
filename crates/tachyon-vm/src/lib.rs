@@ -646,6 +646,10 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::Negate => {
+                let value = numeric_negate(self.read(base, operands[1])?);
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -667,11 +671,20 @@ impl Isolate {
                     self.set_pc(WordOffset::new(operands[1]));
                 }
             }
+            Opcode::JumpIfTrue => {
+                if is_truthy(self.read(base, operands[0])?) {
+                    self.set_pc(WordOffset::new(operands[1]));
+                }
+            }
+            Opcode::JumpIfNotNullish => {
+                if !is_nullish(self.read(base, operands[0])?) {
+                    self.set_pc(WordOffset::new(operands[1]));
+                }
+            }
             Opcode::LoadScope => {
                 let name = self.scope_atom(code, operands[1])?;
                 let value = self
-                    .realm
-                    .get(name)
+                    .scope_value(name)
                     .ok_or(ExecutionError::UnresolvedBinding(name))?;
                 self.write(base, operands[0], value)?;
             }
@@ -698,6 +711,21 @@ impl Isolate {
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
+    }
+
+    /// Resolves non-writable primitive realm properties before mutable global bindings.
+    #[inline(always)]
+    fn scope_value(&self, name: AtomId) -> Option<Value> {
+        let string = self.atoms.get(name)?;
+        let intrinsic = match string.len() {
+            3 if string.equals_latin1(b"NaN") => Some(Value::from_f64(f64::NAN)),
+            8 if string.equals_latin1(b"Infinity") => Some(Value::from_f64(f64::INFINITY)),
+            9 if string.equals_latin1(b"undefined") => {
+                Some(Value::from_immediate(Immediate::Undefined))
+            }
+            _ => None,
+        };
+        intrinsic.or_else(|| self.realm.get(name))
     }
 
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
@@ -1049,6 +1077,26 @@ fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
 }
 
 #[inline(always)]
+fn numeric_negate(value: Value) -> Value {
+    if let Some(integer) = value.as_i32() {
+        if integer == 0 {
+            return Value::from_f64(-0.0);
+        }
+        return integer
+            .checked_neg()
+            .map_or_else(|| Value::from_f64(-f64::from(integer)), Value::from_i32);
+    }
+    if let Some(number) = value.as_f64() {
+        return Value::from_f64(-number);
+    }
+    Value::from_f64(match value.as_immediate() {
+        Some(Immediate::Null | Immediate::False) => -0.0,
+        Some(Immediate::True) => -1.0,
+        _ => f64::NAN,
+    })
+}
+
+#[inline(always)]
 fn strict_equal(left: Value, right: Value) -> bool {
     match (numeric_value(left), numeric_value(right)) {
         (Some(left), Some(right)) => left == right,
@@ -1072,6 +1120,14 @@ fn is_truthy(value: Value) -> bool {
     !matches!(
         value.as_immediate(),
         Some(Immediate::Undefined | Immediate::Null | Immediate::False)
+    )
+}
+
+#[inline(always)]
+fn is_nullish(value: Value) -> bool {
+    matches!(
+        value.as_immediate(),
+        Some(Immediate::Undefined | Immediate::Null)
     )
 }
 
@@ -1399,6 +1455,21 @@ mod tests {
     }
 
     #[test]
+    fn primitive_realm_intrinsics_precede_unattributed_global_bindings() {
+        let mut isolate = test_isolate();
+        let infinity = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("Infinity").unwrap())
+            .unwrap();
+        isolate.realm.set(infinity, Value::from_i32(1)).unwrap();
+
+        assert_eq!(
+            isolate.scope_value(infinity).and_then(Value::as_f64),
+            Some(f64::INFINITY)
+        );
+    }
+
+    #[test]
     fn interpreter_stops_at_exact_budget_boundary() {
         assert_batch_budget::<1>();
         assert_batch_budget::<2>();
@@ -1426,6 +1497,15 @@ mod tests {
         assert_conditional_batch::<4>();
         assert_conditional_batch::<8>();
         assert_conditional_batch::<16>();
+    }
+
+    #[test]
+    fn logical_short_circuit_preserves_operands_for_every_dispatch_batch() {
+        assert_logical_batch::<1>();
+        assert_logical_batch::<2>();
+        assert_logical_batch::<4>();
+        assert_logical_batch::<8>();
+        assert_logical_batch::<16>();
     }
 
     #[test]
@@ -1614,6 +1694,47 @@ mod tests {
         }
     }
 
+    /// Checks both paths of all logical branches under one dispatch batch monomorphization.
+    fn assert_logical_batch<const N: usize>() {
+        let cases = [
+            (Opcode::JumpIfFalse, Opcode::LoadFalse, None, None),
+            (Opcode::JumpIfFalse, Opcode::LoadTrue, None, Some(42)),
+            (Opcode::JumpIfTrue, Opcode::LoadFalse, None, Some(42)),
+            (Opcode::JumpIfTrue, Opcode::LoadTrue, None, None),
+            (Opcode::JumpIfNotNullish, Opcode::LoadNull, None, Some(42)),
+            (
+                Opcode::JumpIfNotNullish,
+                Opcode::LoadImmediate,
+                Some(7),
+                Some(7),
+            ),
+        ];
+        for (branch, left, immediate, expected_integer) in cases {
+            let outcome = test_isolate()
+                .execute_with_batch::<N>(
+                    &logical_module(branch, left, immediate),
+                    ExecutionBudget {
+                        fuel: 8,
+                        quantum: 8,
+                    },
+                )
+                .unwrap();
+            let RunOutcome::Completed(value) = outcome else {
+                panic!("logical module must complete");
+            };
+            if let Some(expected_integer) = expected_integer {
+                assert_eq!(value.as_i32(), Some(expected_integer));
+            } else {
+                let expected = if left == Opcode::LoadFalse {
+                    Immediate::False
+                } else {
+                    Immediate::True
+                };
+                assert_eq!(value.as_immediate(), Some(expected));
+            }
+        }
+    }
+
     /// Builds a verified branch program with explicit labels to exercise PC changes inside one dispatch batch.
     fn conditional_module(test: Opcode) -> CompiledModule {
         let span = SourceSpan { start: 0, end: 1 };
@@ -1641,6 +1762,53 @@ mod tests {
         };
         CompiledModule::new(
             Arc::from("conditional"),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds one operand-preserving short-circuit branch around a right-hand integer load.
+    fn logical_module(branch: Opcode, left: Opcode, immediate: Option<u32>) -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(6, 1);
+        let end = builder.new_label().unwrap();
+        if let Some(value) = immediate {
+            builder.emit(left, &[0, value], span).unwrap();
+        } else {
+            builder.emit(left, &[0], span).unwrap();
+        }
+        builder.emit(Opcode::Move, &[1, 0], span).unwrap();
+        match branch {
+            Opcode::JumpIfFalse => builder.emit_jump_if_false(RegisterId::new(0), end, span),
+            Opcode::JumpIfTrue => builder.emit_jump_if_true(RegisterId::new(0), end, span),
+            Opcode::JumpIfNotNullish => {
+                builder.emit_jump_if_not_nullish(RegisterId::new(0), end, span)
+            }
+            _ => panic!("test supplies a logical branch opcode"),
+        }
+        .unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 42], span).unwrap();
+        builder.emit(Opcode::Move, &[1, 2], span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("logical"),
             Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(

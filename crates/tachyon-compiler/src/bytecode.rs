@@ -8,9 +8,9 @@ use tachyon_bytecode::{
 
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction,
-    HirFunctionDeclaration, HirProgram, HirStatement, HirStatementKind, HirUnaryOperator,
-    HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName, SourceSpan,
-    SourceText,
+    HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
+    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName,
+    SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -525,6 +525,19 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Unary {
+                operator: HirUnaryOperator::Negate,
+                argument,
+            } => {
+                let argument = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::Negate,
+                    &[destination.index(), argument.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Binary {
                 operator,
                 left,
@@ -554,6 +567,11 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Logical {
+                operator,
+                left,
+                right,
+            } => self.logical(*operator, left, right, expression.span),
             HirExpressionKind::Identifier(name) => match self.local(name) {
                 Some(binding) => Ok(binding.register),
                 None => {
@@ -605,6 +623,39 @@ impl Lowerer<'_> {
                 syntax: "expression",
             }),
         }
+    }
+
+    /// Preserves the left operand value and evaluates the right operand only when required.
+    fn logical(
+        &mut self,
+        operator: HirLogicalOperator,
+        left: &HirExpression,
+        right: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let left = self.expression(left)?;
+        let destination = self.register()?;
+        self.emit(Opcode::Move, &[destination.index(), left.index()], span)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let source_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        match operator {
+            HirLogicalOperator::And => self.builder.emit_jump_if_false(left, end, source_span),
+            HirLogicalOperator::Or => self.builder.emit_jump_if_true(left, end, source_span),
+            HirLogicalOperator::Coalesce => {
+                self.builder
+                    .emit_jump_if_not_nullish(left, end, source_span)
+            }
+        }
+        .map_err(CompileError::Builder)?;
+        let right = self.expression(right)?;
+        self.emit(Opcode::Move, &[destination.index(), right.index()], span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        Ok(destination)
     }
 
     /// Evaluates callee/arguments in source order and copies them into the verified contiguous call window.
@@ -871,6 +922,11 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             expression_scope_name_count(right)?,
             "scope names",
         ),
+        HirExpressionKind::Logical { left, right, .. } => checked_count_add(
+            expression_scope_name_count(left)?,
+            expression_scope_name_count(right)?,
+            "scope names",
+        ),
         HirExpressionKind::Assignment { value, .. } => expression_scope_name_count(value),
         HirExpressionKind::Conditional {
             test,
@@ -982,12 +1038,24 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             )?;
             checked_count_add(1, operands, "bytecode instructions")
         }
+        HirExpressionKind::Logical { left, right, .. } => {
+            let operands = checked_count_add(
+                expression_instruction_count(left)?,
+                expression_instruction_count(right)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(operands, 3, "bytecode instructions")
+        }
         HirExpressionKind::Assignment { value, .. } => checked_count_add(
             expression_instruction_count(value)?,
             1,
             "bytecode instructions",
         ),
-        HirExpressionKind::Unary { argument, .. } => expression_instruction_count(argument),
+        HirExpressionKind::Unary { argument, .. } => checked_count_add(
+            expression_instruction_count(argument)?,
+            1,
+            "bytecode instructions",
+        ),
         HirExpressionKind::Conditional {
             test,
             consequent,
@@ -1246,6 +1314,14 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             expression_label_count(right)?,
             "bytecode labels",
         ),
+        HirExpressionKind::Logical { left, right, .. } => {
+            let nested = checked_count_add(
+                expression_label_count(left)?,
+                expression_label_count(right)?,
+                "bytecode labels",
+            )?;
+            checked_count_add(nested, 1, "bytecode labels")
+        }
         HirExpressionKind::Assignment { value, .. } => expression_label_count(value),
         HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {
@@ -1280,6 +1356,11 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
     match &expression.kind {
         HirExpressionKind::Number(_) => Ok(1),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
+            expression_literal_count(left)?,
+            expression_literal_count(right)?,
+            "bytecode constants",
+        ),
+        HirExpressionKind::Logical { left, right, .. } => checked_count_add(
             expression_literal_count(left)?,
             expression_literal_count(right)?,
             "bytecode constants",

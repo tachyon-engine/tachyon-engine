@@ -8,7 +8,7 @@ use oxc::{
         VariableDeclarationKind,
     },
     span::GetSpan,
-    syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator},
+    syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
 };
 
 use crate::{CompileError, ProgramKind, SourceId, SourceName, SourceSpan, SourceText};
@@ -162,6 +162,11 @@ pub enum HirExpressionKind {
         left: Box<HirExpression>,
         right: Box<HirExpression>,
     },
+    Logical {
+        operator: HirLogicalOperator,
+        left: Box<HirExpression>,
+        right: Box<HirExpression>,
+    },
     Assignment {
         target: Arc<str>,
         value: Box<HirExpression>,
@@ -212,6 +217,13 @@ pub enum HirBinaryOperator {
     BitwiseAnd,
     In,
     InstanceOf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirLogicalOperator {
+    And,
+    Or,
+    Coalesce,
 }
 
 /// Lowers only the currently supported Oxc subset and copies every retained field into owned HIR.
@@ -506,6 +518,11 @@ fn lower_expression(
             left: Box::new(lower_expression(&expression.left, source)?),
             right: Box::new(lower_expression(&expression.right, source)?),
         },
+        Expression::LogicalExpression(expression) => HirExpressionKind::Logical {
+            operator: lower_logical_operator(expression.operator),
+            left: Box::new(lower_expression(&expression.left, source)?),
+            right: Box::new(lower_expression(&expression.right, source)?),
+        },
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
             target: lower_assignment_target(&expression.left, expression.operator, source)?,
             value: Box::new(lower_expression(&expression.right, source)?),
@@ -601,6 +618,14 @@ fn lower_binary_operator(operator: BinaryOperator) -> HirBinaryOperator {
         BinaryOperator::BitwiseAnd => HirBinaryOperator::BitwiseAnd,
         BinaryOperator::In => HirBinaryOperator::In,
         BinaryOperator::Instanceof => HirBinaryOperator::InstanceOf,
+    }
+}
+
+fn lower_logical_operator(operator: LogicalOperator) -> HirLogicalOperator {
+    match operator {
+        LogicalOperator::And => HirLogicalOperator::And,
+        LogicalOperator::Or => HirLogicalOperator::Or,
+        LogicalOperator::Coalesce => HirLogicalOperator::Coalesce,
     }
 }
 
