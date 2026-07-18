@@ -330,10 +330,7 @@ fn validate_external_engines(profiles: &[ExternalEngineProfile]) -> Result<(), &
         if !ids.insert(&profile.id) {
             return Err("external engine profile IDs must be unique");
         }
-        if !matches!(
-            profile.kind,
-            EngineKind::BoaCli | EngineKind::QuickJsCli | EngineKind::EscargotCli
-        ) {
+        if profile.kind != EngineKind::EscargotCli {
             return Err("external engine profiles require a CLI engine kind");
         }
         if profile.id.is_empty()
@@ -463,8 +460,8 @@ mod tests {
         let corpus = load_corpus(&workspace, &config).unwrap();
         assert_eq!(corpus.len(), 4);
         assert!(corpus.iter().all(|script| !script.source.is_empty()));
-        assert_eq!(config.external_engines.len(), 3);
-        assert!(config.external_engine("boa-macos-aarch64").is_some());
+        assert_eq!(config.external_engines.len(), 1);
+        assert!(config.external_engine("escargot-macos-aarch64").is_some());
     }
 
     #[test]
@@ -481,14 +478,16 @@ mod tests {
     fn external_profiles_reject_duplicates_unsafe_paths_and_non_cli_kinds() {
         let config = BenchmarkConfig::parse(CONFIG).unwrap();
         let mut duplicate = config.clone();
-        duplicate.external_engines[1].id = duplicate.external_engines[0].id.clone();
+        duplicate
+            .external_engines
+            .push(duplicate.external_engines[0].clone());
         assert_eq!(
             duplicate.validate(),
             Err("external engine profile IDs must be unique")
         );
 
         let mut escaping = config.clone();
-        escaping.external_engines[0].checkout_path = "../boa".into();
+        escaping.external_engines[0].checkout_path = "../escargot".into();
         assert_eq!(
             escaping.validate(),
             Err("external engine paths must be non-empty safe relative paths")

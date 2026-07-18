@@ -12,9 +12,10 @@ use std::{
 
 use benchmark_runner::{
     BENCHMARK_REPORT_SCHEMA_VERSION, BenchmarkAdapter, BenchmarkConfig, BenchmarkReport,
-    CorpusScript, EngineIdentity, EngineKind, ExternalProcessAdapter, ExternalProcessConfig,
-    HostMetadata, MeasurementMode, TachyonInProcessAdapter, TachyonInProcessConfig,
-    compare_reports as compare_benchmarks, load_corpus, run_case,
+    BoaInProcessAdapter, CorpusScript, EngineIdentity, EngineKind, ExternalProcessAdapter,
+    ExternalProcessConfig, HostMetadata, MeasurementMode, RQuickJsInProcessAdapter,
+    TachyonInProcessAdapter, TachyonInProcessConfig, compare_reports as compare_benchmarks,
+    load_corpus, run_case,
 };
 use test262_runner::{
     RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
@@ -89,15 +90,15 @@ fn main() {
         [command, subcommand, profile] if command == "bench" && subcommand == "build-profile" => {
             build_benchmark_profile(profile)
         }
-        [command, subcommand, mode, script]
-            if command == "bench" && subcommand == "run-tachyon" =>
+        [command, subcommand, engine, mode, script]
+            if command == "bench" && subcommand == "run-in-process" =>
         {
-            launch_release_tachyon_benchmark(mode, script)
+            launch_release_in_process_benchmark(engine, mode, script)
         }
-        [command, subcommand, mode, script]
-            if command == "bench" && subcommand == "run-tachyon-internal" =>
+        [command, subcommand, engine, mode, script]
+            if command == "bench" && subcommand == "run-in-process-internal" =>
         {
-            run_tachyon_benchmark(mode, script)
+            run_in_process_benchmark(engine, mode, script)
         }
         _ => Err(USAGE.to_owned()),
     };
@@ -108,7 +109,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-tachyon <parse-compile-execute|precompiled-execute|steady-state> <script-id>\n  cargo xtask bench run-external <boa|quickjs|escargot> <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -431,8 +432,12 @@ fn execute_external_benchmarks(
     )
 }
 
-/// Re-executes the in-process benchmark in the configured Cargo release profile outside the timer.
-fn launch_release_tachyon_benchmark(mode: &str, script: &str) -> Result<(), String> {
+/// Re-executes one linked engine in the configured Cargo release profile outside the timer.
+fn launch_release_in_process_benchmark(
+    engine: &str,
+    mode: &str,
+    script: &str,
+) -> Result<(), String> {
     let workspace = workspace_root();
     verify_clean_checkout(&workspace)?;
     let mut command = Command::new("cargo");
@@ -445,7 +450,8 @@ fn launch_release_tachyon_benchmark(mode: &str, script: &str) -> Result<(), Stri
             "xtask",
             "--",
             "bench",
-            "run-tachyon-internal",
+            "run-in-process-internal",
+            engine,
             mode,
             script,
         ])
@@ -453,10 +459,10 @@ fn launch_release_tachyon_benchmark(mode: &str, script: &str) -> Result<(), Stri
     run_streaming_command(&mut command)
 }
 
-/// Runs one mode inside the release child after binding report identity to a clean revision.
-fn run_tachyon_benchmark(mode: &str, script: &str) -> Result<(), String> {
+/// Runs one linked engine inside the release child under a common report and sampling contract.
+fn run_in_process_benchmark(engine: &str, mode: &str, script: &str) -> Result<(), String> {
     if env::var_os("TACHYON_BENCH_RELEASE_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return Err("internal Tachyon benchmark must be launched through run-tachyon".to_owned());
+        return Err("internal benchmark must be launched through run-in-process".to_owned());
     }
     let mode = match mode {
         "parse-compile-execute" => MeasurementMode::ParseCompileExecute,
@@ -475,21 +481,59 @@ fn run_tachyon_benchmark(mode: &str, script: &str) -> Result<(), String> {
         config.build.codegen_units,
         config.build.target_cpu
     );
-    let identity = EngineIdentity {
-        name: "Tachyon".into(),
-        kind: EngineKind::TachyonInProcess,
-        version: env!("CARGO_PKG_VERSION").into(),
-        commit: commit.into(),
-        features: config.build.features.clone(),
-        build_flags: build_flags.into(),
-        binary_size_bytes: None,
+    let common = |name: &str, kind: EngineKind, version: &str, revision: &str, features: &str| {
+        EngineIdentity {
+            name: name.into(),
+            kind,
+            version: version.into(),
+            commit: revision.into(),
+            features: features.into(),
+            build_flags: build_flags.clone().into(),
+            binary_size_bytes: None,
+        }
     };
-    let mut adapter = TachyonInProcessAdapter::new(
-        identity,
-        TachyonInProcessConfig::from_benchmark(config.tachyon),
-    )
-    .map_err(|error| error.to_string())?;
-    execute_adapter_benchmarks(&mut adapter, mode, Some(script), config, corpus)
+    match engine {
+        "tachyon" => {
+            let identity = common(
+                "Tachyon",
+                EngineKind::TachyonInProcess,
+                env!("CARGO_PKG_VERSION"),
+                &commit,
+                &config.build.features,
+            );
+            let mut adapter = TachyonInProcessAdapter::new(
+                identity,
+                TachyonInProcessConfig::from_benchmark(config.tachyon),
+            )
+            .map_err(|error| error.to_string())?;
+            execute_adapter_benchmarks(&mut adapter, mode, Some(script), config, corpus)
+        }
+        "boa" => {
+            let identity = common(
+                "Boa",
+                EngineKind::BoaInProcess,
+                "0.21.0",
+                "crates.io:boa_engine@0.21.0",
+                "default",
+            );
+            let mut adapter =
+                BoaInProcessAdapter::new(identity).map_err(|error| error.to_string())?;
+            execute_adapter_benchmarks(&mut adapter, mode, Some(script), config, corpus)
+        }
+        "rquickjs" => {
+            let identity = common(
+                "rquickjs/QuickJS",
+                EngineKind::RQuickJsInProcess,
+                "0.12.1",
+                "crates.io:rquickjs@0.12.1",
+                "default",
+            );
+            let mut adapter =
+                RQuickJsInProcessAdapter::new(identity).map_err(|error| error.to_string())?;
+            execute_adapter_benchmarks(&mut adapter, mode, Some(script), config, corpus)
+        }
+        _ => Err("in-process engine must be tachyon, boa, or rquickjs".to_owned()),
+    }
 }
 
 /// Applies one adapter/mode to a selected approved corpus and serializes a complete report.
@@ -617,10 +661,8 @@ fn parse_external_run_options(arguments: &[String]) -> Result<ExternalRunOptions
         return Err(USAGE.to_owned());
     };
     let (kind, name) = match engine.as_str() {
-        "boa" => (EngineKind::BoaCli, "Boa"),
-        "quickjs" => (EngineKind::QuickJsCli, "QuickJS"),
         "escargot" => (EngineKind::EscargotCli, "Escargot"),
-        _ => return Err("external engine must be boa, quickjs, or escargot".to_owned()),
+        _ => return Err("external engine must be escargot".to_owned()),
     };
     let mut script = None;
     let mut engine_arguments = Vec::new();
@@ -844,7 +886,7 @@ mod tests {
         let unknown = ["v8", "bin", "v", "c", "f", "flags"].map(str::to_owned);
         assert!(parse_external_run_options(&unknown).is_err());
         let missing_value =
-            ["boa", "bin", "v", "c", "f", "flags", "--engine-arg"].map(str::to_owned);
+            ["escargot", "bin", "v", "c", "f", "flags", "--engine-arg"].map(str::to_owned);
         assert!(parse_external_run_options(&missing_value).is_err());
     }
 }

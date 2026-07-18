@@ -15,6 +15,8 @@ name = "benchmark-runner"
 path = "src/main.rs"
 
 [dependencies]
+boa_engine = "=0.21.0"
+rquickjs = "=0.12.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

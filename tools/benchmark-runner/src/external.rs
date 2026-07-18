@@ -52,10 +52,7 @@ impl ExternalProcessAdapter {
         mut identity: EngineIdentity,
         config: ExternalProcessConfig,
     ) -> Result<Self, AdapterError> {
-        if !matches!(
-            identity.kind,
-            EngineKind::BoaCli | EngineKind::QuickJsCli | EngineKind::EscargotCli
-        ) {
+        if identity.kind != EngineKind::EscargotCli {
             return Err(AdapterError::Setup(
                 "external process adapter requires a CLI engine kind".into(),
             ));

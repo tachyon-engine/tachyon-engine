@@ -12,7 +12,7 @@ fn adapter(timeout: Duration, output_limit: usize) -> ExternalProcessAdapter {
     ExternalProcessAdapter::new(
         EngineIdentity {
             name: "fixture CLI".into(),
-            kind: EngineKind::QuickJsCli,
+            kind: EngineKind::EscargotCli,
             version: "fixture".into(),
             commit: "fixture".into(),
             features: "none".into(),

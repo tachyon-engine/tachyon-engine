@@ -12,10 +12,8 @@ pub enum EngineKind {
     TachyonInProcess,
     /// Boa linked directly into the runner process.
     BoaInProcess,
-    /// Boa release command-line executable.
-    BoaCli,
-    /// QuickJS release command-line executable.
-    QuickJsCli,
+    /// QuickJS linked through the safe rquickjs binding in the runner process.
+    RQuickJsInProcess,
     /// Escargot release command-line executable.
     EscargotCli,
     /// Deterministic test-only implementation.
