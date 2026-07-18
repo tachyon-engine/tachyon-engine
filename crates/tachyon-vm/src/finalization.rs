@@ -237,9 +237,19 @@ mod tests {
         registry: GcRef<Registry>,
     }
 
+    struct FinalizationRoots<'a> {
+        isolate: &'a mut Isolate,
+    }
+
+    impl Trace for FinalizationRoots<'_> {
+        fn trace(&mut self, tracer: &mut dyn Tracer) {
+            self.isolate.finalization_jobs.trace(tracer);
+        }
+    }
+
     impl Trace for CallbackRoots<'_> {
         fn trace(&mut self, tracer: &mut dyn Tracer) {
-            self.isolate.trace(tracer);
+            self.isolate.finalization_jobs.trace(tracer);
             self.registry.trace(tracer);
         }
     }
@@ -334,7 +344,8 @@ mod tests {
 
         let stats = isolate
             .run_finalization_cleanup_safepoint(&mut heap, |isolate, heap, job| {
-                heap.collect_major(isolate).unwrap();
+                heap.collect_major(&mut FinalizationRoots { isolate })
+                    .unwrap();
                 heap.verify_reference(job.registry(), None).unwrap();
                 heap.verify_reference(job.held_value().as_heap_ref().unwrap(), None)
                     .unwrap();

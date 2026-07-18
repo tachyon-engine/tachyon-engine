@@ -1051,6 +1051,25 @@ impl Lowerer<'_> {
                     Ok(register)
                 }
             }
+            HirExpressionKind::String(value) => {
+                let code_unit_count = value.encode_utf16().count();
+                let mut code_units = Vec::new();
+                code_units
+                    .try_reserve_exact(code_unit_count)
+                    .map_err(|_| CompileError::ConstantAllocationFailed)?;
+                code_units.extend(value.encode_utf16());
+                let constant = u32::try_from(self.constants.len())
+                    .map_err(|_| CompileError::ConstantOverflow)?;
+                self.constants
+                    .push(BytecodeConstant::string_from_utf16(code_units));
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::LoadConstant,
+                    &[destination.index(), constant],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Boolean(value) => self.load_boolean(*value, expression.span),
             HirExpressionKind::Null => self.load_null(expression.span),
             HirExpressionKind::Unary {
@@ -1074,6 +1093,19 @@ impl Lowerer<'_> {
                 let destination = self.register()?;
                 self.emit(
                     Opcode::Negate,
+                    &[destination.index(), argument.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
+            HirExpressionKind::Unary {
+                operator: HirUnaryOperator::Typeof,
+                argument,
+            } => {
+                let argument = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::Typeof,
                     &[destination.index(), argument.index()],
                     expression.span,
                 )?;
@@ -1286,6 +1318,17 @@ impl Lowerer<'_> {
         right: RegisterId,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
+        if matches!(operator, HirBinaryOperator::StrictNotEqual) {
+            let equal = self.register()?;
+            self.emit(
+                Opcode::StrictEqual,
+                &[equal.index(), left.index(), right.index()],
+                span,
+            )?;
+            let destination = self.register()?;
+            self.emit(Opcode::Not, &[destination.index(), equal.index()], span)?;
+            return Ok(destination);
+        }
         let opcode = match operator {
             HirBinaryOperator::Add => Opcode::Add,
             HirBinaryOperator::Subtract => Opcode::Sub,
@@ -2257,13 +2300,22 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Binary { left, right, .. } => {
+        HirExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } => {
             let operands = checked_count_add(
                 expression_instruction_count(left)?,
                 expression_instruction_count(right)?,
                 "bytecode instructions",
             )?;
-            checked_count_add(1, operands, "bytecode instructions")
+            let own = if matches!(operator, HirBinaryOperator::StrictNotEqual) {
+                2
+            } else {
+                1
+            };
+            checked_count_add(own, operands, "bytecode instructions")
         }
         HirExpressionKind::Logical { left, right, .. } => {
             let operands = checked_count_add(

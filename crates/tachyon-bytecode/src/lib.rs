@@ -150,6 +150,8 @@ pub enum Opcode {
     GetByValue = 36,
     /// Stores a property using a runtime key value.
     SetByValue = 37,
+    /// Loads the ECMAScript typeof result for register 1.
+    Typeof = 38,
 }
 
 impl Opcode {
@@ -175,6 +177,7 @@ impl Opcode {
             | Self::CreateClosure
             | Self::LoadScope
             | Self::StoreScope => 2,
+            Self::Typeof => 2,
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -236,6 +239,7 @@ impl Opcode {
             35 => Some(Self::LessThan),
             36 => Some(Self::GetByValue),
             37 => Some(Self::SetByValue),
+            38 => Some(Self::Typeof),
             _ => None,
         }
     }
@@ -747,7 +751,7 @@ impl BytecodeBuilder {
             | Opcode::LoadException
             | Opcode::LoadThis
             | Opcode::LoadNewTarget => &[0],
-            Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
+            Opcode::Move | Opcode::Not | Opcode::Negate | Opcode::Typeof => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1595,7 +1599,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Not | Opcode::Negate => {
+        Opcode::Not | Opcode::Negate | Opcode::Typeof => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }

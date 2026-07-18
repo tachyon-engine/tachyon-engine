@@ -27,7 +27,7 @@ mod tests {
     fn test_isolate_with_realm_limits(realm_limits: RealmLimits) -> Isolate {
         Isolate::new(IsolateConfig::new(
             AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
-            HeapLimit::new(4 * SPAN_SIZE_BYTES),
+            HeapLimit::new(8 * SPAN_SIZE_BYTES),
             StackLimits::new(64, 4_096),
             realm_limits,
         ))
@@ -757,6 +757,27 @@ mod tests {
             execute_source(
                 41,
                 "function Box() { this[0] = 1; this.calls = 0; } function target(receiver) { receiver.calls += 1; return receiver; } function key(receiver) { receiver.calls += 1; return 0; } let box = new Box(); target(box)[key(box)] += 2; box.calls === 2 && box[0] === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Exercises observable string primitives instead of inspecting internal GC descriptors.
+    fn typeof_and_string_constants_follow_primitive_semantics() {
+        assert_eq!(
+            execute_source(
+                42,
+                "typeof undefined === 'undefined' && typeof null === 'object' && typeof true === 'boolean' && typeof 1 === 'number' && typeof 'x' === 'string';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                43,
+                "function Box() {} typeof Box === 'function' && typeof new Box() === 'object' && 'same' === 'same' && !'';",
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True)

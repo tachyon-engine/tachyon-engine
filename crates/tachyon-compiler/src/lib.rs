@@ -43,6 +43,7 @@ pub enum CompileError {
     Builder(tachyon_bytecode::BuilderError),
     Module(tachyon_bytecode::ModuleBuildError),
     ConstantOverflow,
+    ConstantAllocationFailed,
     RegisterOverflow,
     BindingOverflow,
     LoweringCapacityOverflow {

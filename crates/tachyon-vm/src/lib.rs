@@ -31,8 +31,9 @@ use tachyon_bytecode::{
     HandlerKind, Opcode, RegisterId, WordOffset, decode_instruction,
 };
 use tachyon_gc::{
-    AllocationSpace, GcRef, GcType, Heap, HeapLimit, HeapReferenceError, ManagedAllocationError,
-    NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
+    AllocationSpace, GcRef, GcType, Heap, HeapAllocationError, HeapLimit, HeapReferenceError,
+    ManagedAllocationError, NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError,
+    TypeRegistry,
 };
 use tachyon_value::{Immediate, Value};
 
@@ -155,9 +156,12 @@ pub enum ExecutionError {
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),
     ScopeNameString(StringAllocationError),
+    ConstantValueAllocationFailed,
+    ConstantString(StringAllocationError),
     PropertyKeyAtom(AtomTableError),
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
+    UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
     UnresolvedBinding(AtomId),
@@ -172,6 +176,8 @@ pub enum ExecutionError {
 pub enum IsolateCreationError {
     TypeRegistration(TypeRegistrationError),
     Shape(ShapeError),
+    String(StringAllocationError),
+    HeapAllocation(HeapAllocationError),
 }
 
 /// A future GC-managed lexical environment. Its concrete payload arrives with M5.
@@ -239,6 +245,7 @@ struct VmTypes {
     function: GcType<FunctionObject>,
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
+    string: GcType<JsString>,
 }
 
 /// An isolate-local immutable-code index; zero stays reserved for niche optimization and validation.
@@ -267,6 +274,15 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<CodeId>>()];
 struct LoadedCode {
     module: CompiledModule,
     scope_atoms: Box<[AtomId]>,
+    constant_values: Box<[Option<Value>]>,
+}
+
+impl Trace for LoadedCode {
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        for value in self.constant_values.iter_mut().flatten() {
+            value.trace(tracer);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -278,13 +294,15 @@ struct GlobalBinding {
 #[derive(Debug)]
 struct Realm {
     globals: Vec<GlobalBinding>,
+    typeof_strings: TypeofStrings,
     limits: RealmLimits,
 }
 
 impl Realm {
-    const fn new(limits: RealmLimits) -> Self {
+    fn new(limits: RealmLimits, typeof_strings: TypeofStrings) -> Self {
         Self {
             globals: Vec::new(),
+            typeof_strings,
             limits,
         }
     }
@@ -327,13 +345,72 @@ impl Trace for Realm {
         for binding in &mut self.globals {
             binding.value.trace(tracer);
         }
+        self.typeof_strings.trace(tracer);
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TypeofStrings {
+    undefined: Value,
+    object: Value,
+    boolean: Value,
+    number: Value,
+    string: Value,
+    function: Value,
+    symbol: Value,
+    bigint: Value,
+}
+
+impl Trace for TypeofStrings {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.undefined.trace(tracer);
+        self.object.trace(tracer);
+        self.boolean.trace(tracer);
+        self.number.trace(tracer);
+        self.string.trace(tracer);
+        self.function.trace(tracer);
+        self.symbol.trace(tracer);
+        self.bigint.trace(tracer);
+    }
+}
+
+impl TypeofStrings {
+    /// Allocates the complete spec-fixed typeof vocabulary once before the isolate becomes visible.
+    fn allocate(
+        heap: &mut Heap,
+        string_type: GcType<JsString>,
+    ) -> Result<Self, IsolateCreationError> {
+        Ok(Self {
+            undefined: allocate_initial_string(heap, string_type, b"undefined")?,
+            object: allocate_initial_string(heap, string_type, b"object")?,
+            boolean: allocate_initial_string(heap, string_type, b"boolean")?,
+            number: allocate_initial_string(heap, string_type, b"number")?,
+            string: allocate_initial_string(heap, string_type, b"string")?,
+            function: allocate_initial_string(heap, string_type, b"function")?,
+            symbol: allocate_initial_string(heap, string_type, b"symbol")?,
+            bigint: allocate_initial_string(heap, string_type, b"bigint")?,
+        })
+    }
+}
+
+fn allocate_initial_string(
+    heap: &mut Heap,
+    string_type: GcType<JsString>,
+    bytes: &[u8],
+) -> Result<Value, IsolateCreationError> {
+    let string = JsString::try_from_latin1(bytes).map_err(IsolateCreationError::String)?;
+    let reference = heap
+        .try_allocate_external(string_type, 0, string, AllocationSpace::Old)
+        .map_err(IsolateCreationError::HeapAllocation)?;
+    Ok(Value::from_heap_ref(reference.raw()))
 }
 
 struct VmRoots<'a> {
     fiber: &'a mut Fiber,
     finalization_jobs: &'a mut finalization::FinalizationJobs,
     realm: &'a mut Realm,
+    loaded_code: &'a mut Vec<LoadedCode>,
 }
 
 struct PropertyMutationRoots<'a> {
@@ -355,6 +432,23 @@ impl Trace for VmRoots<'_> {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
         self.realm.trace(tracer);
+        for code in self.loaded_code.iter_mut() {
+            code.trace(tracer);
+        }
+    }
+}
+
+struct CodeLoadRoots<'a> {
+    vm: VmRoots<'a>,
+    constant_values: &'a mut Vec<Option<Value>>,
+}
+
+impl Trace for CodeLoadRoots<'_> {
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        for value in self.constant_values.iter_mut().flatten() {
+            value.trace(tracer);
+        }
     }
 }
 
@@ -479,17 +573,22 @@ impl Isolate {
             property_storage: registry
                 .try_register("PropertyStorage")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            string: registry
+                .try_register("JsString")
+                .map_err(IsolateCreationError::TypeRegistration)?,
         };
         let shapes =
             ShapeTable::new(config.realm_limits.max_shapes).map_err(IsolateCreationError::Shape)?;
+        let mut heap = Heap::new(config.heap_limit, registry);
+        let typeof_strings = TypeofStrings::allocate(&mut heap, types.string)?;
         Ok(Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
             atoms: AtomTable::new(config.atom_table),
             shapes,
-            realm: Realm::new(config.realm_limits),
+            realm: Realm::new(config.realm_limits, typeof_strings),
             loaded_code: Vec::new(),
-            heap: Heap::new(config.heap_limit, registry),
+            heap,
             types,
             stack_limits: config.stack_limits,
             _not_sync: Cell::new(()),
@@ -511,6 +610,7 @@ impl Isolate {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
             realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
         };
         let object = self
             .heap
@@ -633,6 +733,7 @@ impl Isolate {
                     fiber: &mut self.fiber,
                     finalization_jobs: &mut self.finalization_jobs,
                     realm: &mut self.realm,
+                    loaded_code: &mut self.loaded_code,
                 },
                 receiver: object.value(),
             };
@@ -756,6 +857,9 @@ impl Isolate {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
         self.realm.trace(tracer);
+        for code in &mut self.loaded_code {
+            code.trace(tracer);
+        }
     }
 
     /// Starts the module entry function with one checked register reservation before opcode dispatch.
@@ -807,11 +911,57 @@ impl Isolate {
                 }
             }
         }
+        let mut constant_values = Vec::new();
+        if constant_values
+            .try_reserve_exact(module.constants().len())
+            .is_err()
+        {
+            self.atoms.rollback(checkpoint);
+            return Err(ExecutionError::ConstantValueAllocationFailed);
+        }
+        for constant in module.constants() {
+            let value = match constant {
+                BytecodeConstant::String(code_units) => {
+                    let string = match JsString::try_from_utf16(code_units) {
+                        Ok(string) => string,
+                        Err(error) => {
+                            self.atoms.rollback(checkpoint);
+                            return Err(ExecutionError::ConstantString(error));
+                        }
+                    };
+                    let mut roots = CodeLoadRoots {
+                        vm: VmRoots {
+                            fiber: &mut self.fiber,
+                            finalization_jobs: &mut self.finalization_jobs,
+                            realm: &mut self.realm,
+                            loaded_code: &mut self.loaded_code,
+                        },
+                        constant_values: &mut constant_values,
+                    };
+                    match self.heap.try_allocate_external_with_gc(
+                        self.types.string,
+                        0,
+                        string,
+                        AllocationSpace::Young,
+                        &mut roots,
+                    ) {
+                        Ok(reference) => Some(Value::from_heap_ref(reference.raw())),
+                        Err(error) => {
+                            self.atoms.rollback(checkpoint);
+                            return Err(ExecutionError::HeapAllocation(error));
+                        }
+                    }
+                }
+                _ => None,
+            };
+            constant_values.push(value);
+        }
         let code = CodeId::from_index(self.loaded_code.len())
             .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX })?;
         self.loaded_code.push(LoadedCode {
             module: module.clone(),
             scope_atoms: scope_atoms.into_boxed_slice(),
+            constant_values: constant_values.into_boxed_slice(),
         });
         Ok(code)
     }
@@ -856,6 +1006,97 @@ impl Isolate {
         self.atoms
             .try_intern(string)
             .map_err(ExecutionError::PropertyKeyAtom)
+    }
+
+    #[inline(always)]
+    fn typeof_value(&self, value: Value) -> Result<Value, ExecutionError> {
+        let strings = self.realm.typeof_strings;
+        if value.as_i32().is_some() || value.as_f64().is_some() {
+            return Ok(strings.number);
+        }
+        if let Some(immediate) = value.as_immediate() {
+            return match immediate {
+                Immediate::Undefined => Ok(strings.undefined),
+                Immediate::Null => Ok(strings.object),
+                Immediate::False | Immediate::True => Ok(strings.boolean),
+                Immediate::Hole | Immediate::Uninitialized => {
+                    Err(ExecutionError::UnsupportedTypeof(value))
+                }
+            };
+        }
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedTypeof(value))?;
+        if self.heap.checked_reference(raw, self.types.string).is_ok() {
+            return Ok(strings.string);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .is_ok()
+        {
+            return Ok(strings.function);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.ordinary_object)
+            .is_ok()
+        {
+            return Ok(strings.object);
+        }
+        Err(ExecutionError::UnsupportedTypeof(value))
+    }
+
+    /// Applies strict equality without allocating while preserving numeric and string semantics.
+    fn strict_equal_values(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
+        match (numeric_value(left), numeric_value(right)) {
+            (Some(left), Some(right)) => return Ok(left == right),
+            (Some(_), None) | (None, Some(_)) => return Ok(false),
+            (None, None) => {}
+        }
+        if left == right {
+            return Ok(true);
+        }
+        let (Some(left), Some(right)) = (left.as_heap_ref(), right.as_heap_ref()) else {
+            return Ok(false);
+        };
+        let Ok(left) = self.heap.checked_reference(left, self.types.string) else {
+            return Ok(false);
+        };
+        let Ok(right) = self.heap.checked_reference(right, self.types.string) else {
+            return Ok(false);
+        };
+        self.heap.with_running_scope(|scope| {
+            let left = scope.root(left).map_err(ExecutionError::Root)?;
+            let right = scope.root(right).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let left = no_gc
+                    .borrow(left, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let right = no_gc
+                    .borrow(right, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok(left == right)
+            })
+        })
+    }
+
+    #[inline(always)]
+    fn is_truthy_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        if let Some(raw) = value.as_heap_ref()
+            && let Ok(string) = self.heap.checked_reference(raw, self.types.string)
+        {
+            return self.heap.with_running_scope(|scope| {
+                let string = scope.root(string).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(string, self.types.string)
+                        .map(|string| !string.is_empty())
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            });
+        }
+        Ok(is_non_string_truthy(value))
     }
 
     /// Executes with a fixed internal batch size so each monomorphization preserves the same fuel contract.
@@ -963,14 +1204,21 @@ impl Isolate {
                 self.write(base, operands[0], Value::from_i32(operands[1] as i32))?
             }
             Opcode::LoadConstant => {
-                let constant = self
-                    .loaded_code(code)?
+                let constant_index = operands[1] as usize;
+                let loaded = self.loaded_code(code)?;
+                let constant = loaded
                     .module
                     .constants()
-                    .get(operands[1] as usize)
+                    .get(constant_index)
                     .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?;
                 let value = match constant {
                     BytecodeConstant::NumberBits(bits) => Value::from_f64(f64::from_bits(*bits)),
+                    BytecodeConstant::String(_) => loaded
+                        .constant_values
+                        .get(constant_index)
+                        .copied()
+                        .flatten()
+                        .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?,
                     _ => return Err(ExecutionError::UnsupportedConstant(operands[1])),
                 };
                 self.write(base, operands[0], value)?;
@@ -980,7 +1228,7 @@ impl Isolate {
                 self.write(base, operands[0], value)?;
             }
             Opcode::Not => {
-                let value = if is_truthy(self.read(base, operands[1])?) {
+                let value = if self.is_truthy_value(self.read(base, operands[1])?)? {
                     Value::from_immediate(Immediate::False)
                 } else {
                     Value::from_immediate(Immediate::True)
@@ -999,11 +1247,15 @@ impl Isolate {
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
-                let value = if strict_equal(left, right) {
+                let value = if self.strict_equal_values(left, right)? {
                     Value::from_immediate(Immediate::True)
                 } else {
                     Value::from_immediate(Immediate::False)
                 };
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::Typeof => {
+                let value = self.typeof_value(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;
             }
             Opcode::LessThan => {
@@ -1018,12 +1270,12 @@ impl Isolate {
             }
             Opcode::Jump => self.set_pc(WordOffset::new(operands[0])),
             Opcode::JumpIfFalse => {
-                if !is_truthy(self.read(base, operands[0])?) {
+                if !self.is_truthy_value(self.read(base, operands[0])?)? {
                     self.set_pc(WordOffset::new(operands[1]));
                 }
             }
             Opcode::JumpIfTrue => {
-                if is_truthy(self.read(base, operands[0])?) {
+                if self.is_truthy_value(self.read(base, operands[0])?)? {
                     self.set_pc(WordOffset::new(operands[1]));
                 }
             }
@@ -1233,6 +1485,7 @@ impl Isolate {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
             realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
         };
         let closure = self
             .heap
@@ -1670,14 +1923,6 @@ fn numeric_negate(value: Value) -> Value {
 }
 
 #[inline(always)]
-fn strict_equal(left: Value, right: Value) -> bool {
-    match (numeric_value(left), numeric_value(right)) {
-        (Some(left), Some(right)) => left == right,
-        _ => left == right,
-    }
-}
-
-#[inline(always)]
 fn numeric_value(value: Value) -> Option<f64> {
     value.as_i32().map(f64::from).or_else(|| value.as_f64())
 }
@@ -1694,7 +1939,7 @@ fn numeric_less_than(left: Value, right: Value) -> bool {
 }
 
 #[inline(always)]
-fn is_truthy(value: Value) -> bool {
+fn is_non_string_truthy(value: Value) -> bool {
     if let Some(integer) = value.as_i32() {
         return integer != 0;
     }
@@ -1720,8 +1965,8 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_bytecode::{
-        Bytecode, BytecodeBuilder, CompiledFunctionTemplate, CompiledModule, FunctionId,
-        FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
+        Bytecode, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule,
+        FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
     };
     use tachyon_gc::{ForcedCollectionMode, GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
@@ -1744,6 +1989,71 @@ mod tests {
 
     fn less_than_module() -> CompiledModule {
         binary_module(Opcode::LessThan, "1 < 2")
+    }
+
+    /// Compares the canonical typeof number value with an independently loaded string literal.
+    fn typeof_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(5, 0);
+        builder.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
+        builder.emit(Opcode::Typeof, &[1, 0], span).unwrap();
+        builder.emit(Opcode::LoadConstant, &[2, 0], span).unwrap();
+        builder.emit(Opcode::StrictEqual, &[3, 1, 2], span).unwrap();
+        builder.emit(Opcode::Return, &[3], span).unwrap();
+        single_function_module(
+            "typeof number",
+            vec![BytecodeConstant::string_from_utf16(
+                "number".encode_utf16().collect(),
+            )],
+            builder,
+        )
+    }
+
+    /// Loads two distinct strings so forced collection runs while the pending cache owns a root.
+    fn string_constant_root_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(4, 0);
+        builder.emit(Opcode::LoadConstant, &[0, 0], span).unwrap();
+        builder.emit(Opcode::LoadConstant, &[1, 1], span).unwrap();
+        builder.emit(Opcode::StrictEqual, &[2, 0, 1], span).unwrap();
+        builder.emit(Opcode::Return, &[2], span).unwrap();
+        single_function_module(
+            "rooted strings",
+            vec![
+                BytecodeConstant::string_from_utf16("left".encode_utf16().collect()),
+                BytecodeConstant::string_from_utf16("right".encode_utf16().collect()),
+            ],
+            builder,
+        )
+    }
+
+    /// Freezes one builder into a script module with caller-provided immutable constants.
+    fn single_function_module(
+        source: &'static str,
+        constants: Vec<BytecodeConstant>,
+        builder: BytecodeBuilder,
+    ) -> CompiledModule {
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from(source),
+            constants,
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
     }
 
     /// Builds a minimal verified binary-op fixture over the integer values one and two.
@@ -2114,6 +2424,38 @@ mod tests {
         assert_less_than_batch::<4>();
         assert_less_than_batch::<8>();
         assert_less_than_batch::<16>();
+    }
+
+    #[test]
+    fn typeof_and_string_equality_work_for_every_dispatch_batch() {
+        assert_typeof_batch::<1>();
+        assert_typeof_batch::<2>();
+        assert_typeof_batch::<4>();
+        assert_typeof_batch::<8>();
+        assert_typeof_batch::<16>();
+    }
+
+    #[test]
+    /// Forces collection between loaded literals so pending and published caches must both trace.
+    fn loaded_string_constants_survive_forced_major_during_module_load() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &string_constant_root_module(),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::False)
+        ));
     }
 
     #[test]
@@ -2499,6 +2841,23 @@ mod tests {
                 ExecutionBudget {
                     fuel: 4,
                     quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
+    }
+
+    fn assert_typeof_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &typeof_module(),
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
                 },
             )
             .unwrap();
