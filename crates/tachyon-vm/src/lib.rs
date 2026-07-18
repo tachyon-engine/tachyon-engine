@@ -187,6 +187,7 @@ pub enum ExecutionError {
     PropertyStorageAllocationFailed,
     UnsupportedErrorMessage(Value),
     UnsupportedDynamicFunctionConstructor,
+    NonExtensibleObject(Value),
     NotObject(Value),
 }
 
@@ -234,6 +235,7 @@ enum NativeFunction {
     ObjectCreate,
     ObjectIsPrototypeOf,
     ObjectIsExtensible,
+    ObjectPreventExtensions,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -260,6 +262,7 @@ impl NativeFunction {
             | Self::ObjectGetPrototypeOf
             | Self::ObjectIsPrototypeOf
             | Self::ObjectIsExtensible
+            | Self::ObjectPreventExtensions
             | Self::StringConstructor
             | Self::NumberConstructor
             | Self::BooleanConstructor
@@ -289,6 +292,7 @@ impl NativeFunction {
             Self::ObjectCreate => "create",
             Self::ObjectIsPrototypeOf => "isPrototypeOf",
             Self::ObjectIsExtensible => "isExtensible",
+            Self::ObjectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
             Self::NumberConstructor => "Number",
             Self::BooleanConstructor => "Boolean",
@@ -669,6 +673,7 @@ struct Realm {
     object_create: Option<Value>,
     object_is_prototype_of: Option<Value>,
     object_is_extensible: Option<Value>,
+    object_prevent_extensions: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -709,6 +714,7 @@ impl Realm {
             object_create: None,
             object_is_prototype_of: None,
             object_is_extensible: None,
+            object_prevent_extensions: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -976,6 +982,7 @@ impl Trace for Realm {
         self.object_create.trace(tracer);
         self.object_is_prototype_of.trace(tracer);
         self.object_is_extensible.trace(tracer);
+        self.object_prevent_extensions.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1283,12 +1290,14 @@ impl Isolate {
     fn initialize_realm_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let object_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
+            extensible: true,
             storage: None,
             prototype: Value::from_immediate(Immediate::Null),
         })?;
         self.realm.object_prototype = Some(object_prototype);
         let global_object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
+            extensible: true,
             storage: None,
             prototype: object_prototype,
         })?;
@@ -1316,6 +1325,7 @@ impl Isolate {
             NativeFunction::ObjectConstructor,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1328,6 +1338,7 @@ impl Isolate {
             NativeFunction::ObjectDefineProperty,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1339,6 +1350,7 @@ impl Isolate {
             NativeFunction::ObjectHasOwnProperty,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1350,6 +1362,7 @@ impl Isolate {
             NativeFunction::ObjectToString,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1361,6 +1374,7 @@ impl Isolate {
             NativeFunction::ObjectAssign,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1372,6 +1386,7 @@ impl Isolate {
             NativeFunction::ObjectKeys,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1383,6 +1398,7 @@ impl Isolate {
             NativeFunction::ObjectValues,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1394,6 +1410,7 @@ impl Isolate {
             NativeFunction::ObjectEntries,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1405,6 +1422,7 @@ impl Isolate {
             NativeFunction::ObjectHasOwn,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1416,6 +1434,7 @@ impl Isolate {
             NativeFunction::ObjectIs,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1427,6 +1446,7 @@ impl Isolate {
             NativeFunction::ObjectGetPrototypeOf,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1438,6 +1458,7 @@ impl Isolate {
             NativeFunction::ObjectCreate,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1449,6 +1470,7 @@ impl Isolate {
             NativeFunction::ObjectIsPrototypeOf,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1460,13 +1482,26 @@ impl Isolate {
             NativeFunction::ObjectIsExtensible,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
         )?;
         self.realm.object_is_extensible = Some(is_extensible);
         let is_extensible_atom = self.intern_intrinsic_name(b"isExtensible")?;
-        self.set_own_data_property(constructor, is_extensible_atom, is_extensible)
+        self.set_own_data_property(constructor, is_extensible_atom, is_extensible)?;
+        let prevent_extensions = self.allocate_native_function(
+            NativeFunction::ObjectPreventExtensions,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_prevent_extensions = Some(prevent_extensions);
+        let prevent_extensions_atom = self.intern_intrinsic_name(b"preventExtensions")?;
+        self.set_own_data_property(constructor, prevent_extensions_atom, prevent_extensions)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1480,6 +1515,7 @@ impl Isolate {
                 native,
                 OrdinaryObject {
                     shape: ShapeId::EMPTY,
+                    extensible: true,
                     storage: None,
                     prototype: function_prototype,
                 },
@@ -1502,6 +1538,7 @@ impl Isolate {
             NativeFunction::FunctionPrototypeCall,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: object_prototype,
             },
@@ -1533,6 +1570,7 @@ impl Isolate {
             NativeFunction::FunctionPrototype,
             OrdinaryObject {
                 shape,
+                extensible: true,
                 storage: Some(storage),
                 prototype: object_prototype,
             },
@@ -1543,6 +1581,7 @@ impl Isolate {
             NativeFunction::FunctionConstructor,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1595,6 +1634,7 @@ impl Isolate {
             };
             let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: parent,
             })?;
@@ -1603,6 +1643,7 @@ impl Isolate {
                 NativeFunction::ErrorConstructor(kind),
                 OrdinaryObject {
                     shape: ShapeId::EMPTY,
+                    extensible: true,
                     storage: None,
                     prototype: function_prototype,
                 },
@@ -1622,6 +1663,7 @@ impl Isolate {
             .expect("function intrinsics initialize before Array intrinsics");
         let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
+            extensible: true,
             storage: None,
             prototype: self
                 .realm
@@ -1633,6 +1675,7 @@ impl Isolate {
             NativeFunction::ArrayConstructor,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1647,6 +1690,7 @@ impl Isolate {
             NativeFunction::ArrayConcat,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1658,6 +1702,7 @@ impl Isolate {
             NativeFunction::ArrayToString,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
+                extensible: true,
                 storage: None,
                 prototype: function_prototype,
             },
@@ -1827,6 +1872,7 @@ impl Isolate {
                 0,
                 OrdinaryObject {
                     shape: ShapeId::EMPTY,
+                    extensible: true,
                     storage: None,
                     prototype,
                 },
@@ -2759,6 +2805,7 @@ impl Isolate {
                 0,
                 OrdinaryObject {
                     shape,
+                    extensible: true,
                     storage: Some(storage),
                     prototype: Value::from_immediate(Immediate::Null),
                 },
@@ -2881,7 +2928,33 @@ impl Isolate {
             debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
             return self.update_property_slot(snapshot, property.slot, value);
         }
+        if !snapshot.extensible {
+            return Err(ExecutionError::NonExtensibleObject(receiver));
+        }
         self.add_property_slot(object, snapshot, key, value)
+    }
+
+    /// Applies assignment failure semantics without weakening throwing descriptor operations.
+    fn set_data_property_from_bytecode(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let strictness = self
+            .fiber
+            .frames
+            .last()
+            .expect("property assignment always has an active frame")
+            .strictness;
+        match self.set_own_data_property(receiver, key, value) {
+            Err(ExecutionError::NonExtensibleObject(_))
+                if strictness == FunctionStrictness::Sloppy =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     /// Marks one own data property as deleted while retaining append-only shape metadata.
@@ -3022,6 +3095,37 @@ impl Isolate {
             })
         })?;
         Ok((ObjectReceiver::Function(function), ordinary))
+    }
+
+    /// Mutates the shared ordinary-object state for either object payload representation.
+    fn set_object_extensible(
+        &mut self,
+        receiver: ObjectReceiver,
+        extensible: bool,
+    ) -> Result<(), ExecutionError> {
+        match receiver {
+            ObjectReceiver::Ordinary(object) => self.heap.with_running_scope(|scope| {
+                let object = scope.root(object).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(object, self.types.ordinary_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
+                let function = scope.root(function).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+        }
     }
 
     /// Publishes a replacement storage edge through the receiver's concrete typed payload.
@@ -3902,7 +4006,7 @@ impl Isolate {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
-                self.set_own_data_property(receiver, key, value)?;
+                self.set_data_property_from_bytecode(receiver, key, value)?;
             }
             Opcode::GetByValue => {
                 let receiver = self.read(base, operands[1])?;
@@ -3916,7 +4020,7 @@ impl Isolate {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let key = self.property_key_atom(self.read(base, operands[2])?)?;
-                self.set_own_data_property(receiver, key, value)?;
+                self.set_data_property_from_bytecode(receiver, key, value)?;
             }
             Opcode::Call => {
                 let callee = self.read(base, operands[1])?;
@@ -4307,6 +4411,7 @@ impl Isolate {
                     function_prototype: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
+                        extensible: true,
                         storage: None,
                         prototype: internal_prototype,
                     },
@@ -4610,15 +4715,30 @@ impl Isolate {
                     let value = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = if self.is_object_value(value) {
+                        self.object_snapshot(value)?.1.extensible
+                    } else {
+                        false
+                    };
                     return self.write(
                         site.caller_base,
                         site.destination,
-                        Value::from_immediate(if self.is_object_value(value) {
+                        Value::from_immediate(if result {
                             Immediate::True
                         } else {
                             Immediate::False
                         }),
                     );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectPreventExtensions) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if self.is_object_value(value) {
+                        let (receiver, _) = self.object_snapshot(value)?;
+                        self.set_object_extensible(receiver, false)?;
+                    }
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
@@ -4993,6 +5113,7 @@ fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
         | ExecutionError::InvalidInstanceofPrototype(_)
         | ExecutionError::ReadOnlyBinding(_)
         | ExecutionError::ImmutableBinding(_)
+        | ExecutionError::NonExtensibleObject(_)
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),

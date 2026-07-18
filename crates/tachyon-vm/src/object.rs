@@ -223,8 +223,10 @@ impl GcExternalMemory for PropertyStorage {
 
 /// Ordinary data-property object. Exotic kinds remain separate slow-path payload types.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub(crate) struct OrdinaryObject {
     pub(crate) shape: ShapeId,
+    pub(crate) extensible: bool,
     pub(crate) storage: Option<GcRef<PropertyStorage>>,
     pub(crate) prototype: Value,
 }
@@ -239,7 +241,9 @@ impl Trace for OrdinaryObject {
 
 #[cfg(test)]
 mod tests {
-    use super::{PropertyAttributes, ShapeId, ShapeTable};
+    use core::mem::size_of;
+
+    use super::{OrdinaryObject, PropertyAttributes, ShapeId, ShapeTable};
     use crate::AtomId;
 
     #[test]
@@ -262,5 +266,10 @@ mod tests {
         assert_eq!(table.lookup(two, first).unwrap().slot, 0);
         assert_eq!(table.lookup(two, second).unwrap().slot, 1);
         assert_eq!(table.property_count(two), 2);
+    }
+
+    #[test]
+    fn extensibility_uses_existing_object_alignment_padding() {
+        assert_eq!(size_of::<OrdinaryObject>(), 24);
     }
 }

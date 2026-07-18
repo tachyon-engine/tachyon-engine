@@ -1596,6 +1596,35 @@ mod tests {
         );
     }
 
+    /// Covers preventExtensions identity, object state, and strict versus sloppy writes.
+    #[test]
+    fn prevent_extensions_blocks_new_own_properties() {
+        assert_eq!(
+            execute_source(
+                80,
+                "let object = { value: 1 }; Object.preventExtensions(object); object.added = 2; object.value = 3; !Object.isExtensible(object) && !Object.hasOwn(object, 'added') && object.value === 3 && Object.preventExtensions.length === 1 && Object.preventExtensions.name === 'preventExtensions';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                81,
+                "function write(object) { 'use strict'; object.added = 2; } let object = {}; Object.preventExtensions(object); let threw = false; try { write(object); } catch (error) { threw = error instanceof TypeError; } threw && Object.preventExtensions(1) === 1;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                82,
+                "let callable = function () {}; Object.preventExtensions(callable); let threw = false; try { Object.defineProperty(callable, 'added', { value: 1 }); } catch (error) { threw = error instanceof TypeError; } threw && !Object.isExtensible(callable);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
     #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
