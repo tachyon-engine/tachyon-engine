@@ -308,7 +308,7 @@ mod tests {
             },
             build: BuildConfig {
                 profile: "release".into(),
-                panic: "unwind".into(),
+                panic: "abort".into(),
                 lto: "thin".into(),
                 codegen_units: 1,
                 target_cpu: "default".into(),

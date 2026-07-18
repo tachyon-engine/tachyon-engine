@@ -1115,10 +1115,10 @@ impl SpanTable {
         true
     }
 
-    /// Removes lifetime metadata before invoking a potentially unwinding Rust destructor.
+    /// Removes lifetime metadata before invoking a Rust destructor.
     ///
-    /// Storage bytes remain untouched until the callback returns, but a caught panic cannot make
-    /// a later collection invoke the same destructor twice.
+    /// Storage bytes remain untouched until the callback returns. Production builds abort if a
+    /// destructor panics, so collection never attempts recovery or a second destructor call.
     pub(crate) fn unpublish_small_for_drop(&mut self, reference: RawHeapRef) -> bool {
         let Some(span) = self
             .entries

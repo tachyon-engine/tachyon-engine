@@ -94,7 +94,7 @@ arguments = ["--build", "escargot/out-release"]
 
 [build]
 profile = "release"
-panic = "unwind"
+panic = "abort"
 lto = "thin"
 codegen_units = 1
 target_cpu = "default"

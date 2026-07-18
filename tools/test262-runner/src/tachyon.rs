@@ -1,4 +1,4 @@
-use std::{any::Any, panic::AssertUnwindSafe, sync::Arc};
+use std::sync::Arc;
 
 use tachyon_compiler::{
     CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
@@ -25,14 +25,9 @@ const MAX_GLOBAL_BINDINGS: u32 = 1 << 18;
 pub struct TachyonAdapter;
 
 impl EngineAdapter for TachyonAdapter {
-    /// Contains engine panics at the conformance boundary so one test cannot terminate the suite.
+    /// Executes one request without translating Rust panics into ECMAScript outcomes.
     fn execute(&self, request: ExecutionRequest<'_>) -> EngineResponse {
-        match std::panic::catch_unwind(AssertUnwindSafe(|| execute_request(request))) {
-            Ok(outcome) => EngineResponse::new(outcome),
-            Err(payload) => EngineResponse::new(EngineOutcome::Panic {
-                message: panic_message(payload).into(),
-            }),
-        }
+        EngineResponse::new(execute_request(request))
     }
 }
 
@@ -183,16 +178,6 @@ fn compile_error_message(error: &CompileError) -> String {
 fn unsupported(reason: impl Into<Box<str>>) -> EngineOutcome {
     EngineOutcome::Unsupported {
         reason: reason.into(),
-    }
-}
-
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    match payload.downcast::<String>() {
-        Ok(message) => *message,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(message) => (*message).to_owned(),
-            Err(_) => "Tachyon panicked with a non-string payload".to_owned(),
-        },
     }
 }
 

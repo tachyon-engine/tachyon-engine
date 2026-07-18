@@ -1,9 +1,6 @@
 //! Post-collection FinalizationRegistry cleanup jobs owned and rooted by the VM.
 
-use std::{
-    collections::VecDeque,
-    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-};
+use std::collections::VecDeque;
 
 use tachyon_gc::{Heap, PendingFinalization, RawHeapRef, Trace, Tracer};
 use tachyon_value::Value;
@@ -162,15 +159,15 @@ impl Isolate {
                 .finalization_jobs
                 .front()
                 .expect("eligible cleanup count matches the rooted FIFO");
-            let result = catch_unwind(AssertUnwindSafe(|| callback(self, heap, job)));
+            let result = callback(self, heap, job);
             self.finalization_jobs.running = false;
             self.finalization_jobs.complete_front();
             match result {
-                Ok(Ok(())) => {
+                Ok(()) => {
                     callbacks_completed += 1;
                     self.finalization_jobs.running = true;
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     return Err(FinalizationSafepointError::Callback {
                         error,
                         stats: self.finalization_safepoint_stats(
@@ -180,7 +177,6 @@ impl Isolate {
                         ),
                     });
                 }
-                Err(payload) => resume_unwind(payload),
             }
         }
 
@@ -210,8 +206,6 @@ impl Isolate {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     use tachyon_gc::{
         AllocationSpace, FinalizationRegistration, GcRef, GcType, HeapLimit, SPAN_SIZE_BYTES,
         Trace, Tracer, TypeRegistry,
@@ -423,37 +417,6 @@ mod tests {
 
         assert_eq!(stats.callbacks_completed, 1);
         assert_eq!(isolate.finalization_job_queue_stats().queued, 0);
-    }
-
-    #[test]
-    /// Rust unwind consumes the started job and restores the scheduler for remaining FIFO work.
-    fn callback_panic_restores_scheduler_state_without_replaying_the_started_job() {
-        let PendingFixture { mut heap, .. } =
-            heap_with_pending_finalizations(2, AllocationSpace::Old, HeldValueKind::Integer);
-        let mut isolate = test_isolate();
-        let mut started = None;
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            let _ = isolate.run_finalization_cleanup_safepoint(
-                &mut heap,
-                |_, _, job| -> Result<(), ()> {
-                    started = job.held_value().as_i32();
-                    panic!("host callback panic")
-                },
-            );
-        }));
-        assert!(panic.is_err());
-        let started = started.expect("the first callback started before unwinding");
-        assert_eq!(isolate.finalization_job_queue_stats().queued, 1);
-
-        let mut observed = Vec::new();
-        isolate
-            .run_finalization_cleanup_safepoint(&mut heap, |_, _, job| {
-                observed.push(job.held_value().as_i32().unwrap());
-                Ok::<_, ()>(())
-            })
-            .unwrap();
-        assert_eq!(observed.len(), 1);
-        assert_ne!(observed[0], started);
     }
 
     #[test]

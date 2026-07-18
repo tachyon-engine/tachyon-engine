@@ -30,6 +30,7 @@ opt-level = 3
 debug = 2
 debug-assertions = false
 overflow-checks = false
+panic = "abort"
 
 [profile.test]
 opt-level = 3
@@ -41,6 +42,7 @@ overflow-checks = false
 codegen-units = 1
 lto = "thin"
 debug = 2
+panic = "abort"
 
 [profile.bench]
 codegen-units = 1

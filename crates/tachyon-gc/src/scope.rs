@@ -374,12 +374,9 @@ impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use tachyon_value::Value;
@@ -523,37 +520,6 @@ mod tests {
         let mut no_roots = Vec::<Value>::new();
         heap.collect_major(&mut no_roots).unwrap();
         assert_eq!(drops.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    /// Rust unwinding drops the scope guard and cannot leave a stale temporary root behind.
-    fn panic_unwind_restores_the_temporary_root_checkpoint() {
-        let (mut heap, object_type, drops) = heap_and_type();
-        let reference = heap
-            .try_allocate(
-                object_type,
-                0,
-                0,
-                DropProbe {
-                    drops: Arc::clone(&drops),
-                },
-                AllocationSpace::Old,
-            )
-            .unwrap();
-
-        let unwind = catch_unwind(AssertUnwindSafe(|| {
-            heap.with_running_scope(|scope| {
-                let _local = scope.root(reference).unwrap();
-                assert_eq!(scope.temporary_root_stats().current_len, 1);
-                panic!("intentional scope unwind");
-            });
-        }));
-        assert!(unwind.is_err());
-        assert_eq!(heap.temporary_root_stats().current_len, 0);
-
-        let mut no_roots = Vec::<Value>::new();
-        heap.collect_major(&mut no_roots).unwrap();
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]

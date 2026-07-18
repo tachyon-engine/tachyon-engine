@@ -1158,12 +1158,9 @@ fn size_class_index(required: u16) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        panic::{AssertUnwindSafe, catch_unwind},
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use super::{AllocationSpace, GcExternalMemory, Heap, HeapAllocationError, HeapLimit};
@@ -1229,20 +1226,6 @@ mod tests {
 
     struct DropLarge {
         _bytes: [u8; 70_000],
-        drops: Arc<AtomicUsize>,
-    }
-
-    struct PanicOnDrop {
-        drops: Arc<AtomicUsize>,
-    }
-
-    struct LargePanicOnDrop {
-        _bytes: [u8; 70_000],
-        drops: Arc<AtomicUsize>,
-    }
-
-    struct ExternalPanicOnDrop {
-        backing: Box<[u8]>,
         drops: Arc<AtomicUsize>,
     }
 
@@ -1380,45 +1363,6 @@ mod tests {
     impl Drop for DropLarge {
         fn drop(&mut self) {
             self.drops.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    impl Trace for PanicOnDrop {
-        fn trace(&mut self, _: &mut dyn Tracer) {}
-    }
-
-    impl Drop for PanicOnDrop {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::Relaxed);
-            panic!("intentional destructor unwind");
-        }
-    }
-
-    impl Trace for LargePanicOnDrop {
-        fn trace(&mut self, _: &mut dyn Tracer) {}
-    }
-
-    impl Drop for LargePanicOnDrop {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::Relaxed);
-            panic!("intentional large destructor unwind");
-        }
-    }
-
-    impl Trace for ExternalPanicOnDrop {
-        fn trace(&mut self, _: &mut dyn Tracer) {}
-    }
-
-    impl GcExternalMemory for ExternalPanicOnDrop {
-        fn external_memory_bytes(&self) -> usize {
-            self.backing.len()
-        }
-    }
-
-    impl Drop for ExternalPanicOnDrop {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::Relaxed);
-            panic!("intentional external destructor unwind");
         }
     }
 
@@ -3879,112 +3823,5 @@ mod tests {
             0
         );
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    /// Unpublication precedes unsafe drop so a caught destructor panic cannot cause double drop.
-    fn destructor_unwind_cannot_republish_or_double_drop_a_slot() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut types = TypeRegistry::new();
-        let object_type = types.try_register::<PanicOnDrop>("PanicOnDrop").unwrap();
-        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
-        let reference = heap
-            .try_allocate(
-                object_type,
-                0,
-                0,
-                PanicOnDrop {
-                    drops: Arc::clone(&drops),
-                },
-                AllocationSpace::Old,
-            )
-            .unwrap();
-        let mut no_roots = Vec::<Value>::new();
-
-        let unwind = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap.collect_major(&mut no_roots);
-        }));
-        assert!(unwind.is_err());
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            heap.verify_reference(reference.raw(), None),
-            Err(HeapReferenceError::UnallocatedSlot(reference.raw()))
-        );
-
-        let retry = heap.collect_major(&mut no_roots).unwrap();
-        assert_eq!(retry.sweep.reclaimed_objects, 0);
-        assert_eq!(retry.sweep.spans_released, 1);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    /// External charge is removed before a destructor unwind and is never charged twice on retry.
-    fn external_destructor_unwind_preserves_exact_accounting() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut types = TypeRegistry::new();
-        let object_type = types
-            .try_register::<ExternalPanicOnDrop>("ExternalPanicOnDrop")
-            .unwrap();
-        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES + 32), types);
-        heap.try_allocate_external(
-            object_type,
-            0,
-            ExternalPanicOnDrop {
-                backing: vec![0; 32].into_boxed_slice(),
-                drops: Arc::clone(&drops),
-            },
-            AllocationSpace::Old,
-        )
-        .unwrap();
-        assert_eq!(heap.external_bytes(), 32);
-        let mut no_roots = Vec::<Value>::new();
-
-        let unwind = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap.collect_major(&mut no_roots);
-        }));
-        assert!(unwind.is_err());
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(heap.external_bytes(), 0);
-
-        let retry = heap.collect_major(&mut no_roots).unwrap();
-        assert_eq!(retry.sweep.reclaimed_objects, 0);
-        assert_eq!(retry.sweep.external_bytes, 0);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    /// A large drop unwind leaves an unpublished owner that the next major releases without redrop.
-    fn large_destructor_unwind_releases_range_on_retry_without_double_drop() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let mut types = TypeRegistry::new();
-        let object_type = types
-            .try_register::<LargePanicOnDrop>("LargePanicOnDrop")
-            .unwrap();
-        let mut heap = Heap::new(HeapLimit::new(2 * SPAN_SIZE_BYTES), types);
-        heap.try_allocate(
-            object_type,
-            0,
-            0,
-            LargePanicOnDrop {
-                _bytes: [0; 70_000],
-                drops: Arc::clone(&drops),
-            },
-            AllocationSpace::Old,
-        )
-        .unwrap();
-        let mut no_roots = Vec::<Value>::new();
-
-        let unwind = catch_unwind(AssertUnwindSafe(|| {
-            let _ = heap.collect_major(&mut no_roots);
-        }));
-        assert!(unwind.is_err());
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(heap.committed_span_storage_bytes(), 2 * SPAN_SIZE_BYTES);
-
-        let retry = heap.collect_major(&mut no_roots).unwrap();
-        assert_eq!(retry.sweep.reclaimed_objects, 0);
-        assert_eq!(retry.sweep.spans_released, 2);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(heap.committed_span_storage_bytes(), 0);
     }
 }
