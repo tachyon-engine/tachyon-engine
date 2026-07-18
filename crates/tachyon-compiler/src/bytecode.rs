@@ -1652,6 +1652,20 @@ impl Lowerer<'_> {
                 operator: HirUnaryOperator::Typeof,
                 argument,
             } => {
+                if let HirExpressionKind::Identifier(reference) = &argument.kind
+                    && self.local_reference(reference).is_none()
+                    && self.captured_reference(reference)?.is_none()
+                {
+                    self.require_global_reference(reference, expression.span)?;
+                    let destination = self.register()?;
+                    let scope_name = self.resolved_global_binding(reference, false)?;
+                    self.emit(
+                        Opcode::TypeofScope,
+                        &[destination.index(), scope_name],
+                        expression.span,
+                    )?;
+                    return Ok(destination);
+                }
                 let argument = self.expression(argument)?;
                 let destination = self.register()?;
                 self.emit(

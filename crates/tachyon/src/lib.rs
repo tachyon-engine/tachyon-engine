@@ -1351,6 +1351,16 @@ mod tests {
     }
 
     #[test]
+    /// Ensures an unresolved global name is safe inside typeof and reports undefined.
+    fn typeof_unresolved_global_is_undefined() {
+        assert!(
+            execute_source(113, "typeof definitely_missing_name;")
+                .as_heap_ref()
+                .is_some(),
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

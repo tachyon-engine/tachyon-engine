@@ -2510,6 +2510,14 @@ impl Isolate {
                     }),
                 )?;
             }
+            Opcode::TypeofScope => {
+                let resolution = self.scope_resolution(code, operands[1])?;
+                let value = self
+                    .scope_value(resolution)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                let value = self.typeof_value(value)?;
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;

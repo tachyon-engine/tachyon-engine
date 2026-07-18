@@ -186,6 +186,7 @@ pub enum Opcode {
     LooseEqual = 60,
     LooseNotEqual = 61,
     HasProperty = 62,
+    TypeofScope = 63,
 }
 
 impl Opcode {
@@ -242,6 +243,7 @@ impl Opcode {
             | Self::LessEqual
             | Self::GreaterEqual => 3,
             Self::LooseEqual | Self::LooseNotEqual | Self::HasProperty => 3,
+            Self::TypeofScope => 2,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -320,6 +322,7 @@ impl Opcode {
             60 => Some(Self::LooseEqual),
             61 => Some(Self::LooseNotEqual),
             62 => Some(Self::HasProperty),
+            63 => Some(Self::TypeofScope),
             _ => None,
         }
     }
@@ -852,7 +855,8 @@ impl BytecodeBuilder {
             | Opcode::Negate
             | Opcode::Typeof
             | Opcode::ToNumber
-            | Opcode::BitwiseNot => &[0, 1],
+            | Opcode::BitwiseNot
+            | Opcode::TypeofScope => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1844,7 +1848,12 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber | Opcode::BitwiseNot => {
+        Opcode::Not
+        | Opcode::Negate
+        | Opcode::Typeof
+        | Opcode::ToNumber
+        | Opcode::BitwiseNot
+        | Opcode::TypeofScope => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
