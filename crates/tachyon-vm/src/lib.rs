@@ -45,6 +45,7 @@ use object::{OrdinaryObject, PropertyAttributes, PropertyStorage, ShapeId, Shape
 pub struct Engine;
 
 /// Mandatory isolate resource and entropy configuration; production has no fixed hash seed.
+/// Built-in ECMAScript Error families currently materialized by the realm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IsolateConfig {
     atom_table: AtomTableConfig,
@@ -201,8 +202,11 @@ pub enum ExecutionError {
     },
     GlobalBindingAllocationFailed,
     GlobalBindingIndexAllocationFailed,
+    IntrinsicBindingAllocationFailed,
+    IntrinsicBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
+    UnsupportedErrorMessage(Value),
     NotObject(Value),
 }
 
@@ -238,6 +242,67 @@ impl GcExternalMemory for Environment {
 enum NativeFunction {
     FunctionPrototype,
     FunctionPrototypeCall,
+    ErrorConstructor(NativeErrorKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NativeErrorKind {
+    Error,
+    Reference,
+    Syntax,
+    Type,
+}
+
+impl NativeErrorKind {
+    const ALL: [Self; 4] = [Self::Error, Self::Reference, Self::Syntax, Self::Type];
+
+    #[inline(always)]
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "Error",
+            Self::Reference => "ReferenceError",
+            Self::Syntax => "SyntaxError",
+            Self::Type => "TypeError",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ErrorIntrinsic {
+    constructor: Option<Value>,
+    prototype: Option<Value>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ErrorIntrinsics {
+    entries: [ErrorIntrinsic; NativeErrorKind::ALL.len()],
+}
+
+impl ErrorIntrinsics {
+    #[inline(always)]
+    fn get(self, kind: NativeErrorKind) -> ErrorIntrinsic {
+        self.entries[kind.index()]
+    }
+
+    #[inline(always)]
+    fn get_mut(&mut self, kind: NativeErrorKind) -> &mut ErrorIntrinsic {
+        &mut self.entries[kind.index()]
+    }
+}
+
+impl Trace for ErrorIntrinsics {
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        for entry in &mut self.entries {
+            entry.constructor.trace(tracer);
+            entry.prototype.trace(tracer);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -320,6 +385,24 @@ struct VmTypes {
 struct IntrinsicPropertyAtoms {
     prototype: Option<AtomId>,
     constructor: Option<AtomId>,
+    message: Option<AtomId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RealmIntrinsicAtoms {
+    undefined: AtomId,
+    nan: AtomId,
+    infinity: AtomId,
+    errors: [AtomId; NativeErrorKind::ALL.len()],
+}
+
+impl RealmIntrinsicAtoms {
+    const BINDING_COUNT: usize = 3 + NativeErrorKind::ALL.len();
+
+    #[inline(always)]
+    fn error(self, kind: NativeErrorKind) -> AtomId {
+        self.errors[kind.index()]
+    }
 }
 
 /// An isolate-local immutable-code index; zero stays reserved for niche optimization and validation.
@@ -363,6 +446,7 @@ impl Trace for LoadedCode {
 struct ScopeResolution {
     atom: AtomId,
     lexical_slot: Option<GlobalLexicalSlotId>,
+    intrinsic_slot: Option<IntrinsicSlotId>,
     global_slot: Option<GlobalSlotId>,
 }
 
@@ -371,6 +455,35 @@ struct GlobalBinding {
     name: AtomId,
     value: Value,
 }
+
+#[derive(Clone, Copy, Debug)]
+struct IntrinsicBinding {
+    name: AtomId,
+    value: Value,
+    writable: bool,
+}
+
+/// Stable isolate-local index into mandatory bindings excluded from the host user-binding quota.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+struct IntrinsicSlotId(NonZeroU32);
+
+impl IntrinsicSlotId {
+    fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(NonZeroU32::new)
+            .map(Self)
+    }
+
+    const fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+const _: [(); 4] = [(); core::mem::size_of::<IntrinsicSlotId>()];
+const _: [(); 4] = [(); core::mem::size_of::<Option<IntrinsicSlotId>>()];
 
 /// A stable isolate-local index into one realm's global binding storage.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -426,6 +539,8 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalLexicalSlotId>>()];
 
 #[derive(Debug)]
 struct Realm {
+    intrinsic_bindings: Vec<IntrinsicBinding>,
+    intrinsic_slots_by_atom: Vec<Option<IntrinsicSlotId>>,
     global_lexicals: Vec<GlobalLexicalBinding>,
     global_lexical_slots_by_atom: Vec<Option<GlobalLexicalSlotId>>,
     global_bindings: Vec<GlobalBinding>,
@@ -433,6 +548,7 @@ struct Realm {
     global_object: Option<Value>,
     function_prototype: Option<Value>,
     function_prototype_call: Option<Value>,
+    error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
 }
@@ -440,6 +556,8 @@ struct Realm {
 impl Realm {
     fn new(limits: RealmLimits, typeof_strings: TypeofStrings) -> Self {
         Self {
+            intrinsic_bindings: Vec::new(),
+            intrinsic_slots_by_atom: Vec::new(),
             global_lexicals: Vec::new(),
             global_lexical_slots_by_atom: Vec::new(),
             global_bindings: Vec::new(),
@@ -447,9 +565,75 @@ impl Realm {
             global_object: None,
             function_prototype: None,
             function_prototype_call: None,
+            error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
         }
+    }
+
+    /// Reserves the complete mandatory binding set before any intrinsic becomes observable.
+    fn reserve_intrinsics(
+        &mut self,
+        binding_count: usize,
+        atom_upper_bound: usize,
+    ) -> Result<(), ExecutionError> {
+        self.intrinsic_bindings
+            .try_reserve_exact(binding_count)
+            .map_err(|_| ExecutionError::IntrinsicBindingAllocationFailed)?;
+        self.intrinsic_slots_by_atom
+            .try_reserve_exact(atom_upper_bound)
+            .map_err(|_| ExecutionError::IntrinsicBindingIndexAllocationFailed)?;
+        self.intrinsic_slots_by_atom.resize(atom_upper_bound, None);
+        Ok(())
+    }
+
+    /// Publishes one pre-reserved intrinsic with stable identity and explicit writability.
+    fn publish_intrinsic(
+        &mut self,
+        name: AtomId,
+        value: Value,
+        writable: bool,
+    ) -> Result<(), ExecutionError> {
+        let slot = IntrinsicSlotId::from_index(self.intrinsic_bindings.len())
+            .ok_or(ExecutionError::IntrinsicBindingAllocationFailed)?;
+        let target = self
+            .intrinsic_slots_by_atom
+            .get_mut(name.index() as usize)
+            .ok_or(ExecutionError::IntrinsicBindingIndexAllocationFailed)?;
+        debug_assert!(target.is_none());
+        self.intrinsic_bindings.push(IntrinsicBinding {
+            name,
+            value,
+            writable,
+        });
+        *target = Some(slot);
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn resolve_intrinsic(&self, name: AtomId) -> Option<IntrinsicSlotId> {
+        let slot = self
+            .intrinsic_slots_by_atom
+            .get(name.index() as usize)
+            .copied()
+            .flatten()?;
+        debug_assert_eq!(self.intrinsic_bindings[slot.index()].name, name);
+        Some(slot)
+    }
+
+    #[inline(always)]
+    fn intrinsic_value(&self, slot: IntrinsicSlotId) -> Value {
+        self.intrinsic_bindings[slot.index()].value
+    }
+
+    #[inline(always)]
+    fn set_intrinsic(&mut self, slot: IntrinsicSlotId, value: Value) -> Result<(), ExecutionError> {
+        let binding = &mut self.intrinsic_bindings[slot.index()];
+        if !binding.writable {
+            return Err(ExecutionError::ReadOnlyBinding(binding.name));
+        }
+        binding.value = value;
+        Ok(())
     }
 
     #[inline(always)]
@@ -474,7 +658,10 @@ impl Realm {
 
     /// Publishes an uninitialized declarative binding after reserving both stable-index tables.
     fn declare_lexical(&mut self, name: AtomId, mutable: bool) -> Result<(), ExecutionError> {
-        if self.resolve_lexical(name).is_some() || self.resolve(name).is_some() {
+        if self.resolve_lexical(name).is_some()
+            || self.resolve_intrinsic(name).is_some()
+            || self.resolve(name).is_some()
+        {
             return Err(ExecutionError::GlobalLexicalRedeclaration(name));
         }
         if self
@@ -561,6 +748,9 @@ impl Realm {
         if self.resolve_lexical(name).is_some() {
             return Err(ExecutionError::GlobalLexicalRedeclaration(name));
         }
+        if let Some(slot) = self.resolve_intrinsic(name) {
+            return self.set_intrinsic(slot, value);
+        }
         if let Some(slot) = self.resolve(name) {
             self.set_slot(slot, value);
             return Ok(());
@@ -607,6 +797,9 @@ impl Realm {
 
 impl Trace for Realm {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
+        for binding in &mut self.intrinsic_bindings {
+            binding.value.trace(tracer);
+        }
         for binding in &mut self.global_lexicals {
             binding.value.trace(tracer);
         }
@@ -616,6 +809,7 @@ impl Trace for Realm {
         self.global_object.trace(tracer);
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
+        self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
 }
@@ -891,6 +1085,29 @@ impl Isolate {
         &mut self.atoms
     }
 
+    /// Classifies a managed error through its intrinsic prototype chain without exposing heap IDs.
+    pub fn native_error_kind(
+        &mut self,
+        value: Value,
+    ) -> Result<Option<NativeErrorKind>, ExecutionError> {
+        let mut current = value;
+        loop {
+            for kind in NativeErrorKind::ALL {
+                if self.realm.error_intrinsics.get(kind).prototype == Some(current) {
+                    return Ok(Some(kind));
+                }
+            }
+            if !self.is_object_value(current) {
+                return Ok(None);
+            }
+            let (_, snapshot) = self.object_snapshot(current)?;
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(None);
+            }
+            current = snapshot.prototype;
+        }
+    }
+
     /// Builds the global object, shared callable prototype, and native `call` before publication.
     fn initialize_realm_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let global_object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -899,6 +1116,14 @@ impl Isolate {
             prototype: Value::from_immediate(Immediate::Null),
         })?;
         self.realm.global_object = Some(global_object);
+        self.initialize_function_intrinsics()?;
+        let atoms = self.intern_realm_intrinsic_atoms()?;
+        self.initialize_error_intrinsics()?;
+        self.publish_realm_intrinsic_bindings(atoms)
+    }
+
+    /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
+    fn initialize_function_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let call_atom = self.intern_intrinsic_name(b"call")?;
         let call = self.allocate_native_function(
             NativeFunction::FunctionPrototypeCall,
@@ -941,6 +1166,90 @@ impl Isolate {
         )?;
         self.realm.function_prototype = Some(function_prototype);
         self.set_function_internal_prototype(call, function_prototype)
+    }
+
+    /// Interns every mandatory global name before reserving the dense atom-indexed binding table.
+    fn intern_realm_intrinsic_atoms(&mut self) -> Result<RealmIntrinsicAtoms, ExecutionError> {
+        Ok(RealmIntrinsicAtoms {
+            undefined: self.intern_intrinsic_name(b"undefined")?,
+            nan: self.intern_intrinsic_name(b"NaN")?,
+            infinity: self.intern_intrinsic_name(b"Infinity")?,
+            errors: [
+                self.intern_intrinsic_name(b"Error")?,
+                self.intern_intrinsic_name(b"ReferenceError")?,
+                self.intern_intrinsic_name(b"SyntaxError")?,
+                self.intern_intrinsic_name(b"TypeError")?,
+            ],
+        })
+    }
+
+    /// Creates the base Error pair first, then roots each subclass pair before property allocation.
+    fn initialize_error_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before Error intrinsics");
+        let constructor_atom = self.constructor_atom()?;
+        for kind in NativeErrorKind::ALL {
+            let parent = if kind == NativeErrorKind::Error {
+                Value::from_immediate(Immediate::Null)
+            } else {
+                self.realm
+                    .error_intrinsics
+                    .get(NativeErrorKind::Error)
+                    .prototype
+                    .expect("Error.prototype initializes before subclasses")
+            };
+            let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: parent,
+            })?;
+            self.realm.error_intrinsics.get_mut(kind).prototype = Some(prototype);
+            let constructor = self.allocate_native_function(
+                NativeFunction::ErrorConstructor(kind),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            self.realm.error_intrinsics.get_mut(kind).constructor = Some(constructor);
+            self.set_function_prototype(constructor, prototype)?;
+            self.set_own_data_property(prototype, constructor_atom, constructor)?;
+        }
+        Ok(())
+    }
+
+    /// Publishes all mandatory names without charging the host quota for user-created globals.
+    fn publish_realm_intrinsic_bindings(
+        &mut self,
+        atoms: RealmIntrinsicAtoms,
+    ) -> Result<(), ExecutionError> {
+        self.realm.reserve_intrinsics(
+            RealmIntrinsicAtoms::BINDING_COUNT,
+            self.atoms.stats().entries,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.undefined,
+            Value::from_immediate(Immediate::Undefined),
+            false,
+        )?;
+        self.realm
+            .publish_intrinsic(atoms.nan, Value::from_f64(f64::NAN), false)?;
+        self.realm
+            .publish_intrinsic(atoms.infinity, Value::from_f64(f64::INFINITY), false)?;
+        for kind in NativeErrorKind::ALL {
+            let constructor = self
+                .realm
+                .error_intrinsics
+                .get(kind)
+                .constructor
+                .expect("Error constructor initializes before global publication");
+            self.realm
+                .publish_intrinsic(atoms.error(kind), constructor, true)?;
+        }
+        Ok(())
     }
 
     fn allocate_intrinsic_ordinary_object(
@@ -1112,6 +1421,49 @@ impl Isolate {
             .map_err(ExecutionError::PropertyKeyAtom)?;
         self.intrinsic_property_atoms.constructor = Some(atom);
         Ok(atom)
+    }
+
+    fn message_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.message {
+            return Ok(atom);
+        }
+        let string =
+            JsString::try_from_latin1(b"message").map_err(ExecutionError::PropertyKeyString)?;
+        let atom = self
+            .atoms
+            .try_intern(string)
+            .map_err(ExecutionError::PropertyKeyAtom)?;
+        self.intrinsic_property_atoms.message = Some(atom);
+        Ok(atom)
+    }
+
+    /// Allocates one ordinary native error and defines a string message only when supplied.
+    fn create_native_error(
+        &mut self,
+        kind: NativeErrorKind,
+        message: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .error_intrinsics
+            .get(kind)
+            .prototype
+            .expect("native Error prototypes initialize before execution");
+        let error = self.create_ordinary_object_with_prototype(prototype)?;
+        let Some(message) =
+            message.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(error);
+        };
+        let raw = message
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedErrorMessage(message))?;
+        self.heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedErrorMessage(message))?;
+        let message_atom = self.message_atom()?;
+        self.set_own_data_property(error, message_atom, message)?;
+        Ok(error)
     }
 
     #[inline(always)]
@@ -1559,6 +1911,7 @@ impl Isolate {
                 Ok(atom) => scope_resolutions.push(ScopeResolution {
                     atom,
                     lexical_slot: self.realm.resolve_lexical(atom),
+                    intrinsic_slot: self.realm.resolve_intrinsic(atom),
                     global_slot: self.realm.resolve(atom),
                 }),
                 Err(error) => {
@@ -1651,16 +2004,21 @@ impl Isolate {
             .get(scope_name as usize)
             .copied()
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })?;
-        if resolution.lexical_slot.is_some() || resolution.global_slot.is_some() {
+        if resolution.lexical_slot.is_some()
+            || resolution.intrinsic_slot.is_some()
+            || resolution.global_slot.is_some()
+        {
             return Ok(resolution);
         }
         let lexical_slot = self.realm.resolve_lexical(resolution.atom);
+        let intrinsic_slot = self.realm.resolve_intrinsic(resolution.atom);
         let global_slot = self.realm.resolve(resolution.atom);
-        if lexical_slot.is_none() && global_slot.is_none() {
+        if lexical_slot.is_none() && intrinsic_slot.is_none() && global_slot.is_none() {
             return Ok(resolution);
         }
         let resolved = ScopeResolution {
             lexical_slot,
+            intrinsic_slot,
             global_slot,
             ..resolution
         };
@@ -1863,9 +2221,30 @@ impl Isolate {
         Ok(None)
     }
 
-    /// Implements the arithmetic subset emitted by the current compiler; later opcodes extend this match.
+    /// Converts only specification-level failures into JavaScript abrupt completion at the opcode site.
     #[inline(always)]
     fn dispatch(
+        &mut self,
+        code: CodeId,
+        instruction_offset: WordOffset,
+        opcode: Opcode,
+        operands: [u32; 3],
+        base: u32,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.dispatch_instruction(code, instruction_offset, opcode, operands, base) {
+            Err(error) => {
+                let Some(kind) = execution_error_kind(&error) else {
+                    return Err(error);
+                };
+                self.throw_native_error(kind, instruction_offset)
+            }
+            result => result,
+        }
+    }
+
+    /// Implements one verified opcode without conflating engine faults with language exceptions.
+    #[inline(always)]
+    fn dispatch_instruction(
         &mut self,
         code: CodeId,
         instruction_offset: WordOffset,
@@ -2135,18 +2514,15 @@ impl Isolate {
         Ok(None)
     }
 
-    /// Resolves non-writable primitive realm properties before mutable global bindings.
-    #[inline(always)]
-    fn intrinsic_scope_value(&self, name: AtomId) -> Option<Value> {
-        let string = self.atoms.get(name)?;
-        match string.len() {
-            3 if string.equals_latin1(b"NaN") => Some(Value::from_f64(f64::NAN)),
-            8 if string.equals_latin1(b"Infinity") => Some(Value::from_f64(f64::INFINITY)),
-            9 if string.equals_latin1(b"undefined") => {
-                Some(Value::from_immediate(Immediate::Undefined))
-            }
-            _ => None,
-        }
+    #[cold]
+    #[inline(never)]
+    fn throw_native_error(
+        &mut self,
+        kind: NativeErrorKind,
+        instruction_offset: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let error = self.create_native_error(kind, None)?;
+        self.throw_value(error, instruction_offset)
     }
 
     #[inline(always)]
@@ -2154,11 +2530,12 @@ impl Isolate {
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.lexical_value(slot).map(Some);
         }
-        Ok(self.intrinsic_scope_value(resolution.atom).or_else(|| {
-            resolution
-                .global_slot
-                .and_then(|slot| self.realm.get_slot(slot))
-        }))
+        if let Some(slot) = resolution.intrinsic_slot {
+            return Ok(Some(self.realm.intrinsic_value(slot)));
+        }
+        Ok(resolution
+            .global_slot
+            .and_then(|slot| self.realm.get_slot(slot)))
     }
 
     /// Writes through a cached global slot or publishes the binding once on the cold path.
@@ -2170,6 +2547,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
+        if let Some(slot) = resolution.intrinsic_slot {
+            return self.realm.set_intrinsic(slot, value);
+        }
         if let Some(slot) = resolution.global_slot {
             self.realm.set_slot(slot, value);
             return Ok(());
@@ -2209,23 +2589,31 @@ impl Isolate {
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.set_lexical(slot, value);
         }
-        if let Some(slot) = resolution.global_slot {
-            self.realm.set_slot(slot, value);
-            return Ok(());
-        }
-        if self.intrinsic_scope_value(resolution.atom).is_some() {
+        if let Some(slot) = resolution.intrinsic_slot {
             let strict = self
                 .fiber
                 .frames
                 .last()
                 .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
-            return if strict {
-                Err(ExecutionError::ReadOnlyBinding(resolution.atom))
-            } else {
-                Ok(())
+            return match self.realm.set_intrinsic(slot, value) {
+                Err(ExecutionError::ReadOnlyBinding(_)) if !strict => Ok(()),
+                result => result,
             };
         }
-        Err(ExecutionError::UnresolvedBinding(resolution.atom))
+        if let Some(slot) = resolution.global_slot {
+            self.realm.set_slot(slot, value);
+            return Ok(());
+        }
+        let strict = self
+            .fiber
+            .frames
+            .last()
+            .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
+        if strict {
+            Err(ExecutionError::UnresolvedBinding(resolution.atom))
+        } else {
+            self.realm.set(resolution.atom, value)
+        }
     }
 
     fn declare_global_lexical(
@@ -2235,7 +2623,10 @@ impl Isolate {
         mutable: bool,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
-        if resolution.lexical_slot.is_some() || resolution.global_slot.is_some() {
+        if resolution.lexical_slot.is_some()
+            || resolution.intrinsic_slot.is_some()
+            || resolution.global_slot.is_some()
+        {
             return Err(ExecutionError::GlobalLexicalRedeclaration(resolution.atom));
         }
         self.realm.declare_lexical(resolution.atom, mutable)
@@ -2515,8 +2906,32 @@ impl Isolate {
         let callable = self
             .resolve_function_object(constructor)
             .map_err(|_| ExecutionError::NonConstructor(constructor))?;
-        if !matches!(callable.executable, FunctionExecutable::Bytecode { .. }) {
-            return Err(ExecutionError::NonConstructor(constructor));
+        match callable.executable {
+            FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
+                let argument_base = caller_base
+                    .checked_add(callee_register)
+                    .and_then(|base| base.checked_add(1))
+                    .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?;
+                let message = if argument_count == 0 {
+                    None
+                } else {
+                    Some(
+                        self.fiber
+                            .registers
+                            .get(argument_base as usize)
+                            .copied()
+                            .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
+                                callee_register,
+                            )))?,
+                    )
+                };
+                let error = self.create_native_error(kind, message)?;
+                return self.write(caller_base, destination, error);
+            }
+            FunctionExecutable::Bytecode { .. } => {}
+            FunctionExecutable::Native(_) => {
+                return Err(ExecutionError::NonConstructor(constructor));
+            }
         }
         let prototype_atom = self.prototype_atom()?;
         let prototype = self
@@ -2590,6 +3005,11 @@ impl Isolate {
                             .ok_or(ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
                         site.argument_count -= 1;
                     }
+                }
+                FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
+                    let message = self.call_argument(&site, 0)?;
+                    let error = self.create_native_error(kind, message)?;
+                    return self.write(site.caller_base, site.destination, error);
                 }
             }
         }
@@ -2897,6 +3317,24 @@ impl Trace for Isolate {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.trace_roots(tracer);
+    }
+}
+
+#[inline(always)]
+fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
+    match error {
+        ExecutionError::UnresolvedBinding(_) | ExecutionError::UninitializedBinding(_) => {
+            Some(NativeErrorKind::Reference)
+        }
+        ExecutionError::NonCallable(_)
+        | ExecutionError::NonConstructor(_)
+        | ExecutionError::InvalidInstanceofPrototype(_)
+        | ExecutionError::ReadOnlyBinding(_)
+        | ExecutionError::ImmutableBinding(_)
+        | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
+        ExecutionError::GlobalLexicalRedeclaration(_)
+        | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),
+        _ => None,
     }
 }
 
@@ -3714,6 +4152,37 @@ mod tests {
     }
 
     #[test]
+    fn strict_and_sloppy_unresolved_assignment_work_for_every_dispatch_batch() {
+        assert_reference_error_batch::<1>();
+        assert_reference_error_batch::<2>();
+        assert_reference_error_batch::<4>();
+        assert_reference_error_batch::<8>();
+        assert_reference_error_batch::<16>();
+    }
+
+    #[test]
+    fn native_error_constructor_hierarchy_survives_forced_major() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &native_error_constructor_module(),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
+    }
+
+    #[test]
     fn native_function_intrinsics_survive_forced_major_before_forwarding() {
         let mut isolate = test_isolate();
         isolate
@@ -3757,35 +4226,41 @@ mod tests {
     #[test]
     fn isolate_owns_the_atom_table_created_from_mandatory_host_config() {
         let mut isolate = test_isolate();
+        let mandatory_entries = isolate.atoms().stats().entries;
         let atom = isolate
             .atoms_mut()
             .try_intern(JsString::try_from_str("property").unwrap())
             .unwrap();
 
-        assert_eq!(atom.index(), 1);
+        assert_eq!(atom.index() as usize, mandatory_entries);
         assert_eq!(isolate.atoms().get(atom).unwrap().len(), 8);
-        assert_eq!(isolate.atoms().stats().entries, 2);
+        assert_eq!(isolate.atoms().stats().entries, mandatory_entries + 1);
     }
 
     #[test]
-    fn primitive_realm_intrinsics_precede_unattributed_global_bindings() {
+    fn primitive_realm_intrinsics_use_stable_non_writable_slots() {
         let mut isolate = test_isolate();
         let infinity = isolate
             .atoms
             .try_intern(JsString::try_from_str("Infinity").unwrap())
             .unwrap();
-        isolate.realm.set(infinity, Value::from_i32(1)).unwrap();
+        let slot = isolate.realm.resolve_intrinsic(infinity).unwrap();
 
         assert_eq!(
             isolate
                 .scope_value(ScopeResolution {
                     atom: infinity,
                     lexical_slot: None,
-                    global_slot: isolate.realm.resolve(infinity),
+                    intrinsic_slot: Some(slot),
+                    global_slot: None,
                 })
                 .unwrap()
                 .and_then(Value::as_f64),
             Some(f64::INFINITY)
+        );
+        assert_eq!(
+            isolate.realm.set_intrinsic(slot, Value::from_i32(1)),
+            Err(ExecutionError::ReadOnlyBinding(infinity))
         );
     }
 
@@ -3800,6 +4275,7 @@ mod tests {
             .declare_scope_resolution(ScopeResolution {
                 atom: infinity,
                 lexical_slot: None,
+                intrinsic_slot: isolate.realm.resolve_intrinsic(infinity),
                 global_slot: None,
             })
             .unwrap();
@@ -4446,6 +4922,47 @@ mod tests {
         ));
     }
 
+    /// Confirms dispatch-level error conversion preserves constructor identity for each batch.
+    fn assert_reference_error_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        let expected = isolate
+            .realm
+            .error_intrinsics
+            .get(NativeErrorKind::Reference)
+            .constructor
+            .unwrap();
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &unresolved_assignment_module(FunctionStrictness::Strict),
+                ExecutionBudget {
+                    fuel: 2,
+                    quantum: 2,
+                },
+            )
+            .unwrap();
+        let RunOutcome::Thrown(error) = outcome else {
+            panic!("strict unresolved assignment must throw");
+        };
+        assert_eq!(
+            isolate.native_error_kind(error).unwrap(),
+            Some(NativeErrorKind::Reference)
+        );
+        let constructor_atom = isolate.constructor_atom().unwrap();
+        let constructor = isolate.get_data_property(error, constructor_atom).unwrap();
+        assert_eq!(constructor, Some(expected));
+
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &unresolved_assignment_module(FunctionStrictness::Sloppy),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
     fn assert_batch_budget<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -4874,6 +5391,71 @@ mod tests {
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
             ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds one unresolved assignment with caller-selected strict throw or sloppy publication.
+    fn unresolved_assignment_module(strictness: FunctionStrictness) -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(4, 0);
+        builder.emit(Opcode::LoadImmediate, &[0, 42], span).unwrap();
+        builder
+            .emit(Opcode::StoreResolvedScope, &[0, 0], span)
+            .unwrap();
+        builder.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            strictness,
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("missing = 42; missing"),
+            Vec::new(),
+            vec![Arc::from("missing")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `new ReferenceError() instanceof ReferenceError` over native construct dispatch.
+    fn native_error_constructor_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(4, 0);
+        builder.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+        builder.emit(Opcode::Construct, &[1, 0, 0], span).unwrap();
+        builder.emit(Opcode::InstanceOf, &[2, 1, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[2], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("new ReferenceError() instanceof ReferenceError"),
+            Vec::new(),
+            vec![Arc::from("ReferenceError")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
             FunctionId::new(0),
         )
         .unwrap()

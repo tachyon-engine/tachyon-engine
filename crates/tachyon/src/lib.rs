@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_module_intrinsic_assignment_reports_a_read_only_binding() {
+    fn strict_module_intrinsic_assignment_throws_a_type_error() {
         let module = Compiler
             .compile(
                 SourceText::new(
@@ -363,7 +363,7 @@ mod tests {
                     quantum: 8,
                 }
             ),
-            Err(ExecutionError::ReadOnlyBinding(_))
+            Ok(RunOutcome::Thrown(_))
         ));
     }
 
@@ -651,7 +651,7 @@ mod tests {
             Arc::from("function scoped() { { let hidden = 1; } return hidden; } scoped();"),
         );
         let module = Compiler.compile(source, CompileOptions::default()).unwrap();
-        let error = test_isolate()
+        let outcome = test_isolate()
             .execute(
                 &module,
                 ExecutionBudget {
@@ -659,8 +659,8 @@ mod tests {
                     quantum: 16,
                 },
             )
-            .unwrap_err();
-        assert!(matches!(error, ExecutionError::UnresolvedBinding(_)));
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Thrown(_)));
     }
 
     #[test]
@@ -763,7 +763,7 @@ mod tests {
                     quantum: 16
                 }
             ),
-            Err(ExecutionError::UninitializedBinding(_))
+            Ok(RunOutcome::Thrown(_))
         ));
         let immutable = compile(58, "const.js", "const value = 1; value = 2;");
         assert!(matches!(
@@ -774,7 +774,7 @@ mod tests {
                     quantum: 16
                 }
             ),
-            Err(ExecutionError::ImmutableBinding(_))
+            Ok(RunOutcome::Thrown(_))
         ));
         let redeclaration = compile(59, "redeclaration.js", "let retained = 2;");
         assert!(matches!(
@@ -785,7 +785,7 @@ mod tests {
                     quantum: 16
                 }
             ),
-            Err(ExecutionError::GlobalLexicalRedeclaration(_))
+            Ok(RunOutcome::Thrown(_))
         ));
     }
 
@@ -814,7 +814,8 @@ mod tests {
                 CompileOptions::default(),
             )
             .unwrap();
-        let mut code_limited = test_isolate_with_realm_limits(RealmLimits::new(1, 2));
+        let mut code_limited =
+            test_isolate_with_realm_limits(RealmLimits::new(1, 2).with_max_shapes(64));
         for _ in 0..2 {
             code_limited
                 .execute(
@@ -988,6 +989,23 @@ mod tests {
             "function readThis() { 'use strict'; return this; } readThis.call(undefined) === undefined;",
         );
         assert_eq!(strict.as_immediate(), Some(tachyon_value::Immediate::True));
+    }
+
+    #[test]
+    fn strict_reference_failures_are_catchable_native_error_objects() {
+        let caught = execute_source(
+            63,
+            "function fail() { 'use strict'; missing = 1; } try { fail(); } catch (error) { error.constructor === ReferenceError; }",
+        );
+        assert_eq!(caught.as_immediate(), Some(tachyon_value::Immediate::True));
+        let constructed = execute_source(
+            64,
+            "var called = ReferenceError(); var built = new ReferenceError(); called.constructor === ReferenceError && built instanceof ReferenceError;",
+        );
+        assert_eq!(
+            constructed.as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
     }
 
     #[test]

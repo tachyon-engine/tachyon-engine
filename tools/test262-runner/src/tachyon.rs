@@ -138,11 +138,28 @@ fn execute_module(
     };
     match outcome {
         RunOutcome::Completed(_) => None,
-        RunOutcome::Thrown(value) => Some(EngineOutcome::Error {
-            phase: Phase::Runtime,
-            error_type: "Error".into(),
-            message: format!("Tachyon threw {value:?} without an exception object type").into(),
-        }),
+        RunOutcome::Thrown(value) => {
+            let kind = match isolate.native_error_kind(value) {
+                Ok(Some(kind)) => kind,
+                Ok(None) => {
+                    return Some(EngineOutcome::Error {
+                        phase: Phase::Runtime,
+                        error_type: "Error".into(),
+                        message: format!("Tachyon threw non-native value {value:?}").into(),
+                    });
+                }
+                Err(error) => {
+                    return Some(unsupported(format!(
+                        "Tachyon could not classify thrown value {value:?}: {error:?}"
+                    )));
+                }
+            };
+            Some(EngineOutcome::Error {
+                phase: Phase::Runtime,
+                error_type: kind.as_str().into(),
+                message: format!("Tachyon threw native {}", kind.as_str()).into(),
+            })
+        }
         RunOutcome::BudgetExhausted => Some(EngineOutcome::Timeout {
             message: format!("Tachyon exhausted the {EXECUTION_FUEL_LIMIT} instruction fuel limit")
                 .into(),
@@ -242,6 +259,15 @@ mod tests {
     }
 
     #[test]
+    fn native_runtime_errors_keep_their_ecmascript_type() {
+        assert!(matches!(
+            execute(&composed("'use strict'; missing = 1;", &[], false)),
+            EngineOutcome::Error { phase: crate::Phase::Runtime, ref error_type, .. }
+                if &**error_type == "ReferenceError"
+        ));
+    }
+
+    #[test]
     fn control_flow_harness_executes_in_tachyon() {
         assert_eq!(
             execute(&composed(
@@ -254,14 +280,15 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_member_harness_and_async_protocol_are_explicit() {
+    fn harness_reference_errors_and_unsupported_async_are_explicit() {
         assert!(matches!(
             execute(&composed(
                 "1 + 2;",
                 &[("assert.js", "assert.value;")],
                 false
             )),
-            EngineOutcome::Unsupported { .. }
+            EngineOutcome::Error { phase: crate::Phase::Runtime, ref error_type, .. }
+                if &**error_type == "ReferenceError"
         ));
         assert!(matches!(
             execute(&composed("1 + 2;", &[], true)),
