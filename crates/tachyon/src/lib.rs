@@ -1934,7 +1934,7 @@ mod tests {
         assert_eq!(
             execute_source(
                 158,
-                "Number.isNaN(NaN) && !Number.isNaN('NaN') && Number.isFinite(1.5) && !Number.isFinite(Infinity) && Number.isInteger(-0) && !Number.isInteger(1.5);",
+                "Number.isNaN(NaN) && !Number.isNaN('NaN') && Number.isFinite(1.5) && !Number.isFinite(Infinity) && Number.isInteger(-0) && !Number.isInteger(1.5) && Number.isSafeInteger(9007199254740991) && !Number.isSafeInteger(9007199254740992);",
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True),

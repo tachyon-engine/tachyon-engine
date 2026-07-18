@@ -262,6 +262,7 @@ enum NativeFunction {
     NumberIsNaN,
     NumberIsFinite,
     NumberIsInteger,
+    NumberIsSafeInteger,
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
@@ -353,7 +354,10 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
-            Self::NumberIsNaN | Self::NumberIsFinite | Self::NumberIsInteger => 1,
+            Self::NumberIsNaN
+            | Self::NumberIsFinite
+            | Self::NumberIsInteger
+            | Self::NumberIsSafeInteger => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -386,6 +390,7 @@ impl NativeFunction {
             Self::NumberIsNaN => "isNaN",
             Self::NumberIsFinite => "isFinite",
             Self::NumberIsInteger => "isInteger",
+            Self::NumberIsSafeInteger => "isSafeInteger",
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
@@ -839,6 +844,7 @@ struct Realm {
     number_is_nan: Option<Value>,
     number_is_finite: Option<Value>,
     number_is_integer: Option<Value>,
+    number_is_safe_integer: Option<Value>,
     boolean_constructor: Option<Value>,
     function_constructor: Option<Value>,
     math_object: Option<Value>,
@@ -905,6 +911,7 @@ impl Realm {
             number_is_nan: None,
             number_is_finite: None,
             number_is_integer: None,
+            number_is_safe_integer: None,
             boolean_constructor: None,
             function_constructor: None,
             math_object: None,
@@ -1198,6 +1205,7 @@ impl Trace for Realm {
         self.number_is_nan.trace(tracer);
         self.number_is_finite.trace(tracer);
         self.number_is_integer.trace(tracer);
+        self.number_is_safe_integer.trace(tracer);
         self.boolean_constructor.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
@@ -1848,6 +1856,10 @@ impl Isolate {
         self.realm.number_is_integer = Some(is_integer);
         let is_integer_atom = self.intern_intrinsic_name(b"isInteger")?;
         self.set_intrinsic_data_property(number, is_integer_atom, is_integer, true)?;
+        let is_safe_integer = allocate(self, NativeFunction::NumberIsSafeInteger)?;
+        self.realm.number_is_safe_integer = Some(is_safe_integer);
+        let is_safe_integer_atom = self.intern_intrinsic_name(b"isSafeInteger")?;
+        self.set_intrinsic_data_property(number, is_safe_integer_atom, is_safe_integer, true)?;
         self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
         Ok(())
     }
@@ -6678,7 +6690,8 @@ impl Isolate {
                 FunctionExecutable::Native(
                     native @ (NativeFunction::NumberIsNaN
                     | NativeFunction::NumberIsFinite
-                    | NativeFunction::NumberIsInteger),
+                    | NativeFunction::NumberIsInteger
+                    | NativeFunction::NumberIsSafeInteger),
                 ) => {
                     let argument = self
                         .call_argument(&site, 0)?
@@ -6688,6 +6701,11 @@ impl Isolate {
                         NativeFunction::NumberIsFinite => number.is_finite(),
                         NativeFunction::NumberIsInteger => {
                             number.is_finite() && number.fract() == 0.0
+                        }
+                        NativeFunction::NumberIsSafeInteger => {
+                            number.is_finite()
+                                && number.fract() == 0.0
+                                && number.abs() <= crate::array::MAX_SAFE_INTEGER as f64
                         }
                         _ => unreachable!("numeric predicate dispatch is exhaustive"),
                     });
