@@ -1150,6 +1150,10 @@ pub struct BindingPlanEntry {
 pub struct FunctionLayout {
     pub register_count: u32,
     pub argument_count: u32,
+    /// Number of parameters before the first default/rest parameter for the `length` property.
+    pub function_length: u32,
+    /// Optional module scope-name index used by the virtual `name` property.
+    pub name_scope: Option<u32>,
     pub temporary_register_count: u32,
     pub feedback_slot_count: u32,
     pub environment_slot_count: u32,
@@ -1477,7 +1481,12 @@ impl CompiledModule {
             )?;
             let handler_depth =
                 validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
-            validate_function_layout(template.id, template.metadata.layout, handler_depth)?;
+            validate_function_layout(
+                template.id,
+                template.metadata.layout,
+                handler_depth,
+                scope_name_count,
+            )?;
             validate_feedback_sites(
                 template.id,
                 &template.metadata.feedback_sites,
@@ -1556,11 +1565,15 @@ fn validate_function_layout(
     function: FunctionId,
     layout: FunctionLayout,
     handler_depth: HandlerDepth,
+    scope_name_count: u32,
 ) -> Result<(), ModuleBuildError> {
     if layout.argument_count > layout.register_count
         || layout.temporary_register_count > layout.register_count - layout.argument_count
         || layout.max_handler_depth < handler_depth.handlers
         || layout.max_completion_depth < handler_depth.finally_handlers
+        || layout
+            .name_scope
+            .is_some_and(|name_scope| name_scope >= scope_name_count)
     {
         return Err(ModuleBuildError::InvalidFunctionLayout { function, layout });
     }

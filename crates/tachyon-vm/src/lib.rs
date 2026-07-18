@@ -10,6 +10,7 @@
 //! This crate intentionally has no host I/O surface.
 
 mod atom;
+mod bound_function;
 mod finalization;
 mod for_in;
 mod object;
@@ -39,6 +40,7 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
+use bound_function::BoundFunctionData;
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 use object::{
     OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId, ShapeTable,
@@ -189,6 +191,9 @@ pub enum ExecutionError {
     IntrinsicBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
+    BoundArgumentAllocationFailed,
+    BoundArgumentCountOverflow,
+    BoundNameAllocationFailed,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),
     UnsupportedErrorMessage(Value),
@@ -251,6 +256,7 @@ enum NativeFunction {
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
+    FunctionPrototypeBind,
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
     ArrayConstructor,
@@ -259,6 +265,20 @@ enum NativeFunction {
 }
 
 impl NativeFunction {
+    #[inline(always)]
+    const fn is_constructor(self) -> bool {
+        matches!(
+            self,
+            Self::ObjectConstructor
+                | Self::StringConstructor
+                | Self::NumberConstructor
+                | Self::BooleanConstructor
+                | Self::FunctionConstructor
+                | Self::ErrorConstructor(_)
+                | Self::ArrayConstructor
+        )
+    }
+
     #[inline(always)]
     const fn length(self) -> i32 {
         match self {
@@ -281,6 +301,7 @@ impl NativeFunction {
             | Self::NumberConstructor
             | Self::BooleanConstructor
             | Self::FunctionPrototypeCall
+            | Self::FunctionPrototypeBind
             | Self::FunctionConstructor
             | Self::ErrorConstructor(_)
             | Self::ArrayConstructor
@@ -313,6 +334,7 @@ impl NativeFunction {
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
+            Self::FunctionPrototypeBind => "bind",
             Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
             Self::ErrorConstructor(NativeErrorKind::Reference) => "ReferenceError",
@@ -393,6 +415,7 @@ enum FunctionExecutable {
         environment: Option<GcRef<Environment>>,
     },
     Native(NativeFunction),
+    Bound(GcRef<BoundFunctionData>),
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -442,11 +465,24 @@ struct CallSite {
     destination: u32,
     callee: Value,
     argument_base: u32,
+    argument_prefix: Option<GcRef<BoundFunctionData>>,
+    argument_prefix_offset: u32,
+    argument_prefix_count: u32,
     argument_count: u32,
     this_value: Value,
     new_target: Value,
     construct_receiver: Option<Value>,
     call_site: WordOffset,
+}
+
+#[derive(Clone, Copy)]
+struct BoundFunctionSnapshot {
+    bound_target: Value,
+    call_target: Value,
+    bound_this: Value,
+    argument_count: u32,
+    length: Value,
+    name: Value,
 }
 
 impl Trace for FunctionObject {
@@ -455,6 +491,9 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::Bytecode { environment, .. } = &mut self.executable {
             environment.trace(tracer);
         }
+        if let FunctionExecutable::Bound(data) = &mut self.executable {
+            data.trace(tracer);
+        }
         self.function_prototype.trace(tracer);
         self.ordinary.trace(tracer);
     }
@@ -462,6 +501,7 @@ impl Trace for FunctionObject {
 
 #[derive(Clone, Copy)]
 struct VmTypes {
+    bound_function: GcType<BoundFunctionData>,
     environment: GcType<Environment>,
     for_in_iterator: GcType<ForInIterator>,
     function: GcType<FunctionObject>,
@@ -678,6 +718,7 @@ struct Realm {
     global_object: Option<Value>,
     function_prototype: Option<Value>,
     function_prototype_call: Option<Value>,
+    function_prototype_bind: Option<Value>,
     array_constructor: Option<Value>,
     array_prototype: Option<Value>,
     array_concat: Option<Value>,
@@ -720,6 +761,7 @@ impl Realm {
             global_object: None,
             function_prototype: None,
             function_prototype_call: None,
+            function_prototype_bind: None,
             array_constructor: None,
             array_prototype: None,
             array_concat: None,
@@ -989,6 +1031,7 @@ impl Trace for Realm {
         self.global_object.trace(tracer);
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
+        self.function_prototype_bind.trace(tracer);
         self.array_constructor.trace(tracer);
         self.array_prototype.trace(tracer);
         self.array_concat.trace(tracer);
@@ -1149,6 +1192,9 @@ struct Frame {
     construct_receiver: Option<Value>,
     strictness: FunctionStrictness,
     argument_base: u32,
+    argument_prefix: Option<GcRef<BoundFunctionData>>,
+    argument_prefix_offset: u32,
+    argument_prefix_count: u32,
     argument_count: u32,
     handler_base: u32,
     completion_base: u32,
@@ -1192,13 +1238,23 @@ impl Fiber {
             frame.this_value.trace(tracer);
             frame.new_target.trace(tracer);
             frame.construct_receiver.trace(tracer);
+            frame.argument_prefix.trace(tracer);
             if let Some(return_register) = frame.return_register {
                 debug_assert!((return_register.index() as usize) < self.registers.len());
             }
+            debug_assert!(frame.argument_prefix_count <= frame.argument_count);
+            debug_assert!(
+                frame.argument_prefix.is_some()
+                    || (frame.argument_prefix_offset == 0 && frame.argument_prefix_count == 0)
+            );
             debug_assert!(
                 frame
                     .argument_base
-                    .checked_add(frame.argument_count)
+                    .checked_add(
+                        frame
+                            .argument_count
+                            .saturating_sub(frame.argument_prefix_count),
+                    )
                     .is_some_and(|end| end as usize <= self.registers.len())
             );
             let _is_strict = matches!(frame.strictness, FunctionStrictness::Strict);
@@ -1242,6 +1298,9 @@ impl Isolate {
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
+            bound_function: registry
+                .try_register("BoundFunctionData")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             environment: registry
                 .try_register("Environment")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1638,6 +1697,18 @@ impl Isolate {
         )?;
         self.realm.function_prototype = Some(function_prototype);
         self.set_function_internal_prototype(call, function_prototype)?;
+        let bind = self.allocate_native_function(
+            NativeFunction::FunctionPrototypeBind,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.function_prototype_bind = Some(bind);
+        let bind_atom = self.intern_intrinsic_name(b"bind")?;
+        self.set_intrinsic_data_property(function_prototype, bind_atom, bind, true)?;
         let constructor = self.allocate_native_function(
             NativeFunction::FunctionConstructor,
             OrdinaryObject {
@@ -1903,6 +1974,238 @@ impl Isolate {
             )
             .map(|function| Value::from_heap_ref(function.raw()))
             .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Creates one bound exotic while flattening nested wrappers into one immutable argument prefix.
+    fn create_bound_function(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let bound_target = site.this_value;
+        self.resolve_function_object(bound_target)?;
+        let length =
+            self.bound_function_length(bound_target, site.argument_count.saturating_sub(1))?;
+        let name = self.allocate_bound_function_name(bound_target)?;
+        self.write(site.caller_base, site.destination, name)?;
+        let supplied_this = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let target_object = self.resolve_function_object(bound_target)?;
+        let (call_target, bound_this, existing_arguments) = match target_object.executable {
+            FunctionExecutable::Bound(data) => {
+                let snapshot = self.bound_function_snapshot(data)?;
+                (snapshot.call_target, snapshot.bound_this, Some(data))
+            }
+            _ => (bound_target, supplied_this, None),
+        };
+        let existing_count = existing_arguments
+            .map(|data| {
+                self.bound_function_snapshot(data)
+                    .map(|data| data.argument_count)
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let supplied_count = site.argument_count.saturating_sub(1);
+        let argument_count = existing_count
+            .checked_add(supplied_count)
+            .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+        let mut arguments = Vec::new();
+        arguments
+            .try_reserve_exact(argument_count as usize)
+            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+        if let Some(data) = existing_arguments {
+            self.append_bound_arguments(data, &mut arguments)?;
+        }
+        for index in 0..supplied_count {
+            arguments.push(
+                self.call_argument(site, index + 1)?
+                    .expect("supplied bound argument is within the call window"),
+            );
+        }
+        let data = {
+            let roots = &mut VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            };
+            self.heap
+                .try_allocate_external_with_gc(
+                    self.types.bound_function,
+                    0,
+                    BoundFunctionData {
+                        bound_target,
+                        call_target,
+                        bound_this,
+                        arguments: arguments.into_boxed_slice(),
+                        length,
+                        name,
+                    },
+                    AllocationSpace::Young,
+                    roots,
+                )
+                .map_err(ExecutionError::HeapAllocation)?
+        };
+        let internal_prototype = self
+            .resolve_function_object(site.this_value)?
+            .ordinary
+            .prototype;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let function = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    executable: FunctionExecutable::Bound(data),
+                    function_prototype: None,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: internal_prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok(Value::from_heap_ref(function.raw()))
+    }
+
+    /// Computes the configurable bound length from the target's own numeric length property.
+    fn bound_function_length(
+        &mut self,
+        target: Value,
+        supplied_arguments: u32,
+    ) -> Result<Value, ExecutionError> {
+        let length_atom = self.length_atom()?;
+        let Some((length, _)) = self.own_data_property_with_attributes(target, length_atom)? else {
+            return Ok(Value::from_i32(0));
+        };
+        let Some(length) = numeric_value(length) else {
+            return Ok(Value::from_i32(0));
+        };
+        if length == f64::INFINITY {
+            return Ok(Value::from_f64(f64::INFINITY));
+        }
+        let length = length.trunc().max(0.0) - f64::from(supplied_arguments);
+        Ok(Value::from_f64(length.max(0.0)))
+    }
+
+    /// Materializes `"bound " + targetName` with one exact UTF-16 reserve before GC allocation.
+    fn allocate_bound_function_name(&mut self, target: Value) -> Result<Value, ExecutionError> {
+        const PREFIX: &[u8] = b"bound ";
+        let name_atom = self.name_atom()?;
+        let target_name = self
+            .get_data_property(target, name_atom)?
+            .filter(|value| self.is_string_value(*value));
+        let target_length = target_name
+            .map(|value| self.string_value_length(value))
+            .transpose()?
+            .unwrap_or(0);
+        let capacity = PREFIX
+            .len()
+            .checked_add(target_length)
+            .ok_or(ExecutionError::BoundNameAllocationFailed)?;
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::BoundNameAllocationFailed)?;
+        units.extend(PREFIX.iter().map(|&byte| u16::from(byte)));
+        if let Some(target_name) = target_name {
+            self.append_primitive_string_units(target_name, &mut units)?;
+        }
+        let name = JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(name)
+    }
+
+    #[inline(always)]
+    fn is_string_value(&self, value: Value) -> bool {
+        value
+            .as_heap_ref()
+            .is_some_and(|raw| self.heap.checked_reference(raw, self.types.string).is_ok())
+    }
+
+    fn string_value_length(&mut self, value: Value) -> Result<usize, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedErrorMessage(value))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedErrorMessage(value))?;
+        self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(string, self.types.string)
+                    .map(JsString::len)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn bound_function_snapshot(
+        &mut self,
+        data: GcRef<BoundFunctionData>,
+    ) -> Result<BoundFunctionSnapshot, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let data = no_gc
+                    .borrow(data, self.types.bound_function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok(BoundFunctionSnapshot {
+                    bound_target: data.bound_target,
+                    call_target: data.call_target,
+                    bound_this: data.bound_this,
+                    argument_count: u32::try_from(data.arguments.len())
+                        .map_err(|_| ExecutionError::BoundArgumentCountOverflow)?,
+                    length: data.length,
+                    name: data.name,
+                })
+            })
+        })
+    }
+
+    fn bound_function_argument(
+        &mut self,
+        data: GcRef<BoundFunctionData>,
+        index: u32,
+    ) -> Result<Value, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.bound_function)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .arguments
+                    .get(index as usize)
+                    .copied()
+                    .ok_or(ExecutionError::BoundArgumentCountOverflow)
+            })
+        })
+    }
+
+    fn append_bound_arguments(
+        &mut self,
+        data: GcRef<BoundFunctionData>,
+        output: &mut Vec<Value>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let data = no_gc
+                    .borrow(data, self.types.bound_function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                output.extend_from_slice(&data.arguments);
+                Ok(())
+            })
+        })
     }
 
     /// Allocates an empty ordinary object with a caller-selected prototype through managed GC.
@@ -2351,16 +2654,19 @@ impl Isolate {
     ) -> Result<Option<Value>, ExecutionError> {
         let mut current = receiver;
         loop {
-            if let Some(value) = self.native_function_metadata_property(current, key)? {
-                return Ok(Some(value));
-            }
-            if self.is_function_prototype_property(current, key) {
-                self.intrinsic_property_atoms.prototype = Some(key);
-                return self.ensure_function_prototype(current).map(Some);
-            }
             let (_, snapshot) = self.object_snapshot(current)?;
-            if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
-                return Ok(Some(value));
+            if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
+                if let Some(value) = self.property_value_from_snapshot(snapshot, property)? {
+                    return Ok(Some(value));
+                }
+            } else {
+                if let Some(value) = self.function_metadata_property(current, key)? {
+                    return Ok(Some(value));
+                }
+                if self.is_function_prototype_property(current, key) {
+                    self.intrinsic_property_atoms.prototype = Some(key);
+                    return self.ensure_function_prototype(current).map(Some);
+                }
             }
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
                 return Ok(None);
@@ -2389,7 +2695,13 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<Option<(Value, PropertyAttributes)>, ExecutionError> {
-        if let Some(value) = self.native_function_metadata_property(receiver, key)? {
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
+            return Ok(self
+                .property_value_from_snapshot(snapshot, property)?
+                .map(|value| (value, property.attributes)));
+        }
+        if let Some(value) = self.function_metadata_property(receiver, key)? {
             return Ok(Some((value, PropertyAttributes::data(false, false, true))));
         }
         if self.is_function_prototype_property(receiver, key) {
@@ -2397,17 +2709,11 @@ impl Isolate {
             let value = self.ensure_function_prototype(receiver)?;
             return Ok(Some((value, PropertyAttributes::data(true, false, false))));
         }
-        let (_, snapshot) = self.object_snapshot(receiver)?;
-        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
-            return Ok(None);
-        };
-        Ok(self
-            .property_value_from_snapshot(snapshot, property)?
-            .map(|value| (value, property.attributes)))
+        Ok(None)
     }
 
-    /// Exposes native callable name/length as non-enumerable own virtual data properties.
-    fn native_function_metadata_property(
+    /// Exposes callable metadata as non-enumerable own virtual data properties.
+    fn function_metadata_property(
         &mut self,
         receiver: Value,
         key: AtomId,
@@ -2415,18 +2721,72 @@ impl Isolate {
         let Ok(function) = self.resolve_function_object(receiver) else {
             return Ok(None);
         };
-        let FunctionExecutable::Native(native) = function.executable else {
-            return Ok(None);
-        };
-        if key == self.length_atom()? {
-            return Ok(Some(Value::from_i32(native.length())));
+        match function.executable {
+            FunctionExecutable::Bound(data) => {
+                let metadata = self.bound_function_snapshot(data)?;
+                if key == self.length_atom()? {
+                    return Ok(Some(metadata.length));
+                }
+                if key == self.name_atom()? {
+                    return Ok(Some(metadata.name));
+                }
+                Ok(None)
+            }
+            FunctionExecutable::Native(native) => {
+                if key == self.length_atom()? {
+                    return Ok(Some(Value::from_i32(native.length())));
+                }
+                if key != self.name_atom()? {
+                    return Ok(None);
+                }
+                let name = JsString::try_from_latin1(native.name().as_bytes())
+                    .map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
+            FunctionExecutable::Bytecode { code, function, .. } => {
+                let is_length = key == self.length_atom()?;
+                let is_name = !is_length && key == self.name_atom()?;
+                if !is_length && !is_name {
+                    return Ok(None);
+                }
+                let template = self
+                    .loaded_code(code)?
+                    .module
+                    .function(function)
+                    .ok_or(ExecutionError::MissingEntryFunction(function))?;
+                if is_length {
+                    return Ok(Some(Value::from_i32(
+                        i32::try_from(template.layout().function_length).unwrap_or(i32::MAX),
+                    )));
+                }
+                let name = template
+                    .layout()
+                    .name_scope
+                    .and_then(|scope| {
+                        self.loaded_code(code)
+                            .ok()?
+                            .module
+                            .scope_names()
+                            .get(scope as usize)
+                    })
+                    .map_or("", AsRef::as_ref);
+                let name =
+                    JsString::try_from_str(name).map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
         }
-        if key != self.name_atom()? {
-            return Ok(None);
+    }
+
+    /// Tests the virtual metadata key without materializing a runtime name string.
+    fn is_function_metadata_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<bool, ExecutionError> {
+        if self.resolve_function_object(receiver).is_err() {
+            return Ok(false);
         }
-        let name = JsString::try_from_latin1(native.name().as_bytes())
-            .map_err(ExecutionError::PropertyKeyString)?;
-        self.allocate_runtime_string(name).map(Some)
+        Ok(key == self.length_atom()? || key == self.name_atom()?)
     }
 
     /// Copies enumerable ordinary data slots in stable shape insertion order.
@@ -2527,15 +2887,34 @@ impl Isolate {
         key: AtomId,
         descriptor: DataPropertyDescriptor,
     ) -> Result<(), ExecutionError> {
-        if self.is_function_prototype_property(receiver, key)
-            || self
-                .native_function_metadata_property(receiver, key)?
-                .is_some()
-        {
+        if self.is_function_prototype_property(receiver, key) {
             return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         let property = self.shapes.lookup(snapshot.shape, key);
+        if property.is_none()
+            && let Some(current_value) = self.function_metadata_property(receiver, key)?
+        {
+            let current_attributes = PropertyAttributes::data(false, false, true);
+            self.validate_data_property_redefinition(
+                receiver,
+                current_value,
+                current_attributes,
+                descriptor,
+            )?;
+            let attributes = PropertyAttributes::data(
+                descriptor.writable.unwrap_or(false),
+                descriptor.enumerable.unwrap_or(false),
+                descriptor.configurable.unwrap_or(true),
+            );
+            return self.add_property_slot(
+                object,
+                snapshot,
+                key,
+                descriptor.value.unwrap_or(current_value),
+                attributes,
+            );
+        }
         let current = property
             .map(|property| self.property_value_from_snapshot(snapshot, property))
             .transpose()?
@@ -2852,10 +3231,11 @@ impl Isolate {
         let mut current = source;
         loop {
             let virtual_count = match self.resolve_function_object(current) {
-                Ok(function) => {
-                    1 + usize::from(matches!(function.executable, FunctionExecutable::Native(_)))
-                        * 2
-                }
+                Ok(function) => match function.executable {
+                    FunctionExecutable::Native(_) => 3,
+                    FunctionExecutable::Bound(_) => 2,
+                    FunctionExecutable::Bytecode { .. } => 3,
+                },
                 Err(_) => 0,
             };
             let (_, snapshot) = self.object_snapshot(current)?;
@@ -2883,13 +3263,23 @@ impl Isolate {
         receiver: Value,
         keys: &mut ForInKeySet,
     ) -> Result<(), ExecutionError> {
-        let Ok(function) = self.resolve_function_object(receiver) else {
+        if self.resolve_function_object(receiver).is_err() {
             return Ok(());
-        };
-        keys.insert(self.prototype_atom()?);
-        if matches!(function.executable, FunctionExecutable::Native(_)) {
-            keys.insert(self.name_atom()?);
-            keys.insert(self.length_atom()?);
+        }
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let name = self.name_atom()?;
+        if self.shapes.lookup(snapshot.shape, name).is_none() {
+            keys.insert(name);
+        }
+        let length = self.length_atom()?;
+        if self.shapes.lookup(snapshot.shape, length).is_none() {
+            keys.insert(length);
+        }
+        let prototype = self.prototype_atom()?;
+        if self.shapes.lookup(snapshot.shape, prototype).is_none()
+            && self.is_function_prototype_property(receiver, prototype)
+        {
+            keys.insert(prototype);
         }
         Ok(())
     }
@@ -3197,22 +3587,21 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn is_function_prototype_property(&self, receiver: Value, key: AtomId) -> bool {
-        let Some(raw) = receiver.as_heap_ref() else {
-            return false;
-        };
-        if self
-            .heap
-            .checked_reference(raw, self.types.function)
-            .is_err()
-        {
-            return false;
-        }
-        self.intrinsic_property_atoms.prototype == Some(key)
+    fn is_function_prototype_property(&mut self, receiver: Value, key: AtomId) -> bool {
+        let is_prototype_name = self.intrinsic_property_atoms.prototype == Some(key)
             || self
                 .atoms
                 .get(key)
-                .is_some_and(|name| name.equals_latin1(b"prototype"))
+                .is_some_and(|name| name.equals_latin1(b"prototype"));
+        if !is_prototype_name {
+            return false;
+        }
+        self.resolve_function_object(receiver)
+            .is_ok_and(|function| match function.executable {
+                FunctionExecutable::Bytecode { .. } => true,
+                FunctionExecutable::Native(native) => native.is_constructor(),
+                FunctionExecutable::Bound(_) => false,
+            })
     }
 
     /// Materializes the spec-visible function prototype only on first observation or construction.
@@ -3354,14 +3743,15 @@ impl Isolate {
     fn ordinary_instance_of(
         &mut self,
         value: Value,
-        constructor: Value,
+        mut constructor: Value,
     ) -> Result<bool, ExecutionError> {
-        let raw = constructor
-            .as_heap_ref()
-            .ok_or(ExecutionError::NonCallable(constructor))?;
-        self.heap
-            .checked_reference(raw, self.types.function)
-            .map_err(|_| ExecutionError::NonCallable(constructor))?;
+        loop {
+            let function = self.resolve_function_object(constructor)?;
+            let FunctionExecutable::Bound(data) = function.executable else {
+                break;
+            };
+            constructor = self.bound_function_snapshot(data)?.call_target;
+        }
         let prototype_atom = self.prototype_atom()?;
         let prototype = self.get_data_property(constructor, prototype_atom)?.ok_or(
             ExecutionError::InvalidInstanceofPrototype(Value::from_immediate(Immediate::Undefined)),
@@ -3418,6 +3808,9 @@ impl Isolate {
             self.set_object_shape(object, shape)?;
             return self.update_property_slot(snapshot, property.slot, value);
         }
+        if self.is_function_metadata_property(receiver, key)? {
+            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        }
         if !snapshot.extensible {
             return Err(ExecutionError::NonExtensibleObject(receiver));
         }
@@ -3459,8 +3852,20 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<bool, ExecutionError> {
-        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let (object, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            if self.is_function_prototype_property(receiver, key) {
+                return Ok(false);
+            }
+            if self.is_function_metadata_property(receiver, key)? {
+                self.add_property_slot(
+                    object,
+                    snapshot,
+                    key,
+                    Value::from_immediate(Immediate::Hole),
+                    PropertyAttributes::data(false, false, true),
+                )?;
+            }
             return Ok(true);
         };
         if !property.attributes.configurable() {
@@ -4573,6 +4978,9 @@ impl Isolate {
                         .checked_add(operands[1])
                         .and_then(|base| base.checked_add(1))
                         .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
                     argument_count: operands[2],
                     this_value: Value::from_immediate(Immediate::Undefined),
                     new_target: Value::from_immediate(Immediate::Undefined),
@@ -4591,6 +4999,9 @@ impl Isolate {
                         .checked_add(operands[1])
                         .and_then(|base| base.checked_add(2))
                         .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
                     argument_count: operands[2],
                     this_value: receiver,
                     new_target: Value::from_immediate(Immediate::Undefined),
@@ -4904,6 +5315,9 @@ impl Isolate {
             new_target: Value::from_immediate(Immediate::Undefined),
             strictness,
             argument_base: 0,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
             argument_count: 0,
             handler_base: 0,
             completion_base: 0,
@@ -4975,104 +5389,7 @@ impl Isolate {
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         let constructor = self.read(caller_base, callee_register)?;
-        let callable = self
-            .resolve_function_object(constructor)
-            .map_err(|_| ExecutionError::NonConstructor(constructor))?;
-        match callable.executable {
-            FunctionExecutable::Native(
-                native @ (NativeFunction::StringConstructor
-                | NativeFunction::NumberConstructor
-                | NativeFunction::BooleanConstructor),
-            ) => {
-                let site = CallSite {
-                    caller_base,
-                    destination,
-                    callee: constructor,
-                    argument_base: caller_base
-                        .checked_add(callee_register)
-                        .and_then(|base| base.checked_add(1))
-                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
-                    argument_count,
-                    this_value: Value::from_immediate(Immediate::Undefined),
-                    new_target: constructor,
-                    construct_receiver: None,
-                    call_site,
-                };
-                let value = self.primitive_constructor_value(native, &site)?;
-                return self.write(caller_base, destination, value);
-            }
-            FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
-                let site = CallSite {
-                    caller_base,
-                    destination,
-                    callee: constructor,
-                    argument_base: caller_base
-                        .checked_add(callee_register)
-                        .and_then(|base| base.checked_add(1))
-                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
-                    argument_count,
-                    this_value: Value::from_immediate(Immediate::Undefined),
-                    new_target: constructor,
-                    construct_receiver: None,
-                    call_site,
-                };
-                let object = self.create_object_from_site(&site)?;
-                return self.write(caller_base, destination, object);
-            }
-            FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
-                let argument_base = caller_base
-                    .checked_add(callee_register)
-                    .and_then(|base| base.checked_add(1))
-                    .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?;
-                let message = if argument_count == 0 {
-                    None
-                } else {
-                    Some(
-                        self.fiber
-                            .registers
-                            .get(argument_base as usize)
-                            .copied()
-                            .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
-                                callee_register,
-                            )))?,
-                    )
-                };
-                let error = self.create_native_error(kind, message)?;
-                return self.write(caller_base, destination, error);
-            }
-            FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
-                let site = CallSite {
-                    caller_base,
-                    destination,
-                    callee: constructor,
-                    argument_base: caller_base
-                        .checked_add(callee_register)
-                        .and_then(|base| base.checked_add(1))
-                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
-                    argument_count,
-                    this_value: Value::from_immediate(Immediate::Undefined),
-                    new_target: constructor,
-                    construct_receiver: None,
-                    call_site,
-                };
-                let array = self.create_array_from_site(&site)?;
-                return self.write(caller_base, destination, array);
-            }
-            FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
-                return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
-            }
-            FunctionExecutable::Bytecode { .. } => {}
-            FunctionExecutable::Native(_) => {
-                return Err(ExecutionError::NonConstructor(constructor));
-            }
-        }
-        let prototype_atom = self.prototype_atom()?;
-        let prototype = self
-            .get_data_property(constructor, prototype_atom)?
-            .filter(|value| self.is_object_value(*value))
-            .unwrap_or(Value::from_immediate(Immediate::Null));
-        let receiver = self.create_ordinary_object_with_prototype(prototype)?;
-        self.call(CallSite {
+        let mut site = CallSite {
             caller_base,
             destination,
             callee: constructor,
@@ -5080,12 +5397,95 @@ impl Isolate {
                 .checked_add(callee_register)
                 .and_then(|base| base.checked_add(1))
                 .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
             argument_count,
-            this_value: receiver,
+            this_value: Value::from_immediate(Immediate::Undefined),
             new_target: constructor,
-            construct_receiver: Some(receiver),
+            construct_receiver: None,
             call_site,
-        })
+        };
+        loop {
+            let callable = self
+                .resolve_function_object(site.callee)
+                .map_err(|_| ExecutionError::NonConstructor(site.callee))?;
+            match callable.executable {
+                FunctionExecutable::Bound(data) => {
+                    if site.argument_prefix.is_some() {
+                        return Err(ExecutionError::BoundArgumentCountOverflow);
+                    }
+                    let bound = self.bound_function_snapshot(data)?;
+                    site.argument_count = site
+                        .argument_count
+                        .checked_add(bound.argument_count)
+                        .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                    site.argument_prefix = Some(data);
+                    site.argument_prefix_count = bound.argument_count;
+                    let (target, new_target) =
+                        self.resolve_bound_construct_target(site.callee, site.new_target)?;
+                    debug_assert_eq!(target, bound.call_target);
+                    site.callee = target;
+                    site.new_target = new_target;
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::StringConstructor
+                    | NativeFunction::NumberConstructor
+                    | NativeFunction::BooleanConstructor),
+                ) => {
+                    let value = self.primitive_constructor_value(native, &site)?;
+                    return self.write(caller_base, destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
+                    let object = self.create_object_from_site(&site)?;
+                    return self.write(caller_base, destination, object);
+                }
+                FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
+                    let message = self.call_argument(&site, 0)?;
+                    let error = self.create_native_error(kind, message)?;
+                    return self.write(caller_base, destination, error);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
+                    let array = self.create_array_from_site(&site)?;
+                    return self.write(caller_base, destination, array);
+                }
+                FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
+                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+                }
+                FunctionExecutable::Bytecode { .. } => break,
+                FunctionExecutable::Native(_) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+            }
+        }
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(site.new_target, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .unwrap_or(Value::from_immediate(Immediate::Null));
+        let receiver = self.create_ordinary_object_with_prototype(prototype)?;
+        site.this_value = receiver;
+        site.construct_receiver = Some(receiver);
+        self.call(site)
+    }
+
+    /// Applies each bound exotic's observable newTarget substitution without merging arguments.
+    fn resolve_bound_construct_target(
+        &mut self,
+        mut target: Value,
+        mut new_target: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        loop {
+            let function = self.resolve_function_object(target)?;
+            let FunctionExecutable::Bound(data) = function.executable else {
+                return Ok((target, new_target));
+            };
+            let bound = self.bound_function_snapshot(data)?;
+            if new_target == target {
+                new_target = bound.bound_target;
+            }
+            target = bound.bound_target;
+        }
     }
 
     /// Resolves native forwarding iteratively, then pushes one exact bytecode frame when required.
@@ -5094,6 +5494,20 @@ impl Isolate {
         loop {
             let function_object = self.resolve_function_object(site.callee)?;
             match function_object.executable {
+                FunctionExecutable::Bound(data) => {
+                    if site.argument_prefix.is_some() {
+                        return Err(ExecutionError::BoundArgumentCountOverflow);
+                    }
+                    let bound = self.bound_function_snapshot(data)?;
+                    site.argument_count = site
+                        .argument_count
+                        .checked_add(bound.argument_count)
+                        .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                    site.argument_prefix = Some(data);
+                    site.argument_prefix_count = bound.argument_count;
+                    site.callee = bound.call_target;
+                    site.this_value = bound.bound_this;
+                }
                 FunctionExecutable::Bytecode {
                     code,
                     function,
@@ -5269,8 +5683,8 @@ impl Isolate {
                     return Ok(());
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIsPrototypeOf) => {
-                    let result =
-                        self.is_prototype_of(site.this_value, self.call_argument(&site, 0)?)?;
+                    let value = self.call_argument(&site, 0)?;
+                    let result = self.is_prototype_of(site.this_value, value)?;
                     return self.write(
                         site.caller_base,
                         site.destination,
@@ -5333,12 +5747,20 @@ impl Isolate {
                     site.callee = site.this_value;
                     site.this_value = this_argument;
                     if site.argument_count != 0 {
-                        site.argument_base = site
-                            .argument_base
-                            .checked_add(1)
-                            .ok_or(ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
+                        if site.argument_prefix_count != 0 {
+                            site.argument_prefix_offset += 1;
+                            site.argument_prefix_count -= 1;
+                        } else {
+                            site.argument_base = site.argument_base.checked_add(1).ok_or(
+                                ExecutionError::RegisterWindowTooLarge(site.argument_count),
+                            )?;
+                        }
                         site.argument_count -= 1;
                     }
+                }
+                FunctionExecutable::Native(NativeFunction::FunctionPrototypeBind) => {
+                    let bound = self.create_bound_function(&site)?;
+                    return self.write(site.caller_base, site.destination, bound);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
@@ -5380,20 +5802,37 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn call_argument(&self, site: &CallSite, index: u32) -> Result<Option<Value>, ExecutionError> {
+    fn call_argument(
+        &mut self,
+        site: &CallSite,
+        index: u32,
+    ) -> Result<Option<Value>, ExecutionError> {
         if index >= site.argument_count {
             return Ok(None);
         }
+        if index < site.argument_prefix_count {
+            let data = site
+                .argument_prefix
+                .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+            let index = site
+                .argument_prefix_offset
+                .checked_add(index)
+                .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+            return self.bound_function_argument(data, index).map(Some);
+        }
+        let suffix_index = index - site.argument_prefix_count;
         let absolute = site
             .argument_base
-            .checked_add(index)
+            .checked_add(suffix_index)
             .ok_or(ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
         self.fiber
             .registers
             .get(absolute as usize)
             .copied()
             .map(Some)
-            .ok_or(ExecutionError::InvalidRegister(RegisterId::new(index)))
+            .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
+                suffix_index,
+            )))
     }
 
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.
@@ -5434,16 +5873,9 @@ impl Isolate {
         );
         let copied_arguments = site.argument_count.min(target.layout.argument_count);
         for index in 0..copied_arguments {
-            let absolute = site
-                .argument_base
-                .checked_add(index)
-                .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
             let value = self
-                .fiber
-                .registers
-                .get(absolute as usize)
-                .copied()
-                .ok_or(ExecutionError::InvalidRegister(RegisterId::new(index)))?;
+                .call_argument(&site, index)?
+                .expect("copied argument index is within total count");
             self.write(callee_base, index, value)?;
         }
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
@@ -5459,6 +5891,9 @@ impl Isolate {
             construct_receiver: site.construct_receiver,
             strictness: target.strictness,
             argument_base: site.argument_base,
+            argument_prefix: site.argument_prefix,
+            argument_prefix_offset: site.argument_prefix_offset,
+            argument_prefix_count: site.argument_prefix_count,
             argument_count: site.argument_count,
             handler_base: self.fiber.handlers.len() as u32,
             completion_base: self.fiber.completions.len() as u32,
@@ -6745,6 +7180,15 @@ mod tests {
     }
 
     #[test]
+    fn bound_argument_prefix_forwards_for_every_dispatch_batch() {
+        assert_bound_function_batch::<1>();
+        assert_bound_function_batch::<2>();
+        assert_bound_function_batch::<4>();
+        assert_bound_function_batch::<8>();
+        assert_bound_function_batch::<16>();
+    }
+
+    #[test]
     fn strict_and_sloppy_this_binding_work_for_every_dispatch_batch() {
         assert_this_binding_batch::<1>();
         assert_this_binding_batch::<2>();
@@ -6809,6 +7253,41 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    fn bound_function_payload_and_name_survive_forced_major_allocations() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &bound_function_call_module(),
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    fn nested_bound_construct_preserves_each_new_target_substitution() {
+        let mut isolate = test_isolate();
+        let target = isolate.realm.array_constructor.unwrap();
+        let first = create_test_bound_function(&mut isolate, target);
+        let second = create_test_bound_function(&mut isolate, first);
+
+        let (resolved, new_target) = isolate
+            .resolve_bound_construct_target(second, first)
+            .unwrap();
+        assert_eq!((resolved, new_target), (target, target));
+        let (resolved, new_target) = isolate
+            .resolve_bound_construct_target(second, second)
+            .unwrap();
+        assert_eq!((resolved, new_target), (target, target));
     }
 
     #[test]
@@ -7567,6 +8046,44 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    fn assert_bound_function_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &bound_function_call_module(),
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    /// Creates a zero-argument bound exotic through the production allocation path.
+    fn create_test_bound_function(isolate: &mut Isolate, target: Value) -> Value {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        isolate.fiber.registers.resize(3, undefined);
+        isolate.fiber.registers[1] = target;
+        let bound = isolate
+            .create_bound_function(&CallSite {
+                caller_base: 0,
+                destination: 0,
+                callee: isolate.realm.function_prototype_bind.unwrap(),
+                argument_base: 2,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: target,
+                new_target: undefined,
+                construct_receiver: None,
+                call_site: WordOffset::new(0),
+            })
+            .unwrap();
+        isolate.fiber.registers[1] = bound;
+        bound
+    }
+
     /// Checks both nullish substitution and strict preservation in one dispatch monomorphization.
     fn assert_this_binding_batch<const N: usize>() {
         let mut sloppy = test_isolate();
@@ -8176,6 +8693,64 @@ mod tests {
             vec![
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `add.bind(undefined, 20)(22)` with one immutable bound-argument prefix.
+    fn bound_function_call_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(8, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::GetById, &[1, 0, 0], span).unwrap();
+        entry.emit(Opcode::LoadUndefined, &[2], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[3, 20], span).unwrap();
+        entry
+            .emit(Opcode::CallWithReceiver, &[4, 0, 2], span)
+            .unwrap();
+        entry.emit(Opcode::LoadImmediate, &[5, 22], span).unwrap();
+        entry.emit(Opcode::Call, &[6, 4, 1], span).unwrap();
+        entry.emit(Opcode::Return, &[6], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::Add, &[2, 0, 1], span).unwrap();
+        callee.emit(Opcode::Return, &[2], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        CompiledModule::new(
+            Arc::from("add.bind(undefined, 20)(22)"),
+            Vec::new(),
+            vec![Arc::from("bind"), Arc::from("add")],
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callee_bytecode,
+                    FunctionMetadata {
+                        layout: FunctionLayout {
+                            register_count: callee_registers,
+                            argument_count: 2,
+                            function_length: 2,
+                            name_scope: Some(1),
+                            ..FunctionLayout::default()
+                        },
+                        source_map: callee_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                    },
+                ),
             ],
             FunctionId::new(0),
         )

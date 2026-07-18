@@ -1009,6 +1009,77 @@ mod tests {
     }
 
     #[test]
+    /// Covers bound this, argument prefixes, nested flattening, and virtual metadata.
+    fn function_prototype_bind_preserves_call_semantics() {
+        assert_eq!(
+            execute_source(
+                75,
+                "function add(first, second) { return this.base + first + second; } let bound = add.bind({ base: 10 }, 20); bound(12) === 42 && bound.length === 1 && bound.name === 'bound add';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                76,
+                "function add(first, second, third) { return this.base + first + second + third; } let first = add.bind({ base: 10 }, 1); let second = first.bind({ base: 100 }, 2); second(29) === 42 && second.name === 'bound bound add' && second.length === 1 && second.bind(null, 3).length === 0;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                77,
+                "let hasOwn = Function.prototype.call.bind(Object.prototype.hasOwnProperty); hasOwn({ answer: 42 }, 'answer');",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Proves bound construction ignores bound-this and delegates HasInstance to its target.
+    fn bound_function_constructs_with_target_prototype() {
+        assert_eq!(
+            execute_source(
+                78,
+                "function Box(first, second) { this.total = first + second; } let Bound = Box.bind({ total: 0 }, 20); let box = new Bound(22); box.total === 42 && box instanceof Box && box instanceof Bound && !Object.hasOwn(Bound, 'prototype');",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                79,
+                "function defaults(first, second = 2, third) {} defaults.length === 1 && defaults.bind(null, 1).length === 0;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Covers configurable virtual metadata overrides, deletion tombstones, and recreation.
+    fn function_metadata_properties_follow_ordinary_descriptor_semantics() {
+        assert_eq!(
+            execute_source(
+                80,
+                "function pair(first, second) {} Object.defineProperty(pair, 'length', { value: 3.66 }); let first = pair.bind(null); let removed = delete pair.length; let absent = !Object.hasOwn(pair, 'length') && pair.length === 0; pair.length = 7; first.length === 3 && removed && absent && pair.bind(null, 1).length === 6;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                81,
+                "function named() {} Object.defineProperty(named, 'name', { value: 'renamed' }); let bound = named.bind(null); let descriptor = Object.getOwnPropertyDescriptor(bound, 'name'); bound.name === 'bound renamed' && descriptor.writable === false && descriptor.enumerable === false && descriptor.configurable === true && !Object.hasOwn(Function.prototype.bind, 'prototype') && Object.hasOwn(Function, 'prototype');",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
     fn ordinary_construct_sets_receiver_new_target_and_return_replacement() {
         assert_eq!(
             execute_source(

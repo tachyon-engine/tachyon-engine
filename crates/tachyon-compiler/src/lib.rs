@@ -988,6 +988,23 @@ mod tests {
     }
 
     #[test]
+    fn unused_parameters_remain_reserved_in_the_verified_frame_layout() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "function pair(first, second) {}"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let layout = module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap()
+            .layout();
+        assert_eq!(layout.argument_count, 2);
+        assert_eq!(layout.function_length, 2);
+        assert_eq!(layout.register_count, 2);
+    }
+
+    #[test]
     fn compiler_lowers_compound_assignment_through_the_shared_binary_path() {
         let module = Compiler
             .compile(

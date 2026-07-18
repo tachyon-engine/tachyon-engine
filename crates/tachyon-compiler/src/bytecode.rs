@@ -622,10 +622,24 @@ fn lower_function(
     if !terminal {
         lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
     }
+    let name_scope = function
+        .name
+        .as_ref()
+        .map(|name| lowerer.scope_name(name))
+        .transpose()?;
+    let function_length = function
+        .parameter_initializers
+        .iter()
+        .position(Option::is_some)
+        .unwrap_or(function.parameters.len());
     let handlers = freeze_handlers(lowerer.handlers)?;
     let binding_plan = lowerer.binding_plan.into();
-    let (bytecode, source_map, register_count) =
+    // Unused parameters own frame registers even when no instruction mentions them. The bytecode
+    // builder only observes encoded operands, so retain the lowerer's complete allocation frontier.
+    let allocated_register_count = lowerer.next_register;
+    let (bytecode, source_map, encoded_register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
+    let register_count = encoded_register_count.max(allocated_register_count);
     let function_id = function
         .id
         .index()
@@ -646,6 +660,9 @@ fn lower_function(
                 register_count,
                 argument_count: u32::try_from(function.parameters.len())
                     .map_err(|_| CompileError::RegisterOverflow)?,
+                function_length: u32::try_from(function_length)
+                    .map_err(|_| CompileError::RegisterOverflow)?,
+                name_scope,
                 max_handler_depth,
                 environment_slot_count: u32::try_from(
                     environments.functions[function_index].slots.len(),
@@ -3277,6 +3294,7 @@ fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
             parameter_scope_name_count(&function.parameter_initializers)?,
             "scope names",
         )?;
+        count = checked_count_add(count, usize::from(function.name.is_some()), "scope names")?;
     }
     Ok(count)
 }
