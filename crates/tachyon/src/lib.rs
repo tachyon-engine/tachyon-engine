@@ -1493,6 +1493,19 @@ mod tests {
         );
     }
 
+    /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.
+    #[test]
+    fn object_to_string_reports_standard_tags() {
+        assert_eq!(
+            execute_source(
+                70,
+                "Object.prototype.toString.call([]) === '[object Array]' && Object.prototype.toString.call(1) === '[object Number]' && Object.prototype.toString.call(null) === '[object Null]';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
     #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {

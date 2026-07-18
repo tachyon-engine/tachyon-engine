@@ -222,6 +222,7 @@ enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectHasOwnProperty,
+    ObjectToString,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -582,6 +583,7 @@ struct Realm {
     object_prototype: Option<Value>,
     object_define_property: Option<Value>,
     object_has_own_property: Option<Value>,
+    object_to_string: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -610,6 +612,7 @@ impl Realm {
             object_prototype: None,
             object_define_property: None,
             object_has_own_property: None,
+            object_to_string: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -865,6 +868,7 @@ impl Trace for Realm {
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
         self.object_has_own_property.trace(tracer);
+        self.object_to_string.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1233,7 +1237,18 @@ impl Isolate {
         )?;
         self.realm.object_has_own_property = Some(has_own_property);
         let has_own_atom = self.intern_intrinsic_name(b"hasOwnProperty")?;
-        self.set_own_data_property(object_prototype, has_own_atom, has_own_property)
+        self.set_own_data_property(object_prototype, has_own_atom, has_own_property)?;
+        let to_string = self.allocate_native_function(
+            NativeFunction::ObjectToString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_to_string = Some(to_string);
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_own_data_property(object_prototype, to_string_atom, to_string)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1680,6 +1695,38 @@ impl Isolate {
                 Immediate::Undefined,
             ))),
         }
+    }
+
+    /// Implements the ordinary tag-producing subset of Object.prototype.toString.
+    fn object_to_string(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        let tag = if let Some(immediate) = value.as_immediate() {
+            match immediate {
+                Immediate::Undefined => "[object Undefined]",
+                Immediate::Null => "[object Null]",
+                Immediate::True | Immediate::False => "[object Boolean]",
+                Immediate::Hole | Immediate::Uninitialized => "[object Object]",
+            }
+        } else if value.as_i32().is_some() || value.as_f64().is_some() {
+            "[object Number]"
+        } else if let Some(raw) = value.as_heap_ref()
+            && self.heap.checked_reference(raw, self.types.string).is_ok()
+        {
+            "[object String]"
+        } else if let Some(raw) = value.as_heap_ref()
+            && self
+                .heap
+                .checked_reference(raw, self.types.function)
+                .is_ok()
+        {
+            "[object Function]"
+        } else if self.is_array_value(value)? {
+            "[object Array]"
+        } else {
+            "[object Object]"
+        };
+        self.allocate_runtime_string(
+            JsString::try_from_latin1(tag.as_bytes()).map_err(ExecutionError::PropertyKeyString)?,
+        )
     }
 
     /// Appends one array-like source while preserving holes as length-only positions.
@@ -3839,6 +3886,10 @@ impl Isolate {
                             Immediate::False
                         }),
                     );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectToString) => {
+                    let string = self.object_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, string);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeCall) => {
                     let this_argument = self
