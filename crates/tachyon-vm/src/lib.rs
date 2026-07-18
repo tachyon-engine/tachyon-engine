@@ -2393,7 +2393,7 @@ impl Isolate {
                 self.write(base, operands[0], value)?;
             }
             Opcode::Negate => {
-                let value = numeric_negate(self.read(base, operands[1])?);
+                let value = numeric_negate(self.convert_to_number(self.read(base, operands[1])?)?);
                 self.write(base, operands[0], value)?;
             }
             Opcode::ToNumber => {

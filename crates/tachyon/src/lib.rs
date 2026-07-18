@@ -1261,6 +1261,14 @@ mod tests {
     }
 
     #[test]
+    /// Ensures unary negation shares primitive ToNumber conversion and preserves signed zero.
+    fn unary_minus_converts_supported_primitives() {
+        assert_eq!(execute_source(90, "-'2.5';").as_f64(), Some(-2.5));
+        assert_eq!(execute_source(91, "-true;").as_i32(), Some(-1));
+        assert_eq!(execute_source(92, "-null;").as_f64(), Some(-0.0));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(
