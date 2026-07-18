@@ -9,7 +9,8 @@ use std::rc::Rc;
 
 use crate::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, GcTypeId, Heap, HeapAllocationError,
-    HeapReferenceError, MajorCollectionError, MajorCollectionStats, TemporaryRootError, Trace,
+    HeapReferenceError, MajorCollectionError, MajorCollectionStats, RawHeapRef, TemporaryRootError,
+    Trace,
     persistent::{PersistentRootError, PersistentRootId},
 };
 use tachyon_value::Value;
@@ -399,6 +400,18 @@ impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
         Ok(unsafe { &*payload })
     }
 
+    /// Retypes and borrows one encoded reference only through the checked no-GC boundary.
+    ///
+    /// This is intended for tagged runtime values whose logical address has no static pointee type.
+    /// Descriptor and liveness validation occurs before the resulting `&T` can be observed.
+    pub fn borrow_raw_reference<T: Trace + 'static>(
+        &self,
+        reference: RawHeapRef,
+        object_type: GcType<T>,
+    ) -> Result<&T, NoGcBorrowError> {
+        self.borrow_reference(GcRef::from_raw(reference), object_type)
+    }
+
     /// Exclusively borrows a validated payload while the mutable scope borrow prevents aliases.
     pub fn borrow_mut<T: Trace + 'static>(
         &mut self,
@@ -695,6 +708,13 @@ mod tests {
                         .value,
                     7
                 );
+                assert_eq!(
+                    no_gc
+                        .borrow_raw_reference(reference.raw(), payload_type)
+                        .unwrap()
+                        .value,
+                    7
+                );
                 no_gc
                     .borrow_reference_mut(reference, payload_type)
                     .unwrap()
@@ -732,8 +752,8 @@ mod tests {
     }
 
     #[test]
-    /// Unsafe raw retyping still cannot cross the checked descriptor boundary into a Rust borrow.
-    fn no_gc_scope_rejects_a_forged_payload_type_before_dereference() {
+    /// Raw retyping cannot cross the checked descriptor boundary into a mismatched Rust borrow.
+    fn no_gc_scope_rejects_a_raw_payload_type_mismatch_before_dereference() {
         let mut types = TypeRegistry::new();
         let payload_type = types.try_register::<Payload>("Payload").unwrap();
         let other_type = types.try_register::<OtherPayload>("OtherPayload").unwrap();
@@ -747,15 +767,10 @@ mod tests {
                 AllocationSpace::Old,
             )
             .unwrap();
-        // SAFETY: this deliberately violates the pointee type only to exercise the checked NoGc
-        // boundary; the forged reference is never dereferenced without descriptor validation.
-        let forged = unsafe { GcRef::<OtherPayload>::from_raw_unchecked(reference.raw()) };
-
         heap.with_running_scope(|running| {
-            let local = running.root(forged).unwrap();
             running.with_no_gc_scope(|no_gc| {
                 assert!(matches!(
-                    no_gc.borrow(local, other_type),
+                    no_gc.borrow_raw_reference(reference.raw(), other_type),
                     Err(super::NoGcBorrowError::InvalidReference(
                         HeapReferenceError::TypeMismatch { expected, actual }
                     )) if expected == other_type.type_id() && actual == payload_type.type_id()

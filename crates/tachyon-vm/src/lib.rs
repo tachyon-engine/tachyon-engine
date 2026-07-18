@@ -2993,17 +2993,12 @@ impl Isolate {
         let raw = callee
             .as_heap_ref()
             .ok_or(ExecutionError::NonCallable(callee))?;
-        let reference = self
-            .heap
-            .checked_reference(raw, self.types.function)
-            .map_err(|_| ExecutionError::NonCallable(callee))?;
         self.heap.with_running_scope(|scope| {
-            let local = scope.root(reference).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
-                    .borrow(local, self.types.function)
+                    .borrow_raw_reference(raw, self.types.function)
                     .copied()
-                    .map_err(ExecutionError::NoGcBorrow)
+                    .map_err(|_| ExecutionError::NonCallable(callee))
             })
         })
     }
@@ -3698,6 +3693,16 @@ mod tests {
         .unwrap()
     }
 
+    /// Builds a call whose integer callee must become a language-level TypeError.
+    fn non_callable_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::default();
+        builder.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
+        builder.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        single_function_module("1()", Vec::new(), builder)
+    }
+
     /// Builds one non-capturing function call with a contiguous single-argument window.
     fn call_module() -> CompiledModule {
         let span = SourceSpan { start: 0, end: 0 };
@@ -4137,6 +4142,15 @@ mod tests {
         assert_reference_error_batch::<4>();
         assert_reference_error_batch::<8>();
         assert_reference_error_batch::<16>();
+    }
+
+    #[test]
+    fn non_callable_values_throw_type_error_for_every_dispatch_batch() {
+        assert_non_callable_batch::<1>();
+        assert_non_callable_batch::<2>();
+        assert_non_callable_batch::<4>();
+        assert_non_callable_batch::<8>();
+        assert_non_callable_batch::<16>();
     }
 
     #[test]
@@ -4960,6 +4974,27 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    /// Confirms the raw callable fast path retains language-level error conversion.
+    fn assert_non_callable_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &non_callable_module(),
+                ExecutionBudget {
+                    fuel: 2,
+                    quantum: 2,
+                },
+            )
+            .unwrap();
+        let RunOutcome::Thrown(error) = outcome else {
+            panic!("integer call must throw");
+        };
+        assert_eq!(
+            isolate.native_error_kind(error).unwrap(),
+            Some(NativeErrorKind::Type)
+        );
     }
 
     fn assert_batch_budget<const N: usize>() {
