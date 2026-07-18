@@ -1034,6 +1034,35 @@ fn lower_expression(
         {
             HirExpressionKind::NewTarget
         }
+        Expression::ArrayExpression(array) => {
+            let mut properties = Vec::with_capacity(array.elements.len() + 1);
+            for (index, element) in array.elements.iter().enumerate() {
+                let Some(value) = element.as_expression() else {
+                    if element.is_spread() {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(element.span()),
+                            "array spread",
+                        ));
+                    }
+                    continue;
+                };
+                properties.push(HirObjectProperty {
+                    span: source_span(element.span()),
+                    key: HirObjectPropertyKey::Static(Arc::from(index.to_string())),
+                    value: lower_expression(value, source, semantic, functions)?,
+                });
+            }
+            properties.push(HirObjectProperty {
+                span,
+                key: HirObjectPropertyKey::Static(Arc::from("length")),
+                value: HirExpression {
+                    span,
+                    kind: HirExpressionKind::Number((array.elements.len() as f64).to_bits()),
+                },
+            });
+            HirExpressionKind::Object(properties.into())
+        }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());
             for property in &expression.properties {

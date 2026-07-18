@@ -1374,6 +1374,16 @@ mod tests {
     }
 
     #[test]
+    /// Covers dense array indexing, elision as an absent property, and length publication.
+    fn array_literals_support_basic_indexing_and_length() {
+        assert_eq!(
+            execute_source(115, "let array = [40, 2]; array[0] + array[1];").as_i32(),
+            Some(42)
+        );
+        assert_eq!(execute_source(116, "[1, , 3].length;").as_i32(), Some(3));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(
