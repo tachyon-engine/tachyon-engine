@@ -185,15 +185,73 @@ pub(crate) fn format_exponential(
     let absolute = value.abs();
     let mut shortest_buffer = ryu_js::Buffer::new();
     let shortest = shortest_buffer.format_finite(absolute).as_bytes();
-    let exponent = decimal_exponent(shortest)?;
+    let shortest_exponent = decimal_exponent(shortest)?;
     if negative {
         output.push(b'-')?;
     }
     match fraction_digits {
         Some(fraction_digits) => {
+            let exponent = exact_decimal_exponent(absolute, shortest_exponent)?;
             write_precision_exponential(absolute, exponent, fraction_digits, &mut output)?;
         }
-        None => write_shortest_exponential(shortest, exponent, &mut output)?,
+        None => write_shortest_exponential(shortest, shortest_exponent, &mut output)?,
+    }
+    Ok(&output.bytes[..output.len])
+}
+
+/// Formats Number.prototype.toPrecision with exact significant-digit rounding.
+pub(crate) fn format_precision(
+    value: f64,
+    precision: u8,
+    buffer: &mut [u8; EXPONENTIAL_FORMAT_BUFFER_SIZE],
+) -> Result<&[u8], NumberFormatError> {
+    let mut output = ByteCursor {
+        bytes: buffer,
+        len: 0,
+    };
+    if value.is_nan() {
+        for byte in b"NaN" {
+            output.push(*byte)?;
+        }
+        return Ok(&output.bytes[..output.len]);
+    }
+    if value.is_infinite() {
+        let bytes = if value.is_sign_negative() {
+            b"-Infinity".as_slice()
+        } else {
+            b"Infinity".as_slice()
+        };
+        for byte in bytes {
+            output.push(*byte)?;
+        }
+        return Ok(&output.bytes[..output.len]);
+    }
+    debug_assert!((1..=MAX_DECIMAL_FRACTION_DIGITS as u8).contains(&precision));
+    if value == 0.0 {
+        output.push(b'0')?;
+        if precision > 1 {
+            output.push(b'.')?;
+            for _ in 1..precision {
+                output.push(b'0')?;
+            }
+        }
+        return Ok(&output.bytes[..output.len]);
+    }
+    let negative = value.is_sign_negative();
+    let absolute = value.abs();
+    let mut shortest_buffer = ryu_js::Buffer::new();
+    let shortest = shortest_buffer.format_finite(absolute).as_bytes();
+    let exponent = exact_decimal_exponent(absolute, decimal_exponent(shortest)?)?;
+    let mut digits = [0_u8; MAX_DECIMAL_FRACTION_DIGITS + 1];
+    let digit_count = usize::from(precision);
+    let exponent = generate_precision_digits(absolute, exponent, &mut digits[..digit_count])?;
+    if negative {
+        output.push(b'-')?;
+    }
+    if exponent < -6 || exponent >= i16::from(precision) {
+        write_exponential_digits(&digits[..digit_count], exponent, &mut output)?;
+    } else {
+        write_fixed_precision_digits(&digits[..digit_count], exponent, &mut output)?;
     }
     Ok(&output.bytes[..output.len])
 }
@@ -234,6 +292,24 @@ fn decimal_exponent(shortest: &[u8]) -> Result<i16, NumberFormatError> {
             .map(|distance| -distance)
             .map_err(|_| NumberFormatError::InvalidDigit)
     }
+}
+
+/// Corrects a shortest-display exponent to floor(log10(value)) using the exact binary ratio.
+fn exact_decimal_exponent(value: f64, candidate: i16) -> Result<i16, NumberFormatError> {
+    let (numerator, denominator) = normalized_ratio(value, candidate)?;
+    if numerator.compare(&denominator) == Ordering::Less {
+        return candidate
+            .checked_sub(1)
+            .ok_or(NumberFormatError::InvalidDigit);
+    }
+    let mut ten_denominator = denominator;
+    ten_denominator.multiply_small(10)?;
+    if numerator.compare(&ten_denominator) != Ordering::Less {
+        return candidate
+            .checked_add(1)
+            .ok_or(NumberFormatError::InvalidDigit);
+    }
+    Ok(candidate)
 }
 
 /// Writes zero with the exact requested fractional width and canonical positive exponent.
@@ -306,10 +382,21 @@ fn write_precision_exponential(
 ) -> Result<(), NumberFormatError> {
     debug_assert!(value.is_finite() && value > 0.0);
     debug_assert!(usize::from(fraction_digits) <= MAX_DECIMAL_FRACTION_DIGITS);
-    let (mut numerator, denominator) = normalized_ratio(value, exponent)?;
     let digit_count = usize::from(fraction_digits) + 1;
     let mut digits = [0_u8; MAX_DECIMAL_FRACTION_DIGITS + 1];
-    for (index, digit) in digits[..digit_count].iter_mut().enumerate() {
+    exponent = generate_precision_digits(value, exponent, &mut digits[..digit_count])?;
+    write_exponential_digits(&digits[..digit_count], exponent, output)
+}
+
+/// Produces exact rounded significant digits and returns the post-carry decimal exponent.
+fn generate_precision_digits(
+    value: f64,
+    mut exponent: i16,
+    digits: &mut [u8],
+) -> Result<i16, NumberFormatError> {
+    let (mut numerator, denominator) = normalized_ratio(value, exponent)?;
+    let digit_count = digits.len();
+    for (index, digit) in digits.iter_mut().enumerate() {
         while numerator.compare(&denominator) != Ordering::Less {
             numerator.subtract(&denominator);
             *digit += 1;
@@ -323,19 +410,57 @@ fn write_precision_exponential(
     }
     let mut doubled_remainder = numerator.clone();
     doubled_remainder.multiply_small(2)?;
-    if doubled_remainder.compare(&denominator) != Ordering::Less
-        && round_decimal_digits(&mut digits[..digit_count])
-    {
+    if doubled_remainder.compare(&denominator) != Ordering::Less && round_decimal_digits(digits) {
         exponent += 1;
     }
+    Ok(exponent)
+}
+
+/// Renders already-rounded significant digits in normalized exponential notation.
+fn write_exponential_digits(
+    digits: &[u8],
+    exponent: i16,
+    output: &mut ByteCursor<'_>,
+) -> Result<(), NumberFormatError> {
     output.push(b'0' + digits[0])?;
-    if fraction_digits != 0 {
+    if digits.len() > 1 {
         output.push(b'.')?;
-        for digit in &digits[1..digit_count] {
+        for digit in &digits[1..] {
             output.push(b'0' + *digit)?;
         }
     }
     output.push_exponent(exponent)
+}
+
+/// Places rounded significant digits around a fixed decimal point for exponent -6..p-1.
+fn write_fixed_precision_digits(
+    digits: &[u8],
+    exponent: i16,
+    output: &mut ByteCursor<'_>,
+) -> Result<(), NumberFormatError> {
+    if exponent >= 0 {
+        let integer_digits =
+            usize::try_from(exponent + 1).map_err(|_| NumberFormatError::InvalidDigit)?;
+        for digit in &digits[..integer_digits] {
+            output.push(b'0' + *digit)?;
+        }
+        if integer_digits < digits.len() {
+            output.push(b'.')?;
+            for digit in &digits[integer_digits..] {
+                output.push(b'0' + *digit)?;
+            }
+        }
+        return Ok(());
+    }
+    output.push(b'0')?;
+    output.push(b'.')?;
+    for _ in 0..(-exponent - 1) {
+        output.push(b'0')?;
+    }
+    for digit in digits {
+        output.push(b'0' + *digit)?;
+    }
+    Ok(())
 }
 
 /// Builds value / 10^exponent exactly as two bounded base-2^32 integers.
@@ -376,10 +501,6 @@ fn normalized_ratio(
             binary_exponent + magnitude,
         )?;
     }
-    debug_assert!(numerator.compare(&denominator) != Ordering::Less);
-    let mut ten_denominator = denominator.clone();
-    ten_denominator.multiply_small(10)?;
-    debug_assert_eq!(numerator.compare(&ten_denominator), Ordering::Less);
     Ok((numerator, denominator))
 }
 
@@ -578,7 +699,7 @@ fn round_fraction_up(
 
 #[cfg(test)]
 mod tests {
-    use super::{NumberFormatError, format_exponential, format_radix};
+    use super::{NumberFormatError, format_exponential, format_precision, format_radix};
     use crate::tuning::numbers::{EXPONENTIAL_FORMAT_BUFFER_SIZE, RADIX_FORMAT_BUFFER_SIZE};
 
     fn formatted(value: f64, radix: u8) -> Result<String, NumberFormatError> {
@@ -591,6 +712,16 @@ mod tests {
         let mut buffer = [0; EXPONENTIAL_FORMAT_BUFFER_SIZE];
         String::from_utf8(
             format_exponential(value, fraction_digits, &mut buffer)
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn precision(value: f64, significant_digits: u8) -> String {
+        let mut buffer = [0; EXPONENTIAL_FORMAT_BUFFER_SIZE];
+        String::from_utf8(
+            format_precision(value, significant_digits, &mut buffer)
                 .unwrap()
                 .to_vec(),
         )
@@ -616,6 +747,7 @@ mod tests {
         assert_eq!(exponential(123.456, Some(3)), "1.235e+2");
         assert_eq!(exponential(0.9999, Some(0)), "1e+0");
         assert_eq!(exponential(0.9999, Some(3)), "9.999e-1");
+        assert_eq!(exponential(1e-21, Some(15)), "9.999999999999999e-22");
     }
 
     #[test]
@@ -641,9 +773,21 @@ mod tests {
                     let formatted = exponential(value, precision);
                     assert!(formatted.is_ascii());
                     assert!(formatted.contains('e'));
+                    assert!(matches!(formatted.as_bytes().first(), Some(b'1'..=b'9')));
                 }
             }
         }
+    }
+
+    #[test]
+    fn precision_formatter_selects_fixed_after_exact_rounding() {
+        assert_eq!(precision(7.0, 3), "7.00");
+        assert_eq!(precision(100.0, 7), "100.0000");
+        assert_eq!(precision(0.000001, 3), "0.00000100");
+        assert_eq!(precision(0.0000001, 2), "1.0e-7");
+        assert_eq!(precision(99.95, 3), "100");
+        assert_eq!(precision(9.5, 1), "1e+1");
+        assert_eq!(precision(1e-21, 16), "9.999999999999999e-22");
     }
 
     #[test]

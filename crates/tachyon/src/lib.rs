@@ -2052,6 +2052,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                168,
+                "let rangeError = false; try { (3).toPrecision(0); } catch (error) { rangeError = error instanceof RangeError; } (7).toPrecision(3) === '7.00' && (99.95).toPrecision(3) === '100' && (0.000001).toPrecision(3) === '0.00000100' && (0.0000001).toPrecision(2) === '1.0e-7' && (1.2345e27).toPrecision(6) === '1.23450e+27' && (42).toPrecision() === '42' && Infinity.toPrecision(1000) === 'Infinity' && rangeError;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.

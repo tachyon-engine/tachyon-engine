@@ -272,6 +272,7 @@ enum NativeFunction {
     NumberIsSafeInteger,
     NumberToExponential,
     NumberToFixed,
+    NumberToPrecision,
     NumberToString,
     NumberValueOf,
     BooleanConstructor,
@@ -371,6 +372,7 @@ impl NativeFunction {
             | Self::NumberIsSafeInteger
             | Self::NumberToExponential
             | Self::NumberToFixed
+            | Self::NumberToPrecision
             | Self::NumberToString => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
@@ -412,6 +414,7 @@ impl NativeFunction {
             Self::NumberIsSafeInteger => "isSafeInteger",
             Self::NumberToExponential => "toExponential",
             Self::NumberToFixed => "toFixed",
+            Self::NumberToPrecision => "toPrecision",
             Self::NumberToString => "toString",
             Self::NumberValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
@@ -898,6 +901,7 @@ struct Realm {
     number_is_safe_integer: Option<Value>,
     number_to_exponential: Option<Value>,
     number_to_fixed: Option<Value>,
+    number_to_precision: Option<Value>,
     number_to_string: Option<Value>,
     number_value_of: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -971,6 +975,7 @@ impl Realm {
             number_is_safe_integer: None,
             number_to_exponential: None,
             number_to_fixed: None,
+            number_to_precision: None,
             number_to_string: None,
             number_value_of: None,
             boolean_constructor: None,
@@ -1271,6 +1276,7 @@ impl Trace for Realm {
         self.number_is_safe_integer.trace(tracer);
         self.number_to_exponential.trace(tracer);
         self.number_to_fixed.trace(tracer);
+        self.number_to_precision.trace(tracer);
         self.number_to_string.trace(tracer);
         self.number_value_of.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1944,6 +1950,10 @@ impl Isolate {
         self.realm.number_to_fixed = Some(to_fixed);
         let to_fixed_atom = self.intern_intrinsic_name(b"toFixed")?;
         self.set_intrinsic_data_property(number_prototype, to_fixed_atom, to_fixed, true)?;
+        let to_precision = allocate(self, NativeFunction::NumberToPrecision)?;
+        self.realm.number_to_precision = Some(to_precision);
+        let to_precision_atom = self.intern_intrinsic_name(b"toPrecision")?;
+        self.set_intrinsic_data_property(number_prototype, to_precision_atom, to_precision, true)?;
         let to_string = allocate(self, NativeFunction::NumberToString)?;
         self.realm.number_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
@@ -3149,6 +3159,46 @@ impl Isolate {
         let mut buffer = [0; tuning::numbers::EXPONENTIAL_FORMAT_BUFFER_SIZE];
         let formatted =
             number::format_exponential(number, fraction_digits, &mut buffer).map_err(|error| {
+                match error {
+                    number::NumberFormatError::BufferExhausted => {
+                        ExecutionError::NumberFormatBufferExhausted
+                    }
+                    number::NumberFormatError::InvalidDigit => {
+                        ExecutionError::NumberFormatInvalidDigit
+                    }
+                }
+            })?;
+        self.allocate_runtime_string(
+            JsString::try_from_latin1(formatted).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Implements Number.prototype.toPrecision with shared exact significant-digit rounding.
+    fn number_to_precision(
+        &mut self,
+        receiver: Value,
+        precision: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let number = self.this_number_value(receiver)?;
+        let Some(precision) =
+            precision.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            let mut units = Vec::new();
+            self.append_primitive_string_units(number, &mut units)?;
+            return self.allocate_runtime_string(
+                JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+            );
+        };
+        let precision = self.integer_or_infinity_argument(Some(precision), 0.0)?;
+        let number = numeric_value(number).expect("thisNumberValue always returns a number");
+        if number.is_finite() && !(1.0..=100.0).contains(&precision) {
+            return Err(ExecutionError::InvalidNumberPrecision(Value::from_f64(
+                precision,
+            )));
+        }
+        let mut buffer = [0; tuning::numbers::EXPONENTIAL_FORMAT_BUFFER_SIZE];
+        let formatted =
+            number::format_precision(number, precision as u8, &mut buffer).map_err(|error| {
                 match error {
                     number::NumberFormatError::BufferExhausted => {
                         ExecutionError::NumberFormatBufferExhausted
@@ -7206,6 +7256,11 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::NumberToFixed) => {
                     let fraction_digits = self.call_argument(&site, 0)?;
                     let value = self.number_to_fixed(site.this_value, fraction_digits)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::NumberToPrecision) => {
+                    let precision = self.call_argument(&site, 0)?;
+                    let value = self.number_to_precision(site.this_value, precision)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::NumberToString) => {
