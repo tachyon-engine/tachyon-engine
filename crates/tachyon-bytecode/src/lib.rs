@@ -195,6 +195,8 @@ pub enum Opcode {
     CreateForInIterator = 67,
     /// Returns the next string key or undefined when the internal iterator is exhausted.
     ForInNext = 68,
+    /// Loads the active function's exact actual-argument count into one register.
+    LoadArgumentsLength = 69,
 }
 
 impl Opcode {
@@ -261,7 +263,8 @@ impl Opcode {
             | Self::CreateArray
             | Self::LoadException
             | Self::LoadThis
-            | Self::LoadNewTarget => 1,
+            | Self::LoadNewTarget
+            | Self::LoadArgumentsLength => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
     }
@@ -351,6 +354,7 @@ impl Opcode {
             2 => Some(Self::CreateArray),
             3 => Some(Self::CreateForInIterator),
             4 => Some(Self::ForInNext),
+            5 => Some(Self::LoadArgumentsLength),
             _ => None,
         }
     }
@@ -920,7 +924,8 @@ impl BytecodeBuilder {
             | Opcode::CreateArray
             | Opcode::LoadException
             | Opcode::LoadThis
-            | Opcode::LoadNewTarget => &[0],
+            | Opcode::LoadNewTarget
+            | Opcode::LoadArgumentsLength => &[0],
             Opcode::Move
             | Opcode::Not
             | Opcode::Negate
@@ -1933,7 +1938,8 @@ fn verify_instruction(
         | Opcode::CreateArray
         | Opcode::LoadException
         | Opcode::LoadThis
-        | Opcode::LoadNewTarget => check_register(operands[0])?,
+        | Opcode::LoadNewTarget
+        | Opcode::LoadArgumentsLength => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;

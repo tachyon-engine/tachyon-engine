@@ -1991,6 +1991,18 @@ impl Lowerer<'_> {
                 right,
             } => self.logical(*operator, left, right, expression.span),
             HirExpressionKind::Identifier(reference) => {
+                if reference.binding.is_none()
+                    && reference.name.as_ref() == "arguments"
+                    && self.function_scope.is_some()
+                {
+                    let destination = self.register()?;
+                    self.emit(
+                        Opcode::LoadArgumentsLength,
+                        &[destination.index()],
+                        expression.span,
+                    )?;
+                    return Ok(destination);
+                }
                 match self.local_reference(reference).cloned() {
                     Some(binding) => self.read_local(&binding, expression.span),
                     None => {
@@ -2059,6 +2071,22 @@ impl Lowerer<'_> {
                 Ok(object)
             }
             HirExpressionKind::StaticMember { object, property } => {
+                if self.function_scope.is_some()
+                    && property.as_ref() == "length"
+                    && matches!(
+                        &object.kind,
+                        HirExpressionKind::Identifier(reference)
+                            if reference.binding.is_none() && reference.name.as_ref() == "arguments"
+                    )
+                {
+                    let destination = self.register()?;
+                    self.emit(
+                        Opcode::LoadArgumentsLength,
+                        &[destination.index()],
+                        expression.span,
+                    )?;
+                    return Ok(destination);
+                }
                 let receiver = self.expression(object)?;
                 let destination = self.register()?;
                 let property = self.scope_name(property)?;

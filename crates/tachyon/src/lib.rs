@@ -58,7 +58,7 @@ mod tests {
             .unwrap()
         {
             RunOutcome::Completed(value) => value,
-            outcome => panic!("expression fixture did not complete: {outcome:?}"),
+            outcome => panic!("expression fixture did not complete: {outcome:?}; source: {text}"),
         }
     }
 
@@ -1613,6 +1613,88 @@ mod tests {
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
+        );
+    }
+
+    /// Covers Array exotic identity, generic push/join, holes, and length attributes.
+    #[test]
+    fn array_identity_push_and_join_follow_array_like_semantics() {
+        assert_eq!(
+            execute_source(
+                124,
+                "Array.isArray([]) && Array.isArray(Array.prototype) && !Array.isArray({ length: 0 }) && !Array.isArray(Object.create(Array.prototype));",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                125,
+                "let values = [1]; values.push(2, 3) === 3 && values.length === 3 && values[2] === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                128,
+                "let values = [1]; values.push(2, 3); values.join('-') === '1-2-3';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                126,
+                "let object = { length: 1 }; object[0] = 'a'; Array.prototype.push.call(object, 'b') === 2 && object.length === 2 && object[1] === 'b';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                129,
+                "let object = { length: 2 }; object[0] = 'a'; object[1] = 'b'; Array.prototype.join.call(object, ':') === 'a:b';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                130,
+                "let object = { length: 1 }; object[0] = 'a'; Array.prototype.push.call(object, 'b'); Array.prototype.join.call(object, ':') === 'a:b';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                127,
+                "let recursive = []; recursive.push(recursive); let descriptor = Object.getOwnPropertyDescriptor([], 'length'); [1, , null, undefined, 4].join('-') === '1----4' && recursive.join() === '' && descriptor.writable === true && descriptor.enumerable === false && descriptor.configurable === false;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Covers descriptor harness primitives used by multiple built-in test262 directories.
+    fn object_names_enumerability_and_math_pow_are_available() {
+        assert_eq!(
+            execute_source(
+                131,
+                "let descriptor = { value: 1 }; let names = Object.getOwnPropertyNames(descriptor); names.length === 1 && names[0] === 'value' && Object.prototype.propertyIsEnumerable.call(descriptor, 'value') && Math.pow(2, 5) === 32;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                132,
+                "function verify(object, name, descriptor) { return arguments.length > 2 && Object.getOwnPropertyNames(descriptor).length === 4 && Object.getOwnPropertyDescriptor(object, name).value === descriptor.value && Object.prototype.propertyIsEnumerable.call(object, name) === false; } verify(Function.prototype.bind, 'length', { value: 1, writable: false, enumerable: false, configurable: true });",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
         );
     }
 

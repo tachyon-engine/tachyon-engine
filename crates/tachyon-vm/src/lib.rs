@@ -9,6 +9,7 @@
 //!
 //! This crate intentionally has no host I/O surface.
 
+mod array;
 mod atom;
 mod bound_function;
 mod finalization;
@@ -40,6 +41,7 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
+use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 use object::{
@@ -173,6 +175,7 @@ pub enum ExecutionError {
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
     NumberStringAllocationFailed,
+    StringBufferAllocationFailed,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
@@ -194,6 +197,7 @@ pub enum ExecutionError {
     BoundArgumentAllocationFailed,
     BoundArgumentCountOverflow,
     BoundNameAllocationFailed,
+    ArrayLengthOverflow,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),
     UnsupportedErrorMessage(Value),
@@ -238,7 +242,9 @@ enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
+    ObjectGetOwnPropertyNames,
     ObjectHasOwnProperty,
+    ObjectPropertyIsEnumerable,
     ObjectToString,
     ObjectAssign,
     ObjectKeys,
@@ -260,8 +266,12 @@ enum NativeFunction {
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
     ArrayConstructor,
+    ArrayIsArray,
     ArrayConcat,
+    ArrayPush,
+    ArrayJoin,
     ArrayToString,
+    MathPow,
 }
 
 impl NativeFunction {
@@ -289,7 +299,9 @@ impl NativeFunction {
             | Self::ObjectCreate
             | Self::ObjectGetOwnPropertyDescriptor => 2,
             Self::ObjectConstructor
+            | Self::ObjectGetOwnPropertyNames
             | Self::ObjectHasOwnProperty
+            | Self::ObjectPropertyIsEnumerable
             | Self::ObjectKeys
             | Self::ObjectValues
             | Self::ObjectEntries
@@ -305,7 +317,10 @@ impl NativeFunction {
             | Self::FunctionConstructor
             | Self::ErrorConstructor(_)
             | Self::ArrayConstructor
+            | Self::ArrayIsArray
             | Self::ArrayConcat => 1,
+            Self::ArrayPush | Self::ArrayJoin => 1,
+            Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
         }
     }
@@ -316,7 +331,9 @@ impl NativeFunction {
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
+            Self::ObjectGetOwnPropertyNames => "getOwnPropertyNames",
             Self::ObjectHasOwnProperty => "hasOwnProperty",
+            Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
             Self::ObjectToString => "toString",
             Self::ObjectAssign => "assign",
             Self::ObjectKeys => "keys",
@@ -341,8 +358,12 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Syntax) => "SyntaxError",
             Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
             Self::ArrayConstructor => "Array",
+            Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
+            Self::ArrayPush => "push",
+            Self::ArrayJoin => "join",
             Self::ArrayToString => "toString",
+            Self::MathPow => "pow",
         }
     }
 }
@@ -429,6 +450,7 @@ struct FunctionObject {
 #[derive(Clone, Copy)]
 enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
+    Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
 }
 
@@ -437,6 +459,7 @@ impl ObjectReceiver {
     fn value(self) -> Value {
         match self {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
+            Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
         }
     }
@@ -501,6 +524,7 @@ impl Trace for FunctionObject {
 
 #[derive(Clone, Copy)]
 struct VmTypes {
+    array: GcType<ArrayObject>,
     bound_function: GcType<BoundFunctionData>,
     environment: GcType<Environment>,
     for_in_iterator: GcType<ForInIterator>,
@@ -531,10 +555,11 @@ struct RealmIntrinsicAtoms {
     number: AtomId,
     boolean: AtomId,
     function: AtomId,
+    math: AtomId,
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 9 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 10 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -721,13 +746,18 @@ struct Realm {
     function_prototype_bind: Option<Value>,
     array_constructor: Option<Value>,
     array_prototype: Option<Value>,
+    array_is_array: Option<Value>,
     array_concat: Option<Value>,
+    array_push: Option<Value>,
+    array_join: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
     object_define_property: Option<Value>,
     object_get_own_property_descriptor: Option<Value>,
+    object_get_own_property_names: Option<Value>,
     object_has_own_property: Option<Value>,
+    object_property_is_enumerable: Option<Value>,
     object_to_string: Option<Value>,
     object_assign: Option<Value>,
     object_keys: Option<Value>,
@@ -744,6 +774,8 @@ struct Realm {
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
     function_constructor: Option<Value>,
+    math_object: Option<Value>,
+    math_pow: Option<Value>,
     error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
@@ -764,13 +796,18 @@ impl Realm {
             function_prototype_bind: None,
             array_constructor: None,
             array_prototype: None,
+            array_is_array: None,
             array_concat: None,
+            array_push: None,
+            array_join: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
             object_define_property: None,
             object_get_own_property_descriptor: None,
+            object_get_own_property_names: None,
             object_has_own_property: None,
+            object_property_is_enumerable: None,
             object_to_string: None,
             object_assign: None,
             object_keys: None,
@@ -787,6 +824,8 @@ impl Realm {
             number_constructor: None,
             boolean_constructor: None,
             function_constructor: None,
+            math_object: None,
+            math_pow: None,
             error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
@@ -1034,13 +1073,18 @@ impl Trace for Realm {
         self.function_prototype_bind.trace(tracer);
         self.array_constructor.trace(tracer);
         self.array_prototype.trace(tracer);
+        self.array_is_array.trace(tracer);
         self.array_concat.trace(tracer);
+        self.array_push.trace(tracer);
+        self.array_join.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
         self.object_get_own_property_descriptor.trace(tracer);
+        self.object_get_own_property_names.trace(tracer);
         self.object_has_own_property.trace(tracer);
+        self.object_property_is_enumerable.trace(tracer);
         self.object_to_string.trace(tracer);
         self.object_assign.trace(tracer);
         self.object_keys.trace(tracer);
@@ -1057,6 +1101,8 @@ impl Trace for Realm {
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
         self.function_constructor.trace(tracer);
+        self.math_object.trace(tracer);
+        self.math_pow.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
@@ -1136,6 +1182,11 @@ struct PrototypeInitializationRoots<'a> {
     function: Value,
 }
 
+struct ArrayAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+}
+
 impl Trace for PropertyMutationRoots<'_> {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -1149,6 +1200,14 @@ impl Trace for PrototypeInitializationRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.function.trace(tracer);
+    }
+}
+
+impl Trace for ArrayAllocationRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
     }
 }
 
@@ -1298,6 +1357,9 @@ impl Isolate {
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
+            array: registry
+                .try_register("ArrayObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             bound_function: registry
                 .try_register("BoundFunctionData")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1397,6 +1459,7 @@ impl Isolate {
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
+        self.initialize_math_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -1452,6 +1515,23 @@ impl Isolate {
             get_own_property_descriptor,
             true,
         )?;
+        let get_own_property_names = self.allocate_native_function(
+            NativeFunction::ObjectGetOwnPropertyNames,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_get_own_property_names = Some(get_own_property_names);
+        let get_own_names_atom = self.intern_intrinsic_name(b"getOwnPropertyNames")?;
+        self.set_intrinsic_data_property(
+            constructor,
+            get_own_names_atom,
+            get_own_property_names,
+            true,
+        )?;
         let has_own_property = self.allocate_native_function(
             NativeFunction::ObjectHasOwnProperty,
             OrdinaryObject {
@@ -1464,6 +1544,23 @@ impl Isolate {
         self.realm.object_has_own_property = Some(has_own_property);
         let has_own_atom = self.intern_intrinsic_name(b"hasOwnProperty")?;
         self.set_intrinsic_data_property(object_prototype, has_own_atom, has_own_property, true)?;
+        let property_is_enumerable = self.allocate_native_function(
+            NativeFunction::ObjectPropertyIsEnumerable,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_property_is_enumerable = Some(property_is_enumerable);
+        let property_is_enumerable_atom = self.intern_intrinsic_name(b"propertyIsEnumerable")?;
+        self.set_intrinsic_data_property(
+            object_prototype,
+            property_is_enumerable_atom,
+            property_is_enumerable,
+            true,
+        )?;
         let to_string = self.allocate_native_function(
             NativeFunction::ObjectToString,
             OrdinaryObject {
@@ -1742,6 +1839,7 @@ impl Isolate {
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
             function: self.intern_intrinsic_name(b"Function")?,
+            math: self.intern_intrinsic_name(b"Math")?,
         })
     }
 
@@ -1793,15 +1891,12 @@ impl Isolate {
             .realm
             .function_prototype
             .expect("function intrinsics initialize before Array intrinsics");
-        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
-            shape: ShapeId::EMPTY,
-            extensible: true,
-            storage: None,
-            prototype: self
-                .realm
+        let prototype = self.allocate_array_object(
+            self.realm
                 .object_prototype
                 .expect("Object prototype initializes before Array prototype"),
-        })?;
+            AllocationSpace::Old,
+        )?;
         self.realm.array_prototype = Some(prototype);
         let constructor = self.allocate_native_function(
             NativeFunction::ArrayConstructor,
@@ -1816,6 +1911,18 @@ impl Isolate {
         self.set_function_prototype(constructor, prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        let is_array = self.allocate_native_function(
+            NativeFunction::ArrayIsArray,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_is_array = Some(is_array);
+        let is_array_atom = self.intern_intrinsic_name(b"isArray")?;
+        self.set_intrinsic_data_property(constructor, is_array_atom, is_array, true)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_intrinsic_data_property(prototype, length_atom, Value::from_i32(0), false)?;
         let concat = self.allocate_native_function(
@@ -1830,6 +1937,30 @@ impl Isolate {
         self.realm.array_concat = Some(concat);
         let concat_atom = self.intern_intrinsic_name(b"concat")?;
         self.set_intrinsic_data_property(prototype, concat_atom, concat, true)?;
+        let push = self.allocate_native_function(
+            NativeFunction::ArrayPush,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_push = Some(push);
+        let push_atom = self.intern_intrinsic_name(b"push")?;
+        self.set_intrinsic_data_property(prototype, push_atom, push, true)?;
+        let join = self.allocate_native_function(
+            NativeFunction::ArrayJoin,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_join = Some(join);
+        let join_atom = self.intern_intrinsic_name(b"join")?;
+        self.set_intrinsic_data_property(prototype, join_atom, join, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -1842,6 +1973,35 @@ impl Isolate {
         self.realm.array_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
         self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)
+    }
+
+    /// Builds the non-constructor Math namespace and its first numeric intrinsic.
+    fn initialize_math_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before Math"),
+        })?;
+        self.realm.math_object = Some(object);
+        let pow = self.allocate_native_function(
+            NativeFunction::MathPow,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: self
+                    .realm
+                    .function_prototype
+                    .expect("Function prototype initializes before Math methods"),
+            },
+        )?;
+        self.realm.math_pow = Some(pow);
+        let pow_atom = self.intern_intrinsic_name(b"pow")?;
+        self.set_intrinsic_data_property(object, pow_atom, pow, true)
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.
@@ -1912,6 +2072,13 @@ impl Isolate {
             self.realm
                 .function_constructor
                 .expect("Function initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.math,
+            self.realm
+                .math_object
+                .expect("Math initializes before global publication"),
             true,
         )?;
         Ok(())
@@ -2247,6 +2414,71 @@ impl Isolate {
         Ok(Value::from_heap_ref(object.raw()))
     }
 
+    /// Allocates one Array exotic while keeping its ordinary prototype edge in the pending payload.
+    fn create_array_object_with_prototype(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        self.allocate_array_object(prototype, AllocationSpace::Young)
+    }
+
+    /// Publishes the mandatory length slot before exposing one Array exotic identity.
+    fn allocate_array_object(
+        &mut self,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let length = self.length_atom()?;
+        let shape = self
+            .shapes
+            .transition_add(
+                ShapeId::EMPTY,
+                length,
+                PropertyAttributes::data(true, false, false),
+            )
+            .map_err(ExecutionError::Shape)?;
+        let mut roots = ArrayAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.property_storage,
+                0,
+                PropertyStorage {
+                    slots: Box::new([Value::from_i32(0)]),
+                },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let array = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.array,
+                0,
+                0,
+                ArrayObject {
+                    ordinary: OrdinaryObject {
+                        shape,
+                        extensible: true,
+                        storage: Some(storage),
+                        prototype: roots.prototype,
+                    },
+                },
+                space,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok(Value::from_heap_ref(array.raw()))
+    }
+
     /// Creates an Array-shaped ordinary object from one native call/construct argument window.
     fn create_array_from_site(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let count = usize::try_from(site.argument_count)
@@ -2265,7 +2497,7 @@ impl Isolate {
             .realm
             .array_prototype
             .expect("Array prototype initializes before Array construction");
-        let array = self.create_ordinary_object_with_prototype(prototype)?;
+        let array = self.create_array_object_with_prototype(prototype)?;
         self.write(site.caller_base, site.destination, array)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
         if arguments.len() == 1
@@ -2444,29 +2676,11 @@ impl Isolate {
         Ok(())
     }
 
-    /// Identifies this Array subset by its realm-local prototype chain.
+    /// Implements the non-Proxy IsArray branch through the unforgeable GC payload type.
     fn is_array_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
-        if !self.is_object_value(value) {
-            return Ok(false);
-        }
-        let array_prototype = self
-            .realm
-            .array_prototype
-            .expect("Array prototype initializes before execution");
-        if value == array_prototype {
-            return Ok(true);
-        }
-        let (_, mut snapshot) = self.object_snapshot(value)?;
-        loop {
-            if snapshot.prototype == array_prototype {
-                return Ok(true);
-            }
-            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
-                return Ok(false);
-            }
-            let (_, next) = self.object_snapshot(snapshot.prototype)?;
-            snapshot = next;
-        }
+        Ok(value
+            .as_heap_ref()
+            .is_some_and(|raw| self.heap.checked_reference(raw, self.types.array).is_ok()))
     }
 
     /// Returns the current ordinary prototype and applies the nullish TypeError boundary.
@@ -2524,6 +2738,117 @@ impl Isolate {
         }
     }
 
+    /// Implements Array.prototype.push through the generic array-like Set contract.
+    fn array_push(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        let argument_count = u64::from(site.argument_count);
+        let new_length = length
+            .checked_add(argument_count)
+            .filter(|length| *length <= MAX_SAFE_INTEGER)
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        for index in 0..site.argument_count {
+            let value = self
+                .call_argument(site, index)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            let key = self.safe_integer_property_atom(
+                length
+                    .checked_add(u64::from(index))
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?,
+            )?;
+            self.set_own_data_property(site.this_value, key, value)?;
+        }
+        let length_atom = self.length_atom()?;
+        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(new_length))?;
+        Ok(safe_integer_value(new_length))
+    }
+
+    fn array_join(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let separator = self.call_argument(site, 0)?;
+        self.join_array_like(site.this_value, separator)
+    }
+
+    /// Joins one generic array-like receiver while retaining primitive conversion order.
+    fn join_array_like(
+        &mut self,
+        receiver: Value,
+        separator: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(receiver)?;
+        let mut separator_units = Vec::new();
+        if separator.is_none_or(|value| value.as_immediate() == Some(Immediate::Undefined)) {
+            separator_units
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            separator_units.push(u16::from(b','));
+        } else if let Some(separator) = separator {
+            self.append_primitive_string_units(separator, &mut separator_units)?;
+        }
+        let per_element =
+            tuning::arrays::JOIN_INITIAL_UNITS_PER_ELEMENT.saturating_add(separator_units.len());
+        let estimated = usize::try_from(length)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(per_element)
+            .min(tuning::arrays::JOIN_MAX_INITIAL_UNITS);
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(estimated)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for index in 0..length {
+            if index != 0 {
+                output
+                    .try_reserve(separator_units.len())
+                    .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+                output.extend_from_slice(&separator_units);
+            }
+            let key = self.safe_integer_property_atom(index)?;
+            let value = self
+                .get_data_property(receiver, key)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            if value == receiver
+                || matches!(
+                    value.as_immediate(),
+                    Some(Immediate::Undefined | Immediate::Null)
+                )
+            {
+                continue;
+            }
+            self.append_primitive_string_units(value, &mut output)?;
+        }
+        let string =
+            JsString::try_from_utf16(&output).map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(string)
+    }
+
+    /// Applies the currently supported ToLength boundary to one object length property.
+    fn length_of_array_like(&mut self, receiver: Value) -> Result<u64, ExecutionError> {
+        if !self.is_object_value(receiver) {
+            return Err(ExecutionError::NotObject(receiver));
+        }
+        let length_atom = self.length_atom()?;
+        let value = self
+            .get_data_property(receiver, length_atom)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let number = self.convert_to_number(value)?;
+        let number =
+            numeric_value(number).ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
+        if number.is_nan() || number <= 0.0 {
+            return Ok(0);
+        }
+        if !number.is_finite() || number >= MAX_SAFE_INTEGER as f64 {
+            return Ok(MAX_SAFE_INTEGER);
+        }
+        Ok(number.floor() as u64)
+    }
+
+    #[inline(always)]
+    fn safe_integer_property_atom(&mut self, index: u64) -> Result<AtomId, ExecutionError> {
+        debug_assert!(index <= MAX_SAFE_INTEGER);
+        if let Ok(integer) = i32::try_from(index) {
+            return self.property_key_atom(Value::from_i32(integer));
+        }
+        self.property_key_atom(Value::from_f64(index as f64))
+    }
+
     /// Implements the basic Array.prototype.concat flattening contract for ordinary arrays.
     fn array_concat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let result = self.create_array_from_site(&CallSite {
@@ -2545,31 +2870,7 @@ impl Isolate {
 
     /// Implements Array.prototype.toString as comma-joined primitive elements for this subset.
     fn array_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
-        let length_atom = self.intern_intrinsic_name(b"length")?;
-        let length = self
-            .get_data_property(receiver, length_atom)?
-            .and_then(Value::as_i32)
-            .unwrap_or(0)
-            .max(0);
-        let mut units = Vec::new();
-        for index in 0..length {
-            if index != 0 {
-                units.push(u16::from(b','));
-            }
-            let key = self.property_key_atom(Value::from_i32(index))?;
-            let Some(value) = self.get_data_property(receiver, key)? else {
-                continue;
-            };
-            if matches!(
-                value.as_immediate(),
-                Some(Immediate::Undefined | Immediate::Null)
-            ) {
-                continue;
-            }
-            self.append_primitive_string_units(value, &mut units)?;
-        }
-        let string = JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?;
-        self.allocate_runtime_string(string)
+        self.join_array_like(receiver, None)
     }
 
     /// Appends the currently supported ECMAScript primitive string conversion without heap allocation.
@@ -2588,6 +2889,9 @@ impl Isolate {
                     return Err(ExecutionError::UnsupportedErrorMessage(value));
                 }
             };
+            output
+                .try_reserve(bytes.len())
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
             output.extend(bytes.iter().map(|&byte| u16::from(byte)));
             return Ok(());
         }
@@ -2598,6 +2902,9 @@ impl Isolate {
             } else {
                 buffer.format(number)
             };
+            output
+                .try_reserve(printed.len())
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
             output.extend(printed.bytes().map(u16::from));
             return Ok(());
         }
@@ -2616,9 +2923,17 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)?;
                 match string.as_view() {
                     JsStringView::Latin1(bytes) => {
+                        output
+                            .try_reserve(bytes.len())
+                            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
                         output.extend(bytes.iter().map(|&byte| u16::from(byte)));
                     }
-                    JsStringView::Utf16(units) => output.extend_from_slice(units),
+                    JsStringView::Utf16(units) => {
+                        output
+                            .try_reserve(units.len())
+                            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+                        output.extend_from_slice(units);
+                    }
                 }
                 Ok(())
             })
@@ -3152,6 +3467,46 @@ impl Isolate {
         Ok(result)
     }
 
+    /// Materializes all present own string keys, including non-enumerable properties.
+    fn object_get_own_property_names(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if matches!(
+            source.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        if !self.is_object_value(source) {
+            return Ok(result);
+        }
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let keys = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        let mut output_index = 0_u64;
+        for key in keys {
+            if self.data_property_from_snapshot(snapshot, key)?.is_none() {
+                continue;
+            }
+            let name = self.atom_string_value(key)?;
+            let output_key = self.safe_integer_property_atom(output_index)?;
+            self.set_own_data_property(result, output_key, name)?;
+            output_index = output_index
+                .checked_add(1)
+                .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        }
+        let length = self.length_atom()?;
+        self.set_own_data_property(result, length, safe_integer_value(output_index))?;
+        Ok(result)
+    }
+
     /// Snapshots the currently visible enumerable string keys into one managed iterator payload.
     fn create_for_in_iterator(&mut self, source: Value) -> Result<Value, ExecutionError> {
         let keys = self.for_in_keys(source)?;
@@ -3446,7 +3801,7 @@ impl Isolate {
             .realm
             .array_prototype
             .expect("Array prototype initializes before Object.entries");
-        self.create_ordinary_object_with_prototype(prototype)
+        self.create_array_object_with_prototype(prototype)
     }
 
     /// Copies an immortal atom spelling into one GC-managed ECMAScript string value.
@@ -3986,6 +4341,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Ordinary(object), snapshot));
         }
+        if let Ok(array) = self.heap.checked_reference(raw, self.types.array) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.array)
+                        .map(|array| array.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Array(array), ordinary));
+        }
         let function = self
             .heap
             .checked_reference(raw, self.types.function)
@@ -4019,6 +4386,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Array(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(array, self.types.array)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
                 let function = scope.root(function).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -4046,6 +4424,17 @@ impl Isolate {
                     no_gc
                         .borrow_mut(object, self.types.ordinary_object)
                         .map_err(ExecutionError::NoGcBorrow)?
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Array(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(array, self.types.array)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
                         .shape = shape;
                     Ok(())
                 })
@@ -4088,6 +4477,22 @@ impl Isolate {
                     .map_err(ExecutionError::HeapReference)?;
                 Ok(())
             }),
+            ObjectReceiver::Array(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let array = no_gc
+                        .borrow_mut(array, self.types.array)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    array.ordinary.shape = shape;
+                    array.ordinary.storage = Some(storage);
+                    Ok::<(), ExecutionError>(())
+                })?;
+                scope
+                    .write_barrier(array, storage_local)
+                    .map_err(ExecutionError::HeapReference)?;
+                Ok(())
+            }),
             ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
                 let function = scope.root(function).map_err(ExecutionError::Root)?;
                 let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
@@ -4115,6 +4520,7 @@ impl Isolate {
         self.heap
             .checked_reference(raw, self.types.ordinary_object)
             .is_ok()
+            || self.heap.checked_reference(raw, self.types.array).is_ok()
             || self
                 .heap
                 .checked_reference(raw, self.types.function)
@@ -4901,7 +5307,7 @@ impl Isolate {
                     .realm
                     .array_prototype
                     .expect("Array prototype initializes before array literals");
-                let object = self.create_ordinary_object_with_prototype(prototype)?;
+                let object = self.create_array_object_with_prototype(prototype)?;
                 self.write(base, operands[0], object)?;
             }
             Opcode::CreateForInIterator => {
@@ -4939,6 +5345,15 @@ impl Isolate {
                     .expect("new.target load always has an active frame")
                     .new_target;
                 self.write(base, operands[0], value)?;
+            }
+            Opcode::LoadArgumentsLength => {
+                let length = self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("arguments length load always has an active frame")
+                    .argument_count;
+                self.write(base, operands[0], safe_integer_value(u64::from(length)))?;
             }
             Opcode::GetById => {
                 let receiver = self.read(base, operands[1])?;
@@ -5598,6 +6013,10 @@ impl Isolate {
                     self.materialize_data_property_descriptor(result, value, attributes)?;
                     return Ok(());
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyNames) => {
+                    let result = self.object_get_own_property_names(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwnProperty) => {
                     let key = self
                         .call_argument(&site, 0)?
@@ -5608,6 +6027,24 @@ impl Isolate {
                         site.caller_base,
                         site.destination,
                         Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectPropertyIsEnumerable) => {
+                    let key = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self.property_key_atom_or_undefined(key)?;
+                    let enumerable = self
+                        .own_data_property_with_attributes(site.this_value, key)?
+                        .is_some_and(|(_, attributes)| attributes.enumerable());
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if enumerable {
                             Immediate::True
                         } else {
                             Immediate::False
@@ -5774,13 +6211,53 @@ impl Isolate {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayIsArray) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.is_array_value(value)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConcat) => {
                     let array = self.array_concat(&site)?;
                     return self.write(site.caller_base, site.destination, array);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayPush) => {
+                    let length = self.array_push(&site)?;
+                    return self.write(site.caller_base, site.destination, length);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayJoin) => {
+                    let value = self.array_join(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::MathPow) => {
+                    let left = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let right = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let left = numeric_value(self.convert_to_number(left)?)
+                        .ok_or(ExecutionError::UnsupportedNumberConversion(left))?;
+                    let right = numeric_value(self.convert_to_number(right)?)
+                        .ok_or(ExecutionError::UnsupportedNumberConversion(right))?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_f64(left.powf(right)),
+                    );
                 }
             }
         }
@@ -6121,6 +6598,7 @@ fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
         | ExecutionError::NonExtensibleObject(_)
         | ExecutionError::ReadOnlyProperty(_)
         | ExecutionError::InvalidPropertyRedefinition(_)
+        | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),
@@ -6346,6 +6824,13 @@ fn numeric_bitwise_uint32(number: f64) -> u32 {
 #[inline(always)]
 fn numeric_value(value: Value) -> Option<f64> {
     value.as_i32().map(f64::from).or_else(|| value.as_f64())
+}
+
+#[inline(always)]
+fn safe_integer_value(value: u64) -> Value {
+    i32::try_from(value)
+        .map(Value::from_i32)
+        .unwrap_or_else(|_| Value::from_f64(value as f64))
 }
 
 /// Parses ECMAScript numeric string forms after the string has been detached from the heap.
@@ -7189,6 +7674,15 @@ mod tests {
     }
 
     #[test]
+    fn array_push_method_call_is_stable_for_every_dispatch_batch() {
+        assert_array_push_batch::<1>();
+        assert_array_push_batch::<2>();
+        assert_array_push_batch::<4>();
+        assert_array_push_batch::<8>();
+        assert_array_push_batch::<16>();
+    }
+
+    #[test]
     fn strict_and_sloppy_this_binding_work_for_every_dispatch_batch() {
         assert_this_binding_batch::<1>();
         assert_this_binding_batch::<2>();
@@ -7274,6 +7768,24 @@ mod tests {
     }
 
     #[test]
+    fn array_identity_and_property_storage_survive_forced_major_allocations() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &array_push_module(),
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
+
+    #[test]
     fn nested_bound_construct_preserves_each_new_target_substitution() {
         let mut isolate = test_isolate();
         let target = isolate.realm.array_constructor.unwrap();
@@ -7288,6 +7800,74 @@ mod tests {
             .resolve_bound_construct_target(second, second)
             .unwrap();
         assert_eq!((resolved, new_target), (target, target));
+    }
+
+    /// Exercises raw native helpers before the managed-error dispatch boundary.
+    #[test]
+    fn array_push_updates_existing_indexed_storage_and_length() {
+        let mut isolate = test_isolate();
+        let prototype = isolate.realm.array_prototype.unwrap();
+        let array = isolate
+            .create_array_object_with_prototype(prototype)
+            .unwrap();
+        let zero = isolate.property_key_atom(Value::from_i32(0)).unwrap();
+        isolate
+            .set_own_data_property(array, zero, Value::from_i32(1))
+            .unwrap();
+        let length = isolate.length_atom().unwrap();
+        isolate
+            .set_own_data_property(array, length, Value::from_i32(1))
+            .unwrap();
+        isolate.fiber.registers = vec![array, Value::from_i32(2), Value::from_i32(3)];
+        let result = isolate
+            .array_push(&CallSite {
+                caller_base: 0,
+                destination: 0,
+                callee: isolate.realm.array_push.unwrap(),
+                argument_base: 1,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 2,
+                this_value: array,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: WordOffset::new(0),
+            })
+            .unwrap();
+        assert_eq!(result.as_i32(), Some(3));
+        assert_eq!(
+            isolate
+                .get_data_property(array, length)
+                .unwrap()
+                .unwrap()
+                .as_i32(),
+            Some(3)
+        );
+        let separator = isolate
+            .allocate_runtime_string(JsString::try_from_latin1(b"-").unwrap())
+            .unwrap();
+        isolate.fiber.registers.push(separator);
+        let joined = isolate
+            .array_join(&CallSite {
+                caller_base: 0,
+                destination: 0,
+                callee: isolate.realm.array_join.unwrap(),
+                argument_base: 3,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 1,
+                this_value: array,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: WordOffset::new(0),
+            })
+            .unwrap();
+        let expected = isolate
+            .allocate_runtime_string(JsString::try_from_latin1(b"1-2-3").unwrap())
+            .unwrap();
+        assert!(isolate.strict_equal_values(joined, expected).unwrap());
     }
 
     #[test]
@@ -8059,6 +8639,19 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    fn assert_array_push_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &array_push_module(),
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
+
     /// Creates a zero-argument bound exotic through the production allocation path.
     fn create_test_bound_function(isolate: &mut Isolate, target: Value) -> Value {
         let undefined = Value::from_immediate(Immediate::Undefined);
@@ -8752,6 +9345,40 @@ mod tests {
                     },
                 ),
             ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `[].push(20, 22)` through a verified receiver/callee/argument window.
+    fn array_push_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(6, 0);
+        builder.emit(Opcode::CreateArray, &[0], span).unwrap();
+        builder.emit(Opcode::GetById, &[1, 0, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 20], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[3, 22], span).unwrap();
+        builder
+            .emit(Opcode::CallWithReceiver, &[4, 0, 2], span)
+            .unwrap();
+        builder.emit(Opcode::Return, &[4], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        CompiledModule::new(
+            Arc::from("[].push(20, 22)"),
+            Vec::new(),
+            vec![Arc::from("push")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count,
+                        ..FunctionLayout::default()
+                    },
+                    source_map,
+                    ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                },
+            )],
             FunctionId::new(0),
         )
         .unwrap()
