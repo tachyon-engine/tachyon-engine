@@ -127,6 +127,7 @@ pub enum RunOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
+    InvalidDispatchBatch { batch: usize },
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
     HandlerStackTooLarge(u32),
@@ -777,7 +778,9 @@ impl Isolate {
         code: CodeId,
         mut budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        assert!(N > 0, "interpreter batch size must be non-zero");
+        if N == 0 {
+            return Err(ExecutionError::InvalidDispatchBatch { batch: N });
+        }
         let entry_function = self.loaded_code(code)?.module.entry_function();
         self.enter(code, entry_function)?;
         loop {
@@ -1777,14 +1780,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "interpreter batch size must be non-zero")]
-    fn interpreter_rejects_zero_batch_before_entering_dispatch_loop() {
-        let _ = test_isolate().execute_with_batch::<0>(
+    fn interpreter_rejects_zero_batch_without_panicking() {
+        let result = test_isolate().execute_with_batch::<0>(
             &arithmetic_module(),
             ExecutionBudget {
                 fuel: 1,
                 quantum: 1,
             },
+        );
+        assert_eq!(
+            result,
+            Err(ExecutionError::InvalidDispatchBatch { batch: 0 })
         );
     }
 
