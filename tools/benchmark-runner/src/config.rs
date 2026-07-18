@@ -62,6 +62,12 @@ pub struct TachyonBenchmarkConfig {
     pub atom_hash_seed_0: u64,
     /// Deterministic benchmark-only atom hash seed high word.
     pub atom_hash_seed_1: u64,
+    /// Hard heap limit for one benchmark isolate.
+    pub heap_max_bytes: usize,
+    /// Maximum explicit JavaScript frames for one benchmark execution.
+    pub stack_max_frames: u32,
+    /// Maximum aggregate frame-register slots for one benchmark execution.
+    pub stack_max_registers: u32,
     /// Executions represented by one steady-state timing sample.
     pub steady_state_iterations: u64,
 }
@@ -262,6 +268,9 @@ impl BenchmarkConfig {
         }
         if self.tachyon.atom_max_entries == 0
             || self.tachyon.atom_max_bytes == 0
+            || self.tachyon.heap_max_bytes == 0
+            || self.tachyon.stack_max_frames == 0
+            || self.tachyon.stack_max_registers == 0
             || self.tachyon.steady_state_iterations < 2
         {
             return Err(

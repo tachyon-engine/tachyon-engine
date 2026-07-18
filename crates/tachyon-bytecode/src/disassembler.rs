@@ -80,7 +80,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::Return | Opcode::Throw => write!(output, " r{}", operands[0])?,
         Opcode::Call => write!(
             output,
-            " r{}, r{}, r{}",
+            " r{}, callee=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
         Opcode::CreateClosure => write!(output, " r{}, function={}", operands[0], operands[1])?,

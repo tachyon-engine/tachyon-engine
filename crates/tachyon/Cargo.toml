@@ -14,4 +14,5 @@ tachyon-compiler = { path = "../tachyon-compiler" }
 tachyon-vm = { path = "../tachyon-vm" }
 
 [dev-dependencies]
+tachyon-gc = { path = "../tachyon-gc" }
 tachyon-value = { path = "../tachyon-value" }

@@ -17,6 +17,9 @@ atom_max_entries = 1024
 atom_max_bytes = 1048576
 atom_hash_seed_0 = 7640891576956012809
 atom_hash_seed_1 = 4354685564936845355
+heap_max_bytes = 67108864
+stack_max_frames = 2048
+stack_max_registers = 1048576
 steady_state_iterations = 1000
 
 [[external_engines]]

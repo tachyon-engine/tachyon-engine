@@ -2,8 +2,9 @@ use std::{hint::black_box, sync::Arc, time::Instant};
 
 use tachyon_bytecode::CompiledModule;
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
+use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome, StackLimits,
 };
 
 use crate::{
@@ -38,11 +39,15 @@ impl TachyonInProcessConfig {
     #[must_use]
     pub fn from_benchmark(config: TachyonBenchmarkConfig) -> Self {
         Self {
-            isolate: IsolateConfig::new(AtomTableConfig::new(
-                config.atom_max_entries,
-                config.atom_max_bytes,
-                AtomHashSeed::new(config.atom_hash_seed_0, config.atom_hash_seed_1),
-            )),
+            isolate: IsolateConfig::new(
+                AtomTableConfig::new(
+                    config.atom_max_entries,
+                    config.atom_max_bytes,
+                    AtomHashSeed::new(config.atom_hash_seed_0, config.atom_hash_seed_1),
+                ),
+                HeapLimit::new(config.heap_max_bytes),
+                StackLimits::new(config.stack_max_frames, config.stack_max_registers),
+            ),
             steady_state_iterations: config.steady_state_iterations,
         }
     }
@@ -171,7 +176,9 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
             source: Arc::clone(&request.source),
             mode: request.mode,
             module,
-            isolate: Isolate::new(self.config.isolate),
+            isolate: Isolate::new(self.config.isolate).map_err(|error| {
+                AdapterError::Setup(format!("Tachyon isolate creation failed: {error:?}").into())
+            })?,
         });
         Ok(())
     }

@@ -22,6 +22,7 @@ serde-saphyr = { version = "0.0.29", default-features = false, features = ["dese
 sha2 = "0.10"
 tachyon-bytecode = { path = "../../crates/tachyon-bytecode" }
 tachyon-compiler = { path = "../../crates/tachyon-compiler" }
+tachyon-gc = { path = "../../crates/tachyon-gc" }
 tachyon-vm = { path = "../../crates/tachyon-vm" }
 toml = "0.8"
 

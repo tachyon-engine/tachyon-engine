@@ -28,7 +28,10 @@ use tachyon_bytecode::{
     BytecodeConstant, CompiledModule, FunctionId, FunctionKind, Opcode, RegisterId, WordOffset,
     decode_instruction,
 };
-use tachyon_gc::{GcRef, Trace, Tracer};
+use tachyon_gc::{
+    AllocationSpace, GcRef, GcType, Heap, HeapLimit, HeapReferenceError, ManagedAllocationError,
+    NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
+};
 use tachyon_value::{Immediate, Value};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
@@ -39,12 +42,39 @@ pub struct Engine;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IsolateConfig {
     atom_table: AtomTableConfig,
+    heap_limit: HeapLimit,
+    stack_limits: StackLimits,
 }
 
 impl IsolateConfig {
     #[must_use]
-    pub const fn new(atom_table: AtomTableConfig) -> Self {
-        Self { atom_table }
+    pub const fn new(
+        atom_table: AtomTableConfig,
+        heap_limit: HeapLimit,
+        stack_limits: StackLimits,
+    ) -> Self {
+        Self {
+            atom_table,
+            heap_limit,
+            stack_limits,
+        }
+    }
+}
+
+/// Host-provided hard bounds for explicit JavaScript frames and their register windows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StackLimits {
+    max_frames: u32,
+    max_registers: u32,
+}
+
+impl StackLimits {
+    #[must_use]
+    pub const fn new(max_frames: u32, max_registers: u32) -> Self {
+        Self {
+            max_frames,
+            max_registers,
+        }
     }
 }
 
@@ -76,11 +106,59 @@ pub enum ExecutionError {
     UnsupportedOpcode(Opcode),
     UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
+    NonCallable(Value),
+    HeapAllocation(ManagedAllocationError),
+    HeapReference(HeapReferenceError),
+    Root(RootError),
+    NoGcBorrow(NoGcBorrowError),
+    CallStackLimit { limit: u32 },
+    RegisterStackLimit { limit: u32, requested: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IsolateCreationError {
+    TypeRegistration(TypeRegistrationError),
 }
 
 /// A future GC-managed lexical environment. Its concrete payload arrives with M5.
 #[derive(Debug)]
 struct Environment;
+
+impl Trace for Environment {
+    fn trace(&mut self, _: &mut dyn Tracer) {}
+}
+
+/// Minimal callable payload; properties and captured environments extend this object in M5.
+#[derive(Clone, Copy, Debug)]
+struct FunctionObject {
+    function: FunctionId,
+    environment: Option<GcRef<Environment>>,
+}
+
+impl Trace for FunctionObject {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.environment.trace(tracer);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VmTypes {
+    function: GcType<FunctionObject>,
+}
+
+struct VmRoots<'a> {
+    fiber: &'a mut Fiber,
+    finalization_jobs: &'a mut finalization::FinalizationJobs,
+}
+
+impl Trace for VmRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.fiber.trace_roots(tracer);
+        self.finalization_jobs.trace(tracer);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Strictness {
@@ -99,6 +177,10 @@ struct Frame {
     this_value: Value,
     new_target: Value,
     strictness: Strictness,
+    argument_base: u32,
+    argument_count: u32,
+    handler_base: u32,
+    completion_base: u32,
 }
 
 /// The dynamic handler state selected from immutable bytecode handler metadata.
@@ -139,6 +221,12 @@ impl Fiber {
             if let Some(return_register) = frame.return_register {
                 debug_assert!((return_register.index() as usize) < self.registers.len());
             }
+            debug_assert!(
+                frame
+                    .argument_base
+                    .checked_add(frame.argument_count)
+                    .is_some_and(|end| end as usize <= self.registers.len())
+            );
             let _is_strict = matches!(frame.strictness, Strictness::Strict);
         }
         for handler in &self.handlers {
@@ -160,23 +248,34 @@ impl Fiber {
 }
 
 /// A single-thread-owned ECMAScript execution state; `Cell` intentionally makes it `!Sync`.
-#[derive(Debug)]
 pub struct Isolate {
     fiber: Fiber,
     finalization_jobs: finalization::FinalizationJobs,
     atoms: AtomTable,
+    heap: Heap,
+    types: VmTypes,
+    stack_limits: StackLimits,
     _not_sync: Cell<()>,
 }
 
 impl Isolate {
-    #[must_use]
-    pub fn new(config: IsolateConfig) -> Self {
-        Self {
+    /// Registers VM payload descriptors before constructing an otherwise empty isolate heap.
+    pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
+        let mut registry = TypeRegistry::new();
+        let types = VmTypes {
+            function: registry
+                .try_register("FunctionObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+        };
+        Ok(Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
             atoms: AtomTable::new(config.atom_table),
+            heap: Heap::new(config.heap_limit, registry),
+            types,
+            stack_limits: config.stack_limits,
             _not_sync: Cell::new(()),
-        }
+        })
     }
 
     #[must_use]
@@ -333,9 +432,11 @@ impl Isolate {
                     self.set_pc(WordOffset::new(operands[1]));
                 }
             }
-            Opcode::Return => {
-                return Ok(Some(RunOutcome::Completed(self.read(base, operands[0])?)));
+            Opcode::CreateClosure => {
+                self.create_closure(module, base, operands[0], FunctionId::new(operands[1]))?
             }
+            Opcode::Call => self.call(module, base, operands[0], operands[1], operands[2])?,
+            Opcode::Return => return self.return_from_frame(base, operands[0]),
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
@@ -352,6 +453,15 @@ impl Isolate {
         let register_count = usize::try_from(function.layout().register_count).map_err(|_| {
             ExecutionError::RegisterWindowTooLarge(function.layout().register_count)
         })?;
+        if function.layout().register_count > self.stack_limits.max_registers {
+            return Err(ExecutionError::RegisterStackLimit {
+                limit: self.stack_limits.max_registers,
+                requested: function.layout().register_count,
+            });
+        }
+        if self.stack_limits.max_frames == 0 {
+            return Err(ExecutionError::CallStackLimit { limit: 0 });
+        }
         self.fiber.frames.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
@@ -369,8 +479,187 @@ impl Isolate {
             this_value: Value::from_immediate(Immediate::Undefined),
             new_target: Value::from_immediate(Immediate::Undefined),
             strictness: strictness_for(function.kind()),
+            argument_base: 0,
+            argument_count: 0,
+            handler_base: 0,
+            completion_base: 0,
         });
         Ok(())
+    }
+
+    /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
+    fn create_closure(
+        &mut self,
+        module: &CompiledModule,
+        base: u32,
+        destination: u32,
+        function: FunctionId,
+    ) -> Result<(), ExecutionError> {
+        module
+            .function(function)
+            .ok_or(ExecutionError::MissingEntryFunction(function))?;
+        let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+        };
+        let closure = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    function,
+                    environment,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.write(base, destination, Value::from_heap_ref(closure.raw()))
+    }
+
+    /// Resolves one callable and pushes its exact register/frame window without Rust recursion.
+    fn call(
+        &mut self,
+        module: &CompiledModule,
+        caller_base: u32,
+        destination: u32,
+        callee_register: u32,
+        argument_count: u32,
+    ) -> Result<(), ExecutionError> {
+        let callee = self.read(caller_base, callee_register)?;
+        let raw = callee
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(callee))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(ExecutionError::HeapReference)?;
+        let function_object = self.heap.with_running_scope(|scope| {
+            let local = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.function)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let function = module.function(function_object.function).ok_or(
+            ExecutionError::MissingEntryFunction(function_object.function),
+        )?;
+        self.push_call_frame(
+            function,
+            function_object,
+            caller_base,
+            destination,
+            callee_register,
+            argument_count,
+        )
+    }
+
+    /// Reserves the callee state before mutation, then copies the supplied positional arguments.
+    fn push_call_frame(
+        &mut self,
+        function: &tachyon_bytecode::CompiledFunction,
+        function_object: FunctionObject,
+        caller_base: u32,
+        destination: u32,
+        callee_register: u32,
+        argument_count: u32,
+    ) -> Result<(), ExecutionError> {
+        if self.fiber.frames.len() >= self.stack_limits.max_frames as usize {
+            return Err(ExecutionError::CallStackLimit {
+                limit: self.stack_limits.max_frames,
+            });
+        }
+        let register_count = function.layout().register_count;
+        let callee_base = u32::try_from(self.fiber.registers.len())
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(register_count))?;
+        let requested = callee_base
+            .checked_add(register_count)
+            .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
+        if requested > self.stack_limits.max_registers {
+            return Err(ExecutionError::RegisterStackLimit {
+                limit: self.stack_limits.max_registers,
+                requested,
+            });
+        }
+        let argument_base = caller_base
+            .checked_add(callee_register)
+            .and_then(|base| base.checked_add(1))
+            .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
+        let additional = register_count as usize;
+        self.fiber
+            .frames
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        self.fiber
+            .registers
+            .try_reserve_exact(additional)
+            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        self.fiber.registers.resize(
+            requested as usize,
+            Value::from_immediate(Immediate::Undefined),
+        );
+        let copied_arguments = argument_count.min(function.layout().argument_count);
+        for index in 0..copied_arguments {
+            let value = self
+                .fiber
+                .registers
+                .get((argument_base + index) as usize)
+                .copied()
+                .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
+                    callee_register + 1 + index,
+                )))?;
+            self.write(callee_base, index, value)?;
+        }
+        self.fiber.frames.push(Frame {
+            function: function.id(),
+            pc: WordOffset::new(0),
+            base: callee_base,
+            environment: function_object.environment,
+            return_register: Some(RegisterId::new(destination)),
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: Value::from_immediate(Immediate::Undefined),
+            strictness: strictness_for(function.kind()),
+            argument_base,
+            argument_count,
+            handler_base: self.fiber.handlers.len() as u32,
+            completion_base: self.fiber.completions.len() as u32,
+        });
+        Ok(())
+    }
+
+    /// Pops one explicit frame, restores its stack checkpoints, and writes into the caller result slot.
+    fn return_from_frame(
+        &mut self,
+        base: u32,
+        source: u32,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let value = self.read(base, source)?;
+        let frame = self
+            .fiber
+            .frames
+            .pop()
+            .expect("an executing return always has an active frame");
+        self.fiber.registers.truncate(frame.base as usize);
+        self.fiber.handlers.truncate(frame.handler_base as usize);
+        self.fiber
+            .completions
+            .truncate(frame.completion_base as usize);
+        let Some(destination) = frame.return_register else {
+            return Ok(Some(RunOutcome::Completed(value)));
+        };
+        let caller_base = self
+            .fiber
+            .frames
+            .last()
+            .expect("a callee return with a destination retains its caller")
+            .base;
+        self.write(caller_base, destination.index(), value)?;
+        Ok(None)
     }
 
     /// Reserves the exact entry-function execution windows before any opcode can push into them.
@@ -517,17 +806,18 @@ mod tests {
         Bytecode, BytecodeBuilder, CompiledFunctionTemplate, CompiledModule, FunctionId,
         FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
     };
-    use tachyon_gc::{GcRef, Tracer};
+    use tachyon_gc::{GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
 
     use super::*;
 
     fn test_isolate() -> Isolate {
-        Isolate::new(IsolateConfig::new(AtomTableConfig::new(
-            1_024,
-            1024 * 1024,
-            AtomHashSeed::new(1, 2),
-        )))
+        Isolate::new(IsolateConfig::new(
+            AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+            HeapLimit::new(4 * SPAN_SIZE_BYTES),
+            StackLimits::new(64, 4_096),
+        ))
+        .expect("test isolate descriptors register")
     }
 
     fn arithmetic_module() -> CompiledModule {
@@ -553,6 +843,76 @@ mod tests {
             FunctionId::new(0),
         )
         .unwrap()
+    }
+
+    /// Builds one non-capturing function call with a contiguous single-argument window.
+    fn call_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 0 };
+        let mut entry = BytecodeBuilder::default();
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[1, 40], span).unwrap();
+        entry.emit(Opcode::Call, &[2, 0, 1], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut callee = BytecodeBuilder::default();
+        callee.emit(Opcode::LoadImmediate, &[1, 2], span).unwrap();
+        callee.emit(Opcode::Add, &[2, 0, 1], span).unwrap();
+        callee.emit(Opcode::Return, &[2], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+
+        CompiledModule::new(
+            Arc::from("function addTwo(value) { return value + 2; } addTwo(40);"),
+            vec![],
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Script,
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callee_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Ordinary,
+                        layout: FunctionLayout {
+                            register_count: callee_registers,
+                            argument_count: 1,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: callee_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    fn assert_call_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &call_module(),
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
     #[test]
@@ -605,6 +965,15 @@ mod tests {
         assert_conditional_batch::<4>();
         assert_conditional_batch::<8>();
         assert_conditional_batch::<16>();
+    }
+
+    #[test]
+    fn explicit_function_frames_work_for_every_dispatch_batch() {
+        assert_call_batch::<1>();
+        assert_call_batch::<2>();
+        assert_call_batch::<4>();
+        assert_call_batch::<8>();
+        assert_call_batch::<16>();
     }
 
     #[test]

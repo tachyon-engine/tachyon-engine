@@ -118,6 +118,7 @@ pub enum Opcode {
     JumpIfFalse = 10,
     Return = 11,
     Throw = 12,
+    /// Calls register 1 with register 2 arguments stored contiguously after the callee.
     Call = 13,
     CreateClosure = 14,
     LoadScope = 15,
@@ -436,6 +437,12 @@ pub enum VerifyError {
         function: u32,
         function_count: u32,
     },
+    InvalidCallArgumentWindow {
+        offset: WordOffset,
+        callee: u32,
+        argument_count: u32,
+        register_count: u32,
+    },
     InvalidJumpTarget {
         offset: WordOffset,
         target: u32,
@@ -654,12 +661,26 @@ impl BytecodeBuilder {
             Opcode::Move => &[0, 1],
             Opcode::Not => &[0, 1],
             Opcode::JumpIfFalse => &[0],
-            Opcode::Add
-            | Opcode::Sub
-            | Opcode::Mul
-            | Opcode::Div
-            | Opcode::StrictEqual
-            | Opcode::Call => &[0, 1, 2],
+            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
+                &[0, 1, 2]
+            }
+            Opcode::Call => {
+                for &index in &[0, 1] {
+                    if let Some(&register) = operands.get(index) {
+                        self.note_register(register)?;
+                    }
+                }
+                let callee = operands[1];
+                let argument_count = operands[2];
+                if argument_count != 0 {
+                    self.note_register(
+                        callee
+                            .checked_add(argument_count)
+                            .ok_or(BuilderError::RegisterCountOverflow)?,
+                    )?;
+                }
+                return Ok(());
+            }
             Opcode::Await | Opcode::Yield => &[0, 1],
         };
         for &index in indexes {
@@ -1441,15 +1462,26 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Add
-        | Opcode::Sub
-        | Opcode::Mul
-        | Opcode::Div
-        | Opcode::StrictEqual
-        | Opcode::Call => {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
+        }
+        Opcode::Call => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            if operands[1]
+                .checked_add(operands[2])
+                .is_none_or(|last_argument| last_argument >= context.register_count)
+                && operands[2] != 0
+            {
+                return Err(VerifyError::InvalidCallArgumentWindow {
+                    offset,
+                    callee: operands[1],
+                    argument_count: operands[2],
+                    register_count: context.register_count,
+                });
+            }
         }
         Opcode::Await | Opcode::Yield => {
             check_register(operands[0])?;
@@ -1558,6 +1590,21 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_call_argument_window_past_register_file() {
+        let mut words = encode_instruction(Opcode::Call, &[0, 2, 2]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        assert!(matches!(
+            Bytecode::from_words(words).verify(context()),
+            Err(VerifyError::InvalidCallArgumentWindow {
+                callee: 2,
+                argument_count: 2,
+                register_count: 4,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn load_undefined_uses_one_register_operand() {
         let words = encode_instruction(Opcode::LoadUndefined, &[7]).unwrap();
         let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
@@ -1619,7 +1666,7 @@ mod tests {
         builder.emit(Opcode::Call, &[0, 1, 2], span).unwrap();
         builder.emit(Opcode::Return, &[0], span).unwrap();
         let (_, _, register_count) = builder.finish().unwrap();
-        assert_eq!(register_count, 3);
+        assert_eq!(register_count, 4);
     }
 
     #[test]

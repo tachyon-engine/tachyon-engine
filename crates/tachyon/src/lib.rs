@@ -14,16 +14,19 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
+    use tachyon_gc::{HeapLimit, SPAN_SIZE_BYTES};
     use tachyon_vm::{
         AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome,
+        StackLimits,
     };
 
     fn test_isolate() -> Isolate {
-        Isolate::new(IsolateConfig::new(AtomTableConfig::new(
-            1_024,
-            1024 * 1024,
-            AtomHashSeed::new(1, 2),
-        )))
+        Isolate::new(IsolateConfig::new(
+            AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+            HeapLimit::new(4 * SPAN_SIZE_BYTES),
+            StackLimits::new(64, 4_096),
+        ))
+        .expect("test isolate descriptors register")
     }
 
     #[test]

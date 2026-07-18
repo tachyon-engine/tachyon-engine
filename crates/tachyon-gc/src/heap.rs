@@ -535,6 +535,22 @@ impl Heap {
         Ok(header)
     }
 
+    /// Validates a raw logical address and restores its descriptor-proven typed reference.
+    pub fn checked_reference<T: Trace + 'static>(
+        &self,
+        reference: RawHeapRef,
+        object_type: GcType<T>,
+    ) -> Result<GcRef<T>, HeapReferenceError> {
+        if !self.types.matches(object_type) {
+            return Err(HeapReferenceError::UnregisteredTypeId {
+                reference,
+                type_id: object_type.type_id(),
+            });
+        }
+        self.verify_reference(reference, Some(object_type.type_id()))?;
+        Ok(GcRef::from_raw(reference))
+    }
+
     /// Starts a fresh epoch and reaches the exact strong-root fixed point iteratively.
     pub fn mark_strong(&mut self, roots: &mut dyn Trace) -> Result<MarkStats, MarkError> {
         self.collection_epoch = self.table.advance_collection_epoch(self.collection_epoch);
@@ -2099,6 +2115,26 @@ mod tests {
             })
         );
         assert_eq!(heap.committed_span_storage_bytes(), 0);
+    }
+
+    #[test]
+    fn checked_reference_restores_only_the_registered_payload_type() {
+        let mut types = TypeRegistry::new();
+        let value_type = types.try_register::<Value>("Value").unwrap();
+        let other_type = types.try_register::<OtherPayload>("OtherPayload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(value_type, 0, 0, Value::from_i32(7), AllocationSpace::Young)
+            .unwrap();
+
+        assert_eq!(
+            heap.checked_reference(reference.raw(), value_type),
+            Ok(reference)
+        );
+        assert!(matches!(
+            heap.checked_reference(reference.raw(), other_type),
+            Err(HeapReferenceError::TypeMismatch { .. })
+        ));
     }
 
     #[test]

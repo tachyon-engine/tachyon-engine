@@ -59,6 +59,7 @@ dependencies = [
  "sha2",
  "tachyon-bytecode",
  "tachyon-compiler",
+ "tachyon-gc",
  "tachyon-vm",
  "tempfile",
  "toml",
@@ -1011,6 +1012,7 @@ name = "tachyon"
 version = "0.1.0"
 dependencies = [
  "tachyon-compiler",
+ "tachyon-gc",
  "tachyon-value",
  "tachyon-vm",
 ]
@@ -1085,6 +1087,7 @@ dependencies = [
  "sha2",
  "tachyon-bytecode",
  "tachyon-compiler",
+ "tachyon-gc",
  "tachyon-vm",
  "tempfile",
  "toml",

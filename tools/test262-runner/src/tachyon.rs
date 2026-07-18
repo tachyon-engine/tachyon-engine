@@ -3,8 +3,9 @@ use std::{any::Any, panic::AssertUnwindSafe, sync::Arc};
 use tachyon_compiler::{
     CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
 };
+use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome, StackLimits,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -12,6 +13,9 @@ use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phas
 const ATOM_MAX_ENTRIES: u32 = 1 << 18;
 const ATOM_MAX_BYTES: usize = 32 * 1024 * 1024;
 const EXECUTION_FUEL_LIMIT: u64 = 10_000_000;
+const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+const STACK_MAX_FRAMES: u32 = 4_096;
+const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
 
 /// Stateless in-process Test262 adapter; each request owns an independent Tachyon isolate.
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,11 +60,18 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         }
     }
 
-    let mut isolate = Isolate::new(IsolateConfig::new(AtomTableConfig::new(
-        ATOM_MAX_ENTRIES,
-        ATOM_MAX_BYTES,
-        AtomHashSeed::new(0x7461_6368_796f_6e31, 0x7465_7374_3236_3231),
-    )));
+    let mut isolate = match Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(
+            ATOM_MAX_ENTRIES,
+            ATOM_MAX_BYTES,
+            AtomHashSeed::new(0x7461_6368_796f_6e31, 0x7465_7374_3236_3231),
+        ),
+        HeapLimit::new(HEAP_LIMIT_BYTES),
+        StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
+    )) {
+        Ok(isolate) => isolate,
+        Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),
+    };
     for (index, prelude) in request.test.preludes.iter().enumerate() {
         let module = match Compiler.compile(
             source_text(source_id(index, 1), prelude),

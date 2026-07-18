@@ -20,6 +20,7 @@ serde_json = "1"
 sha2 = "0.10"
 tachyon-bytecode = { path = "../../crates/tachyon-bytecode" }
 tachyon-compiler = { path = "../../crates/tachyon-compiler" }
+tachyon-gc = { path = "../../crates/tachyon-gc" }
 tachyon-vm = { path = "../../crates/tachyon-vm" }
 tempfile = "3"
 toml = "0.8"
