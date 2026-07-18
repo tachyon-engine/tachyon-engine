@@ -51,8 +51,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 64,
-                    quantum: 64,
+                    fuel: 256,
+                    quantum: 256,
                 },
             )
             .unwrap()
@@ -718,6 +718,27 @@ mod tests {
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Covers both script completion and ordinary-function loop control paths.
+    fn classic_for_loop_runs_update_on_continue_and_exits_on_break() {
+        assert_eq!(
+            execute_source(
+                38,
+                "let sum = 0; for (let index = 0; index < 4; index++) { if (index === 2) { continue; } sum += index; if (index === 3) { break; } } sum;",
+            )
+            .as_i32(),
+            Some(4)
+        );
+        assert_eq!(
+            execute_source(
+                39,
+                "function sumTo(limit) { let sum = 0; for (let index = 0; index < limit; ++index) { sum += index; } return sum; } sumTo(5);",
+            )
+            .as_i32(),
+            Some(10)
         );
     }
 }

@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        AssignmentTarget, BindingPattern, Expression, Program, Statement, VariableDeclaration,
-        VariableDeclarationKind,
+        AssignmentTarget, BindingPattern, Expression, ForStatementInit, Program,
+        SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
     },
     span::{GetSpan, Span},
-    syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
+    syntax::operator::{
+        AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator, UpdateOperator,
+    },
 };
 
 use crate::{CompileError, ProgramKind, SourceId, SourceName, SourceSpan, SourceText};
@@ -90,6 +92,12 @@ pub enum HirStatementKind {
         consequent: Box<HirStatement>,
         alternate: Option<Box<HirStatement>>,
     },
+    For {
+        initializer: Option<HirForInitializer>,
+        test: Option<HirExpression>,
+        update: Option<HirExpression>,
+        body: Box<HirStatement>,
+    },
     Switch {
         discriminant: HirExpression,
         cases: Arc<[HirSwitchCase]>,
@@ -100,9 +108,16 @@ pub enum HirStatementKind {
         finalizer: Option<Arc<[HirStatement]>>,
     },
     Break,
+    Continue,
     Return(Option<HirExpression>),
     Throw(HirExpression),
     Empty,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirForInitializer {
+    Variable(HirVariableDeclaration),
+    Expression(HirExpression),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,6 +233,11 @@ pub enum HirExpressionKind {
         target: HirAssignmentTarget,
         value: Box<HirExpression>,
     },
+    Update {
+        operator: HirUpdateOperator,
+        prefix: bool,
+        target: HirAssignmentTarget,
+    },
     Conditional {
         test: Box<HirExpression>,
         consequent: Box<HirExpression>,
@@ -242,6 +262,12 @@ pub enum HirUnaryOperator {
     Typeof,
     Void,
     Delete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirUpdateOperator {
+    Increment,
+    Decrement,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -379,6 +405,9 @@ fn lower_statement(
                     .transpose()?,
             },
         }),
+        Statement::ForStatement(statement) => {
+            lower_for_statement(statement, source, next_binding, functions)
+        }
         Statement::SwitchStatement(statement) => {
             lower_switch_statement(statement, source, next_binding, functions)
         }
@@ -394,6 +423,16 @@ fn lower_statement(
             source.name(),
             source_span(statement.span),
             "labelled break",
+        )),
+        Statement::ContinueStatement(statement) if statement.label.is_none() => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Continue,
+        }),
+        Statement::ContinueStatement(statement) => Err(unsupported(
+            source.name(),
+            source_span(statement.span),
+            "labelled continue",
         )),
         Statement::ReturnStatement(statement) if !allow_function_declaration => Ok(HirStatement {
             span: source_span(statement.span),
@@ -422,6 +461,53 @@ fn lower_statement(
             "statement",
         )),
     }
+}
+
+/// Owns a classic for-loop without collapsing its update target or continue destination.
+fn lower_for_statement(
+    statement: &oxc::ast::ast::ForStatement<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirStatement, CompileError> {
+    let initializer = statement
+        .init
+        .as_ref()
+        .map(|initializer| match initializer {
+            ForStatementInit::VariableDeclaration(declaration) => {
+                lower_variable_declaration(declaration, source, next_binding, functions)
+                    .map(HirForInitializer::Variable)
+            }
+            initializer => {
+                lower_expression(initializer.to_expression(), source, next_binding, functions)
+                    .map(HirForInitializer::Expression)
+            }
+        })
+        .transpose()?;
+    Ok(HirStatement {
+        span: source_span(statement.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::For {
+            initializer,
+            test: statement
+                .test
+                .as_ref()
+                .map(|test| lower_expression(test, source, next_binding, functions))
+                .transpose()?,
+            update: statement
+                .update
+                .as_ref()
+                .map(|update| lower_expression(update, source, next_binding, functions))
+                .transpose()?,
+            body: Box::new(lower_statement(
+                &statement.body,
+                source,
+                next_binding,
+                functions,
+                false,
+            )?),
+        },
+    })
 }
 
 /// Owns try/catch/finally bodies while restricting the first catch slice to identifier binding.
@@ -816,6 +902,14 @@ fn lower_expression(
                 functions,
             )?),
         },
+        Expression::UpdateExpression(expression) => HirExpressionKind::Update {
+            operator: match expression.operator {
+                UpdateOperator::Increment => HirUpdateOperator::Increment,
+                UpdateOperator::Decrement => HirUpdateOperator::Decrement,
+            },
+            prefix: expression.prefix,
+            target: lower_update_target(&expression.argument, source, next_binding, functions)?,
+        },
         Expression::ConditionalExpression(expression) => HirExpressionKind::Conditional {
             test: Box::new(lower_expression(
                 &expression.test,
@@ -933,6 +1027,36 @@ fn lower_assignment_target(
             source.name(),
             source_span(target.span()),
             "assignment target",
+        )),
+    }
+}
+
+/// Owns update references separately because Oxc excludes destructuring targets by construction.
+fn lower_update_target(
+    target: &SimpleAssignmentTarget<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirAssignmentTarget, CompileError> {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => Ok(
+            HirAssignmentTarget::Identifier(Arc::from(identifier.name.as_str())),
+        ),
+        SimpleAssignmentTarget::StaticMemberExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::StaticMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+                property: Arc::from(expression.property.name.as_str()),
+            })
+        }
+        _ => Err(unsupported(
+            source.name(),
+            source_span(target.span()),
+            "update target",
         )),
     }
 }

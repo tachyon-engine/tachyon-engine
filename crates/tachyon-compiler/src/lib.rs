@@ -20,10 +20,10 @@ use std::sync::Arc;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
-    HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirFunction,
+    HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirForInitializer, HirFunction,
     HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
-    HirSwitchCase, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirSwitchCase, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};

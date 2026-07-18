@@ -986,6 +986,16 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::LessThan => {
+                let left = self.read(base, operands[1])?;
+                let right = self.read(base, operands[2])?;
+                let value = if numeric_less_than(left, right) {
+                    Value::from_immediate(Immediate::True)
+                } else {
+                    Value::from_immediate(Immediate::False)
+                };
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Jump => self.set_pc(WordOffset::new(operands[0])),
             Opcode::JumpIfFalse => {
                 if !is_truthy(self.read(base, operands[0])?) {
@@ -1604,6 +1614,17 @@ fn numeric_value(value: Value) -> Option<f64> {
 }
 
 #[inline(always)]
+fn numeric_less_than(left: Value, right: Value) -> bool {
+    match (left.as_i32(), right.as_i32()) {
+        (Some(left), Some(right)) => left < right,
+        _ => match (numeric_value(left), numeric_value(right)) {
+            (Some(left), Some(right)) => left < right,
+            _ => false,
+        },
+    }
+}
+
+#[inline(always)]
 fn is_truthy(value: Value) -> bool {
     if let Some(integer) = value.as_i32() {
         return integer != 0;
@@ -1649,9 +1670,18 @@ mod tests {
     }
 
     fn arithmetic_module() -> CompiledModule {
+        binary_module(Opcode::Add, "1 + 2")
+    }
+
+    fn less_than_module() -> CompiledModule {
+        binary_module(Opcode::LessThan, "1 < 2")
+    }
+
+    /// Builds a minimal verified binary-op fixture over the integer values one and two.
+    fn binary_module(opcode: Opcode, source: &'static str) -> CompiledModule {
         let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap();
         words.extend(encode_instruction(Opcode::LoadImmediate, &[1, 2]).unwrap());
-        words.extend(encode_instruction(Opcode::Add, &[2, 0, 1]).unwrap());
+        words.extend(encode_instruction(opcode, &[2, 0, 1]).unwrap());
         words.extend(encode_instruction(Opcode::Return, &[2]).unwrap());
         let metadata = FunctionMetadata::new(
             FunctionKind::Script,
@@ -1661,7 +1691,7 @@ mod tests {
             },
         );
         CompiledModule::new(
-            Arc::from("1 + 2"),
+            Arc::from(source),
             Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(
@@ -1993,6 +2023,15 @@ mod tests {
         assert_batch_result::<4>();
         assert_batch_result::<8>();
         assert_batch_result::<16>();
+    }
+
+    #[test]
+    fn numeric_less_than_works_for_every_dispatch_batch() {
+        assert_less_than_batch::<1>();
+        assert_less_than_batch::<2>();
+        assert_less_than_batch::<4>();
+        assert_less_than_batch::<8>();
+        assert_less_than_batch::<16>();
     }
 
     #[test]
@@ -2328,6 +2367,23 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
+
+    fn assert_less_than_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &less_than_module(),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
     }
 
     fn assert_batch_budget<const N: usize>() {

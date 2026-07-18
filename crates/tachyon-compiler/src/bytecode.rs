@@ -8,10 +8,11 @@ use tachyon_bytecode::{
 
 use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
 use crate::{
-    CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind, HirFunction,
-    HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
-    HirSwitchCase, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    ProgramKind, SourceName, SourceSpan, SourceText,
+    CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
+    HirForInitializer, HirFunction, HirFunctionDeclaration, HirLogicalOperator, HirProgram,
+    HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator, HirUpdateOperator,
+    HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName, SourceSpan,
+    SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -57,9 +58,11 @@ fn lower_entry(
             statement.kind,
             HirStatementKind::Block(_)
                 | HirStatementKind::If { .. }
+                | HirStatementKind::For { .. }
                 | HirStatementKind::Switch { .. }
                 | HirStatementKind::Try { .. }
                 | HirStatementKind::Break
+                | HirStatementKind::Continue
                 | HirStatementKind::Throw(_)
         )
     });
@@ -96,6 +99,7 @@ fn lower_entry(
         scope_names,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
         break_targets: Vec::with_capacity(statements_switch_count(hir.statements())?),
+        continue_targets: Vec::with_capacity(statements_loop_count(hir.statements())?),
         handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
@@ -136,9 +140,11 @@ fn lower_entry(
                         }
                         HirStatementKind::Block(_)
                         | HirStatementKind::If { .. }
+                        | HirStatementKind::For { .. }
                         | HirStatementKind::Switch { .. }
                         | HirStatementKind::Try { .. }
                         | HirStatementKind::Break
+                        | HirStatementKind::Continue
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
                         }
@@ -216,6 +222,7 @@ fn lower_function(
                 })?,
         ),
         break_targets: Vec::with_capacity(statements_switch_count(&function.body)?),
+        continue_targets: Vec::with_capacity(statements_loop_count(&function.body)?),
         handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
@@ -274,6 +281,7 @@ struct Lowerer<'a> {
     scope_names: &'a mut Vec<std::sync::Arc<str>>,
     locals: Vec<LocalBinding>,
     break_targets: Vec<Label>,
+    continue_targets: Vec<Label>,
     handlers: Vec<Option<HandlerEntry>>,
     next_register: u32,
     source_name: SourceName,
@@ -379,6 +387,22 @@ impl Lowerer<'_> {
                 result,
                 statement.span,
             ),
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => {
+                self.entry_for_statement(
+                    initializer.as_ref(),
+                    test.as_ref(),
+                    update.as_ref(),
+                    body,
+                    result,
+                    statement.span,
+                )?;
+                Ok(false)
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -399,6 +423,11 @@ impl Lowerer<'_> {
             ),
             HirStatementKind::Break => {
                 let target = self.current_break_target(statement.span)?;
+                self.emit_jump(target, statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::Continue => {
+                let target = self.current_continue_target(statement.span)?;
                 self.emit_jump(target, statement.span)?;
                 Ok(true)
             }
@@ -446,6 +475,56 @@ impl Lowerer<'_> {
         Ok(alternate.is_some() && consequent_terminal && alternate_terminal)
     }
 
+    /// Emits a classic script for-loop while preserving completion and update-before-continue flow.
+    fn entry_for_statement(
+        &mut self,
+        initializer: Option<&HirForInitializer>,
+        test: Option<&HirExpression>,
+        update: Option<&HirExpression>,
+        body: &HirStatement,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        self.for_initializer(initializer)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let update_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        if let Some(test) = test {
+            let test = self.expression(test)?;
+            self.builder
+                .emit_jump_if_false(
+                    test,
+                    end,
+                    BytecodeSourceSpan {
+                        start: span.start,
+                        end: span.end,
+                    },
+                )
+                .map_err(CompileError::Builder)?;
+        }
+        self.break_targets.push(end);
+        self.continue_targets.push(update_label);
+        self.entry_statement(body, result)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.builder
+            .bind_label(update_label)
+            .map_err(CompileError::Builder)?;
+        if let Some(update) = update {
+            self.expression(update)?;
+        }
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_scope(initializer, checkpoint);
+        Ok(())
+    }
+
     /// Lowers one function-body statement and reports whether it ends in an abrupt completion.
     fn function_statement(&mut self, statement: &HirStatement) -> Result<bool, CompileError> {
         match &statement.kind {
@@ -490,6 +569,21 @@ impl Lowerer<'_> {
                 self.if_statement(test, consequent, alternate.as_deref(), statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => {
+                self.function_for_statement(
+                    initializer.as_ref(),
+                    test.as_ref(),
+                    update.as_ref(),
+                    body,
+                    statement.span,
+                )?;
+                Ok(false)
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -512,12 +606,89 @@ impl Lowerer<'_> {
                 self.emit_jump(target, statement.span)?;
                 Ok(true)
             }
+            HirStatementKind::Continue => {
+                let target = self.current_continue_target(statement.span)?;
+                self.emit_jump(target, statement.span)?;
+                Ok(true)
+            }
             HirStatementKind::Empty => Ok(false),
             HirStatementKind::FunctionDeclaration(_) => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span: statement.span,
                 syntax: "nested function declaration",
             }),
+        }
+    }
+
+    /// Emits a classic function-body for-loop with explicit break and continue label stacks.
+    fn function_for_statement(
+        &mut self,
+        initializer: Option<&HirForInitializer>,
+        test: Option<&HirExpression>,
+        update: Option<&HirExpression>,
+        body: &HirStatement,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        self.for_initializer(initializer)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let update_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        if let Some(test) = test {
+            let test = self.expression(test)?;
+            self.builder
+                .emit_jump_if_false(
+                    test,
+                    end,
+                    BytecodeSourceSpan {
+                        start: span.start,
+                        end: span.end,
+                    },
+                )
+                .map_err(CompileError::Builder)?;
+        }
+        self.break_targets.push(end);
+        self.continue_targets.push(update_label);
+        self.function_statement(body)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.builder
+            .bind_label(update_label)
+            .map_err(CompileError::Builder)?;
+        if let Some(update) = update {
+            self.expression(update)?;
+        }
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_scope(initializer, checkpoint);
+        Ok(())
+    }
+
+    fn for_initializer(
+        &mut self,
+        initializer: Option<&HirForInitializer>,
+    ) -> Result<(), CompileError> {
+        match initializer {
+            Some(HirForInitializer::Variable(declaration)) => {
+                self.variable_declaration(declaration)
+            }
+            Some(HirForInitializer::Expression(expression)) => {
+                self.expression(expression).map(|_| ())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn restore_for_scope(&mut self, initializer: Option<&HirForInitializer>, checkpoint: usize) {
+        if let Some(HirForInitializer::Variable(declaration)) = initializer
+            && !matches!(declaration.kind, HirVariableDeclarationKind::Var)
+        {
+            self.locals.truncate(checkpoint);
         }
     }
 
@@ -849,6 +1020,13 @@ impl Lowerer<'_> {
             })
     }
 
+    fn current_continue_target(&self, span: SourceSpan) -> Result<Label, CompileError> {
+        self.continue_targets
+            .last()
+            .copied()
+            .ok_or_else(|| self.unsupported(span, "continue outside loop"))
+    }
+
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     fn expression(&mut self, expression: &HirExpression) -> Result<RegisterId, CompileError> {
         match &expression.kind {
@@ -971,6 +1149,11 @@ impl Lowerer<'_> {
                 target,
                 value,
             } => self.assignment_expression(*operator, target, value, expression.span),
+            HirExpressionKind::Update {
+                operator,
+                prefix,
+                target,
+            } => self.update_expression(*operator, *prefix, target, expression.span),
             HirExpressionKind::Conditional {
                 test,
                 consequent,
@@ -1075,6 +1258,7 @@ impl Lowerer<'_> {
             HirBinaryOperator::Multiply => Opcode::Mul,
             HirBinaryOperator::Divide => Opcode::Div,
             HirBinaryOperator::StrictEqual => Opcode::StrictEqual,
+            HirBinaryOperator::LessThan => Opcode::LessThan,
             _ => {
                 return Err(CompileError::UnsupportedSyntax {
                     source_name: self.source_name.clone(),
@@ -1090,6 +1274,71 @@ impl Lowerer<'_> {
             span,
         )?;
         Ok(destination)
+    }
+
+    /// Reads one update reference once and preserves the prefix/postfix result distinction.
+    fn update_expression(
+        &mut self,
+        operator: HirUpdateOperator,
+        prefix: bool,
+        target: &HirAssignmentTarget,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let opcode = match operator {
+            HirUpdateOperator::Increment => HirBinaryOperator::Add,
+            HirUpdateOperator::Decrement => HirBinaryOperator::Subtract,
+        };
+        match target {
+            HirAssignmentTarget::Identifier(target) => {
+                let binding = self
+                    .local(target)
+                    .cloned()
+                    .ok_or_else(|| self.unsupported(span, "unresolved update target"))?;
+                if !binding.mutable {
+                    return Err(self.unsupported(span, "update of immutable local"));
+                }
+                let result = if prefix {
+                    None
+                } else {
+                    let old = self.register()?;
+                    self.emit(Opcode::Move, &[old.index(), binding.register.index()], span)?;
+                    Some(old)
+                };
+                let one = self.load_immediate(1, span)?;
+                let updated = self.emit_binary(opcode, binding.register, one, span)?;
+                self.emit(
+                    Opcode::Move,
+                    &[binding.register.index(), updated.index()],
+                    span,
+                )?;
+                Ok(result.unwrap_or(updated))
+            }
+            HirAssignmentTarget::StaticMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.scope_name(property)?;
+                let old = self.register()?;
+                self.emit(
+                    Opcode::GetById,
+                    &[old.index(), receiver.index(), property],
+                    span,
+                )?;
+                let result = if prefix {
+                    None
+                } else {
+                    let snapshot = self.register()?;
+                    self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
+                    Some(snapshot)
+                };
+                let one = self.load_immediate(1, span)?;
+                let updated = self.emit_binary(opcode, old, one, span)?;
+                self.emit(
+                    Opcode::SetById,
+                    &[receiver.index(), updated.index(), property],
+                    span,
+                )?;
+                Ok(result.unwrap_or(updated))
+            }
+        }
     }
 
     /// Preserves the left operand value and evaluates the right operand only when required.
@@ -1436,6 +1685,9 @@ fn statements_handler_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 nested
             }
+            HirStatementKind::For { body, .. } => {
+                statements_handler_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
                 for case in cases.iter() {
@@ -1465,6 +1717,7 @@ fn statements_handler_count(statements: &[HirStatement]) -> Result<usize, Compil
             | HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -1492,6 +1745,9 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
                     .transpose()?
                     .unwrap_or(0);
                 consequent.max(alternate)
+            }
+            HirStatementKind::For { body, .. } => {
+                statements_handler_depth(core::slice::from_ref(body))?
             }
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
@@ -1526,6 +1782,7 @@ fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileE
             | HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -1591,6 +1848,12 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => for_scope_name_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -1612,9 +1875,56 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 .transpose()?
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
-            HirStatementKind::Break | HirStatementKind::Empty => 0,
+            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "scope names")?;
+    }
+    Ok(count)
+}
+
+/// Counts every for-loop expression and body reference without flattening evaluation order.
+fn for_scope_name_count(
+    initializer: Option<&HirForInitializer>,
+    test: Option<&HirExpression>,
+    update: Option<&HirExpression>,
+    body: &HirStatement,
+) -> Result<usize, CompileError> {
+    let mut count = match initializer {
+        Some(HirForInitializer::Variable(declaration)) => {
+            declaration_scope_name_count(declaration)?
+        }
+        Some(HirForInitializer::Expression(expression)) => expression_scope_name_count(expression)?,
+        None => 0,
+    };
+    for expression in [test, update].into_iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_scope_name_count(expression)?,
+            "scope names",
+        )?;
+    }
+    checked_count_add(
+        count,
+        statements_scope_name_count(core::slice::from_ref(body))?,
+        "scope names",
+    )
+}
+
+/// Counts identifier references in every declaration initializer.
+fn declaration_scope_name_count(
+    declaration: &HirVariableDeclaration,
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for initializer in declaration
+        .declarators
+        .iter()
+        .filter_map(|declarator| declarator.initializer.as_ref())
+    {
+        count = checked_count_add(
+            count,
+            expression_scope_name_count(initializer)?,
+            "scope names",
+        )?;
     }
     Ok(count)
 }
@@ -1665,6 +1975,12 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             };
             checked_count_add(target, expression_scope_name_count(value)?, "scope names")
         }
+        HirExpressionKind::Update { target, .. } => match target {
+            HirAssignmentTarget::Identifier(_) => Ok(0),
+            HirAssignmentTarget::StaticMember { object, .. } => {
+                checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
+            }
+        },
         HirExpressionKind::Conditional {
             test,
             consequent,
@@ -1746,6 +2062,12 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 }
                 count
             }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => for_instruction_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -1768,12 +2090,51 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                     "bytecode instructions",
                 )?
             }
-            HirStatementKind::Break => 1,
+            HirStatementKind::Break | HirStatementKind::Continue => 1,
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
     }
     Ok(count)
+}
+
+/// Counts classic for-loop evaluation plus its conditional and back-edge instructions exactly.
+fn for_instruction_count(
+    initializer: Option<&HirForInitializer>,
+    test: Option<&HirExpression>,
+    update: Option<&HirExpression>,
+    body: &HirStatement,
+) -> Result<usize, CompileError> {
+    let mut count = match initializer {
+        Some(HirForInitializer::Variable(declaration)) => {
+            declaration_instruction_count(declaration)?
+        }
+        Some(HirForInitializer::Expression(expression)) => {
+            expression_instruction_count(expression)?
+        }
+        None => 0,
+    };
+    if let Some(test) = test {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(test)?,
+            "bytecode instructions",
+        )?;
+        count = checked_count_add(count, 1, "bytecode instructions")?;
+    }
+    if let Some(update) = update {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(update)?,
+            "bytecode instructions",
+        )?;
+    }
+    count = checked_count_add(
+        count,
+        statements_instruction_count(core::slice::from_ref(body))?,
+        "bytecode instructions",
+    )?;
+    checked_count_add(count, 1, "bytecode instructions")
 }
 
 /// Includes dispatch comparisons, conditional branches, fallback jump, and every clause body.
@@ -1865,6 +2226,18 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             };
             checked_count_add(operands, own_instructions, "bytecode instructions")
         }
+        HirExpressionKind::Update { prefix, target, .. } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    1,
+                    "bytecode instructions",
+                )?,
+            };
+            let own = if *prefix { 3 } else { 4 };
+            checked_count_add(target, own, "bytecode instructions")
+        }
         HirExpressionKind::Unary { argument, .. } => checked_count_add(
             expression_instruction_count(argument)?,
             1,
@@ -1953,6 +2326,12 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 count
             }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => for_literal_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -1969,11 +2348,37 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 statements_literal_count,
             )?,
             HirStatementKind::FunctionDeclaration(_) => 0,
-            HirStatementKind::Break | HirStatementKind::Empty => 0,
+            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
     }
     Ok(count)
+}
+
+/// Counts constants in each loop component without counting the synthetic update value one.
+fn for_literal_count(
+    initializer: Option<&HirForInitializer>,
+    test: Option<&HirExpression>,
+    update: Option<&HirExpression>,
+    body: &HirStatement,
+) -> Result<usize, CompileError> {
+    let mut count = match initializer {
+        Some(HirForInitializer::Variable(declaration)) => declaration_literal_count(declaration)?,
+        Some(HirForInitializer::Expression(expression)) => expression_literal_count(expression)?,
+        None => 0,
+    };
+    for expression in [test, update].into_iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_literal_count(expression)?,
+            "bytecode constants",
+        )?;
+    }
+    checked_count_add(
+        count,
+        statements_literal_count(core::slice::from_ref(body))?,
+        "bytecode constants",
+    )
 }
 
 /// Counts constants in both dispatch expressions and source-ordered clause bodies.
@@ -2037,6 +2442,19 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
                 }
                 nested
             }
+            HirStatementKind::For {
+                initializer, body, ..
+            } => {
+                let initializer = match initializer {
+                    Some(HirForInitializer::Variable(declaration)) => declaration.declarators.len(),
+                    _ => 0,
+                };
+                checked_count_add(
+                    initializer,
+                    statements_binding_count(core::slice::from_ref(body))?,
+                    "local bindings",
+                )?
+            }
             HirStatementKind::Switch { cases, .. } => switch_binding_count(cases)?,
             HirStatementKind::Try {
                 block,
@@ -2062,6 +2480,7 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
             }
             HirStatementKind::Expression(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -2154,6 +2573,18 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                     )?;
                 }
             }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => {
+                count = checked_count_add(
+                    count,
+                    for_label_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+                    "bytecode labels",
+                )?;
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -2186,10 +2617,56 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
             }
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Empty => {}
         }
     }
     Ok(count)
+}
+
+/// Counts the condition, update, and exit labels plus labels nested in every loop component.
+fn for_label_count(
+    initializer: Option<&HirForInitializer>,
+    test: Option<&HirExpression>,
+    update: Option<&HirExpression>,
+    body: &HirStatement,
+) -> Result<usize, CompileError> {
+    let mut count = 3;
+    match initializer {
+        Some(HirForInitializer::Variable(declaration)) => {
+            for expression in declaration
+                .declarators
+                .iter()
+                .filter_map(|declarator| declarator.initializer.as_ref())
+            {
+                count = checked_count_add(
+                    count,
+                    expression_label_count(expression)?,
+                    "bytecode labels",
+                )?;
+            }
+        }
+        Some(HirForInitializer::Expression(expression)) => {
+            count = checked_count_add(
+                count,
+                expression_label_count(expression)?,
+                "bytecode labels",
+            )?;
+        }
+        None => {}
+    }
+    for expression in [test, update].into_iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_label_count(expression)?,
+            "bytecode labels",
+        )?;
+    }
+    checked_count_add(
+        count,
+        statements_label_count(core::slice::from_ref(body))?,
+        "bytecode labels",
+    )
 }
 
 /// Reserves one label per clause, one shared end label, and every nested expression/body label.
@@ -2235,6 +2712,9 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
                 }
                 nested
             }
+            HirStatementKind::For { body, .. } => {
+                statements_expression_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::Switch { cases, .. } => switch_expression_count(cases)?,
             HirStatementKind::Try {
                 block,
@@ -2250,6 +2730,7 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
             HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -2272,7 +2753,7 @@ fn switch_expression_count(cases: &[HirSwitchCase]) -> Result<usize, CompileErro
     Ok(count)
 }
 
-/// Counts switch nodes as an exact-capacity upper bound for the active break-target stack.
+/// Counts switch and loop nodes as an exact-capacity upper bound for the active break-target stack.
 fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
     for statement in statements {
@@ -2293,6 +2774,11 @@ fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, Compile
                 }
                 count
             }
+            HirStatementKind::For { body, .. } => checked_count_add(
+                1,
+                statements_switch_count(core::slice::from_ref(body))?,
+                "switch control targets",
+            )?,
             HirStatementKind::Switch { cases, .. } => {
                 let mut count = 1;
                 for case in cases.iter() {
@@ -2319,11 +2805,74 @@ fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, Compile
             | HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
+            | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, nested, "switch control targets")?;
+    }
+    Ok(count)
+}
+
+/// Counts loop nesting as an exact-capacity upper bound for the active continue-target stack.
+fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Block(statements) => statements_loop_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut nested = statements_loop_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_loop_count(core::slice::from_ref(alternate))?,
+                        "loop continue targets",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::For { body, .. } => checked_count_add(
+                1,
+                statements_loop_count(core::slice::from_ref(body))?,
+                "loop continue targets",
+            )?,
+            HirStatementKind::Switch { cases, .. } => {
+                let mut nested = 0;
+                for case in cases.iter() {
+                    nested = checked_count_add(
+                        nested,
+                        statements_loop_count(&case.consequent)?,
+                        "loop continue targets",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "loop continue targets",
+                statements_loop_count,
+            )?,
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, nested, "loop continue targets")?;
     }
     Ok(count)
 }
@@ -2352,6 +2901,10 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             };
             checked_count_add(target, expression_label_count(value)?, "bytecode labels")
         }
+        HirExpressionKind::Update { target, .. } => match target {
+            HirAssignmentTarget::Identifier(_) => Ok(0),
+            HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object),
+        },
         HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {
             test,
@@ -2409,6 +2962,10 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 "bytecode constants",
             )
         }
+        HirExpressionKind::Update { target, .. } => match target {
+            HirAssignmentTarget::Identifier(_) => Ok(0),
+            HirAssignmentTarget::StaticMember { object, .. } => expression_literal_count(object),
+        },
         HirExpressionKind::Unary { argument, .. } => expression_literal_count(argument),
         HirExpressionKind::Conditional {
             test,

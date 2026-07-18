@@ -80,7 +80,7 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_corpus() {
         .unwrap();
     let boa_script = corpus
         .iter()
-        .find(|script| script.config.id.as_ref() == "basic/call-loop")
+        .find(|script| script.config.id.as_ref() == "basic/closure")
         .unwrap();
     let mut adapter = adapter(&config);
 
@@ -103,7 +103,7 @@ fn parse_compile_mode_keeps_compile_failures_inside_the_sample_boundary() {
     let (config, corpus) = config_and_corpus();
     let script = corpus
         .iter()
-        .find(|script| script.config.id.as_ref() == "basic/call-loop")
+        .find(|script| script.config.id.as_ref() == "basic/closure")
         .unwrap();
     let mut adapter = adapter(&config);
     let request = request(script, MeasurementMode::ParseCompileExecute);

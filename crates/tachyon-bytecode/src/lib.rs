@@ -144,6 +144,8 @@ pub enum Opcode {
     Construct = 32,
     LoadThis = 33,
     LoadNewTarget = 34,
+    /// Performs the current numeric less-than subset over registers 1 and 2.
+    LessThan = 35,
 }
 
 impl Opcode {
@@ -174,6 +176,7 @@ impl Opcode {
             | Self::Mul
             | Self::Div
             | Self::StrictEqual
+            | Self::LessThan
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
@@ -224,6 +227,7 @@ impl Opcode {
             32 => Some(Self::Construct),
             33 => Some(Self::LoadThis),
             34 => Some(Self::LoadNewTarget),
+            35 => Some(Self::LessThan),
             _ => None,
         }
     }
@@ -737,9 +741,12 @@ impl BytecodeBuilder {
             | Opcode::LoadNewTarget => &[0],
             Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
-                &[0, 1, 2]
-            }
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::StrictEqual
+            | Opcode::LessThan => &[0, 1, 2],
             Opcode::GetById | Opcode::SetById => &[0, 1],
             Opcode::Call | Opcode::Construct => {
                 for &index in &[0, 1] {
@@ -1582,7 +1589,12 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
+        Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Div
+        | Opcode::StrictEqual
+        | Opcode::LessThan => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
