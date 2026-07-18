@@ -222,6 +222,9 @@ enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectHasOwnProperty,
+    StringConstructor,
+    NumberConstructor,
+    BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
     ErrorConstructor(NativeErrorKind),
@@ -381,10 +384,13 @@ struct RealmIntrinsicAtoms {
     errors: [AtomId; NativeErrorKind::ALL.len()],
     array: AtomId,
     object: AtomId,
+    string: AtomId,
+    number: AtomId,
+    boolean: AtomId,
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 5 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 8 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -576,6 +582,9 @@ struct Realm {
     object_prototype: Option<Value>,
     object_define_property: Option<Value>,
     object_has_own_property: Option<Value>,
+    string_constructor: Option<Value>,
+    number_constructor: Option<Value>,
+    boolean_constructor: Option<Value>,
     error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
@@ -601,6 +610,9 @@ impl Realm {
             object_prototype: None,
             object_define_property: None,
             object_has_own_property: None,
+            string_constructor: None,
+            number_constructor: None,
+            boolean_constructor: None,
             error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
@@ -853,6 +865,9 @@ impl Trace for Realm {
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
         self.object_has_own_property.trace(tracer);
+        self.string_constructor.trace(tracer);
+        self.number_constructor.trace(tracer);
+        self.boolean_constructor.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
@@ -1168,6 +1183,7 @@ impl Isolate {
         self.realm.global_object = Some(global_object);
         self.initialize_function_intrinsics()?;
         self.initialize_object_intrinsics()?;
+        self.initialize_primitive_constructors()?;
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
@@ -1218,6 +1234,28 @@ impl Isolate {
         self.realm.object_has_own_property = Some(has_own_property);
         let has_own_atom = self.intern_intrinsic_name(b"hasOwnProperty")?;
         self.set_own_data_property(object_prototype, has_own_atom, has_own_property)
+    }
+
+    /// Builds primitive conversion constructors with the shared callable prototype.
+    fn initialize_primitive_constructors(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before primitive constructors");
+        let allocate = |this: &mut Self, native: NativeFunction| -> Result<Value, ExecutionError> {
+            this.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )
+        };
+        self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
+        self.realm.number_constructor = Some(allocate(self, NativeFunction::NumberConstructor)?);
+        self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
+        Ok(())
     }
 
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
@@ -1284,6 +1322,9 @@ impl Isolate {
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             object: self.intern_intrinsic_name(b"Object")?,
+            string: self.intern_intrinsic_name(b"String")?,
+            number: self.intern_intrinsic_name(b"Number")?,
+            boolean: self.intern_intrinsic_name(b"Boolean")?,
         })
     }
 
@@ -1420,6 +1461,27 @@ impl Isolate {
             self.realm
                 .object_constructor
                 .expect("Object initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.string,
+            self.realm
+                .string_constructor
+                .expect("String initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.number,
+            self.realm
+                .number_constructor
+                .expect("Number initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.boolean,
+            self.realm
+                .boolean_constructor
+                .expect("Boolean initializes before global publication"),
             true,
         )?;
         Ok(())
@@ -1574,6 +1636,50 @@ impl Isolate {
         let object = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, object)?;
         Ok(object)
+    }
+
+    /// Executes one primitive constructor using the exact call argument window.
+    fn primitive_constructor_value(
+        &mut self,
+        native: NativeFunction,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let argument = self.call_argument(site, 0)?;
+        match native {
+            NativeFunction::StringConstructor => {
+                let Some(argument) = argument else {
+                    return self.allocate_runtime_string(
+                        JsString::try_from_latin1(b"")
+                            .map_err(ExecutionError::PropertyKeyString)?,
+                    );
+                };
+                if let Some(raw) = argument.as_heap_ref()
+                    && self.heap.checked_reference(raw, self.types.string).is_ok()
+                {
+                    return Ok(argument);
+                }
+                let mut units = Vec::new();
+                self.append_primitive_string_units(argument, &mut units)?;
+                self.allocate_runtime_string(
+                    JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+                )
+            }
+            NativeFunction::NumberConstructor => {
+                let argument = argument.unwrap_or(Value::from_i32(0));
+                self.convert_to_number(argument)
+            }
+            NativeFunction::BooleanConstructor => {
+                let argument = argument.unwrap_or(Value::from_immediate(Immediate::Undefined));
+                Ok(Value::from_immediate(if self.is_truthy_value(argument)? {
+                    Immediate::True
+                } else {
+                    Immediate::False
+                }))
+            }
+            _ => Err(ExecutionError::NonCallable(Value::from_immediate(
+                Immediate::Undefined,
+            ))),
+        }
     }
 
     /// Appends one array-like source while preserving holes as length-only positions.
@@ -3545,6 +3651,28 @@ impl Isolate {
             .resolve_function_object(constructor)
             .map_err(|_| ExecutionError::NonConstructor(constructor))?;
         match callable.executable {
+            FunctionExecutable::Native(
+                native @ (NativeFunction::StringConstructor
+                | NativeFunction::NumberConstructor
+                | NativeFunction::BooleanConstructor),
+            ) => {
+                let site = CallSite {
+                    caller_base,
+                    destination,
+                    callee: constructor,
+                    argument_base: caller_base
+                        .checked_add(callee_register)
+                        .and_then(|base| base.checked_add(1))
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+                    argument_count,
+                    this_value: Value::from_immediate(Immediate::Undefined),
+                    new_target: constructor,
+                    construct_receiver: None,
+                    call_site,
+                };
+                let value = self.primitive_constructor_value(native, &site)?;
+                return self.write(caller_base, destination, value);
+            }
             FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                 let site = CallSite {
                     caller_base,
@@ -3669,6 +3797,14 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::StringConstructor
+                    | NativeFunction::NumberConstructor
+                    | NativeFunction::BooleanConstructor),
+                ) => {
+                    let value = self.primitive_constructor_value(native, &site)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectDefineProperty) => {
                     let object = self

@@ -1476,6 +1476,23 @@ mod tests {
         );
     }
 
+    /// Verifies primitive constructors reuse the VM numeric, truthiness, and string contracts.
+    #[test]
+    fn primitive_constructors_convert_values() {
+        assert_eq!(
+            execute_source(67, "String(42) === '42' && String(null) === 'null';").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(68, "Number('42') === 42;").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(69, "Boolean(0) === false && Boolean('x') === true;").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
     #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
