@@ -35,6 +35,7 @@ fn adapter(config: &BenchmarkConfig) -> TachyonInProcessAdapter {
 fn request(script: &CorpusScript, mode: MeasurementMode) -> BenchmarkRequest {
     BenchmarkRequest {
         script_id: script.config.id.clone(),
+        entry: script.config.entry,
         source: Arc::clone(&script.source),
         mode,
     }
@@ -118,11 +119,11 @@ fn parse_compile_mode_keeps_compile_failures_inside_the_sample_boundary() {
 }
 
 #[test]
-fn closure_corpus_executes_after_environment_lowering() {
+fn main_function_corpus_executes_through_separate_invocation_code() {
     let (config, corpus) = config_and_corpus();
     let script = corpus
         .iter()
-        .find(|script| script.config.id.as_ref() == "basic/closure")
+        .find(|script| script.config.id.as_ref() == "basic/call-loop")
         .unwrap();
     let mut adapter = adapter(&config);
     for mode in [

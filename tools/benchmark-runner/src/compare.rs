@@ -113,6 +113,7 @@ pub fn compare_reports(
         }
         if baseline_case.category != candidate_case.category
             || baseline_case.suite != candidate_case.suite
+            || baseline_case.entry != candidate_case.entry
         {
             return Err(CompareError::ClassificationMismatch(key));
         }
@@ -242,7 +243,7 @@ mod tests {
     use crate::{
         BENCHMARK_REPORT_SCHEMA_VERSION, BenchmarkCaseResult, BenchmarkCategory, BenchmarkReport,
         BuildConfig, EngineIdentity, EngineKind, HostMetadata, MeasurementMode, SampleSummary,
-        SuiteKind, Validity,
+        ScriptEntry, SuiteKind, Validity,
     };
 
     use super::{CompareError, compare_reports};
@@ -251,6 +252,7 @@ mod tests {
         BenchmarkCaseResult {
             script_id: id.into(),
             script_sha256: "hash".into(),
+            entry: ScriptEntry::Script,
             category: BenchmarkCategory::Dispatch,
             suite: SuiteKind::Micro,
             mode: MeasurementMode::SteadyState,
@@ -361,6 +363,12 @@ mod tests {
         let baseline = report(vec![case("a", 200)]);
         let mut changed = case("a", 100);
         changed.category = BenchmarkCategory::Call;
+        assert!(matches!(
+            compare_reports(&baseline, &report(vec![changed])),
+            Err(CompareError::ClassificationMismatch(_))
+        ));
+        let mut changed = case("a", 100);
+        changed.entry = ScriptEntry::MainFunction;
         assert!(matches!(
             compare_reports(&baseline, &report(vec![changed])),
             Err(CompareError::ClassificationMismatch(_))

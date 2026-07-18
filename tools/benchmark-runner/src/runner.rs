@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AdapterError, BenchmarkAdapter, BenchmarkConfig, BenchmarkRequest, CorpusScript,
-    EngineIdentity, SampleSummary, StatisticsError, summarize_samples,
+    EngineIdentity, SampleSummary, ScriptEntry, StatisticsError, summarize_samples,
 };
 
 /// Current JSON contract for benchmark reports and derived comparisons.
-pub const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const BENCHMARK_REPORT_SCHEMA_VERSION: u32 = 3;
 
 /// Mutually exclusive benchmark timing boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -70,6 +70,8 @@ pub struct BenchmarkCaseResult {
     pub script_id: Box<str>,
     /// Verified source hash.
     pub script_sha256: Box<str>,
+    /// Exact setup/workload entry contract.
+    pub entry: ScriptEntry,
     /// Subsystem category used for aggregate ratios.
     pub category: crate::BenchmarkCategory,
     /// Corpus suite used for aggregate ratios.
@@ -131,6 +133,7 @@ pub fn run_case(
 ) -> Result<BenchmarkCaseResult, RunError> {
     let request = BenchmarkRequest {
         script_id: script.config.id.clone(),
+        entry: script.config.entry,
         source: script.source.clone(),
         mode,
     };
@@ -182,6 +185,7 @@ pub fn run_case(
     Ok(BenchmarkCaseResult {
         script_id: script.config.id.clone(),
         script_sha256: script.config.sha256.clone(),
+        entry: script.config.entry,
         category: script.config.category,
         suite: script.config.suite,
         mode,

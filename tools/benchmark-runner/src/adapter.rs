@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::MeasurementMode;
+use crate::{MeasurementMode, ScriptEntry};
 
 /// Engine family and integration boundary used for fair grouping.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -46,6 +46,8 @@ pub struct EngineIdentity {
 pub struct BenchmarkRequest {
     /// Approved corpus ID.
     pub script_id: Box<str>,
+    /// Versioned execution entry contract from the approved corpus.
+    pub entry: ScriptEntry,
     /// Verified immutable JavaScript source.
     pub source: Arc<str>,
     /// Exact timing boundary requested from the adapter.
@@ -111,6 +113,35 @@ pub trait BenchmarkAdapter {
 
     /// Executes exactly one timed sample under the prepared mode contract.
     fn sample(&mut self, request: &BenchmarkRequest) -> Result<SampleMetrics, AdapterError>;
+}
+
+pub(crate) const MAIN_INVOCATION_SOURCE: &str = "main();";
+
+/// Composes one process/parse workload while retaining the approved source as separate provenance.
+pub(crate) fn compose_execution_source(
+    source: &Arc<str>,
+    entry: ScriptEntry,
+) -> Result<Arc<str>, AdapterError> {
+    if entry == ScriptEntry::Script {
+        return Ok(Arc::clone(source));
+    }
+    const PREFIX: &str = "\n;";
+    const SUFFIX: &str = "\n";
+    let capacity = source
+        .len()
+        .checked_add(PREFIX.len())
+        .and_then(|length| length.checked_add(MAIN_INVOCATION_SOURCE.len()))
+        .and_then(|length| length.checked_add(SUFFIX.len()))
+        .ok_or_else(|| AdapterError::Setup("benchmark workload source is too large".into()))?;
+    let mut composed = String::new();
+    composed
+        .try_reserve_exact(capacity)
+        .map_err(|_| AdapterError::Setup("benchmark workload source allocation failed".into()))?;
+    composed.push_str(source);
+    composed.push_str(PREFIX);
+    composed.push_str(MAIN_INVOCATION_SOURCE);
+    composed.push_str(SUFFIX);
+    Ok(composed.into())
 }
 
 impl core::fmt::Display for AdapterError {

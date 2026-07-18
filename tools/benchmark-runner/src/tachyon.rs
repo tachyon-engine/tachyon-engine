@@ -10,7 +10,8 @@ use tachyon_vm::{
 
 use crate::{
     AdapterError, BenchmarkAdapter, BenchmarkRequest, EngineIdentity, EngineKind, MeasurementMode,
-    SampleMetrics, TachyonBenchmarkConfig,
+    SampleMetrics, ScriptEntry, TachyonBenchmarkConfig,
+    adapter::{MAIN_INVOCATION_SOURCE, compose_execution_source},
 };
 
 /// Fully explicit isolate and repetition policy for the in-process Tachyon adapter.
@@ -30,6 +31,8 @@ pub struct TachyonInProcessAdapter {
 struct PreparedRequest {
     script_id: Box<str>,
     source: Arc<str>,
+    entry: ScriptEntry,
+    execution_source: Arc<str>,
     mode: MeasurementMode,
     module: Option<CompiledModule>,
     code: Option<CodeId>,
@@ -87,6 +90,7 @@ impl TachyonInProcessAdapter {
         };
         if prepared.script_id != request.script_id
             || prepared.source != request.source
+            || prepared.entry != request.entry
             || prepared.mode != request.mode
         {
             return Err(AdapterError::Setup(
@@ -102,7 +106,7 @@ impl TachyonInProcessAdapter {
         let start = Instant::now();
         let module = Compiler
             .compile(
-                source_text(Arc::clone(&prepared.source)),
+                source_text(Arc::clone(&prepared.execution_source)),
                 CompileOptions::default(),
             )
             .map_err(|error| AdapterError::Engine(format!("compile failed: {error:?}").into()))?;
@@ -167,34 +171,34 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
             return Err(AdapterError::UnsupportedMode(request.mode));
         }
         self.prepared = None;
-        // Compilation belongs in prepare only when the selected timing boundary excludes it.
-        let module = match request.mode {
-            MeasurementMode::PrecompiledExecute | MeasurementMode::SteadyState => Some(
-                Compiler
-                    .compile(
-                        source_text(Arc::clone(&request.source)),
-                        CompileOptions::default(),
-                    )
-                    .map_err(|error| {
-                        AdapterError::Setup(format!("Tachyon compile failed: {error:?}").into())
-                    })?,
-            ),
-            MeasurementMode::ParseCompileExecute => None,
-            MeasurementMode::ColdStart => unreachable!("cold start returned above"),
-        };
+        let execution_source = compose_execution_source(&request.source, request.entry)?;
         let mut isolate = Isolate::new(self.config.isolate).map_err(|error| {
             AdapterError::Setup(format!("Tachyon isolate creation failed: {error:?}").into())
         })?;
-        let code = module
-            .as_ref()
-            .map(|module| isolate.load_module(module))
-            .transpose()
-            .map_err(|error| {
-                AdapterError::Setup(format!("Tachyon module load failed: {error:?}").into())
-            })?;
+        let (module, code) = match request.mode {
+            MeasurementMode::PrecompiledExecute | MeasurementMode::SteadyState => {
+                if request.entry == ScriptEntry::MainFunction {
+                    let setup = compile_for_prepare(Arc::clone(&request.source))?;
+                    let setup_code = load_for_prepare(&mut isolate, &setup)?;
+                    execute_setup_once(&mut isolate, setup_code)?;
+                }
+                let workload_source = if request.entry == ScriptEntry::MainFunction {
+                    Arc::from(MAIN_INVOCATION_SOURCE)
+                } else {
+                    Arc::clone(&request.source)
+                };
+                let module = compile_for_prepare(workload_source)?;
+                let code = load_for_prepare(&mut isolate, &module)?;
+                (Some(module), Some(code))
+            }
+            MeasurementMode::ParseCompileExecute => (None, None),
+            MeasurementMode::ColdStart => unreachable!("cold start returned above"),
+        };
         self.prepared = Some(PreparedRequest {
             script_id: request.script_id.clone(),
             source: Arc::clone(&request.source),
+            entry: request.entry,
+            execution_source,
             mode: request.mode,
             module,
             code,
@@ -220,6 +224,48 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
             }
             MeasurementMode::ColdStart => unreachable!("cold start returned above"),
         }
+    }
+}
+
+fn compile_for_prepare(source: Arc<str>) -> Result<CompiledModule, AdapterError> {
+    Compiler
+        .compile(source_text(source), CompileOptions::default())
+        .map_err(|error| AdapterError::Setup(format!("Tachyon compile failed: {error:?}").into()))
+}
+
+fn load_for_prepare(
+    isolate: &mut Isolate,
+    module: &CompiledModule,
+) -> Result<CodeId, AdapterError> {
+    isolate.load_module(module).map_err(|error| {
+        AdapterError::Setup(format!("Tachyon module load failed: {error:?}").into())
+    })
+}
+
+/// Evaluates corpus setup outside timed samples before resolving the separate `main` invocation.
+fn execute_setup_once(isolate: &mut Isolate, code: CodeId) -> Result<(), AdapterError> {
+    let outcome = isolate
+        .execute_loaded(
+            code,
+            ExecutionBudget {
+                fuel: u64::MAX,
+                quantum: u32::MAX,
+            },
+        )
+        .map_err(|error| {
+            AdapterError::Setup(format!("Tachyon setup execution failed: {error:?}").into())
+        })?;
+    match outcome {
+        RunOutcome::Completed(value) => {
+            black_box(value);
+            Ok(())
+        }
+        RunOutcome::Thrown(value) => Err(AdapterError::Setup(
+            format!("Tachyon setup threw {value:?}").into(),
+        )),
+        RunOutcome::BudgetExhausted => Err(AdapterError::Setup(
+            "Tachyon setup exhausted an effectively unbounded benchmark budget".into(),
+        )),
     }
 }
 

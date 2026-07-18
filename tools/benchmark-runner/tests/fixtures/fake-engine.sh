@@ -1,4 +1,8 @@
 case "$(cat "$1")" in
+  *require-main*)
+    grep -q ';main();' "$1" || exit 9
+    printf 'fixture success'
+    ;;
   *timeout*)
     printf 'timeout stdout'
     printf 'timeout stderr' >&2

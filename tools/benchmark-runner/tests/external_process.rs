@@ -4,7 +4,7 @@ use std::{ffi::OsString, path::PathBuf, sync::Arc, time::Duration};
 
 use benchmark_runner::{
     AdapterError, BenchmarkAdapter, BenchmarkRequest, EngineIdentity, EngineKind,
-    ExternalProcessAdapter, ExternalProcessConfig, MeasurementMode,
+    ExternalProcessAdapter, ExternalProcessConfig, MeasurementMode, ScriptEntry,
 };
 
 fn adapter(timeout: Duration, output_limit: usize) -> ExternalProcessAdapter {
@@ -32,6 +32,7 @@ fn adapter(timeout: Duration, output_limit: usize) -> ExternalProcessAdapter {
 fn request(source: &str, mode: MeasurementMode) -> BenchmarkRequest {
     BenchmarkRequest {
         script_id: "fixture".into(),
+        entry: ScriptEntry::Script,
         source: Arc::from(source),
         mode,
     }
@@ -51,6 +52,18 @@ fn external_adapter_executes_prepared_source_and_records_binary_size() {
             .binary_size_bytes
             .is_some_and(|size| size > 0)
     );
+}
+
+#[test]
+fn external_adapter_composes_the_main_function_entry() {
+    let mut adapter = adapter(Duration::from_secs(1), 1024);
+    let mut request = request(
+        "// require-main\nfunction main() {}",
+        MeasurementMode::ColdStart,
+    );
+    request.entry = ScriptEntry::MainFunction;
+    adapter.prepare(&request).unwrap();
+    assert!(adapter.sample(&request).unwrap().elapsed_ns > 0);
 }
 
 #[test]

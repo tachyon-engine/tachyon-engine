@@ -13,7 +13,7 @@ use wait_timeout::ChildExt;
 
 use crate::{
     AdapterError, BenchmarkAdapter, BenchmarkRequest, EngineIdentity, EngineKind, MeasurementMode,
-    SampleMetrics,
+    SampleMetrics, ScriptEntry, adapter::compose_execution_source,
 };
 
 /// Host-side configuration for a CLI engine whose final argument is a JavaScript file path.
@@ -42,6 +42,7 @@ pub struct ExternalProcessAdapter {
 struct PreparedRequest {
     script_id: Box<str>,
     source: Arc<str>,
+    entry: ScriptEntry,
 }
 
 impl ExternalProcessAdapter {
@@ -95,7 +96,10 @@ impl ExternalProcessAdapter {
                 "external process sample called before prepare".into(),
             ));
         };
-        if prepared.script_id != request.script_id || prepared.source != request.source {
+        if prepared.script_id != request.script_id
+            || prepared.source != request.source
+            || prepared.entry != request.entry
+        {
             return Err(AdapterError::Setup(
                 "external process request differs from prepared source".into(),
             ));
@@ -182,13 +186,15 @@ impl BenchmarkAdapter for ExternalProcessAdapter {
             return Err(AdapterError::UnsupportedMode(request.mode));
         }
         reset_file(&mut self.source_file)?;
+        let execution_source = compose_execution_source(&request.source, request.entry)?;
         self.source_file
-            .write_all(request.source.as_bytes())
+            .write_all(execution_source.as_bytes())
             .map_err(setup_io_error)?;
         self.source_file.flush().map_err(setup_io_error)?;
         self.prepared = Some(PreparedRequest {
             script_id: request.script_id.clone(),
             source: Arc::clone(&request.source),
+            entry: request.entry,
         });
         Ok(())
     }

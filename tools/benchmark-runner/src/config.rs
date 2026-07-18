@@ -147,6 +147,8 @@ pub struct BuildConfig {
 pub struct ScriptConfig {
     /// Stable corpus-relative benchmark ID.
     pub id: Box<str>,
+    /// Execution entry contract applied after the verified source is loaded.
+    pub entry: ScriptEntry,
     /// Workspace-relative checked-in path.
     pub path: Box<str>,
     /// Microbenchmark subsystem category.
@@ -163,6 +165,16 @@ pub struct ScriptConfig {
     pub sha256: Box<str>,
     /// SPDX-style source license expression.
     pub license: Box<str>,
+}
+
+/// How an approved script contributes measured JavaScript work.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScriptEntry {
+    /// Execute the complete script as the measured workload.
+    Script,
+    /// Evaluate setup once, then measure direct calls to its global `main` function.
+    MainFunction,
 }
 
 /// Stable microbenchmark ownership category.
@@ -247,7 +259,7 @@ impl BenchmarkConfig {
 
     /// Rejects ambiguous samples, invalid robust-statistic thresholds, duplicate IDs, and weak provenance.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err("unsupported benchmark config schema version");
         }
         if self.minimum_samples < 10 || self.collected_samples < self.minimum_samples {

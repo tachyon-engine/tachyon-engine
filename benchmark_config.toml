@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 minimum_samples = 10
 collected_samples = 15
 warmup_iterations = 3
@@ -102,6 +102,7 @@ features = "default"
 
 [[scripts]]
 id = "tachyon/foundation-arithmetic"
+entry = "script"
 path = "benches/scripts/tachyon/foundation/arithmetic.js"
 category = "arithmetic"
 suite = "micro"
@@ -113,6 +114,7 @@ license = "Apache-2.0"
 
 [[scripts]]
 id = "basic/call-loop"
+entry = "main-function"
 path = "benches/scripts/boa/basic/call-loop.js"
 category = "call"
 suite = "micro"
@@ -124,6 +126,7 @@ license = "MIT OR Unlicense"
 
 [[scripts]]
 id = "basic/closure"
+entry = "main-function"
 path = "benches/scripts/boa/basic/closure.js"
 category = "closure"
 suite = "micro"
@@ -135,6 +138,7 @@ license = "MIT OR Unlicense"
 
 [[scripts]]
 id = "basic/nested-loop"
+entry = "main-function"
 path = "benches/scripts/boa/basic/nested-loop.js"
 category = "dispatch"
 suite = "micro"
