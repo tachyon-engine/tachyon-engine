@@ -1194,6 +1194,27 @@ mod tests {
     }
 
     #[test]
+    /// Checks computed string keys evaluate before values and use the same ordinary property storage.
+    fn object_literals_support_computed_string_keys() {
+        assert_eq!(
+            execute_source(
+                61,
+                "let key = 'answer'; let object = { [key]: 40 }; object.answer + 2;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                62,
+                "let calls = 0; let object = { [++calls]: 41 }; object[1] + calls;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+    }
+
+    #[test]
     /// Checks update results and one-shot object/key evaluation through source compilation.
     fn computed_members_preserve_reference_evaluation_and_updates() {
         assert_eq!(

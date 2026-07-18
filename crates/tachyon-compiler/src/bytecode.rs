@@ -11,9 +11,9 @@ use crate::hir::{HirAssignmentOperator, HirAssignmentTarget};
 use crate::{
     BindingId, CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
     HirForInitializer, HirFunction, HirFunctionDeclaration, HirIdentifierReference,
-    HirLogicalOperator, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
-    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    ProgramKind, ScopeId, SourceName, SourceSpan, SourceText,
+    HirLogicalOperator, HirObjectPropertyKey, HirProgram, HirStatement, HirStatementKind,
+    HirSwitchCase, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, ProgramKind, ScopeId, SourceName, SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -1671,13 +1671,16 @@ impl Lowerer<'_> {
                 let object = self.register()?;
                 self.emit(Opcode::CreateObject, &[object.index()], expression.span)?;
                 for property in properties.iter() {
+                    let (opcode, key) = match &property.key {
+                        HirObjectPropertyKey::Static(key) => {
+                            (Opcode::SetById, self.scope_name(key)?)
+                        }
+                        HirObjectPropertyKey::Computed(key) => {
+                            (Opcode::SetByValue, self.expression(key)?.index())
+                        }
+                    };
                     let value = self.expression(&property.value)?;
-                    let key = self.scope_name(&property.key)?;
-                    self.emit(
-                        Opcode::SetById,
-                        &[object.index(), value.index(), key],
-                        property.span,
-                    )?;
+                    self.emit(opcode, &[object.index(), value.index(), key], property.span)?;
                 }
                 Ok(object)
             }
@@ -2967,7 +2970,13 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                     expression_scope_name_count(&property.value)?,
                     "scope names",
                 )?;
-                count = checked_count_add(count, 1, "scope names")?;
+                if matches!(property.key, HirObjectPropertyKey::Static(_)) {
+                    count = checked_count_add(count, 1, "scope names")?;
+                }
+                if let HirObjectPropertyKey::Computed(key) = &property.key {
+                    count =
+                        checked_count_add(count, expression_scope_name_count(key)?, "scope names")?;
+                }
             }
             Ok(count)
         }
@@ -3248,6 +3257,13 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     expression_instruction_count(&property.value)?,
                     "bytecode instructions",
                 )?;
+                if let HirObjectPropertyKey::Computed(key) = &property.key {
+                    count = checked_count_add(
+                        count,
+                        expression_instruction_count(key)?,
+                        "bytecode instructions",
+                    )?;
+                }
                 count = checked_count_add(count, 1, "bytecode instructions")?;
             }
             Ok(count)
@@ -4014,6 +4030,10 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                     expression_label_count(&property.value)?,
                     "bytecode labels",
                 )?;
+                if let HirObjectPropertyKey::Computed(key) = &property.key {
+                    count =
+                        checked_count_add(count, expression_label_count(key)?, "bytecode labels")?;
+                }
             }
             Ok(count)
         }
@@ -4097,6 +4117,13 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                     expression_literal_count(&property.value)?,
                     "bytecode constants",
                 )?;
+                if let HirObjectPropertyKey::Computed(key) = &property.key {
+                    count = checked_count_add(
+                        count,
+                        expression_literal_count(key)?,
+                        "bytecode constants",
+                    )?;
+                }
             }
             Ok(count)
         }

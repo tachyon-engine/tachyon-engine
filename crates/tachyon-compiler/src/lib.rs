@@ -22,9 +22,9 @@ pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
     HirBinding, HirCatchClause, HirExpression, HirExpressionKind, HirForInitializer, HirFunction,
     HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator, HirObjectProperty,
-    HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase,
-    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirObjectPropertyKey, HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind,
+    HirSwitchCase, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -746,8 +746,30 @@ mod tests {
             panic!("expected owned object literal");
         };
         assert_eq!(properties.len(), 2);
-        assert_eq!(properties[0].key.as_ref(), "answer");
-        assert_eq!(properties[1].key.as_ref(), "label");
+        assert!(matches!(
+            &properties[0].key,
+            HirObjectPropertyKey::Static(key) if key.as_ref() == "answer"
+        ));
+        assert!(matches!(
+            &properties[1].key,
+            HirObjectPropertyKey::Static(key) if key.as_ref() == "label"
+        ));
+        let computed = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, "({ ['answer']: 40 });"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            computed.statements().first(),
+            Some(HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Object(properties),
+                    ..
+                }),
+                ..
+            }) if matches!(properties[0].key, HirObjectPropertyKey::Computed(_))
+        ));
         assert!(matches!(
             Compiler.lower_to_hir(
                 source(MediaType::JavaScript, "({ ...other });"),

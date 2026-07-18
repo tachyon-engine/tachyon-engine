@@ -2048,9 +2048,30 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
     }
 
-    /// Converts the current integer PropertyKey subset through a bounded stack formatting buffer.
+    /// Converts string and integer PropertyKeys, preserving the integer fast path and atom quota.
     #[cold]
     fn property_key_atom(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
+        if let Some(raw) = value.as_heap_ref()
+            && let Ok(reference) = self.heap.checked_reference(raw, self.types.string)
+        {
+            let string = self.heap.with_running_scope(|scope| {
+                let root = scope.root(reference).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let string = no_gc
+                        .borrow(root, self.types.string)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    match string.as_view() {
+                        JsStringView::Latin1(bytes) => JsString::try_from_latin1(bytes),
+                        JsStringView::Utf16(code_units) => JsString::try_from_utf16(code_units),
+                    }
+                    .map_err(ExecutionError::PropertyKeyString)
+                })
+            })?;
+            return self
+                .atoms
+                .try_intern(string)
+                .map_err(ExecutionError::PropertyKeyAtom);
+        }
         let integer = value
             .as_i32()
             .ok_or(ExecutionError::UnsupportedPropertyKey(value))?;
@@ -4053,16 +4074,18 @@ mod tests {
     }
 
     fn assert_dynamic_property_batch<const N: usize>() {
-        let outcome = test_isolate()
-            .execute_with_batch::<N>(
-                &dynamic_property_module(),
-                ExecutionBudget {
-                    fuel: 8,
-                    quantum: 8,
-                },
-            )
-            .unwrap();
-        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+        for module in [dynamic_property_module(), dynamic_string_property_module()] {
+            let outcome = test_isolate()
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 8,
+                        quantum: 8,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+        }
     }
 
     fn assert_method_receiver_batch<const N: usize>() {
@@ -5427,6 +5450,25 @@ mod tests {
             FunctionId::new(0),
         )
         .unwrap()
+    }
+
+    /// Builds a string-key write/read pair to cover the non-integer PropertyKey path.
+    fn dynamic_string_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(7, 1);
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::LoadConstant, &[1, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 42], span).unwrap();
+        builder.emit(Opcode::SetByValue, &[0, 2, 1], span).unwrap();
+        builder.emit(Opcode::GetByValue, &[3, 0, 1], span).unwrap();
+        builder.emit(Opcode::Return, &[3], span).unwrap();
+        single_function_module(
+            "dynamic string property",
+            vec![BytecodeConstant::string_from_utf16(
+                "answer".encode_utf16().collect(),
+            )],
+            builder,
+        )
     }
 
     /// Builds a callable carrying the same shape/storage path as an ordinary object.

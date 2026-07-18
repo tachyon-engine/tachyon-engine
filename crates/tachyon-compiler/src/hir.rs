@@ -252,8 +252,14 @@ pub struct HirVariableDeclaration {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirObjectProperty {
     pub span: SourceSpan,
-    pub key: Arc<str>,
+    pub key: HirObjectPropertyKey,
     pub value: HirExpression,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirObjectPropertyKey {
+    Static(Arc<str>),
+    Computed(HirExpression),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1035,27 +1041,37 @@ fn lower_expression(
                         "object spread",
                     ));
                 };
-                if property.kind != PropertyKind::Init || property.method || property.computed {
+                if property.kind != PropertyKind::Init || property.method {
                     return Err(unsupported(
                         source.name(),
                         source_span(property.span),
-                        "object accessor or computed property",
+                        "object accessor or method",
                     ));
                 }
-                let key = match &property.key {
-                    PropertyKey::StaticIdentifier(identifier) => identifier.name.as_str(),
-                    PropertyKey::StringLiteral(literal) => literal.value.as_str(),
-                    _ => {
-                        return Err(unsupported(
-                            source.name(),
-                            source_span(property.key.span()),
-                            "object property key",
-                        ));
-                    }
+                let key = if property.computed {
+                    HirObjectPropertyKey::Computed(lower_expression(
+                        property.key.to_expression(),
+                        source,
+                        semantic,
+                        functions,
+                    )?)
+                } else {
+                    let key = match &property.key {
+                        PropertyKey::StaticIdentifier(identifier) => identifier.name.as_str(),
+                        PropertyKey::StringLiteral(literal) => literal.value.as_str(),
+                        _ => {
+                            return Err(unsupported(
+                                source.name(),
+                                source_span(property.key.span()),
+                                "object property key",
+                            ));
+                        }
+                    };
+                    HirObjectPropertyKey::Static(Arc::from(key))
                 };
                 properties.push(HirObjectProperty {
                     span: source_span(property.span),
-                    key: Arc::from(key),
+                    key,
                     value: lower_expression(&property.value, source, semantic, functions)?,
                 });
             }
