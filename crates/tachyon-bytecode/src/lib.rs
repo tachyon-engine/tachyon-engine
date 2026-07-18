@@ -166,13 +166,15 @@ pub enum Opcode {
     DeclareGlobalLexical = 44,
     /// Initializes global lexical scope-name operand 1 from register operand 0 exactly once.
     InitializeGlobalLexical = 45,
+    /// Returns the ECMAScript undefined value without allocating a register.
+    ReturnUndefined = 46,
 }
 
 impl Opcode {
     #[must_use]
     pub const fn operand_count(self) -> usize {
         match self {
-            Self::Nop => 0,
+            Self::Nop | Self::ReturnUndefined => 0,
             Self::LoadUndefined
             | Self::LoadNull
             | Self::LoadFalse
@@ -217,7 +219,10 @@ impl Opcode {
 
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Jump | Self::Return | Self::Throw)
+        matches!(
+            self,
+            Self::Jump | Self::Return | Self::ReturnUndefined | Self::Throw
+        )
     }
 
     const fn from_base(base: u8) -> Option<Self> {
@@ -268,6 +273,7 @@ impl Opcode {
             43 => Some(Self::StoreEnvironment),
             44 => Some(Self::DeclareGlobalLexical),
             45 => Some(Self::InitializeGlobalLexical),
+            46 => Some(Self::ReturnUndefined),
             _ => None,
         }
     }
@@ -773,7 +779,11 @@ impl BytecodeBuilder {
 
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
-            Opcode::Nop | Opcode::Jump | Opcode::DeclareScope | Opcode::DeclareGlobalLexical => &[],
+            Opcode::Nop
+            | Opcode::Jump
+            | Opcode::ReturnUndefined
+            | Opcode::DeclareScope
+            | Opcode::DeclareGlobalLexical => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -1750,7 +1760,11 @@ fn verify_instruction(
         }
     };
     match instruction.opcode {
-        Opcode::Nop | Opcode::Jump | Opcode::DeclareScope | Opcode::DeclareGlobalLexical => {}
+        Opcode::Nop
+        | Opcode::Jump
+        | Opcode::ReturnUndefined
+        | Opcode::DeclareScope
+        | Opcode::DeclareGlobalLexical => {}
         Opcode::LoadUndefined
         | Opcode::LoadNull
         | Opcode::LoadFalse
@@ -2042,6 +2056,18 @@ mod tests {
         assert_eq!(decoded.operand_count, 1);
         assert_eq!(decoded.operands[0], 7);
         assert_eq!(MAX_ENCODED_INSTRUCTION_WORDS, 4);
+    }
+
+    #[test]
+    fn return_undefined_verifies_without_a_register_file() {
+        let words = encode_instruction(Opcode::ReturnUndefined, &[]).unwrap();
+        let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        assert_eq!(decoded.opcode, Opcode::ReturnUndefined);
+        assert_eq!(decoded.operand_count, 0);
+        assert!(decoded.opcode.is_terminal());
+        let mut context = context();
+        context.register_count = 0;
+        assert!(Bytecode::from_words(words).verify(context).is_ok());
     }
 
     #[test]

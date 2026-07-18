@@ -2510,10 +2510,11 @@ impl Isolate {
             )?,
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
-                if self.fiber.frames.len() == 1 {
-                    return Ok(Some(RunOutcome::Completed(value)));
-                }
-                return self.return_from_callee(value);
+                return self.finish_return(value);
+            }
+            Opcode::ReturnUndefined => {
+                let value = Value::from_immediate(Immediate::Undefined);
+                return self.finish_return(value);
             }
             Opcode::Throw => {
                 let value = self.read(base, operands[0])?;
@@ -3112,9 +3113,17 @@ impl Isolate {
             .expect("realm initialization publishes a global object")
     }
 
-    /// Pops a non-entry frame and restores the caller checkpoints outside the top-level Return path.
-    #[cold]
-    #[inline(never)]
+    /// Selects top-level completion or the hot ordinary-callee frame return path.
+    #[inline(always)]
+    fn finish_return(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.fiber.frames.len() == 1 {
+            return Ok(Some(RunOutcome::Completed(value)));
+        }
+        self.return_from_callee(value)
+    }
+
+    /// Pops a non-entry frame and restores caller checkpoints on the ordinary call hot path.
+    #[inline(always)]
     fn return_from_callee(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
         let frame = self
             .fiber
@@ -3701,6 +3710,52 @@ mod tests {
         builder.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
         builder.emit(Opcode::Return, &[1], span).unwrap();
         single_function_module("1()", Vec::new(), builder)
+    }
+
+    /// Builds a zero-register callee so ReturnUndefined exercises ordinary frame unwinding.
+    fn undefined_call_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::default();
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[1], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::default();
+        callee.emit(Opcode::ReturnUndefined, &[], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let entry_layout = FunctionLayout {
+            register_count: entry_registers,
+            ..FunctionLayout::default()
+        };
+        let callee_layout = FunctionLayout {
+            register_count: callee_registers,
+            ..FunctionLayout::default()
+        };
+        CompiledModule::new(
+            Arc::from("function empty() {} empty();"),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        source_map: entry_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Script, entry_layout)
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callee_bytecode,
+                    FunctionMetadata {
+                        source_map: callee_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Ordinary, callee_layout)
+                    },
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
     }
 
     /// Builds one non-capturing function call with a contiguous single-argument window.
@@ -4449,6 +4504,15 @@ mod tests {
     }
 
     #[test]
+    fn zero_register_undefined_returns_work_for_every_dispatch_batch() {
+        assert_undefined_call_batch::<1>();
+        assert_undefined_call_batch::<2>();
+        assert_undefined_call_batch::<4>();
+        assert_undefined_call_batch::<8>();
+        assert_undefined_call_batch::<16>();
+    }
+
+    #[test]
     fn captured_environments_work_for_every_dispatch_batch() {
         assert_captured_environment_batch::<1>();
         assert_captured_environment_batch::<2>();
@@ -4995,6 +5059,33 @@ mod tests {
             isolate.native_error_kind(error).unwrap(),
             Some(NativeErrorKind::Type)
         );
+    }
+
+    /// Confirms a zero-register callee returns undefined through the caller destination.
+    fn assert_undefined_call_batch<const N: usize>() {
+        let module = undefined_call_module();
+        assert_eq!(
+            module
+                .function(FunctionId::new(1))
+                .unwrap()
+                .layout()
+                .register_count,
+            0
+        );
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &module,
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::Undefined)
+        ));
     }
 
     fn assert_batch_budget<const N: usize>() {
@@ -5782,9 +5873,10 @@ mod tests {
         entry.emit(Opcode::InstanceOf, &[2, 1, 0], span).unwrap();
         entry.emit(Opcode::Return, &[2], span).unwrap();
         let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
-        let mut constructor = BytecodeBuilder::with_capacity(2, 0);
-        constructor.emit(Opcode::LoadUndefined, &[0], span).unwrap();
-        constructor.emit(Opcode::Return, &[0], span).unwrap();
+        let mut constructor = BytecodeBuilder::with_capacity(1, 0);
+        constructor
+            .emit(Opcode::ReturnUndefined, &[], span)
+            .unwrap();
         let (constructor_bytecode, constructor_source_map, constructor_registers) =
             constructor.finish().unwrap();
         CompiledModule::new(

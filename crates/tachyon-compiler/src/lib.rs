@@ -464,6 +464,29 @@ mod tests {
     }
 
     #[test]
+    /// Empty and bare-return functions require no register solely to materialize undefined.
+    fn compiler_uses_zero_register_return_undefined_for_known_completions() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function implicit() {} function explicit() { return; } implicit(); explicit();",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        for function_id in [1, 2] {
+            let function = module
+                .function(tachyon_bytecode::FunctionId::new(function_id))
+                .unwrap();
+            let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+            assert_eq!(function.layout().register_count, 0);
+            assert!(disassembly.contains("ReturnUndefined"));
+            assert!(!disassembly.contains("LoadUndefined"));
+        }
+    }
+
+    #[test]
     /// Confirms script vars become deduplicated global declarations while function vars use frames.
     fn compiler_instantiates_var_bindings_at_their_scope_entry() {
         let module = Compiler

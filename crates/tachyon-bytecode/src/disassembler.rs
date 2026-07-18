@@ -62,7 +62,7 @@ pub fn disassemble(function: &CompiledFunction) -> Result<String, DisassemblyErr
 fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -> fmt::Result {
     write!(output, "{opcode}")?;
     match opcode {
-        Opcode::Nop => {}
+        Opcode::Nop | Opcode::ReturnUndefined => {}
         Opcode::DeclareScope => write!(output, " scope={}", operands[0])?,
         Opcode::DeclareGlobalLexical => {
             write!(output, " scope={}, mutable={}", operands[0], operands[1])?

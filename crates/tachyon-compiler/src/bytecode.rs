@@ -583,8 +583,7 @@ fn lower_function(
         }
     }
     if !terminal {
-        let undefined = lowerer.load_undefined(function.span)?;
-        lowerer.emit(Opcode::Return, &[undefined.index()], function.span)?;
+        lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
     }
     let handlers = freeze_handlers(lowerer.handlers)?;
     let binding_plan = lowerer.binding_plan.into();
@@ -933,11 +932,12 @@ impl Lowerer<'_> {
                 Ok(false)
             }
             HirStatementKind::Return(argument) => {
-                let value = match argument {
-                    Some(argument) => self.expression(argument)?,
-                    None => self.load_undefined(statement.span)?,
-                };
-                self.emit(Opcode::Return, &[value.index()], statement.span)?;
+                if let Some(argument) = argument {
+                    let value = self.expression(argument)?;
+                    self.emit(Opcode::Return, &[value.index()], statement.span)?;
+                } else {
+                    self.emit(Opcode::ReturnUndefined, &[], statement.span)?;
+                }
                 Ok(true)
             }
             HirStatementKind::Throw(argument) => {
