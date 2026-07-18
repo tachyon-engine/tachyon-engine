@@ -1736,6 +1736,35 @@ impl Isolate {
         source: Value,
         next_index: &mut i32,
     ) -> Result<(), ExecutionError> {
+        if let Some(raw) = source.as_heap_ref()
+            && let Ok(reference) = self.heap.checked_reference(raw, self.types.string)
+        {
+            let units = self.heap.with_running_scope(|scope| {
+                let root = scope.root(reference).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let string = no_gc
+                        .borrow(root, self.types.string)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    Ok::<Vec<u16>, ExecutionError>(match string.as_view() {
+                        JsStringView::Latin1(bytes) => {
+                            bytes.iter().map(|&byte| u16::from(byte)).collect()
+                        }
+                        JsStringView::Utf16(units) => units.to_vec(),
+                    })
+                })
+            })?;
+            for unit in units {
+                let character = self.allocate_runtime_string(
+                    JsString::try_from_utf16(&[unit]).map_err(ExecutionError::PropertyKeyString)?,
+                )?;
+                let key = self.property_key_atom(Value::from_i32(*next_index))?;
+                self.set_own_data_property(destination, key, character)?;
+                *next_index = next_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+            }
+            return Ok(());
+        }
         if !self.is_array_value(source)? {
             let key = self.property_key_atom(Value::from_i32(*next_index))?;
             self.set_own_data_property(destination, key, source)?;

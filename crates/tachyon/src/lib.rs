@@ -1426,6 +1426,18 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True)
         );
+        assert_eq!(
+            execute_source(119, "let source = [2, 3]; [...source, 4][2] === 4;").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(120, "[0, ...[1, 2], 3].length;").as_i32(),
+            Some(4)
+        );
+        assert_eq!(
+            execute_source(121, "[...'ab'][1] === 'b';").as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies native Array call/construct paths, indexed storage, length, and concat flattening.

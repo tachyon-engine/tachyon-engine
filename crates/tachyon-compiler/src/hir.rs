@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        AssignmentTarget, BindingPattern, Expression, ForStatementInit, ObjectPropertyKind,
-        Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration,
-        VariableDeclarationKind,
+        ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, ForStatementInit,
+        ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+        VariableDeclaration, VariableDeclarationKind,
     },
     semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::{GetSpan, Span},
@@ -1037,33 +1037,48 @@ fn lower_expression(
             HirExpressionKind::NewTarget
         }
         Expression::ArrayExpression(array) => {
-            let mut properties = Vec::with_capacity(array.elements.len() + 1);
-            for (index, element) in array.elements.iter().enumerate() {
-                let Some(value) = element.as_expression() else {
-                    if element.is_spread() {
-                        return Err(unsupported(
-                            source.name(),
-                            source_span(element.span()),
-                            "array spread",
-                        ));
-                    }
+            let mut accumulated = None;
+            let mut chunk_properties = Vec::new();
+            let mut chunk_length = 0usize;
+            for element in &array.elements {
+                if let Some(value) = element.as_expression() {
+                    chunk_properties.push(HirObjectProperty {
+                        span: source_span(element.span()),
+                        key: HirObjectPropertyKey::Static(Arc::from(chunk_length.to_string())),
+                        value: lower_expression(value, source, semantic, functions)?,
+                    });
+                    chunk_length += 1;
                     continue;
-                };
-                properties.push(HirObjectProperty {
-                    span: source_span(element.span()),
-                    key: HirObjectPropertyKey::Static(Arc::from(index.to_string())),
-                    value: lower_expression(value, source, semantic, functions)?,
-                });
+                }
+                if element.is_spread() {
+                    let spread = match element {
+                        ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
+                        _ => {
+                            return Err(unsupported(
+                                source.name(),
+                                source_span(element.span()),
+                                "array spread",
+                            ));
+                        }
+                    };
+                    let spread = lower_expression(spread, source, semantic, functions)?;
+                    let chunk = lower_array_chunk(chunk_properties, chunk_length, span);
+                    accumulated = Some(match accumulated {
+                        Some(left) => lower_array_concat(left, spread, span),
+                        None => lower_array_concat(chunk, spread, span),
+                    });
+                    chunk_properties = Vec::new();
+                    chunk_length = 0;
+                } else {
+                    chunk_length += 1;
+                }
             }
-            properties.push(HirObjectProperty {
-                span,
-                key: HirObjectPropertyKey::Static(Arc::from("length")),
-                value: HirExpression {
-                    span,
-                    kind: HirExpressionKind::Number((array.elements.len() as f64).to_bits()),
-                },
-            });
-            HirExpressionKind::Array(properties.into())
+            let tail = lower_array_chunk(chunk_properties, chunk_length, span);
+            match accumulated {
+                Some(left) if chunk_length != 0 => lower_array_concat(left, tail, span).kind,
+                Some(left) => left.kind,
+                None => tail.kind,
+            }
         }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());
@@ -1292,6 +1307,47 @@ fn lower_expression(
         _ => return Err(unsupported(source.name(), span, "expression")),
     };
     Ok(HirExpression { span, kind })
+}
+
+/// Builds one owned array chunk used by spread lowering and sparse-element preservation.
+fn lower_array_chunk(
+    mut properties: Vec<HirObjectProperty>,
+    length: usize,
+    span: SourceSpan,
+) -> HirExpression {
+    properties.push(HirObjectProperty {
+        span,
+        key: HirObjectPropertyKey::Static(Arc::from("length")),
+        value: HirExpression {
+            span,
+            kind: HirExpressionKind::Number((length as f64).to_bits()),
+        },
+    });
+    HirExpression {
+        span,
+        kind: HirExpressionKind::Array(properties.into()),
+    }
+}
+
+/// Reifies one spread chunk as a receiver-preserving Array.prototype.concat call.
+fn lower_array_concat(
+    left: HirExpression,
+    right: HirExpression,
+    span: SourceSpan,
+) -> HirExpression {
+    HirExpression {
+        span,
+        kind: HirExpressionKind::Call {
+            callee: Box::new(HirExpression {
+                span,
+                kind: HirExpressionKind::StaticMember {
+                    object: Box::new(left),
+                    property: Arc::from("concat"),
+                },
+            }),
+            arguments: Arc::from([right]),
+        },
+    }
 }
 
 /// Converts assignment operators without hiding unsupported short-circuit assignment semantics.
