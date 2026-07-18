@@ -20,6 +20,8 @@ atom_hash_seed_1 = 4354685564936845355
 heap_max_bytes = 67108864
 stack_max_frames = 2048
 stack_max_registers = 1048576
+max_loaded_modules = 64
+max_global_bindings = 1024
 steady_state_iterations = 1000
 
 [[external_engines]]

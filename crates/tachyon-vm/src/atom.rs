@@ -113,6 +113,12 @@ pub struct AtomTable {
     peak_entries: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct AtomTableCheckpoint {
+    entries_len: usize,
+    retained_string_bytes: usize,
+}
+
 impl AtomTable {
     #[must_use]
     pub const fn new(config: AtomTableConfig) -> Self {
@@ -158,6 +164,25 @@ impl AtomTable {
         self.retained_string_bytes = retained;
         self.peak_entries = self.peak_entries.max(self.entries.len());
         Ok(atom)
+    }
+
+    pub(crate) fn checkpoint(&self) -> AtomTableCheckpoint {
+        AtomTableCheckpoint {
+            entries_len: self.entries.len(),
+            retained_string_bytes: self.retained_string_bytes,
+        }
+    }
+
+    /// Removes only atoms published after a module-load checkpoint and rebuilds buckets in place.
+    pub(crate) fn rollback(&mut self, checkpoint: AtomTableCheckpoint) {
+        debug_assert!(checkpoint.entries_len <= self.entries.len());
+        self.entries.truncate(checkpoint.entries_len);
+        self.retained_string_bytes = checkpoint.retained_string_bytes;
+        self.buckets.fill(None);
+        for (index, entry) in self.entries.iter().enumerate() {
+            let bucket = find_vacant_bucket(&self.buckets, entry.hash);
+            self.buckets[bucket] = Some(AtomId::from_index(index));
+        }
     }
 
     #[must_use]
@@ -339,5 +364,29 @@ mod tests {
         assert_eq!(stats.retained_bucket_capacity, 64);
         assert!(stats.retained_entry_capacity >= 40);
         assert_eq!(stats.peak_entries, 40);
+    }
+
+    #[test]
+    fn rollback_removes_only_atoms_published_after_checkpoint() {
+        let mut table = AtomTable::new(AtomTableConfig::new(16, 1_024, AtomHashSeed::new(7, 11)));
+        let retained = table
+            .try_intern(JsString::try_from_str("retained").unwrap())
+            .unwrap();
+        let checkpoint = table.checkpoint();
+        table
+            .try_intern(JsString::try_from_str("rolled-back").unwrap())
+            .unwrap();
+
+        table.rollback(checkpoint);
+
+        assert_eq!(
+            table.find(&JsString::try_from_str("retained").unwrap()),
+            Some(retained)
+        );
+        assert_eq!(
+            table.find(&JsString::try_from_str("rolled-back").unwrap()),
+            None
+        );
+        assert_eq!(table.stats().entries, 1);
     }
 }

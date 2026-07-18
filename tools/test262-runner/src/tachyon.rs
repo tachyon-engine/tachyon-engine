@@ -5,7 +5,8 @@ use tachyon_compiler::{
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome, StackLimits,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RealmLimits,
+    RunOutcome, StackLimits,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -16,6 +17,8 @@ const EXECUTION_FUEL_LIMIT: u64 = 10_000_000;
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
+const MAX_LOADED_MODULES: u32 = 64;
+const MAX_GLOBAL_BINDINGS: u32 = 1 << 18;
 
 /// Stateless in-process Test262 adapter; each request owns an independent Tachyon isolate.
 #[derive(Clone, Copy, Debug, Default)]
@@ -68,6 +71,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         ),
         HeapLimit::new(HEAP_LIMIT_BYTES),
         StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
+        RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
     )) {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),
@@ -256,7 +260,7 @@ mod tests {
     fn control_flow_harness_executes_in_tachyon() {
         assert_eq!(
             execute(&composed(
-                "1 + 2;",
+                "assert();",
                 &[("assert.js", "function assert() { if (true) {} }")],
                 false
             )),

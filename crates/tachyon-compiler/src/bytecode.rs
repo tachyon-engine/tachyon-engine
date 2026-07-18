@@ -16,6 +16,7 @@ use crate::{
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
 pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
     let mut constants = Vec::with_capacity(hir_literal_count(hir)?);
+    let mut scope_names = Vec::with_capacity(hir_scope_name_capacity(hir)?);
     let template_capacity =
         hir.functions()
             .len()
@@ -24,13 +25,19 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
                 collection: "compiled functions",
             })?;
     let mut templates = Vec::with_capacity(template_capacity);
-    templates.push(lower_entry(source, hir, &mut constants)?);
+    templates.push(lower_entry(source, hir, &mut constants, &mut scope_names)?);
     for function in hir.functions() {
-        templates.push(lower_function(source, function, &mut constants)?);
+        templates.push(lower_function(
+            source,
+            function,
+            &mut constants,
+            &mut scope_names,
+        )?);
     }
     CompiledModule::new(
         source.shared_text(),
         constants,
+        scope_names,
         templates,
         FunctionId::new(0),
     )
@@ -42,6 +49,7 @@ fn lower_entry(
     source: &SourceText,
     hir: &HirProgram,
     constants: &mut Vec<BytecodeConstant>,
+    scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
     let has_control_flow = hir.statements().iter().any(|statement| {
         matches!(
@@ -77,6 +85,7 @@ fn lower_entry(
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(word_capacity, hir_label_count(hir)?),
         constants,
+        scope_names,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
         next_register: 0,
         source_name: source.name().clone(),
@@ -165,6 +174,7 @@ fn lower_function(
     source: &SourceText,
     function: &HirFunction,
     constants: &mut Vec<BytecodeConstant>,
+    scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
     let instruction_capacity = statements_instruction_count(&function.body)?
         .checked_add(2)
@@ -178,6 +188,7 @@ fn lower_function(
             statements_label_count(&function.body)?,
         ),
         constants,
+        scope_names,
         locals: Vec::with_capacity(
             function
                 .parameters
@@ -239,6 +250,7 @@ fn lower_function(
 struct Lowerer<'a> {
     builder: BytecodeBuilder,
     constants: &'a mut Vec<BytecodeConstant>,
+    scope_names: &'a mut Vec<std::sync::Arc<str>>,
     locals: Vec<LocalBinding>,
     next_register: u32,
     source_name: SourceName,
@@ -285,6 +297,8 @@ impl Lowerer<'_> {
             .checked_add(1)
             .ok_or(CompileError::RegisterOverflow)?;
         self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
+        let scope_name = self.scope_name(&declaration.binding.name)?;
+        self.emit(Opcode::StoreScope, &[register.index(), scope_name], span)?;
         self.locals.push(LocalBinding {
             name: declaration.binding.name.clone(),
             register,
@@ -540,14 +554,19 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
-            HirExpressionKind::Identifier(name) => self
-                .local(name)
-                .map(|binding| binding.register)
-                .ok_or_else(|| CompileError::UnsupportedSyntax {
-                    source_name: self.source_name.clone(),
-                    span: expression.span,
-                    syntax: "unresolved identifier",
-                }),
+            HirExpressionKind::Identifier(name) => match self.local(name) {
+                Some(binding) => Ok(binding.register),
+                None => {
+                    let destination = self.register()?;
+                    let scope_name = self.scope_name(name)?;
+                    self.emit(
+                        Opcode::LoadScope,
+                        &[destination.index(), scope_name],
+                        expression.span,
+                    )?;
+                    Ok(destination)
+                }
+            },
             HirExpressionKind::Assignment { target, value } => {
                 let binding =
                     self.local(target)
@@ -752,10 +771,136 @@ impl Lowerer<'_> {
             .ok_or(CompileError::RegisterOverflow)?;
         Ok(register)
     }
+
+    /// Returns a module-stable scope-name index while retaining only one owned copy per spelling.
+    fn scope_name(&mut self, name: &std::sync::Arc<str>) -> Result<u32, CompileError> {
+        if let Some(index) = self
+            .scope_names
+            .iter()
+            .position(|existing| existing.as_ref() == name.as_ref())
+        {
+            return u32::try_from(index).map_err(|_| CompileError::BindingOverflow);
+        }
+        let index =
+            u32::try_from(self.scope_names.len()).map_err(|_| CompileError::BindingOverflow)?;
+        self.scope_names.push(name.clone());
+        Ok(index)
+    }
 }
 
 fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
     statements_instruction_count(hir.statements())
+}
+
+/// Computes a checked upper bound for module scope-name interning before HIR lowering starts.
+fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = statements_scope_name_count(hir.statements())?;
+    for function in hir.functions() {
+        count = checked_count_add(
+            count,
+            statements_scope_name_count(&function.body)?,
+            "scope names",
+        )?;
+    }
+    Ok(count)
+}
+
+/// Counts identifier references and published top-level function names across structured statements.
+fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let statement_count = match &statement.kind {
+            HirStatementKind::Expression(expression) => expression_scope_name_count(expression)?,
+            HirStatementKind::VariableDeclaration(declaration) => {
+                let mut nested = 0;
+                for initializer in declaration
+                    .declarators
+                    .iter()
+                    .filter_map(|declarator| declarator.initializer.as_ref())
+                {
+                    nested = checked_count_add(
+                        nested,
+                        expression_scope_name_count(initializer)?,
+                        "scope names",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::FunctionDeclaration(_) => 1,
+            HirStatementKind::Block(statements) => statements_scope_name_count(statements)?,
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let mut nested = expression_scope_name_count(test)?;
+                nested = checked_count_add(
+                    nested,
+                    statements_scope_name_count(core::slice::from_ref(consequent))?,
+                    "scope names",
+                )?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_scope_name_count(core::slice::from_ref(alternate))?,
+                        "scope names",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Return(argument) => argument
+                .as_ref()
+                .map(expression_scope_name_count)
+                .transpose()?
+                .unwrap_or(0),
+            HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
+            HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, statement_count, "scope names")?;
+    }
+    Ok(count)
+}
+
+/// Counts every identifier occurrence in one expression as a conservative scope-name upper bound.
+fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
+    match &expression.kind {
+        HirExpressionKind::Identifier(_) => Ok(1),
+        HirExpressionKind::Unary { argument, .. } => expression_scope_name_count(argument),
+        HirExpressionKind::Binary { left, right, .. } => checked_count_add(
+            expression_scope_name_count(left)?,
+            expression_scope_name_count(right)?,
+            "scope names",
+        ),
+        HirExpressionKind::Assignment { value, .. } => expression_scope_name_count(value),
+        HirExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => checked_count_add(
+            expression_scope_name_count(test)?,
+            checked_count_add(
+                expression_scope_name_count(consequent)?,
+                expression_scope_name_count(alternate)?,
+                "scope names",
+            )?,
+            "scope names",
+        ),
+        HirExpressionKind::Call { callee, arguments } => {
+            let mut count = expression_scope_name_count(callee)?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(argument)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::Number(_)
+        | HirExpressionKind::String(_)
+        | HirExpressionKind::Boolean(_)
+        | HirExpressionKind::Null => Ok(0),
+    }
 }
 
 /// Computes a checked instruction upper bound across nested structured statements.
@@ -767,7 +912,7 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
             HirStatementKind::VariableDeclaration(declaration) => {
                 declaration_instruction_count(declaration)?
             }
-            HirStatementKind::FunctionDeclaration(_) => 1,
+            HirStatementKind::FunctionDeclaration(_) => 2,
             HirStatementKind::Return(argument) => argument
                 .as_ref()
                 .map(expression_instruction_count)

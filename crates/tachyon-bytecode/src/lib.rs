@@ -414,6 +414,7 @@ pub struct VerifyContext {
     pub register_count: u32,
     pub constant_count: u32,
     pub function_count: u32,
+    pub scope_name_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -431,6 +432,11 @@ pub enum VerifyError {
         offset: WordOffset,
         constant: u32,
         constant_count: u32,
+    },
+    ScopeNameOutOfRange {
+        offset: WordOffset,
+        scope_name: u32,
+        scope_name_count: u32,
     },
     FunctionOutOfRange {
         offset: WordOffset,
@@ -919,6 +925,7 @@ impl CompiledFunction {
 pub struct CompiledModule {
     source: Arc<str>,
     constants: Arc<[BytecodeConstant]>,
+    scope_names: Arc<[Arc<str>]>,
     functions: Arc<[CompiledFunction]>,
     entry_function: FunctionId,
 }
@@ -929,6 +936,9 @@ pub enum ModuleBuildError {
         byte_len: usize,
     },
     TooManyConstants {
+        count: usize,
+    },
+    TooManyScopeNames {
         count: usize,
     },
     TooManyFunctions {
@@ -1022,6 +1032,7 @@ impl CompiledModule {
     pub fn new(
         source: Arc<str>,
         constants: Vec<BytecodeConstant>,
+        scope_names: Vec<Arc<str>>,
         templates: Vec<CompiledFunctionTemplate>,
         entry_function: FunctionId,
     ) -> Result<Self, ModuleBuildError> {
@@ -1032,6 +1043,10 @@ impl CompiledModule {
         let constant_count =
             u32::try_from(constants.len()).map_err(|_| ModuleBuildError::TooManyConstants {
                 count: constants.len(),
+            })?;
+        let scope_name_count =
+            u32::try_from(scope_names.len()).map_err(|_| ModuleBuildError::TooManyScopeNames {
+                count: scope_names.len(),
             })?;
         let function_count =
             u32::try_from(templates.len()).map_err(|_| ModuleBuildError::TooManyFunctions {
@@ -1048,6 +1063,7 @@ impl CompiledModule {
             register_count: 0,
             constant_count,
             function_count,
+            scope_name_count,
         };
         let mut functions = Vec::with_capacity(templates.len());
         for (index, template) in templates.into_iter().enumerate() {
@@ -1099,6 +1115,7 @@ impl CompiledModule {
         Ok(Self {
             source,
             constants: constants.into(),
+            scope_names: scope_names.into(),
             functions: functions.into(),
             entry_function,
         })
@@ -1112,6 +1129,19 @@ impl CompiledModule {
     #[must_use]
     pub fn constants(&self) -> &[BytecodeConstant] {
         &self.constants
+    }
+
+    #[must_use]
+    pub fn scope_names(&self) -> &[Arc<str>] {
+        &self.scope_names
+    }
+
+    /// Compares immutable backing identity without hashing source or bytecode on every isolate entry.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.functions, &other.functions)
+            && Arc::ptr_eq(&self.constants, &other.constants)
+            && Arc::ptr_eq(&self.scope_names, &other.scope_names)
     }
 
     #[must_use]
@@ -1499,6 +1529,15 @@ fn verify_instruction(
             constant_count: context.constant_count,
         });
     }
+    if matches!(instruction.opcode, Opcode::LoadScope | Opcode::StoreScope)
+        && operands[1] >= context.scope_name_count
+    {
+        return Err(VerifyError::ScopeNameOutOfRange {
+            offset,
+            scope_name: operands[1],
+            scope_name_count: context.scope_name_count,
+        });
+    }
     if instruction.opcode == Opcode::CreateClosure && operands[1] >= context.function_count {
         return Err(VerifyError::FunctionOutOfRange {
             offset,
@@ -1543,6 +1582,7 @@ mod tests {
             register_count: 4,
             constant_count: 2,
             function_count: 1,
+            scope_name_count: 1,
         }
     }
     #[test]
@@ -1599,6 +1639,20 @@ mod tests {
                 callee: 2,
                 argument_count: 2,
                 register_count: 4,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_scope_name_index_past_module_table() {
+        let mut words = encode_instruction(Opcode::LoadScope, &[0, 1]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        assert!(matches!(
+            Bytecode::from_words(words).verify(context()),
+            Err(VerifyError::ScopeNameOutOfRange {
+                scope_name: 1,
+                scope_name_count: 1,
                 ..
             })
         ));
@@ -1722,6 +1776,7 @@ mod tests {
                 BytecodeConstant::NumberBits(1.0_f64.to_bits()),
                 BytecodeConstant::string_from_utf16(vec![0xd800]),
             ],
+            Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 Bytecode::from_words(words),
@@ -1759,6 +1814,7 @@ mod tests {
         let error = CompiledModule::new(
             Arc::from("x"),
             vec![BytecodeConstant::NumberBits(0)],
+            Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 Bytecode::from_words(out_of_range_constant),
@@ -1779,6 +1835,7 @@ mod tests {
         await_without_metadata.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         let error = CompiledModule::new(
             Arc::from("x"),
+            Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
@@ -1835,6 +1892,7 @@ mod tests {
         let error = CompiledModule::new(
             Arc::from(""),
             Vec::new(),
+            Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 Bytecode::from_words(words.clone()),
@@ -1865,6 +1923,7 @@ mod tests {
         .into();
         let error = CompiledModule::new(
             Arc::from(""),
+            Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),

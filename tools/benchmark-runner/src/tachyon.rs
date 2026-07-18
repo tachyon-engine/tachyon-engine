@@ -4,7 +4,8 @@ use tachyon_bytecode::CompiledModule;
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome, StackLimits,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RealmLimits,
+    RunOutcome, StackLimits,
 };
 
 use crate::{
@@ -47,6 +48,7 @@ impl TachyonInProcessConfig {
                 ),
                 HeapLimit::new(config.heap_max_bytes),
                 StackLimits::new(config.stack_max_frames, config.stack_max_registers),
+                RealmLimits::new(config.max_loaded_modules, config.max_global_bindings),
             ),
             steady_state_iterations: config.steady_state_iterations,
         }

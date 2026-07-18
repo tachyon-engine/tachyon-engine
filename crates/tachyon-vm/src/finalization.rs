@@ -218,7 +218,7 @@ mod tests {
     };
 
     use super::{FinalizationSafepointError, Isolate};
-    use crate::{AtomHashSeed, AtomTableConfig, IsolateConfig, StackLimits};
+    use crate::{AtomHashSeed, AtomTableConfig, IsolateConfig, RealmLimits, StackLimits};
     use tachyon_gc::Heap;
     use tachyon_value::{RawHeapRef, Value};
 
@@ -268,6 +268,7 @@ mod tests {
             AtomTableConfig::new(64, 4 * SPAN_SIZE_BYTES, AtomHashSeed::new(1, 2)),
             HeapLimit::new(4 * SPAN_SIZE_BYTES),
             StackLimits::new(64, 4_096),
+            RealmLimits::new(64, 1_024),
         ))
         .expect("test isolate descriptors register")
     }

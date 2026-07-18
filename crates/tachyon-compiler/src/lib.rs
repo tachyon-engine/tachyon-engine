@@ -292,6 +292,8 @@ mod tests {
         )
         .unwrap();
         assert!(entry.contains("CreateClosure r0, function=1"));
+        assert!(entry.contains("StoreScope r0, scope=0"));
+        assert_eq!(module.scope_names(), &[Arc::from("addTwo")]);
         assert!(entry.contains("Call r4, callee=r1, argc=1"));
         assert!(function.contains("Add r2, r0, r1"));
         assert!(function.contains("Return r2"));

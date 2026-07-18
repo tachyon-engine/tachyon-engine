@@ -68,6 +68,10 @@ pub struct TachyonBenchmarkConfig {
     pub stack_max_frames: u32,
     /// Maximum aggregate frame-register slots for one benchmark execution.
     pub stack_max_registers: u32,
+    /// Maximum immutable modules retained by one benchmark isolate.
+    pub max_loaded_modules: u32,
+    /// Maximum global object bindings retained by one benchmark isolate.
+    pub max_global_bindings: u32,
     /// Executions represented by one steady-state timing sample.
     pub steady_state_iterations: u64,
 }
@@ -271,6 +275,8 @@ impl BenchmarkConfig {
             || self.tachyon.heap_max_bytes == 0
             || self.tachyon.stack_max_frames == 0
             || self.tachyon.stack_max_registers == 0
+            || self.tachyon.max_loaded_modules == 0
+            || self.tachyon.max_global_bindings == 0
             || self.tachyon.steady_state_iterations < 2
         {
             return Err(

@@ -22,11 +22,11 @@ pub use finalization::{
 };
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
 
-use core::cell::Cell;
+use core::{cell::Cell, num::NonZeroU32};
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, Opcode, RegisterId, WordOffset,
-    decode_instruction,
+    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout, Opcode, RegisterId,
+    WordOffset, decode_instruction,
 };
 use tachyon_gc::{
     AllocationSpace, GcRef, GcType, Heap, HeapLimit, HeapReferenceError, ManagedAllocationError,
@@ -44,6 +44,7 @@ pub struct IsolateConfig {
     atom_table: AtomTableConfig,
     heap_limit: HeapLimit,
     stack_limits: StackLimits,
+    realm_limits: RealmLimits,
 }
 
 impl IsolateConfig {
@@ -52,11 +53,30 @@ impl IsolateConfig {
         atom_table: AtomTableConfig,
         heap_limit: HeapLimit,
         stack_limits: StackLimits,
+        realm_limits: RealmLimits,
     ) -> Self {
         Self {
             atom_table,
             heap_limit,
             stack_limits,
+            realm_limits,
+        }
+    }
+}
+
+/// Host hard limits for isolate-retained code and global object bindings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RealmLimits {
+    max_loaded_modules: u32,
+    max_global_bindings: u32,
+}
+
+impl RealmLimits {
+    #[must_use]
+    pub const fn new(max_loaded_modules: u32, max_global_bindings: u32) -> Self {
+        Self {
+            max_loaded_modules,
+            max_global_bindings,
         }
     }
 }
@@ -113,6 +133,16 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
+    LoadedModuleLimit { limit: u32 },
+    LoadedCodeAllocationFailed,
+    ScopeNameAllocationFailed,
+    ScopeNameAtom(AtomTableError),
+    ScopeNameString(StringAllocationError),
+    InvalidCode(CodeId),
+    InvalidScopeName { code: CodeId, scope_name: u32 },
+    UnresolvedBinding(AtomId),
+    GlobalBindingLimit { limit: u32 },
+    GlobalBindingAllocationFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,8 +161,24 @@ impl Trace for Environment {
 /// Minimal callable payload; properties and captured environments extend this object in M5.
 #[derive(Clone, Copy, Debug)]
 struct FunctionObject {
+    code: CodeId,
     function: FunctionId,
     environment: Option<GcRef<Environment>>,
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedCallTarget {
+    object: FunctionObject,
+    layout: FunctionLayout,
+    kind: FunctionKind,
+}
+
+#[derive(Clone, Copy)]
+struct CallSite {
+    caller_base: u32,
+    destination: u32,
+    callee_register: u32,
+    argument_count: u32,
 }
 
 impl Trace for FunctionObject {
@@ -147,9 +193,99 @@ struct VmTypes {
     function: GcType<FunctionObject>,
 }
 
+/// An isolate-local immutable-code index; zero stays reserved for niche optimization and validation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct CodeId(NonZeroU32);
+
+impl CodeId {
+    fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(NonZeroU32::new)
+            .map(Self)
+    }
+
+    const fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+const _: [(); 4] = [(); core::mem::size_of::<CodeId>()];
+const _: [(); 4] = [(); core::mem::size_of::<Option<CodeId>>()];
+
+#[derive(Debug)]
+struct LoadedCode {
+    module: CompiledModule,
+    scope_atoms: Box<[AtomId]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlobalBinding {
+    name: AtomId,
+    value: Value,
+}
+
+#[derive(Debug)]
+struct Realm {
+    globals: Vec<GlobalBinding>,
+    limits: RealmLimits,
+}
+
+impl Realm {
+    const fn new(limits: RealmLimits) -> Self {
+        Self {
+            globals: Vec::new(),
+            limits,
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, name: AtomId) -> Option<Value> {
+        self.globals
+            .iter()
+            .rev()
+            .find(|binding| binding.name == name)
+            .map(|binding| binding.value)
+    }
+
+    /// Updates an existing global object property or publishes one after checked slow-path growth.
+    fn set(&mut self, name: AtomId, value: Value) -> Result<(), ExecutionError> {
+        if let Some(binding) = self
+            .globals
+            .iter_mut()
+            .rev()
+            .find(|binding| binding.name == name)
+        {
+            binding.value = value;
+            return Ok(());
+        }
+        if self.globals.len() >= self.limits.max_global_bindings as usize {
+            return Err(ExecutionError::GlobalBindingLimit {
+                limit: self.limits.max_global_bindings,
+            });
+        }
+        self.globals
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::GlobalBindingAllocationFailed)?;
+        self.globals.push(GlobalBinding { name, value });
+        Ok(())
+    }
+}
+
+impl Trace for Realm {
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        for binding in &mut self.globals {
+            binding.value.trace(tracer);
+        }
+    }
+}
+
 struct VmRoots<'a> {
     fiber: &'a mut Fiber,
     finalization_jobs: &'a mut finalization::FinalizationJobs,
+    realm: &'a mut Realm,
 }
 
 impl Trace for VmRoots<'_> {
@@ -157,6 +293,7 @@ impl Trace for VmRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
+        self.realm.trace(tracer);
     }
 }
 
@@ -169,6 +306,7 @@ enum Strictness {
 /// One explicit JavaScript activation. Rust stack frames never represent JavaScript calls.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
+    code: CodeId,
     function: FunctionId,
     pc: WordOffset,
     base: u32,
@@ -252,6 +390,8 @@ pub struct Isolate {
     fiber: Fiber,
     finalization_jobs: finalization::FinalizationJobs,
     atoms: AtomTable,
+    realm: Realm,
+    loaded_code: Vec<LoadedCode>,
     heap: Heap,
     types: VmTypes,
     stack_limits: StackLimits,
@@ -271,6 +411,8 @@ impl Isolate {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
             atoms: AtomTable::new(config.atom_table),
+            realm: Realm::new(config.realm_limits),
+            loaded_code: Vec::new(),
             heap: Heap::new(config.heap_limit, registry),
             types,
             stack_limits: config.stack_limits,
@@ -294,6 +436,7 @@ impl Isolate {
     pub fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
+        self.realm.trace(tracer);
     }
 
     /// Starts the module entry function with one checked register reservation before opcode dispatch.
@@ -305,6 +448,70 @@ impl Isolate {
         self.execute_with_batch::<1>(module, budget)
     }
 
+    /// Resolves immutable scope names once and publishes one bounded isolate-local code entry.
+    fn load_code(&mut self, module: &CompiledModule) -> Result<CodeId, ExecutionError> {
+        if let Some(index) = self
+            .loaded_code
+            .iter()
+            .position(|loaded| loaded.module.ptr_eq(module))
+        {
+            return CodeId::from_index(index)
+                .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX });
+        }
+        if self.loaded_code.len() >= self.realm.limits.max_loaded_modules as usize {
+            return Err(ExecutionError::LoadedModuleLimit {
+                limit: self.realm.limits.max_loaded_modules,
+            });
+        }
+        self.loaded_code
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::LoadedCodeAllocationFailed)?;
+        let mut scope_atoms = Vec::new();
+        scope_atoms
+            .try_reserve_exact(module.scope_names().len())
+            .map_err(|_| ExecutionError::ScopeNameAllocationFailed)?;
+        let checkpoint = self.atoms.checkpoint();
+        for name in module.scope_names() {
+            let string = match JsString::try_from_str(name) {
+                Ok(string) => string,
+                Err(error) => {
+                    self.atoms.rollback(checkpoint);
+                    return Err(ExecutionError::ScopeNameString(error));
+                }
+            };
+            match self.atoms.try_intern(string) {
+                Ok(atom) => scope_atoms.push(atom),
+                Err(error) => {
+                    self.atoms.rollback(checkpoint);
+                    return Err(ExecutionError::ScopeNameAtom(error));
+                }
+            }
+        }
+        let code = CodeId::from_index(self.loaded_code.len())
+            .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX })?;
+        self.loaded_code.push(LoadedCode {
+            module: module.clone(),
+            scope_atoms: scope_atoms.into_boxed_slice(),
+        });
+        Ok(code)
+    }
+
+    #[inline(always)]
+    fn loaded_code(&self, code: CodeId) -> Result<&LoadedCode, ExecutionError> {
+        self.loaded_code
+            .get(code.index())
+            .ok_or(ExecutionError::InvalidCode(code))
+    }
+
+    #[inline(always)]
+    fn scope_atom(&self, code: CodeId, scope_name: u32) -> Result<AtomId, ExecutionError> {
+        self.loaded_code(code)?
+            .scope_atoms
+            .get(scope_name as usize)
+            .copied()
+            .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
+    }
+
     /// Executes with a fixed internal batch size so each monomorphization preserves the same fuel contract.
     fn execute_with_batch<const N: usize>(
         &mut self,
@@ -312,12 +519,13 @@ impl Isolate {
         mut budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
         assert!(N > 0, "interpreter batch size must be non-zero");
-        self.enter(module, module.entry_function())?;
+        let code = self.load_code(module)?;
+        self.enter(code, module.entry_function())?;
         loop {
             if budget.fuel == 0 || budget.quantum == 0 {
                 return Ok(RunOutcome::BudgetExhausted);
             }
-            if let Some(outcome) = self.execute_batch::<N>(module, &mut budget)? {
+            if let Some(outcome) = self.execute_batch::<N>(&mut budget)? {
                 return Ok(outcome);
             }
         }
@@ -327,7 +535,6 @@ impl Isolate {
     #[inline(always)]
     fn execute_batch<const N: usize>(
         &mut self,
-        module: &CompiledModule,
         budget: &mut ExecutionBudget,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         for _ in 0..N {
@@ -339,7 +546,9 @@ impl Isolate {
                 .frames
                 .last()
                 .expect("entry frame exists while executing");
-            let function = module
+            let function = self
+                .loaded_code(frame.code)?
+                .module
                 .function(frame.function)
                 .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
             let instruction = decode_instruction(function.bytecode().bytecode().words(), frame.pc)
@@ -352,9 +561,12 @@ impl Isolate {
                 .pc = next_pc;
             budget.fuel -= 1;
             budget.quantum -= 1;
-            if let Some(outcome) =
-                self.dispatch(module, instruction.opcode, instruction.operands, frame.base)?
-            {
+            if let Some(outcome) = self.dispatch(
+                frame.code,
+                instruction.opcode,
+                instruction.operands,
+                frame.base,
+            )? {
                 return Ok(Some(outcome));
             }
         }
@@ -365,7 +577,7 @@ impl Isolate {
     #[inline(always)]
     fn dispatch(
         &mut self,
-        module: &CompiledModule,
+        code: CodeId,
         opcode: Opcode,
         operands: [u32; 3],
         base: u32,
@@ -389,7 +601,9 @@ impl Isolate {
                 self.write(base, operands[0], Value::from_i32(operands[1] as i32))?
             }
             Opcode::LoadConstant => {
-                let constant = module
+                let constant = self
+                    .loaded_code(code)?
+                    .module
                     .constants()
                     .get(operands[1] as usize)
                     .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?;
@@ -432,10 +646,23 @@ impl Isolate {
                     self.set_pc(WordOffset::new(operands[1]));
                 }
             }
-            Opcode::CreateClosure => {
-                self.create_closure(module, base, operands[0], FunctionId::new(operands[1]))?
+            Opcode::LoadScope => {
+                let name = self.scope_atom(code, operands[1])?;
+                let value = self
+                    .realm
+                    .get(name)
+                    .ok_or(ExecutionError::UnresolvedBinding(name))?;
+                self.write(base, operands[0], value)?;
             }
-            Opcode::Call => self.call(module, base, operands[0], operands[1], operands[2])?,
+            Opcode::StoreScope => {
+                let name = self.scope_atom(code, operands[1])?;
+                let value = self.read(base, operands[0])?;
+                self.realm.set(name, value)?;
+            }
+            Opcode::CreateClosure => {
+                self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
+            }
+            Opcode::Call => self.call(base, operands[0], operands[1], operands[2])?,
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
                 if self.fiber.frames.len() == 1 {
@@ -452,21 +679,21 @@ impl Isolate {
         Ok(None)
     }
 
-    fn enter(
-        &mut self,
-        module: &CompiledModule,
-        function_id: FunctionId,
-    ) -> Result<(), ExecutionError> {
-        let function = module
-            .function(function_id)
-            .ok_or(ExecutionError::MissingEntryFunction(function_id))?;
-        let register_count = usize::try_from(function.layout().register_count).map_err(|_| {
-            ExecutionError::RegisterWindowTooLarge(function.layout().register_count)
-        })?;
-        if function.layout().register_count > self.stack_limits.max_registers {
+    fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
+        let (layout, kind) = {
+            let function = self
+                .loaded_code(code)?
+                .module
+                .function(function_id)
+                .ok_or(ExecutionError::MissingEntryFunction(function_id))?;
+            (function.layout(), function.kind())
+        };
+        let register_count = usize::try_from(layout.register_count)
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(layout.register_count))?;
+        if layout.register_count > self.stack_limits.max_registers {
             return Err(ExecutionError::RegisterStackLimit {
                 limit: self.stack_limits.max_registers,
-                requested: function.layout().register_count,
+                requested: layout.register_count,
             });
         }
         if self.stack_limits.max_frames == 0 {
@@ -476,11 +703,12 @@ impl Isolate {
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
-        self.reserve_entry_state(function.layout(), register_count)?;
+        self.reserve_entry_state(layout, register_count)?;
         self.fiber
             .registers
             .resize(register_count, Value::from_immediate(Immediate::Undefined));
         self.fiber.frames.push(Frame {
+            code,
             function: function_id,
             pc: WordOffset::new(0),
             base: 0,
@@ -488,7 +716,7 @@ impl Isolate {
             return_register: None,
             this_value: Value::from_immediate(Immediate::Undefined),
             new_target: Value::from_immediate(Immediate::Undefined),
-            strictness: strictness_for(function.kind()),
+            strictness: strictness_for(kind),
             argument_base: 0,
             argument_count: 0,
             handler_base: 0,
@@ -501,18 +729,20 @@ impl Isolate {
     #[inline(never)]
     fn create_closure(
         &mut self,
-        module: &CompiledModule,
+        code: CodeId,
         base: u32,
         destination: u32,
         function: FunctionId,
     ) -> Result<(), ExecutionError> {
-        module
+        self.loaded_code(code)?
+            .module
             .function(function)
             .ok_or(ExecutionError::MissingEntryFunction(function))?;
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
         };
         let closure = self
             .heap
@@ -521,6 +751,7 @@ impl Isolate {
                 0,
                 0,
                 FunctionObject {
+                    code,
                     function,
                     environment,
                 },
@@ -535,7 +766,6 @@ impl Isolate {
     #[inline(never)]
     fn call(
         &mut self,
-        module: &CompiledModule,
         caller_base: u32,
         destination: u32,
         callee_register: u32,
@@ -558,35 +788,43 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
-        let function = module.function(function_object.function).ok_or(
-            ExecutionError::MissingEntryFunction(function_object.function),
-        )?;
+        let (layout, kind) = {
+            let function = self
+                .loaded_code(function_object.code)?
+                .module
+                .function(function_object.function)
+                .ok_or(ExecutionError::MissingEntryFunction(
+                    function_object.function,
+                ))?;
+            (function.layout(), function.kind())
+        };
         self.push_call_frame(
-            function,
-            function_object,
-            caller_base,
-            destination,
-            callee_register,
-            argument_count,
+            ResolvedCallTarget {
+                object: function_object,
+                layout,
+                kind,
+            },
+            CallSite {
+                caller_base,
+                destination,
+                callee_register,
+                argument_count,
+            },
         )
     }
 
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.
     fn push_call_frame(
         &mut self,
-        function: &tachyon_bytecode::CompiledFunction,
-        function_object: FunctionObject,
-        caller_base: u32,
-        destination: u32,
-        callee_register: u32,
-        argument_count: u32,
+        target: ResolvedCallTarget,
+        site: CallSite,
     ) -> Result<(), ExecutionError> {
         if self.fiber.frames.len() >= self.stack_limits.max_frames as usize {
             return Err(ExecutionError::CallStackLimit {
                 limit: self.stack_limits.max_frames,
             });
         }
-        let register_count = function.layout().register_count;
+        let register_count = target.layout.register_count;
         let callee_base = u32::try_from(self.fiber.registers.len())
             .map_err(|_| ExecutionError::RegisterWindowTooLarge(register_count))?;
         let requested = callee_base
@@ -598,8 +836,9 @@ impl Isolate {
                 requested,
             });
         }
-        let argument_base = caller_base
-            .checked_add(callee_register)
+        let argument_base = site
+            .caller_base
+            .checked_add(site.callee_register)
             .and_then(|base| base.checked_add(1))
             .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
         let additional = register_count as usize;
@@ -615,7 +854,7 @@ impl Isolate {
             requested as usize,
             Value::from_immediate(Immediate::Undefined),
         );
-        let copied_arguments = argument_count.min(function.layout().argument_count);
+        let copied_arguments = site.argument_count.min(target.layout.argument_count);
         for index in 0..copied_arguments {
             let value = self
                 .fiber
@@ -623,21 +862,22 @@ impl Isolate {
                 .get((argument_base + index) as usize)
                 .copied()
                 .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
-                    callee_register + 1 + index,
+                    site.callee_register + 1 + index,
                 )))?;
             self.write(callee_base, index, value)?;
         }
         self.fiber.frames.push(Frame {
-            function: function.id(),
+            code: target.object.code,
+            function: target.object.function,
             pc: WordOffset::new(0),
             base: callee_base,
-            environment: function_object.environment,
-            return_register: Some(RegisterId::new(destination)),
+            environment: target.object.environment,
+            return_register: Some(RegisterId::new(site.destination)),
             this_value: Value::from_immediate(Immediate::Undefined),
             new_target: Value::from_immediate(Immediate::Undefined),
-            strictness: strictness_for(function.kind()),
+            strictness: strictness_for(target.kind),
             argument_base,
-            argument_count,
+            argument_count: site.argument_count,
             handler_base: self.fiber.handlers.len() as u32,
             completion_base: self.fiber.completions.len() as u32,
         });
@@ -832,6 +1072,7 @@ mod tests {
             AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
             HeapLimit::new(4 * SPAN_SIZE_BYTES),
             StackLimits::new(64, 4_096),
+            RealmLimits::new(64, 1_024),
         ))
         .expect("test isolate descriptors register")
     }
@@ -850,6 +1091,7 @@ mod tests {
         );
         CompiledModule::new(
             Arc::from("1 + 2"),
+            Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
@@ -879,6 +1121,7 @@ mod tests {
 
         CompiledModule::new(
             Arc::from("function addTwo(value) { return value + 2; } addTwo(40);"),
+            vec![],
             vec![],
             vec![
                 CompiledFunctionTemplate::new(
@@ -935,6 +1178,7 @@ mod tests {
         CompiledModule::new(
             Arc::from("function fail() { throw 7; } fail();"),
             vec![],
+            vec![],
             vec![
                 CompiledFunctionTemplate::new(
                     FunctionId::new(0),
@@ -972,6 +1216,95 @@ mod tests {
         .unwrap()
     }
 
+    /// Builds separate publisher/caller modules to exercise CodeId changes inside one dispatch batch.
+    fn cross_code_modules() -> (CompiledModule, CompiledModule) {
+        let span = SourceSpan { start: 0, end: 0 };
+        let mut publisher_entry = BytecodeBuilder::default();
+        publisher_entry
+            .emit(Opcode::CreateClosure, &[0, 1], span)
+            .unwrap();
+        publisher_entry
+            .emit(Opcode::StoreScope, &[0, 0], span)
+            .unwrap();
+        publisher_entry.emit(Opcode::Return, &[0], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = publisher_entry.finish().unwrap();
+        let mut published_function = BytecodeBuilder::default();
+        published_function
+            .emit(Opcode::LoadImmediate, &[0, 42], span)
+            .unwrap();
+        published_function.emit(Opcode::Return, &[0], span).unwrap();
+        let (function_bytecode, function_source_map, function_registers) =
+            published_function.finish().unwrap();
+        let publisher = CompiledModule::new(
+            Arc::from("publisher"),
+            vec![],
+            vec![Arc::from("answer")],
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Script,
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    function_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Ordinary,
+                        layout: FunctionLayout {
+                            register_count: function_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: function_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap();
+
+        let mut caller_entry = BytecodeBuilder::default();
+        caller_entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+        caller_entry.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
+        caller_entry.emit(Opcode::Return, &[1], span).unwrap();
+        let (caller_bytecode, caller_source_map, caller_registers) = caller_entry.finish().unwrap();
+        let caller = CompiledModule::new(
+            Arc::from("caller"),
+            vec![],
+            vec![Arc::from("answer")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                caller_bytecode,
+                FunctionMetadata {
+                    kind: FunctionKind::Script,
+                    layout: FunctionLayout {
+                        register_count: caller_registers,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: caller_source_map,
+                    handlers: Arc::default(),
+                    suspend_points: Arc::default(),
+                    feedback_sites: Arc::default(),
+                },
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap();
+        (publisher, caller)
+    }
+
     fn assert_call_batch<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -996,6 +1329,30 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Thrown(value) if value.as_i32() == Some(7)));
+    }
+
+    fn assert_cross_code_batch<const N: usize>() {
+        let (publisher, caller) = cross_code_modules();
+        let mut isolate = test_isolate();
+        isolate
+            .execute_with_batch::<N>(
+                &publisher,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &caller,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
     #[test]
@@ -1069,6 +1426,15 @@ mod tests {
     }
 
     #[test]
+    fn cross_module_call_switches_code_for_every_dispatch_batch() {
+        assert_cross_code_batch::<1>();
+        assert_cross_code_batch::<2>();
+        assert_cross_code_batch::<4>();
+        assert_cross_code_batch::<8>();
+        assert_cross_code_batch::<16>();
+    }
+
+    #[test]
     /// Confirms verifier-produced stack depths become allocation reservations before dispatch.
     fn entry_reserves_verified_execution_windows() {
         let layout = FunctionLayout {
@@ -1078,12 +1444,9 @@ mod tests {
             ..FunctionLayout::default()
         };
         let mut isolate = test_isolate();
-        isolate
-            .enter(
-                &state_module(FunctionKind::Module, layout),
-                FunctionId::new(0),
-            )
-            .unwrap();
+        let module = state_module(FunctionKind::Module, layout);
+        let code = isolate.load_code(&module).unwrap();
+        isolate.enter(code, FunctionId::new(0)).unwrap();
 
         assert!(isolate.fiber.frames.capacity() >= 1);
         assert!(isolate.fiber.registers.capacity() >= 2);
@@ -1102,14 +1465,19 @@ mod tests {
             ..FunctionLayout::default()
         };
         let mut isolate = test_isolate();
-        isolate
-            .enter(
-                &state_module(FunctionKind::Script, layout),
-                FunctionId::new(0),
-            )
-            .unwrap();
+        let module = state_module(FunctionKind::Script, layout);
+        let code = isolate.load_code(&module).unwrap();
+        isolate.enter(code, FunctionId::new(0)).unwrap();
         let raw = RawHeapRef::new(16).expect("valid logical address");
         isolate.fiber.registers[0] = Value::from_heap_ref(raw);
+        let global = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("global").unwrap())
+            .unwrap();
+        isolate
+            .realm
+            .set(global, Value::from_heap_ref(raw))
+            .unwrap();
         let frame = isolate.fiber.frames.last_mut().expect("entry frame exists");
         // SAFETY: this test never dereferences the synthetic environment reference; it only checks
         // that the exact tracing contract rewrites every encoded fiber edge.
@@ -1144,6 +1512,10 @@ mod tests {
             isolate.fiber.completions[1],
             Completion::Throw(value) if value.as_heap_ref() == Some(rewritten)
         ));
+        assert_eq!(
+            isolate.realm.get(global).and_then(Value::as_heap_ref),
+            Some(rewritten)
+        );
     }
 
     struct RewritingTracer;
@@ -1249,6 +1621,7 @@ mod tests {
         CompiledModule::new(
             Arc::from("conditional"),
             Vec::new(),
+            Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 bytecode,
@@ -1265,6 +1638,7 @@ mod tests {
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         CompiledModule::new(
             Arc::from("state"),
+            Vec::new(),
             Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),

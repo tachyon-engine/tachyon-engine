@@ -16,15 +16,20 @@ mod tests {
     use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
     use tachyon_gc::{HeapLimit, SPAN_SIZE_BYTES};
     use tachyon_vm::{
-        AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RunOutcome,
-        StackLimits,
+        AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, Isolate, IsolateConfig,
+        RealmLimits, RunOutcome, StackLimits,
     };
 
     fn test_isolate() -> Isolate {
+        test_isolate_with_realm_limits(RealmLimits::new(64, 1_024))
+    }
+
+    fn test_isolate_with_realm_limits(realm_limits: RealmLimits) -> Isolate {
         Isolate::new(IsolateConfig::new(
             AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
             HeapLimit::new(4 * SPAN_SIZE_BYTES),
             StackLimits::new(64, 4_096),
+            realm_limits,
         ))
         .expect("test isolate descriptors register")
     }
@@ -330,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    /// Confirms lowering-time lexical checkpoints remove a block binding before later lookup.
+    /// Confirms a block binding falls through to runtime global resolution after its checkpoint.
     fn block_lexical_binding_is_not_visible_after_the_block() {
         let source = SourceText::new(
             SourceId::new(14),
@@ -338,15 +343,133 @@ mod tests {
             MediaType::JavaScript,
             Arc::from("function scoped() { { let hidden = 1; } return hidden; } scoped();"),
         );
-        let error = Compiler
-            .compile(source, CompileOptions::default())
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let error = test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
             .unwrap_err();
+        assert!(matches!(error, ExecutionError::UnresolvedBinding(_)));
+    }
+
+    #[test]
+    /// Proves a closure published by one script retains its own code when called by a later script.
+    fn global_function_binding_survives_across_source_units() {
+        let declaration = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(15),
+                    SourceName::new("harness.js"),
+                    MediaType::JavaScript,
+                    Arc::from("function addTwo(value) { return value + 2; }"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let body = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(16),
+                    SourceName::new("body.js"),
+                    MediaType::JavaScript,
+                    Arc::from("addTwo(40);"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut isolate = test_isolate();
+        isolate
+            .execute(
+                &declaration,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute(
+                &body,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    /// Confirms repeated code is reused while distinct modules and globals obey independent hard limits.
+    fn loaded_code_and_global_binding_limits_are_explicit() {
+        let first = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(17),
+                    SourceName::new("first.js"),
+                    MediaType::JavaScript,
+                    Arc::from("function first() {}"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let second = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(18),
+                    SourceName::new("second.js"),
+                    MediaType::JavaScript,
+                    Arc::from("function second() {}"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut code_limited = test_isolate_with_realm_limits(RealmLimits::new(1, 2));
+        for _ in 0..2 {
+            code_limited
+                .execute(
+                    &first,
+                    ExecutionBudget {
+                        fuel: 8,
+                        quantum: 8,
+                    },
+                )
+                .unwrap();
+        }
         assert!(matches!(
-            error,
-            tachyon_compiler::CompileError::UnsupportedSyntax {
-                syntax: "unresolved identifier",
-                ..
-            }
+            code_limited.execute(
+                &second,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                }
+            ),
+            Err(ExecutionError::LoadedModuleLimit { limit: 1 })
+        ));
+
+        let mut global_limited = test_isolate_with_realm_limits(RealmLimits::new(2, 1));
+        global_limited
+            .execute(
+                &first,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            global_limited.execute(
+                &second,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                }
+            ),
+            Err(ExecutionError::GlobalBindingLimit { limit: 1 })
         ));
     }
 
