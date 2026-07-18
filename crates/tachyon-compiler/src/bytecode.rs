@@ -7,13 +7,42 @@ use tachyon_bytecode::{
 };
 
 use crate::{
-    CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirProgram,
-    HirStatementKind, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    ProgramKind, SourceName, SourceSpan, SourceText,
+    CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction,
+    HirFunctionDeclaration, HirProgram, HirStatement, HirStatementKind, HirUnaryOperator,
+    HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, SourceName, SourceSpan,
+    SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
 pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
+    let mut constants = Vec::with_capacity(hir_literal_count(hir)?);
+    let template_capacity =
+        hir.functions()
+            .len()
+            .checked_add(1)
+            .ok_or(CompileError::LoweringCapacityOverflow {
+                collection: "compiled functions",
+            })?;
+    let mut templates = Vec::with_capacity(template_capacity);
+    templates.push(lower_entry(source, hir, &mut constants)?);
+    for function in hir.functions() {
+        templates.push(lower_function(source, function, &mut constants)?);
+    }
+    CompiledModule::new(
+        source.shared_text(),
+        constants,
+        templates,
+        FunctionId::new(0),
+    )
+    .map_err(CompileError::Module)
+}
+
+/// Hoists top-level function declarations, then lowers script completion into function zero.
+fn lower_entry(
+    source: &SourceText,
+    hir: &HirProgram,
+    constants: &mut Vec<BytecodeConstant>,
+) -> Result<CompiledFunctionTemplate, CompileError> {
     let has_expression = hir
         .statements()
         .iter()
@@ -31,11 +60,16 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
         })?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(word_capacity, hir_label_count(hir)?),
-        constants: Vec::with_capacity(hir_literal_count(hir)?),
+        constants,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
         next_register: 0,
         source_name: source.name().clone(),
     };
+    for statement in hir.statements() {
+        if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
+            lowerer.function_declaration(declaration, statement.span)?;
+        }
+    }
     let result = match hir.statements() {
         [] => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
         statements => {
@@ -47,6 +81,14 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
                     }
                     HirStatementKind::VariableDeclaration(declaration) => {
                         lowerer.variable_declaration(declaration)?;
+                    }
+                    HirStatementKind::FunctionDeclaration(_) => {}
+                    HirStatementKind::Return(_) => {
+                        return Err(CompileError::UnsupportedSyntax {
+                            source_name: source.name().clone(),
+                            span: statement.span,
+                            syntax: "top-level return",
+                        });
                     }
                     HirStatementKind::Empty => {}
                 }
@@ -80,22 +122,81 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
         suspend_points: Default::default(),
         feedback_sites: Default::default(),
     };
-    CompiledModule::new(
-        source.shared_text(),
-        lowerer.constants,
-        vec![CompiledFunctionTemplate::new(
-            FunctionId::new(0),
-            bytecode,
-            metadata,
-        )],
+    Ok(CompiledFunctionTemplate::new(
         FunctionId::new(0),
-    )
-    .map_err(CompileError::Module)
+        bytecode,
+        metadata,
+    ))
 }
 
-struct Lowerer {
+/// Lowers one ordinary function with parameter registers fixed at the front of its frame.
+fn lower_function(
+    source: &SourceText,
+    function: &HirFunction,
+    constants: &mut Vec<BytecodeConstant>,
+) -> Result<CompiledFunctionTemplate, CompileError> {
+    let instruction_capacity = statements_instruction_count(&function.body)?
+        .checked_add(2)
+        .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "function bytecode words",
+        })?;
+    let mut lowerer = Lowerer {
+        builder: BytecodeBuilder::with_capacity(
+            instruction_capacity,
+            statements_label_count(&function.body)?,
+        ),
+        constants,
+        locals: Vec::with_capacity(function.parameters.len()),
+        next_register: 0,
+        source_name: source.name().clone(),
+    };
+    for parameter in function.parameters.iter() {
+        let register = lowerer.register()?;
+        lowerer.locals.push(LocalBinding {
+            name: parameter.name.clone(),
+            register,
+            mutable: true,
+        });
+    }
+    let mut terminal = false;
+    for statement in function.body.iter() {
+        terminal = lowerer.function_statement(statement)?;
+    }
+    if !terminal {
+        let undefined = lowerer.load_undefined(function.span)?;
+        lowerer.emit(Opcode::Return, &[undefined.index()], function.span)?;
+    }
+    let (bytecode, source_map, register_count) =
+        lowerer.builder.finish().map_err(CompileError::Builder)?;
+    let function_id = function
+        .id
+        .index()
+        .checked_add(1)
+        .map(FunctionId::new)
+        .ok_or(CompileError::RegisterOverflow)?;
+    Ok(CompiledFunctionTemplate::new(
+        function_id,
+        bytecode,
+        FunctionMetadata {
+            kind: FunctionKind::Ordinary,
+            layout: FunctionLayout {
+                register_count,
+                argument_count: u32::try_from(function.parameters.len())
+                    .map_err(|_| CompileError::RegisterOverflow)?,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            handlers: Default::default(),
+            suspend_points: Default::default(),
+            feedback_sites: Default::default(),
+        },
+    ))
+}
+
+struct Lowerer<'a> {
     builder: BytecodeBuilder,
-    constants: Vec<BytecodeConstant>,
+    constants: &'a mut Vec<BytecodeConstant>,
     locals: Vec<LocalBinding>,
     next_register: u32,
     source_name: SourceName,
@@ -108,7 +209,7 @@ struct LocalBinding {
     mutable: bool,
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// Allocates a fresh register and emits one instruction with the HIR span copied into bytecode source metadata.
     fn emit(
         &mut self,
@@ -127,6 +228,55 @@ impl Lowerer {
             )
             .map(|_| ())
             .map_err(CompileError::Builder)
+    }
+
+    /// Publishes one hoisted function binding before any top-level statement can reference it.
+    fn function_declaration(
+        &mut self,
+        declaration: &HirFunctionDeclaration,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let register = self.register()?;
+        let function = declaration
+            .function
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
+        self.locals.push(LocalBinding {
+            name: declaration.binding.name.clone(),
+            register,
+            mutable: true,
+        });
+        Ok(())
+    }
+
+    /// Lowers one function-body statement and reports whether it ends in an explicit return.
+    fn function_statement(&mut self, statement: &HirStatement) -> Result<bool, CompileError> {
+        match &statement.kind {
+            HirStatementKind::Expression(expression) => {
+                self.expression(expression)?;
+                Ok(false)
+            }
+            HirStatementKind::VariableDeclaration(declaration) => {
+                self.variable_declaration(declaration)?;
+                Ok(false)
+            }
+            HirStatementKind::Return(argument) => {
+                let value = match argument {
+                    Some(argument) => self.expression(argument)?,
+                    None => self.load_undefined(statement.span)?,
+                };
+                self.emit(Opcode::Return, &[value.index()], statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::Empty => Ok(false),
+            HirStatementKind::FunctionDeclaration(_) => Err(CompileError::UnsupportedSyntax {
+                source_name: self.source_name.clone(),
+                span: statement.span,
+                syntax: "nested function declaration",
+            }),
+        }
     }
 
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
@@ -234,12 +384,48 @@ impl Lowerer {
                 consequent,
                 alternate,
             } => self.conditional(test, consequent, alternate, expression.span),
+            HirExpressionKind::Call { callee, arguments } => {
+                self.call_expression(callee, arguments, expression.span)
+            }
             _ => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span: expression.span,
                 syntax: "expression",
             }),
         }
+    }
+
+    /// Evaluates callee/arguments in source order and copies them into the verified contiguous call window.
+    fn call_expression(
+        &mut self,
+        callee: &HirExpression,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let callee_value = self.expression(callee)?;
+        let call_base = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[call_base.index(), callee_value.index()],
+            span,
+        )?;
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::Call,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
     }
 
     /// Emits both arms into one result register and resolves their labels before bytecode becomes immutable.
@@ -376,13 +562,27 @@ impl Lowerer {
 }
 
 fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    statements_instruction_count(hir.statements())
+}
+
+fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
-    for statement in hir.statements() {
+    for statement in statements {
         let statement_count = match &statement.kind {
             HirStatementKind::Expression(expression) => expression_instruction_count(expression)?,
             HirStatementKind::VariableDeclaration(declaration) => {
                 declaration_instruction_count(declaration)?
             }
+            HirStatementKind::FunctionDeclaration(_) => 1,
+            HirStatementKind::Return(argument) => argument
+                .as_ref()
+                .map(expression_instruction_count)
+                .transpose()?
+                .unwrap_or(1)
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "bytecode instructions",
+                })?,
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
@@ -439,18 +639,49 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 "bytecode instructions",
             )
         }
+        HirExpressionKind::Call { callee, arguments } => {
+            let mut count = expression_instruction_count(callee)?;
+            count = checked_count_add(count, 2, "bytecode instructions")?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(argument)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
         _ => Ok(1),
     }
 }
 
 fn hir_literal_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    let mut count = statements_literal_count(hir.statements())?;
+    for function in hir.functions() {
+        count = checked_count_add(
+            count,
+            statements_literal_count(&function.body)?,
+            "bytecode constants",
+        )?;
+    }
+    Ok(count)
+}
+
+fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
-    for statement in hir.statements() {
+    for statement in statements {
         let statement_count = match &statement.kind {
             HirStatementKind::Expression(expression) => expression_literal_count(expression)?,
             HirStatementKind::VariableDeclaration(declaration) => {
                 declaration_literal_count(declaration)?
             }
+            HirStatementKind::Return(argument) => argument
+                .as_ref()
+                .map(expression_literal_count)
+                .transpose()?
+                .unwrap_or(0),
+            HirStatementKind::FunctionDeclaration(_) => 0,
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
@@ -477,6 +708,8 @@ fn hir_binding_count(hir: &HirProgram) -> Result<usize, CompileError> {
     for statement in hir.statements() {
         if let HirStatementKind::VariableDeclaration(declaration) = &statement.kind {
             count = checked_count_add(count, declaration.declarators.len(), "local bindings")?;
+        } else if matches!(statement.kind, HirStatementKind::FunctionDeclaration(_)) {
+            count = checked_count_add(count, 1, "local bindings")?;
         }
     }
     Ok(count)
@@ -484,8 +717,12 @@ fn hir_binding_count(hir: &HirProgram) -> Result<usize, CompileError> {
 
 /// Counts every conditional label before bytecode construction so the builder's label vector stays fixed-size.
 fn hir_label_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    statements_label_count(hir.statements())
+}
+
+fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
-    for statement in hir.statements() {
+    for statement in statements {
         match &statement.kind {
             HirStatementKind::Expression(expression) => {
                 count = checked_count_add(
@@ -507,7 +744,16 @@ fn hir_label_count(hir: &HirProgram) -> Result<usize, CompileError> {
                     )?;
                 }
             }
-            HirStatementKind::Empty => {}
+            HirStatementKind::Return(argument) => {
+                if let Some(argument) = argument {
+                    count = checked_count_add(
+                        count,
+                        expression_label_count(argument)?,
+                        "bytecode labels",
+                    )?;
+                }
+            }
+            HirStatementKind::FunctionDeclaration(_) | HirStatementKind::Empty => {}
         }
     }
     Ok(count)
@@ -539,6 +785,14 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             )?;
             checked_count_add(nested, 2, "bytecode labels")
         }
+        HirExpressionKind::Call { callee, arguments } => {
+            let mut count = expression_label_count(callee)?;
+            for argument in arguments.iter() {
+                count =
+                    checked_count_add(count, expression_label_count(argument)?, "bytecode labels")?;
+            }
+            Ok(count)
+        }
         _ => Ok(0),
     }
 }
@@ -566,6 +820,17 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             )?,
             "bytecode constants",
         ),
+        HirExpressionKind::Call { callee, arguments } => {
+            let mut count = expression_literal_count(callee)?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_literal_count(argument)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
         _ => Ok(0),
     }
 }

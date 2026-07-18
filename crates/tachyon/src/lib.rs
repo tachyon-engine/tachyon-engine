@@ -243,6 +243,27 @@ mod tests {
     }
 
     #[test]
+    fn source_to_hoisted_function_call_uses_explicit_vm_frames() {
+        let source = SourceText::new(
+            SourceId::new(10),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("addTwo(40); function addTwo(value) { return value + 2; }"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
     fn logical_not_uses_the_shared_truthiness_contract() {
         let source = SourceText::new(
             SourceId::new(10),

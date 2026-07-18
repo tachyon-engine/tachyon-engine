@@ -20,8 +20,9 @@ use std::sync::Arc;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
     BindingId, FunctionStencilId, HirBinaryOperator, HirBinding, HirExpression, HirExpressionKind,
-    HirProgram, HirStatement, HirStatementKind, HirUnaryOperator, HirVariableDeclaration,
-    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirFunction, HirFunctionDeclaration, HirProgram, HirStatement, HirStatementKind,
+    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
+    ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -238,6 +239,62 @@ mod tests {
         assert!(disassembly.contains("LoadImmediate r1, imm=2"));
         assert!(disassembly.contains("Add r2, r0, r1"));
         assert!(disassembly.contains("Return r2"));
+    }
+
+    #[test]
+    fn function_hir_owns_parameters_body_and_direct_call() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "function addTwo(value) { return value + 2; } addTwo(40);",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [function] = hir.functions() else {
+            panic!("expected one owned function stencil");
+        };
+        assert_eq!(function.name.as_ref(), "addTwo");
+        assert_eq!(function.parameters[0].name.as_ref(), "value");
+        assert!(matches!(function.body[0].kind, HirStatementKind::Return(_)));
+        assert!(matches!(
+            hir.statements().last().map(|statement| &statement.kind),
+            Some(HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::Call { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn compiler_emits_hoisted_closure_call_and_ordinary_function() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "addTwo(40); function addTwo(value) { return value + 2; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(module.functions().len(), 2);
+        let entry = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        let function = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(entry.contains("CreateClosure r0, function=1"));
+        assert!(entry.contains("Call r4, callee=r1, argc=1"));
+        assert!(function.contains("Add r2, r0, r1"));
+        assert!(function.contains("Return r2"));
     }
 
     #[test]

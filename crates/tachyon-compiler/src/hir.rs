@@ -29,6 +29,13 @@ pub struct ReferenceId(u32);
 #[repr(transparent)]
 pub struct FunctionStencilId(u32);
 
+impl FunctionStencilId {
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatementCompletion {
     Value,
@@ -40,6 +47,7 @@ pub struct HirProgram {
     source_id: SourceId,
     kind: ProgramKind,
     statements: Arc<[HirStatement]>,
+    functions: Arc<[HirFunction]>,
 }
 
 impl HirProgram {
@@ -57,6 +65,11 @@ impl HirProgram {
     pub fn statements(&self) -> &[HirStatement] {
         &self.statements
     }
+
+    #[must_use]
+    pub fn functions(&self) -> &[HirFunction] {
+        &self.functions
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,7 +83,24 @@ pub struct HirStatement {
 pub enum HirStatementKind {
     Expression(HirExpression),
     VariableDeclaration(HirVariableDeclaration),
+    FunctionDeclaration(HirFunctionDeclaration),
+    Return(Option<HirExpression>),
     Empty,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirFunctionDeclaration {
+    pub binding: HirBinding,
+    pub function: FunctionStencilId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirFunction {
+    pub id: FunctionStencilId,
+    pub span: SourceSpan,
+    pub name: Arc<str>,
+    pub parameters: Arc<[HirBinding]>,
+    pub body: Arc<[HirStatement]>,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.
@@ -134,6 +164,10 @@ pub enum HirExpressionKind {
         consequent: Box<HirExpression>,
         alternate: Box<HirExpression>,
     },
+    Call {
+        callee: Box<HirExpression>,
+        arguments: Arc<[HirExpression]>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,21 +214,32 @@ pub(crate) fn lower(
     source: &SourceText,
 ) -> Result<HirProgram, CompileError> {
     let mut statements = Vec::with_capacity(program.body.len());
+    let mut functions = Vec::new();
     let mut next_binding = 0;
     for statement in &program.body {
-        statements.push(lower_statement(statement, source, &mut next_binding)?);
+        statements.push(lower_statement(
+            statement,
+            source,
+            &mut next_binding,
+            &mut functions,
+            true,
+        )?);
     }
     Ok(HirProgram {
         source_id: source.id(),
         kind,
         statements: statements.into(),
+        functions: functions.into(),
     })
 }
 
+/// Copies one statement while enforcing which declaration/control forms are legal in this scope.
 fn lower_statement(
     statement: &Statement<'_>,
     source: &SourceText,
     next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+    allow_function_declaration: bool,
 ) -> Result<HirStatement, CompileError> {
     match statement {
         Statement::ExpressionStatement(statement) => Ok(HirStatement {
@@ -216,12 +261,127 @@ fn lower_statement(
                 next_binding,
             )?),
         }),
+        Statement::FunctionDeclaration(function) if allow_function_declaration => {
+            lower_function_declaration(function, source, next_binding, functions)
+        }
+        Statement::ReturnStatement(statement) if !allow_function_declaration => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Return(
+                statement
+                    .argument
+                    .as_ref()
+                    .map(|argument| lower_expression(argument, source))
+                    .transpose()?,
+            ),
+        }),
         _ => Err(unsupported(
             source.name(),
             source_span(statement.span()),
             "statement",
         )),
     }
+}
+
+/// Copies one ordinary declaration and its simple parameters/body into an owned function stencil.
+fn lower_function_declaration(
+    function: &oxc::ast::ast::Function<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirStatement, CompileError> {
+    if function.generator || function.r#async || function.params.rest.is_some() {
+        return Err(unsupported(
+            source.name(),
+            source_span(function.span),
+            "generator/async/rest function declaration",
+        ));
+    }
+    let identifier = function.id.as_ref().ok_or_else(|| {
+        unsupported(
+            source.name(),
+            source_span(function.span),
+            "anonymous function declaration",
+        )
+    })?;
+    let body = function.body.as_ref().ok_or_else(|| {
+        unsupported(
+            source.name(),
+            source_span(function.span),
+            "function declaration without body",
+        )
+    })?;
+    let declaration_binding = new_binding(
+        identifier.name.as_str(),
+        source_span(identifier.span),
+        next_binding,
+    )?;
+    let mut parameters = Vec::with_capacity(function.params.items.len());
+    for parameter in &function.params.items {
+        if parameter.initializer.is_some() {
+            return Err(unsupported(
+                source.name(),
+                source_span(parameter.span),
+                "default parameter",
+            ));
+        }
+        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+            return Err(unsupported(
+                source.name(),
+                source_span(parameter.pattern.span()),
+                "parameter binding pattern",
+            ));
+        };
+        parameters.push(new_binding(
+            identifier.name.as_str(),
+            source_span(identifier.span),
+            next_binding,
+        )?);
+    }
+    let mut statements = Vec::with_capacity(body.statements.len());
+    for statement in &body.statements {
+        statements.push(lower_statement(
+            statement,
+            source,
+            next_binding,
+            functions,
+            false,
+        )?);
+    }
+    let id = FunctionStencilId(
+        u32::try_from(functions.len()).map_err(|_| CompileError::BindingOverflow)?,
+    );
+    functions.push(HirFunction {
+        id,
+        span: source_span(function.span),
+        name: Arc::from(identifier.name.as_str()),
+        parameters: parameters.into(),
+        body: statements.into(),
+    });
+    Ok(HirStatement {
+        span: source_span(function.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::FunctionDeclaration(HirFunctionDeclaration {
+            binding: declaration_binding,
+            function: id,
+        }),
+    })
+}
+
+fn new_binding(
+    name: &str,
+    span: SourceSpan,
+    next_binding: &mut u32,
+) -> Result<HirBinding, CompileError> {
+    let binding = HirBinding {
+        id: BindingId(*next_binding),
+        span,
+        name: Arc::from(name),
+    };
+    *next_binding = next_binding
+        .checked_add(1)
+        .ok_or(CompileError::BindingOverflow)?;
+    Ok(binding)
 }
 
 /// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.
@@ -239,14 +399,11 @@ fn lower_variable_declaration(
                 "binding pattern",
             ));
         };
-        let binding = HirBinding {
-            id: BindingId(*next_binding),
-            span: source_span(identifier.span),
-            name: Arc::from(identifier.name.as_str()),
-        };
-        *next_binding = next_binding
-            .checked_add(1)
-            .ok_or(CompileError::BindingOverflow)?;
+        let binding = new_binding(
+            identifier.name.as_str(),
+            source_span(identifier.span),
+            next_binding,
+        )?;
         declarators.push(HirVariableDeclarator {
             span: source_span(declarator.span),
             binding,
@@ -307,6 +464,23 @@ fn lower_expression(
             consequent: Box::new(lower_expression(&expression.consequent, source)?),
             alternate: Box::new(lower_expression(&expression.alternate, source)?),
         },
+        Expression::CallExpression(expression) if !expression.optional => {
+            let mut arguments = Vec::with_capacity(expression.arguments.len());
+            for argument in &expression.arguments {
+                let argument = argument.as_expression().ok_or_else(|| {
+                    unsupported(
+                        source.name(),
+                        source_span(argument.span()),
+                        "spread argument",
+                    )
+                })?;
+                arguments.push(lower_expression(argument, source)?);
+            }
+            HirExpressionKind::Call {
+                callee: Box::new(lower_expression(&expression.callee, source)?),
+                arguments: arguments.into(),
+            }
+        }
         Expression::ParenthesizedExpression(expression) => {
             let mut lowered = lower_expression(&expression.expression, source)?;
             lowered.span = span;

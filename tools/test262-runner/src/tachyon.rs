@@ -257,7 +257,7 @@ mod tests {
         assert!(matches!(
             execute(&composed(
                 "1 + 2;",
-                &[("assert.js", "function assert() {}")],
+                &[("assert.js", "function assert() { if (true) {} }")],
                 false
             )),
             EngineOutcome::Unsupported { .. }
