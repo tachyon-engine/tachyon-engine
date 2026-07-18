@@ -227,6 +227,8 @@ enum NativeFunction {
     ObjectKeys,
     ObjectValues,
     ObjectEntries,
+    ObjectHasOwn,
+    ObjectIs,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
@@ -592,6 +594,8 @@ struct Realm {
     object_keys: Option<Value>,
     object_values: Option<Value>,
     object_entries: Option<Value>,
+    object_has_own: Option<Value>,
+    object_is: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
@@ -625,6 +629,8 @@ impl Realm {
             object_keys: None,
             object_values: None,
             object_entries: None,
+            object_has_own: None,
+            object_is: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
@@ -885,6 +891,8 @@ impl Trace for Realm {
         self.object_keys.trace(tracer);
         self.object_values.trace(tracer);
         self.object_entries.trace(tracer);
+        self.object_has_own.trace(tracer);
+        self.object_is.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
@@ -1308,7 +1316,29 @@ impl Isolate {
         )?;
         self.realm.object_entries = Some(entries);
         let entries_atom = self.intern_intrinsic_name(b"entries")?;
-        self.set_own_data_property(constructor, entries_atom, entries)
+        self.set_own_data_property(constructor, entries_atom, entries)?;
+        let has_own = self.allocate_native_function(
+            NativeFunction::ObjectHasOwn,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_has_own = Some(has_own);
+        let has_own_atom = self.intern_intrinsic_name(b"hasOwn")?;
+        self.set_own_data_property(constructor, has_own_atom, has_own)?;
+        let object_is = self.allocate_native_function(
+            NativeFunction::ObjectIs,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_is = Some(object_is);
+        let is_atom = self.intern_intrinsic_name(b"is")?;
+        self.set_own_data_property(constructor, is_atom, object_is)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -3097,6 +3127,20 @@ impl Isolate {
         Err(ExecutionError::UnsupportedTypeof(value))
     }
 
+    /// Implements SameValue, including NaN equality and signed-zero distinction.
+    fn same_value(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
+        if let (Some(left), Some(right)) = (numeric_value(left), numeric_value(right)) {
+            if left.is_nan() && right.is_nan() {
+                return Ok(true);
+            }
+            if left == 0.0 && right == 0.0 {
+                return Ok(left.is_sign_negative() == right.is_sign_negative());
+            }
+            return Ok(left == right);
+        }
+        self.strict_equal_values(left, right)
+    }
+
     /// Applies strict equality without allocating while preserving numeric and string semantics.
     fn strict_equal_values(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
         match (numeric_value(left), numeric_value(right)) {
@@ -4196,6 +4240,49 @@ impl Isolate {
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let key = self.property_key_atom_or_undefined(key)?;
                     let result = self.has_own_data_property(site.this_value, key)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectHasOwn) => {
+                    let object = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if matches!(
+                        object.as_immediate(),
+                        Some(Immediate::Undefined | Immediate::Null)
+                    ) {
+                        return Err(ExecutionError::NotObject(object));
+                    }
+                    let key = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let key = self.property_key_atom_or_undefined(key)?;
+                    let result = self.has_own_data_property(object, key)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectIs) => {
+                    let left = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let right = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.same_value(left, right)?;
                     return self.write(
                         site.caller_base,
                         site.destination,

@@ -1549,6 +1549,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                75,
+                "let object = { answer: 42 }; Object.hasOwn(object, 'answer') && Object.is(NaN, NaN) && !Object.is(0, -0);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
