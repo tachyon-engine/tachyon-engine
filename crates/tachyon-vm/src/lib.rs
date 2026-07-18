@@ -494,6 +494,7 @@ impl Isolate {
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
+    #[inline(never)]
     fn create_closure(
         &mut self,
         module: &CompiledModule,
@@ -527,6 +528,7 @@ impl Isolate {
     }
 
     /// Resolves one callable and pushes its exact register/frame window without Rust recursion.
+    #[inline(never)]
     fn call(
         &mut self,
         module: &CompiledModule,
