@@ -1939,6 +1939,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                159,
+                "let descriptor = Object.getOwnPropertyDescriptor(Number, 'MAX_SAFE_INTEGER'); Number.MAX_SAFE_INTEGER === 9007199254740991 && Number.MIN_SAFE_INTEGER === -9007199254740991 && Number.isNaN(Number.NaN) && Number.POSITIVE_INFINITY === Infinity && Number.NEGATIVE_INFINITY === -Infinity && Number.MAX_VALUE > 1e300 && Number.MIN_VALUE > 0 && descriptor.writable === false && descriptor.enumerable === false && descriptor.configurable === false;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.

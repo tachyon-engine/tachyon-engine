@@ -1860,6 +1860,31 @@ impl Isolate {
         self.realm.number_is_safe_integer = Some(is_safe_integer);
         let is_safe_integer_atom = self.intern_intrinsic_name(b"isSafeInteger")?;
         self.set_intrinsic_data_property(number, is_safe_integer_atom, is_safe_integer, true)?;
+        for (name, value) in [
+            (b"EPSILON".as_slice(), Value::from_f64(f64::EPSILON)),
+            (b"MAX_VALUE".as_slice(), Value::from_f64(f64::MAX)),
+            (b"MIN_VALUE".as_slice(), Value::from_f64(f64::from_bits(1))),
+            (
+                b"MAX_SAFE_INTEGER".as_slice(),
+                Value::from_f64(MAX_SAFE_INTEGER as f64),
+            ),
+            (
+                b"MIN_SAFE_INTEGER".as_slice(),
+                Value::from_f64(-(MAX_SAFE_INTEGER as f64)),
+            ),
+            (b"NaN".as_slice(), Value::from_f64(f64::NAN)),
+            (
+                b"POSITIVE_INFINITY".as_slice(),
+                Value::from_f64(f64::INFINITY),
+            ),
+            (
+                b"NEGATIVE_INFINITY".as_slice(),
+                Value::from_f64(f64::NEG_INFINITY),
+            ),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_constant_property(number, atom, value)?;
+        }
         self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
         Ok(())
     }
@@ -3900,6 +3925,25 @@ impl Isolate {
                 writable: Some(true),
                 enumerable: Some(false),
                 configurable: Some(configurable),
+            },
+        )
+    }
+
+    /// Defines one non-writable, non-enumerable, non-configurable intrinsic constant.
+    fn set_intrinsic_constant_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.define_data_property(
+            receiver,
+            key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(false),
             },
         )
     }

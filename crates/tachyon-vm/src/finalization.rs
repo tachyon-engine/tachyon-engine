@@ -269,7 +269,7 @@ mod tests {
 
     fn test_isolate() -> Isolate {
         Isolate::new(IsolateConfig::new(
-            AtomTableConfig::new(64, 4 * SPAN_SIZE_BYTES, AtomHashSeed::new(1, 2)),
+            AtomTableConfig::new(1_024, 4 * SPAN_SIZE_BYTES, AtomHashSeed::new(1, 2)),
             HeapLimit::new(8 * SPAN_SIZE_BYTES),
             StackLimits::new(64, 4_096),
             RealmLimits::new(64, 1_024),
