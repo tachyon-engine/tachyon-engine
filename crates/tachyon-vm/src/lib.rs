@@ -280,6 +280,7 @@ enum NativeFunction {
     ArrayReverse,
     ArrayFill,
     ArrayLastIndexOf,
+    ArrayCopyWithin,
     ArrayToString,
     MathPow,
 }
@@ -338,7 +339,8 @@ impl NativeFunction {
             | Self::ArrayUnshift
             | Self::ArrayReverse
             | Self::ArrayFill
-            | Self::ArrayLastIndexOf => 1,
+            | Self::ArrayLastIndexOf
+            | Self::ArrayCopyWithin => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -392,6 +394,7 @@ impl NativeFunction {
             Self::ArrayReverse => "reverse",
             Self::ArrayFill => "fill",
             Self::ArrayLastIndexOf => "lastIndexOf",
+            Self::ArrayCopyWithin => "copyWithin",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -790,6 +793,7 @@ struct Realm {
     array_reverse: Option<Value>,
     array_fill: Option<Value>,
     array_last_index_of: Option<Value>,
+    array_copy_within: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -850,6 +854,7 @@ impl Realm {
             array_reverse: None,
             array_fill: None,
             array_last_index_of: None,
+            array_copy_within: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1137,6 +1142,7 @@ impl Trace for Realm {
         self.array_reverse.trace(tracer);
         self.array_fill.trace(tracer);
         self.array_last_index_of.trace(tracer);
+        self.array_copy_within.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -2141,6 +2147,18 @@ impl Isolate {
         self.realm.array_last_index_of = Some(last_index_of);
         let last_index_of_atom = self.intern_intrinsic_name(b"lastIndexOf")?;
         self.set_intrinsic_data_property(prototype, last_index_of_atom, last_index_of, true)?;
+        let copy_within = self.allocate_native_function(
+            NativeFunction::ArrayCopyWithin,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_copy_within = Some(copy_within);
+        let copy_within_atom = self.intern_intrinsic_name(b"copyWithin")?;
+        self.set_intrinsic_data_property(prototype, copy_within_atom, copy_within, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -3321,6 +3339,46 @@ impl Isolate {
             index -= 1;
         }
         Ok(Value::from_i32(-1))
+    }
+
+    /// Implements `Array.prototype.copyWithin` with overlap-safe direction and hole preservation.
+    fn array_copy_within(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        let target_value = self.call_argument(site, 0)?.unwrap_or(Value::from_i32(0));
+        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
+        let end_value = self
+            .call_argument(site, 2)?
+            .unwrap_or(safe_integer_value(length));
+        let target = self.relative_array_index(target_value, length)?;
+        let start = self.relative_array_index(start_value, length)?;
+        let end = self.relative_array_index(end_value, length)?;
+        let count = end.saturating_sub(start).min(length.saturating_sub(target));
+        if target < start || target >= start.saturating_add(count) {
+            for offset in 0..count {
+                self.copy_within_element(site.this_value, start + offset, target + offset)?;
+            }
+        } else {
+            for offset in (0..count).rev() {
+                self.copy_within_element(site.this_value, start + offset, target + offset)?;
+            }
+        }
+        Ok(site.this_value)
+    }
+
+    fn copy_within_element(
+        &mut self,
+        receiver: Value,
+        source_index: u64,
+        target_index: u64,
+    ) -> Result<(), ExecutionError> {
+        let source_key = self.safe_integer_property_atom(source_index)?;
+        let target_key = self.safe_integer_property_atom(target_index)?;
+        if let Some(value) = self.get_data_property(receiver, source_key)? {
+            self.set_own_data_property(receiver, target_key, value)?;
+        } else if !self.delete_own_data_property(receiver, target_key)? {
+            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        }
+        Ok(())
     }
 
     fn array_element_or_undefined(
@@ -6774,6 +6832,10 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayLastIndexOf) => {
                     let value = self.array_last_index_of(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayCopyWithin) => {
+                    let value = self.array_copy_within(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
