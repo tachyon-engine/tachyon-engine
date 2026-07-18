@@ -29,8 +29,8 @@ use tachyon_bytecode::{
     decode_instruction,
 };
 use tachyon_gc::{
-    AllocationSpace, GcRef, GcType, Heap, HeapLimit, Trace, Tracer, TypeRegistrationError,
-    TypeRegistry,
+    AllocationSpace, GcRef, GcType, Heap, HeapLimit, HeapReferenceError, ManagedAllocationError,
+    NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::{Immediate, Value};
 
@@ -107,10 +107,10 @@ pub enum ExecutionError {
     UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
     NonCallable(Value),
-    HeapAllocation,
-    HeapReference,
-    RootCapacity,
-    HeapBorrow,
+    HeapAllocation(ManagedAllocationError),
+    HeapReference(HeapReferenceError),
+    Root(RootError),
+    NoGcBorrow(NoGcBorrowError),
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
 }
@@ -523,7 +523,7 @@ impl Isolate {
                 AllocationSpace::Young,
                 roots,
             )
-            .map_err(|_| ExecutionError::HeapAllocation)?;
+            .map_err(ExecutionError::HeapAllocation)?;
         self.write(base, destination, Value::from_heap_ref(closure.raw()))
     }
 
@@ -544,16 +544,14 @@ impl Isolate {
         let reference = self
             .heap
             .checked_reference(raw, self.types.function)
-            .map_err(|_| ExecutionError::HeapReference)?;
+            .map_err(ExecutionError::HeapReference)?;
         let function_object = self.heap.with_running_scope(|scope| {
-            let local = scope
-                .root(reference)
-                .map_err(|_| ExecutionError::RootCapacity)?;
+            let local = scope.root(reference).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(local, self.types.function)
                     .copied()
-                    .map_err(|_| ExecutionError::HeapBorrow)
+                    .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
         let function = module.function(function_object.function).ok_or(
