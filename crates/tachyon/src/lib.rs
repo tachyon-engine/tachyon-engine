@@ -1760,6 +1760,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True)
         );
+        assert_eq!(
+            execute_source(
+                146,
+                "let names = Object.getOwnPropertyNames(Function.prototype.bind); names.includes('length') && names.includes('name') && names.includes('prototype') === false;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
     }
 
     /// Verifies Object intrinsics use the ordinary shape path for own-property operations.

@@ -3886,6 +3886,30 @@ impl Isolate {
                 .checked_add(1)
                 .ok_or(ExecutionError::ArrayLengthOverflow)?;
         }
+        if self.resolve_function_object(source).is_ok() {
+            for key in [self.length_atom()?, self.name_atom()?] {
+                if self.shapes.lookup(snapshot.shape, key).is_some() {
+                    continue;
+                }
+                let name = self.atom_string_value(key)?;
+                let output_key = self.safe_integer_property_atom(output_index)?;
+                self.set_own_data_property(result, output_key, name)?;
+                output_index = output_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
+            }
+            let prototype = self.prototype_atom()?;
+            if self.is_function_prototype_property(source, prototype)
+                && self.shapes.lookup(snapshot.shape, prototype).is_none()
+            {
+                let name = self.atom_string_value(prototype)?;
+                let output_key = self.safe_integer_property_atom(output_index)?;
+                self.set_own_data_property(result, output_key, name)?;
+                output_index = output_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
+            }
+        }
         let length = self.length_atom()?;
         self.set_own_data_property(result, length, safe_integer_value(output_index))?;
         Ok(result)
