@@ -169,6 +169,7 @@ pub enum ExecutionError {
     ReadOnlyBinding(AtomId),
     GlobalBindingLimit { limit: u32 },
     GlobalBindingAllocationFailed,
+    GlobalBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
     NotObject(Value),
@@ -283,7 +284,7 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<CodeId>>()];
 #[derive(Debug)]
 struct LoadedCode {
     module: CompiledModule,
-    scope_atoms: Box<[AtomId]>,
+    scope_resolutions: Box<[ScopeResolution]>,
     constant_values: Box<[Option<Value>]>,
 }
 
@@ -296,14 +297,43 @@ impl Trace for LoadedCode {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ScopeResolution {
+    atom: AtomId,
+    global_slot: Option<GlobalSlotId>,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct GlobalBinding {
     name: AtomId,
     value: Value,
 }
 
+/// A stable isolate-local index into one realm's global binding storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+struct GlobalSlotId(NonZeroU32);
+
+impl GlobalSlotId {
+    fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(NonZeroU32::new)
+            .map(Self)
+    }
+
+    const fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+const _: [(); 4] = [(); core::mem::size_of::<GlobalSlotId>()];
+const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalSlotId>>()];
+
 #[derive(Debug)]
 struct Realm {
-    globals: Vec<GlobalBinding>,
+    global_bindings: Vec<GlobalBinding>,
+    global_slots_by_atom: Vec<Option<GlobalSlotId>>,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
 }
@@ -311,62 +341,69 @@ struct Realm {
 impl Realm {
     fn new(limits: RealmLimits, typeof_strings: TypeofStrings) -> Self {
         Self {
-            globals: Vec::new(),
+            global_bindings: Vec::new(),
+            global_slots_by_atom: Vec::new(),
             typeof_strings,
             limits,
         }
     }
 
     #[inline(always)]
-    fn get(&self, name: AtomId) -> Option<Value> {
-        self.globals
-            .iter()
-            .rev()
-            .find(|binding| binding.name == name)
+    fn get_slot(&self, slot: GlobalSlotId) -> Option<Value> {
+        self.global_bindings
+            .get(slot.index())
             .map(|binding| binding.value)
     }
 
-    /// Updates an existing global object property or publishes one after checked slow-path growth.
+    #[inline(always)]
+    fn set_slot(&mut self, slot: GlobalSlotId, value: Value) {
+        self.global_bindings[slot.index()].value = value;
+    }
+
+    /// Updates an existing slot or atomically publishes one after both backing reserves succeed.
     fn set(&mut self, name: AtomId, value: Value) -> Result<(), ExecutionError> {
-        if let Some(binding) = self
-            .globals
-            .iter_mut()
-            .rev()
-            .find(|binding| binding.name == name)
-        {
-            binding.value = value;
+        if let Some(slot) = self.resolve(name) {
+            self.set_slot(slot, value);
             return Ok(());
         }
-        if self.globals.len() >= self.limits.max_global_bindings as usize {
+        if self.global_bindings.len() >= self.limits.max_global_bindings as usize {
             return Err(ExecutionError::GlobalBindingLimit {
                 limit: self.limits.max_global_bindings,
             });
         }
-        self.globals
+        let required_slots = (name.index() as usize)
+            .checked_add(1)
+            .ok_or(ExecutionError::GlobalBindingIndexAllocationFailed)?;
+        let additional_slots = required_slots.saturating_sub(self.global_slots_by_atom.len());
+        self.global_slots_by_atom
+            .try_reserve_exact(additional_slots)
+            .map_err(|_| ExecutionError::GlobalBindingIndexAllocationFailed)?;
+        self.global_bindings
             .try_reserve_exact(1)
             .map_err(|_| ExecutionError::GlobalBindingAllocationFailed)?;
-        self.globals.push(GlobalBinding { name, value });
+        self.global_slots_by_atom.resize(required_slots, None);
+        let slot = GlobalSlotId::from_index(self.global_bindings.len())
+            .ok_or(ExecutionError::GlobalBindingLimit { limit: u32::MAX })?;
+        self.global_bindings.push(GlobalBinding { name, value });
+        self.global_slots_by_atom[name.index() as usize] = Some(slot);
         Ok(())
     }
 
     #[inline(always)]
-    fn set_existing(&mut self, name: AtomId, value: Value) -> bool {
-        let Some(binding) = self
-            .globals
-            .iter_mut()
-            .rev()
-            .find(|binding| binding.name == name)
-        else {
-            return false;
-        };
-        binding.value = value;
-        true
+    fn resolve(&self, name: AtomId) -> Option<GlobalSlotId> {
+        let slot = self
+            .global_slots_by_atom
+            .get(name.index() as usize)
+            .copied()
+            .flatten()?;
+        debug_assert_eq!(self.global_bindings[slot.index()].name, name);
+        Some(slot)
     }
 }
 
 impl Trace for Realm {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
-        for binding in &mut self.globals {
+        for binding in &mut self.global_bindings {
             binding.value.trace(tracer);
         }
         self.typeof_strings.trace(tracer);
@@ -1154,8 +1191,8 @@ impl Isolate {
         self.loaded_code
             .try_reserve_exact(1)
             .map_err(|_| ExecutionError::LoadedCodeAllocationFailed)?;
-        let mut scope_atoms = Vec::new();
-        scope_atoms
+        let mut scope_resolutions = Vec::new();
+        scope_resolutions
             .try_reserve_exact(module.scope_names().len())
             .map_err(|_| ExecutionError::ScopeNameAllocationFailed)?;
         let checkpoint = self.atoms.checkpoint();
@@ -1168,7 +1205,10 @@ impl Isolate {
                 }
             };
             match self.atoms.try_intern(string) {
-                Ok(atom) => scope_atoms.push(atom),
+                Ok(atom) => scope_resolutions.push(ScopeResolution {
+                    atom,
+                    global_slot: self.realm.resolve(atom),
+                }),
                 Err(error) => {
                     self.atoms.rollback(checkpoint);
                     return Err(ExecutionError::ScopeNameAtom(error));
@@ -1224,7 +1264,7 @@ impl Isolate {
             .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX })?;
         self.loaded_code.push(LoadedCode {
             module: module.clone(),
-            scope_atoms: scope_atoms.into_boxed_slice(),
+            scope_resolutions: scope_resolutions.into_boxed_slice(),
             constant_values: constant_values.into_boxed_slice(),
         });
         Ok(code)
@@ -1246,12 +1286,42 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidCode(code))
     }
 
+    /// Resolves an immutable scope atom once, then retains its stable global slot in loaded code.
+    #[inline(always)]
+    fn scope_resolution(
+        &mut self,
+        code: CodeId,
+        scope_name: u32,
+    ) -> Result<ScopeResolution, ExecutionError> {
+        let resolution = self
+            .loaded_code(code)?
+            .scope_resolutions
+            .get(scope_name as usize)
+            .copied()
+            .ok_or(ExecutionError::InvalidScopeName { code, scope_name })?;
+        if resolution.global_slot.is_some() {
+            return Ok(resolution);
+        }
+        let Some(global_slot) = self.realm.resolve(resolution.atom) else {
+            return Ok(resolution);
+        };
+        let resolved = ScopeResolution {
+            global_slot: Some(global_slot),
+            ..resolution
+        };
+        self.loaded_code
+            .get_mut(code.index())
+            .expect("validated loaded code remains present")
+            .scope_resolutions[scope_name as usize] = resolved;
+        Ok(resolved)
+    }
+
     #[inline(always)]
     fn scope_atom(&self, code: CodeId, scope_name: u32) -> Result<AtomId, ExecutionError> {
         self.loaded_code(code)?
-            .scope_atoms
+            .scope_resolutions
             .get(scope_name as usize)
-            .copied()
+            .map(|resolution| resolution.atom)
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
     }
 
@@ -1559,25 +1629,22 @@ impl Isolate {
                 }
             }
             Opcode::LoadScope => {
-                let name = self.scope_atom(code, operands[1])?;
+                let resolution = self.scope_resolution(code, operands[1])?;
                 let value = self
-                    .scope_value(name)
-                    .ok_or(ExecutionError::UnresolvedBinding(name))?;
+                    .scope_value(resolution)
+                    .ok_or(ExecutionError::UnresolvedBinding(resolution.atom))?;
                 self.write(base, operands[0], value)?;
             }
             Opcode::StoreScope => {
-                let name = self.scope_atom(code, operands[1])?;
                 let value = self.read(base, operands[0])?;
-                self.realm.set(name, value)?;
+                self.store_scope(code, operands[1], value)?;
             }
             Opcode::StoreResolvedScope => {
-                let name = self.scope_atom(code, operands[1])?;
                 let value = self.read(base, operands[0])?;
-                self.store_resolved_scope(name, value)?;
+                self.store_resolved_scope(code, operands[1], value)?;
             }
             Opcode::DeclareScope => {
-                let name = self.scope_atom(code, operands[0])?;
-                self.declare_scope(name)?;
+                self.declare_scope(code, operands[0])?;
             }
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
@@ -1688,46 +1755,86 @@ impl Isolate {
 
     /// Resolves non-writable primitive realm properties before mutable global bindings.
     #[inline(always)]
-    fn scope_value(&self, name: AtomId) -> Option<Value> {
+    fn intrinsic_scope_value(&self, name: AtomId) -> Option<Value> {
         let string = self.atoms.get(name)?;
-        let intrinsic = match string.len() {
+        match string.len() {
             3 if string.equals_latin1(b"NaN") => Some(Value::from_f64(f64::NAN)),
             8 if string.equals_latin1(b"Infinity") => Some(Value::from_f64(f64::INFINITY)),
             9 if string.equals_latin1(b"undefined") => {
                 Some(Value::from_immediate(Immediate::Undefined))
             }
             _ => None,
-        };
-        intrinsic.or_else(|| self.realm.get(name))
+        }
     }
 
     #[inline(always)]
-    fn declare_scope(&mut self, name: AtomId) -> Result<(), ExecutionError> {
-        if self.scope_value(name).is_some() {
+    fn scope_value(&self, resolution: ScopeResolution) -> Option<Value> {
+        self.intrinsic_scope_value(resolution.atom).or_else(|| {
+            resolution
+                .global_slot
+                .and_then(|slot| self.realm.get_slot(slot))
+        })
+    }
+
+    /// Writes through a cached global slot or publishes the binding once on the cold path.
+    #[inline(always)]
+    fn store_scope(
+        &mut self,
+        code: CodeId,
+        scope_name: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let resolution = self.scope_resolution(code, scope_name)?;
+        if let Some(slot) = resolution.global_slot {
+            self.realm.set_slot(slot, value);
+            return Ok(());
+        }
+        self.realm.set(resolution.atom, value)
+    }
+
+    #[inline(always)]
+    fn declare_scope(&mut self, code: CodeId, scope_name: u32) -> Result<(), ExecutionError> {
+        let resolution = self.scope_resolution(code, scope_name)?;
+        self.declare_scope_resolution(resolution)
+    }
+
+    #[inline(always)]
+    fn declare_scope_resolution(
+        &mut self,
+        resolution: ScopeResolution,
+    ) -> Result<(), ExecutionError> {
+        if self.scope_value(resolution).is_some() {
             return Ok(());
         }
         self.realm
-            .set(name, Value::from_immediate(Immediate::Undefined))
+            .set(resolution.atom, Value::from_immediate(Immediate::Undefined))
     }
 
     /// Updates a mutable global or applies the strict/sloppy primitive-intrinsic write contract.
-    fn store_resolved_scope(&mut self, name: AtomId, value: Value) -> Result<(), ExecutionError> {
-        if self.realm.set_existing(name, value) {
+    fn store_resolved_scope(
+        &mut self,
+        code: CodeId,
+        scope_name: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let resolution = self.scope_resolution(code, scope_name)?;
+        if let Some(slot) = resolution.global_slot {
+            self.realm.set_slot(slot, value);
             return Ok(());
         }
-        if self.scope_value(name).is_some() {
+        if self.intrinsic_scope_value(resolution.atom).is_some() {
             let strict = self
                 .fiber
                 .frames
                 .last()
                 .is_some_and(|frame| frame.strictness == Strictness::Strict);
             return if strict {
-                Err(ExecutionError::ReadOnlyBinding(name))
+                Err(ExecutionError::ReadOnlyBinding(resolution.atom))
             } else {
                 Ok(())
             };
         }
-        Err(ExecutionError::UnresolvedBinding(name))
+        Err(ExecutionError::UnresolvedBinding(resolution.atom))
     }
 
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
@@ -2860,7 +2967,12 @@ mod tests {
         isolate.realm.set(infinity, Value::from_i32(1)).unwrap();
 
         assert_eq!(
-            isolate.scope_value(infinity).and_then(Value::as_f64),
+            isolate
+                .scope_value(ScopeResolution {
+                    atom: infinity,
+                    global_slot: isolate.realm.resolve(infinity),
+                })
+                .and_then(Value::as_f64),
             Some(f64::INFINITY)
         );
     }
@@ -2872,8 +2984,91 @@ mod tests {
             .atoms
             .try_intern(JsString::try_from_str("Infinity").unwrap())
             .unwrap();
-        isolate.declare_scope(infinity).unwrap();
-        assert!(isolate.realm.globals.is_empty());
+        isolate
+            .declare_scope_resolution(ScopeResolution {
+                atom: infinity,
+                global_slot: None,
+            })
+            .unwrap();
+        assert!(isolate.realm.global_bindings.is_empty());
+    }
+
+    #[test]
+    /// Proves sparse atom publication resolves through stable slots without binding-order scans.
+    fn realm_global_slots_are_stable_and_atom_indexed() {
+        let mut isolate = test_isolate();
+        let unused = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("unused-property-name").unwrap())
+            .unwrap();
+        let first = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("first-global").unwrap())
+            .unwrap();
+        let second = isolate
+            .atoms
+            .try_intern(JsString::try_from_str("second-global").unwrap())
+            .unwrap();
+
+        isolate.realm.set(first, Value::from_i32(1)).unwrap();
+        let first_slot = isolate.realm.resolve(first).unwrap();
+        isolate.realm.set(second, Value::from_i32(2)).unwrap();
+        isolate.realm.set(first, Value::from_i32(3)).unwrap();
+
+        assert!(isolate.realm.resolve(unused).is_none());
+        assert_eq!(isolate.realm.resolve(first), Some(first_slot));
+        assert_eq!(
+            isolate.realm.get_slot(first_slot).and_then(Value::as_i32),
+            Some(3)
+        );
+        assert_eq!(
+            isolate
+                .realm
+                .resolve(second)
+                .and_then(|slot| isolate.realm.get_slot(slot))
+                .and_then(Value::as_i32),
+            Some(2)
+        );
+        assert_eq!(
+            isolate.realm.global_bindings[first_slot.index()].name,
+            first
+        );
+        assert_eq!(
+            isolate.realm.global_slots_by_atom.len(),
+            second.index() as usize + 1
+        );
+    }
+
+    #[test]
+    /// Confirms loaded scope operands self-resolve once and retain the stable realm slot.
+    fn loaded_scope_resolution_caches_a_published_global_slot() {
+        let mut isolate = test_isolate();
+        let module = scoped_var_module();
+        let code = isolate.load_module(&module).unwrap();
+        assert!(
+            isolate.loaded_code[code.index()].scope_resolutions[0]
+                .global_slot
+                .is_none()
+        );
+
+        let outcome = isolate
+            .execute_loaded(
+                code,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(7)));
+        let resolution = isolate.loaded_code[code.index()].scope_resolutions[0];
+        let slot = resolution.global_slot.expect("executed binding is cached");
+        assert_eq!(isolate.realm.resolve(resolution.atom), Some(slot));
+        assert_eq!(
+            isolate.realm.get_slot(slot).and_then(Value::as_i32),
+            Some(7)
+        );
     }
 
     #[test]
@@ -3250,7 +3445,11 @@ mod tests {
             Completion::Throw(value) if value.as_heap_ref() == Some(rewritten)
         ));
         assert_eq!(
-            isolate.realm.get(global).and_then(Value::as_heap_ref),
+            isolate
+                .realm
+                .resolve(global)
+                .and_then(|slot| isolate.realm.get_slot(slot))
+                .and_then(Value::as_heap_ref),
             Some(rewritten)
         );
     }
