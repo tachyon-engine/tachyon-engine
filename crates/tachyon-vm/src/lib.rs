@@ -2423,6 +2423,15 @@ impl Isolate {
                 let right = self.convert_to_number(self.read(base, operands[2])?)?;
                 self.write(base, operands[0], numeric_shift(opcode, left, right))?;
             }
+            Opcode::Remainder | Opcode::Exponentiate => {
+                let left = self.convert_to_number(self.read(base, operands[1])?)?;
+                let right = self.convert_to_number(self.read(base, operands[2])?)?;
+                self.write(
+                    base,
+                    operands[0],
+                    numeric_remainder_or_power(opcode, left, right),
+                )?;
+            }
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -3574,6 +3583,27 @@ fn numeric_shift(opcode: Opcode, left: Value, right: Value) -> Value {
         }
         _ => unreachable!("shift dispatch only supplies shift opcodes"),
     }
+}
+
+/// Executes `%` and `**` after both operands have crossed the numeric conversion boundary.
+#[inline(always)]
+fn numeric_remainder_or_power(opcode: Opcode, left: Value, right: Value) -> Value {
+    let left = left
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| left.as_f64())
+        .unwrap_or(f64::NAN);
+    let right = right
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| right.as_f64())
+        .unwrap_or(f64::NAN);
+    let result = match opcode {
+        Opcode::Remainder => left % right,
+        Opcode::Exponentiate => left.powf(right),
+        _ => unreachable!("arithmetic dispatch only supplies remainder or exponentiation"),
+    };
+    Value::from_f64(result)
 }
 
 #[inline(always)]

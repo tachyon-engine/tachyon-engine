@@ -1293,6 +1293,13 @@ mod tests {
     }
 
     #[test]
+    /// Covers numeric coercion for remainder and exponentiation.
+    fn remainder_and_exponentiation_convert_supported_primitives() {
+        assert_eq!(execute_source(102, "'5' % 2;").as_f64(), Some(1.0));
+        assert_eq!(execute_source(103, "2 ** '3';").as_f64(), Some(8.0));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

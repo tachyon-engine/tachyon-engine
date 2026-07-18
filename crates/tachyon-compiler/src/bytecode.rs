@@ -1964,6 +1964,8 @@ impl Lowerer<'_> {
             HirBinaryOperator::Subtract => Opcode::Sub,
             HirBinaryOperator::Multiply => Opcode::Mul,
             HirBinaryOperator::Divide => Opcode::Div,
+            HirBinaryOperator::Remainder => Opcode::Remainder,
+            HirBinaryOperator::Exponentiate => Opcode::Exponentiate,
             HirBinaryOperator::BitwiseAnd => Opcode::BitwiseAnd,
             HirBinaryOperator::BitwiseOr => Opcode::BitwiseOr,
             HirBinaryOperator::BitwiseXor => Opcode::BitwiseXor,

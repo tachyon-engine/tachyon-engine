@@ -94,6 +94,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::ShiftLeft
         | Opcode::ShiftRight
         | Opcode::ShiftRightUnsigned
+        | Opcode::Remainder
+        | Opcode::Exponentiate
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => write!(
