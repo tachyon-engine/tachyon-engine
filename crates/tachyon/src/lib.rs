@@ -747,6 +747,63 @@ mod tests {
     }
 
     #[test]
+    /// Proves a function expression stored on a global callable receives multiple later-unit args.
+    fn function_property_arguments_survive_across_source_units() {
+        let compiler = Compiler;
+        let publisher = compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(161),
+                    SourceName::new("harness.js"),
+                    MediaType::JavaScript,
+                    Arc::from(
+                        "function holder() {} holder.equal = function (left, right) { if (left === right) { return left !== 0 || 1 / left === 1 / right; } return left !== left && right !== right; };",
+                    ),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let caller = compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(162),
+                    SourceName::new("body.js"),
+                    MediaType::JavaScript,
+                    Arc::from("holder.equal('0', '0');"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut isolate = test_isolate();
+        isolate
+            .execute(
+                &publisher,
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute(
+                &caller,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Completed(value)
+                    if value.as_immediate() == Some(tachyon_value::Immediate::True)
+            ),
+            "unexpected cross-source outcome: {outcome:?}"
+        );
+    }
+
+    #[test]
     /// Covers declarative global visibility, TDZ, immutable assignment, and cross-script redeclaration.
     fn global_lexical_bindings_preserve_ecmascript_state() {
         let compile = |id, name, text| {
@@ -1557,6 +1614,14 @@ mod tests {
             execute_source(110, "1 != '2';").as_immediate(),
             Some(tachyon_value::Immediate::True)
         );
+        assert_eq!(
+            execute_source(163, "'0' != 0;").as_immediate(),
+            Some(tachyon_value::Immediate::False)
+        );
+        assert_eq!(
+            execute_source(164, "'0' !== 0;").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
     }
 
     #[test]
@@ -1950,7 +2015,15 @@ mod tests {
         assert_eq!(
             execute_source(
                 160,
-                "let boxed = new Number(-3); let method = Number.prototype.valueOf; let descriptor = Object.getOwnPropertyDescriptor(Number.prototype, 'valueOf'); let rejected = false; let invalidRadix = false; try { method.call({}); } catch (error) { rejected = error instanceof TypeError; } try { boxed.toString(1); } catch (error) { invalidRadix = error instanceof RangeError; } boxed.valueOf() === -3 && boxed.toString() === '-3' && Number.prototype.valueOf() === 0 && (4).toString() === '4' && method.call(4) === 4 && boxed instanceof Number && Object.getPrototypeOf(boxed) === Number.prototype && Object.prototype.toString.call(boxed) === '[object Number]' && descriptor.value === method && descriptor.writable && !descriptor.enumerable && descriptor.configurable && rejected && invalidRadix;",
+                "let boxed = new Number(-3); let method = Number.prototype.valueOf; let descriptor = Object.getOwnPropertyDescriptor(Number.prototype, 'valueOf'); let rejected = false; let invalidRadix = false; try { method.call({}); } catch (error) { rejected = error instanceof TypeError; } try { boxed.toString(1); } catch (error) { invalidRadix = error instanceof RangeError; } boxed.valueOf() === -3 && boxed.toString() === '-3' && Number.prototype.valueOf() === 0 && (4).toString() === '4' && (255).toString(16) === 'ff' && (0.5).toString(2) === '0.1' && method.call(4) === 4 && boxed instanceof Number && Object.getPrototypeOf(boxed) === Number.prototype && Object.prototype.toString.call(boxed) === '[object Number]' && descriptor.value === method && descriptor.writable && !descriptor.enumerable && descriptor.configurable && rejected && invalidRadix;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                161,
+                "Number.prototype.toString(2) === '0' && (new Number()).toString(2) === '0' && (new Number(0)).toString(2) === '0' && (new Number(-1)).toString(2) === '-1' && (new Number(1)).toString(2) === '1' && (new Number(Number.NaN)).toString(2) === 'NaN' && (new Number(Number.POSITIVE_INFINITY)).toString(2) === 'Infinity' && (new Number(Number.NEGATIVE_INFINITY)).toString(2) === '-Infinity';",
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True),

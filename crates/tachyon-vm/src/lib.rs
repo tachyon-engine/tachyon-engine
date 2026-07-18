@@ -14,6 +14,7 @@ mod atom;
 mod bound_function;
 mod finalization;
 mod for_in;
+mod number;
 mod object;
 mod string;
 mod tuning;
@@ -176,6 +177,8 @@ pub enum ExecutionError {
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
     InvalidNumberRadix(Value),
+    NumberFormatBufferExhausted,
+    NumberFormatInvalidDigit,
     NumberStringAllocationFailed,
     StringBufferAllocationFailed,
     UnsupportedTypeof(Value),
@@ -2996,14 +2999,14 @@ impl Isolate {
         })
     }
 
-    /// Converts a Number receiver through the canonical decimal formatter used by ToString.
-    fn number_to_decimal_string(
+    /// Implements Number::toString for decimal and shortest round-trip radix representations.
+    fn number_to_string(
         &mut self,
         receiver: Value,
         radix: Option<Value>,
     ) -> Result<Value, ExecutionError> {
         let number = self.this_number_value(receiver)?;
-        if let Some(radix) = radix
+        let radix_number = if let Some(radix) = radix
             && radix.as_immediate() != Some(Immediate::Undefined)
         {
             let converted = self.convert_to_number(radix)?;
@@ -3017,9 +3020,27 @@ impl Isolate {
             if !(2.0..=36.0).contains(&integer) {
                 return Err(ExecutionError::InvalidNumberRadix(radix));
             }
-            if integer != 10.0 {
-                return Err(ExecutionError::UnsupportedNumberConversion(radix));
-            }
+            integer as u8
+        } else {
+            10
+        };
+        let numeric = numeric_value(number).expect("thisNumberValue always returns a number");
+        if radix_number != 10 && numeric.is_finite() && numeric != 0.0 {
+            let mut buffer = [0; tuning::numbers::RADIX_FORMAT_BUFFER_SIZE];
+            let bytes =
+                number::format_radix(numeric, radix_number, &mut buffer).map_err(|error| {
+                    match error {
+                        number::NumberFormatError::BufferExhausted => {
+                            ExecutionError::NumberFormatBufferExhausted
+                        }
+                        number::NumberFormatError::InvalidDigit => {
+                            ExecutionError::NumberFormatInvalidDigit
+                        }
+                    }
+                })?;
+            return self.allocate_runtime_string(
+                JsString::try_from_latin1(bytes).map_err(ExecutionError::PropertyKeyString)?,
+            );
         }
         let mut units = Vec::new();
         self.append_primitive_string_units(number, &mut units)?;
@@ -6997,7 +7018,7 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::NumberToString) => {
                     let radix = self.call_argument(&site, 0)?;
-                    let value = self.number_to_decimal_string(site.this_value, radix)?;
+                    let value = self.number_to_string(site.this_value, radix)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
