@@ -633,12 +633,21 @@ impl Isolate {
     }
 
     /// Pops one explicit frame, restores its stack checkpoints, and writes into the caller result slot.
+    #[inline(always)]
     fn return_from_frame(
         &mut self,
         base: u32,
         source: u32,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let value = self.read(base, source)?;
+        if self
+            .fiber
+            .frames
+            .last()
+            .is_some_and(|frame| frame.return_register.is_none())
+        {
+            return Ok(Some(RunOutcome::Completed(value)));
+        }
         let frame = self
             .fiber
             .frames
