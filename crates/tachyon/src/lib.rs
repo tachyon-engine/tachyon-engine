@@ -977,6 +977,20 @@ mod tests {
     }
 
     #[test]
+    fn function_strictness_controls_nullish_this_binding() {
+        let sloppy = execute_source(
+            61,
+            "function readThis() { return this; } this === readThis.call(undefined);",
+        );
+        assert_eq!(sloppy.as_immediate(), Some(tachyon_value::Immediate::True));
+        let strict = execute_source(
+            62,
+            "function readThis() { 'use strict'; return this; } readThis.call(undefined) === undefined;",
+        );
+        assert_eq!(strict.as_immediate(), Some(tachyon_value::Immediate::True));
+    }
+
+    #[test]
     fn ordinary_construct_sets_receiver_new_target_and_return_replacement() {
         assert_eq!(
             execute_source(

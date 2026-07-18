@@ -932,6 +932,14 @@ pub enum FunctionKind {
     AsyncGenerator,
 }
 
+/// Immutable source-level strictness used by call binding and strict-only runtime semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FunctionStrictness {
+    Sloppy,
+    Strict,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
 pub struct SuspendPointId(u32);
@@ -1000,6 +1008,7 @@ pub struct FunctionLayout {
 #[derive(Clone, Debug)]
 pub struct FunctionMetadata {
     pub kind: FunctionKind,
+    pub strictness: FunctionStrictness,
     pub layout: FunctionLayout,
     pub source_map: Arc<[SourceMapEntry]>,
     pub handlers: Arc<[HandlerEntry]>,
@@ -1011,8 +1020,14 @@ pub struct FunctionMetadata {
 impl FunctionMetadata {
     #[must_use]
     pub fn new(kind: FunctionKind, layout: FunctionLayout) -> Self {
+        let strictness = if matches!(kind, FunctionKind::Module) {
+            FunctionStrictness::Strict
+        } else {
+            FunctionStrictness::Sloppy
+        };
         Self {
             kind,
+            strictness,
             layout,
             source_map: Arc::default(),
             handlers: Arc::default(),
@@ -1070,6 +1085,11 @@ impl CompiledFunction {
     #[must_use]
     pub const fn kind(&self) -> FunctionKind {
         self.metadata.kind
+    }
+
+    #[must_use]
+    pub const fn strictness(&self) -> FunctionStrictness {
+        self.metadata.strictness
     }
 
     #[must_use]
@@ -1133,6 +1153,11 @@ pub enum ModuleBuildError {
     InvalidFunctionLayout {
         function: FunctionId,
         layout: FunctionLayout,
+    },
+    InvalidFunctionStrictness {
+        function: FunctionId,
+        kind: FunctionKind,
+        strictness: FunctionStrictness,
     },
     VerifyFunction {
         function: FunctionId,
@@ -1270,6 +1295,15 @@ impl CompiledModule {
                 return Err(ModuleBuildError::FunctionIdMismatch {
                     expected,
                     actual: template.id,
+                });
+            }
+            if matches!(template.metadata.kind, FunctionKind::Module)
+                && template.metadata.strictness != FunctionStrictness::Strict
+            {
+                return Err(ModuleBuildError::InvalidFunctionStrictness {
+                    function: template.id,
+                    kind: template.metadata.kind,
+                    strictness: template.metadata.strictness,
                 });
             }
             let bytecode = template
@@ -2192,6 +2226,31 @@ mod tests {
         assert!(matches!(
             &module.constants()[1],
             BytecodeConstant::String(value) if value.as_ref() == [0xd800]
+        ));
+    }
+
+    #[test]
+    fn compiled_module_rejects_sloppy_module_metadata() {
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Module,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.strictness = FunctionStrictness::Sloppy;
+        let template = CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(encode_instruction(Opcode::Return, &[0]).unwrap()),
+            metadata,
+        );
+        assert!(matches!(
+            CompiledModule::new(Arc::from(""), Vec::new(), Vec::new(), vec![template], FunctionId::new(0)),
+            Err(ModuleBuildError::InvalidFunctionStrictness {
+                function,
+                kind: FunctionKind::Module,
+                strictness: FunctionStrictness::Sloppy,
+            }) if function == FunctionId::new(0)
         ));
     }
 

@@ -197,6 +197,7 @@ pub struct HirFunction {
     pub parameters: Arc<[HirBinding]>,
     pub body: Arc<[HirStatement]>,
     pub scope: ScopeId,
+    pub strict: bool,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.
@@ -836,15 +837,21 @@ fn lower_function_stencil(
     let id = FunctionStencilId(
         u32::try_from(functions.len()).map_err(|_| CompileError::BindingOverflow)?,
     );
+    let oxc_scope = function
+        .scope_id
+        .get()
+        .ok_or_else(|| missing_semantic(source, source_span(function.span), "function scope"))?;
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
         name,
         parameters: parameters.into(),
         body: statements.into(),
-        scope: function.scope_id.get().map(to_scope_id).ok_or_else(|| {
-            missing_semantic(source, source_span(function.span), "function scope")
-        })?,
+        scope: to_scope_id(oxc_scope),
+        strict: semantic
+            .scoping()
+            .scope_flags(oxc_scope)
+            .contains(OxcScopeFlags::StrictMode),
     });
     Ok(id)
 }

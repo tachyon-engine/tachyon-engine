@@ -2,8 +2,8 @@
 
 use tachyon_bytecode::{
     BindingLocation, BindingPlanEntry, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate,
-    CompiledModule, FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, HandlerEntry,
-    HandlerKind, Label, MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId,
+    CompiledModule, FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, FunctionStrictness,
+    HandlerEntry, HandlerKind, Label, MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId,
     SourceSpan as BytecodeSourceSpan,
 };
 
@@ -219,6 +219,12 @@ fn lower_entry(
     };
     let metadata = FunctionMetadata {
         kind,
+        strictness: scope_strictness(
+            source,
+            hir,
+            hir.root_scope(),
+            SourceSpan { start: 0, end: 0 },
+        )?,
         layout: FunctionLayout {
             register_count,
             max_handler_depth,
@@ -595,6 +601,11 @@ fn lower_function(
         bytecode,
         FunctionMetadata {
             kind: FunctionKind::Ordinary,
+            strictness: if function.strict {
+                FunctionStrictness::Strict
+            } else {
+                FunctionStrictness::Sloppy
+            },
             layout: FunctionLayout {
                 register_count,
                 argument_count: u32::try_from(function.parameters.len())
@@ -613,6 +624,29 @@ fn lower_function(
             binding_plan,
         },
     ))
+}
+
+fn scope_strictness(
+    source: &SourceText,
+    hir: &HirProgram,
+    scope: ScopeId,
+    span: SourceSpan,
+) -> Result<FunctionStrictness, CompileError> {
+    let flags = hir
+        .scopes()
+        .iter()
+        .find(|candidate| candidate.id == scope)
+        .map(|scope| scope.flags)
+        .ok_or_else(|| CompileError::MissingSemanticId {
+            source_name: source.name().clone(),
+            span,
+            semantic: "scope strictness",
+        })?;
+    Ok(if flags.strict {
+        FunctionStrictness::Strict
+    } else {
+        FunctionStrictness::Sloppy
+    })
 }
 
 struct Lowerer<'a> {

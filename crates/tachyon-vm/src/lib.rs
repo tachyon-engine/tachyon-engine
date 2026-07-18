@@ -28,7 +28,8 @@ use core::{cell::Cell, num::NonZeroU32};
 
 use tachyon_bytecode::{
     BindingLocation, BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout,
-    HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset, decode_instruction,
+    FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset,
+    decode_instruction,
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
@@ -279,7 +280,7 @@ struct ResolvedCallTarget {
     function: FunctionId,
     environment: Option<GcRef<Environment>>,
     layout: FunctionLayout,
-    kind: FunctionKind,
+    strictness: FunctionStrictness,
 }
 
 #[derive(Clone, Copy)]
@@ -429,6 +430,7 @@ struct Realm {
     global_lexical_slots_by_atom: Vec<Option<GlobalLexicalSlotId>>,
     global_bindings: Vec<GlobalBinding>,
     global_slots_by_atom: Vec<Option<GlobalSlotId>>,
+    global_object: Option<Value>,
     function_prototype: Option<Value>,
     function_prototype_call: Option<Value>,
     typeof_strings: TypeofStrings,
@@ -442,6 +444,7 @@ impl Realm {
             global_lexical_slots_by_atom: Vec::new(),
             global_bindings: Vec::new(),
             global_slots_by_atom: Vec::new(),
+            global_object: None,
             function_prototype: None,
             function_prototype_call: None,
             typeof_strings,
@@ -610,6 +613,7 @@ impl Trace for Realm {
         for binding in &mut self.global_bindings {
             binding.value.trace(tracer);
         }
+        self.global_object.trace(tracer);
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
         self.typeof_strings.trace(tracer);
@@ -732,12 +736,6 @@ impl Trace for CodeLoadRoots<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Strictness {
-    Sloppy,
-    Strict,
-}
-
 /// One explicit JavaScript activation. Rust stack frames never represent JavaScript calls.
 #[derive(Clone, Copy, Debug)]
 struct Frame {
@@ -750,7 +748,7 @@ struct Frame {
     this_value: Value,
     new_target: Value,
     construct_receiver: Option<Value>,
-    strictness: Strictness,
+    strictness: FunctionStrictness,
     argument_base: u32,
     argument_count: u32,
     handler_base: u32,
@@ -804,7 +802,7 @@ impl Fiber {
                     .checked_add(frame.argument_count)
                     .is_some_and(|end| end as usize <= self.registers.len())
             );
-            let _is_strict = matches!(frame.strictness, Strictness::Strict);
+            let _is_strict = matches!(frame.strictness, FunctionStrictness::Strict);
         }
         for handler in &self.handlers {
             debug_assert!(
@@ -879,7 +877,7 @@ impl Isolate {
             _not_sync: Cell::new(()),
         };
         isolate
-            .initialize_function_intrinsics()
+            .initialize_realm_intrinsics()
             .map_err(IsolateCreationError::IntrinsicInitialization)?;
         Ok(isolate)
     }
@@ -893,8 +891,14 @@ impl Isolate {
         &mut self.atoms
     }
 
-    /// Builds the realm's shared callable prototype and native `call` method before publication.
-    fn initialize_function_intrinsics(&mut self) -> Result<(), ExecutionError> {
+    /// Builds the global object, shared callable prototype, and native `call` before publication.
+    fn initialize_realm_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let global_object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            storage: None,
+            prototype: Value::from_immediate(Immediate::Null),
+        })?;
+        self.realm.global_object = Some(global_object);
         let call_atom = self.intern_intrinsic_name(b"call")?;
         let call = self.allocate_native_function(
             NativeFunction::FunctionPrototypeCall,
@@ -937,6 +941,29 @@ impl Isolate {
         )?;
         self.realm.function_prototype = Some(function_prototype);
         self.set_function_internal_prototype(call, function_prototype)
+    }
+
+    fn allocate_intrinsic_ordinary_object(
+        &mut self,
+        ordinary: OrdinaryObject,
+    ) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                ordinary,
+                AllocationSpace::Old,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     fn intern_intrinsic_name(&mut self, name: &[u8]) -> Result<AtomId, ExecutionError> {
@@ -2191,7 +2218,7 @@ impl Isolate {
                 .fiber
                 .frames
                 .last()
-                .is_some_and(|frame| frame.strictness == Strictness::Strict);
+                .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
             return if strict {
                 Err(ExecutionError::ReadOnlyBinding(resolution.atom))
             } else {
@@ -2370,13 +2397,13 @@ impl Isolate {
     }
 
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
-        let (layout, kind) = {
+        let (layout, kind, strictness) = {
             let function = self
                 .loaded_code(code)?
                 .module
                 .function(function_id)
                 .ok_or(ExecutionError::MissingEntryFunction(function_id))?;
-            (function.layout(), function.kind())
+            (function.layout(), function.kind(), function.strictness())
         };
         let register_count = usize::try_from(layout.register_count)
             .map_err(|_| ExecutionError::RegisterWindowTooLarge(layout.register_count))?;
@@ -2405,9 +2432,15 @@ impl Isolate {
             base: 0,
             environment: None,
             return_register: None,
-            this_value: Value::from_immediate(Immediate::Undefined),
+            this_value: if matches!(kind, FunctionKind::Module) {
+                Value::from_immediate(Immediate::Undefined)
+            } else {
+                self.realm
+                    .global_object
+                    .expect("realm initialization publishes a global object")
+            },
             new_target: Value::from_immediate(Immediate::Undefined),
-            strictness: strictness_for(kind),
+            strictness,
             argument_base: 0,
             argument_count: 0,
             handler_base: 0,
@@ -2518,13 +2551,13 @@ impl Isolate {
                     function,
                     environment,
                 } => {
-                    let (layout, kind) = {
+                    let (layout, strictness) = {
                         let function_template =
                             self.loaded_code(code)?
                                 .module
                                 .function(function)
                                 .ok_or(ExecutionError::MissingEntryFunction(function))?;
-                        (function_template.layout(), function_template.kind())
+                        (function_template.layout(), function_template.strictness())
                     };
                     return self.push_call_frame(
                         ResolvedCallTarget {
@@ -2532,7 +2565,7 @@ impl Isolate {
                             function,
                             environment,
                             layout,
-                            kind,
+                            strictness,
                         },
                         site,
                     );
@@ -2649,6 +2682,7 @@ impl Isolate {
                 .ok_or(ExecutionError::InvalidRegister(RegisterId::new(index)))?;
             self.write(callee_base, index, value)?;
         }
+        let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
         self.fiber.frames.push(Frame {
             code: target.code,
             function: target.function,
@@ -2656,10 +2690,10 @@ impl Isolate {
             base: callee_base,
             environment: target.environment,
             return_register: Some(RegisterId::new(site.destination)),
-            this_value: site.this_value,
+            this_value,
             new_target: site.new_target,
             construct_receiver: site.construct_receiver,
-            strictness: strictness_for(target.kind),
+            strictness: target.strictness,
             argument_base: site.argument_base,
             argument_count: site.argument_count,
             handler_base: self.fiber.handlers.len() as u32,
@@ -2673,6 +2707,21 @@ impl Isolate {
             return Err(error);
         }
         Ok(())
+    }
+
+    #[inline(always)]
+    fn bind_ordinary_this(&self, strictness: FunctionStrictness, this_argument: Value) -> Value {
+        if strictness == FunctionStrictness::Strict
+            || !matches!(
+                this_argument.as_immediate(),
+                Some(Immediate::Undefined | Immediate::Null)
+            )
+        {
+            return this_argument;
+        }
+        self.realm
+            .global_object
+            .expect("realm initialization publishes a global object")
     }
 
     /// Pops a non-entry frame and restores the caller checkpoints outside the top-level Return path.
@@ -2848,16 +2897,6 @@ impl Trace for Isolate {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.trace_roots(tracer);
-    }
-}
-
-/// Modules are intrinsically strict; other function kinds await lowering-provided strict metadata.
-#[inline]
-fn strictness_for(kind: FunctionKind) -> Strictness {
-    if matches!(kind, FunctionKind::Module) {
-        Strictness::Strict
-    } else {
-        Strictness::Sloppy
     }
 }
 
@@ -3049,6 +3088,7 @@ mod tests {
                     entry_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Script,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: entry_registers,
                             environment_slot_count: 1,
@@ -3064,6 +3104,7 @@ mod tests {
                     closure_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Ordinary,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: closure_registers,
                             ..FunctionLayout::default()
@@ -3266,6 +3307,7 @@ mod tests {
                     entry_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Script,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: entry_registers,
                             ..FunctionLayout::default()
@@ -3282,6 +3324,7 @@ mod tests {
                     callee_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Ordinary,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: callee_registers,
                             argument_count: 1,
@@ -3324,6 +3367,7 @@ mod tests {
                     entry_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Script,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: entry_registers,
                             ..FunctionLayout::default()
@@ -3340,6 +3384,7 @@ mod tests {
                     callee_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Ordinary,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: callee_registers,
                             ..FunctionLayout::default()
@@ -3386,6 +3431,7 @@ mod tests {
                     entry_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Script,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: entry_registers,
                             ..FunctionLayout::default()
@@ -3402,6 +3448,7 @@ mod tests {
                     function_bytecode,
                     FunctionMetadata {
                         kind: FunctionKind::Ordinary,
+                        strictness: FunctionStrictness::Sloppy,
                         layout: FunctionLayout {
                             register_count: function_registers,
                             ..FunctionLayout::default()
@@ -3432,6 +3479,7 @@ mod tests {
                 caller_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Script,
+                    strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: caller_registers,
                         ..FunctionLayout::default()
@@ -3654,6 +3702,15 @@ mod tests {
         assert_function_prototype_call_batch::<4>();
         assert_function_prototype_call_batch::<8>();
         assert_function_prototype_call_batch::<16>();
+    }
+
+    #[test]
+    fn strict_and_sloppy_this_binding_work_for_every_dispatch_batch() {
+        assert_this_binding_batch::<1>();
+        assert_this_binding_batch::<2>();
+        assert_this_binding_batch::<4>();
+        assert_this_binding_batch::<8>();
+        assert_this_binding_batch::<16>();
     }
 
     #[test]
@@ -4162,7 +4219,10 @@ mod tests {
         assert!(isolate.fiber.registers.capacity() >= 2);
         assert!(isolate.fiber.handlers.capacity() >= 3);
         assert!(isolate.fiber.completions.capacity() >= 4);
-        assert_eq!(isolate.fiber.frames[0].strictness, Strictness::Strict);
+        assert_eq!(
+            isolate.fiber.frames[0].strictness,
+            FunctionStrictness::Strict
+        );
     }
 
     #[test]
@@ -4353,6 +4413,37 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    /// Checks both nullish substitution and strict preservation in one dispatch monomorphization.
+    fn assert_this_binding_batch<const N: usize>() {
+        let mut sloppy = test_isolate();
+        let global_object = sloppy.realm.global_object.unwrap();
+        let outcome = sloppy
+            .execute_with_batch::<N>(
+                &this_binding_module(FunctionStrictness::Sloppy),
+                ExecutionBudget {
+                    fuel: 7,
+                    quantum: 7,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value == global_object));
+
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &this_binding_module(FunctionStrictness::Strict),
+                ExecutionBudget {
+                    fuel: 7,
+                    quantum: 7,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::Undefined)
+        ));
     }
 
     fn assert_batch_budget<const N: usize>() {
@@ -4731,6 +4822,52 @@ mod tests {
         };
         CompiledModule::new(
             Arc::from("identity.call(undefined, 42)"),
+            Vec::new(),
+            vec![Arc::from("call")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `readThis.call(undefined)` with caller-selected immutable function strictness.
+    fn this_binding_module(strictness: FunctionStrictness) -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(5, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::GetById, &[1, 0, 0], span).unwrap();
+        entry.emit(Opcode::LoadUndefined, &[2], span).unwrap();
+        entry
+            .emit(Opcode::CallWithReceiver, &[3, 0, 1], span)
+            .unwrap();
+        entry.emit(Opcode::Return, &[3], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::LoadThis, &[0], span).unwrap();
+        callee.emit(Opcode::Return, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let callee_metadata = FunctionMetadata {
+            strictness,
+            layout: FunctionLayout {
+                register_count: callee_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callee_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("readThis.call(undefined)"),
             Vec::new(),
             vec![Arc::from("call")],
             vec![

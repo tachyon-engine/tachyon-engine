@@ -722,6 +722,47 @@ mod tests {
     }
 
     #[test]
+    fn compiler_freezes_directive_and_inherited_function_strictness() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function sloppy() {} function strict() { 'use strict'; function nested() {} }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap()
+                .strictness(),
+            tachyon_bytecode::FunctionStrictness::Sloppy
+        );
+        assert_eq!(
+            module
+                .function(tachyon_bytecode::FunctionId::new(1))
+                .unwrap()
+                .strictness(),
+            tachyon_bytecode::FunctionStrictness::Sloppy
+        );
+        assert_eq!(
+            module
+                .function(tachyon_bytecode::FunctionId::new(2))
+                .unwrap()
+                .strictness(),
+            tachyon_bytecode::FunctionStrictness::Strict
+        );
+        assert_eq!(
+            module
+                .function(tachyon_bytecode::FunctionId::new(3))
+                .unwrap()
+                .strictness(),
+            tachyon_bytecode::FunctionStrictness::Strict
+        );
+    }
+
+    #[test]
     fn compiler_lowers_compound_assignment_through_the_shared_binary_path() {
         let module = Compiler
             .compile(
