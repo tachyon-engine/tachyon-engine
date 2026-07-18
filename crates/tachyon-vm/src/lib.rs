@@ -275,6 +275,9 @@ enum NativeFunction {
     ArrayIncludes,
     ArrayPop,
     ArraySlice,
+    ArrayShift,
+    ArrayUnshift,
+    ArrayReverse,
     ArrayToString,
     MathPow,
 }
@@ -328,7 +331,10 @@ impl NativeFunction {
             | Self::ArrayIndexOf
             | Self::ArrayIncludes
             | Self::ArrayPop
-            | Self::ArraySlice => 1,
+            | Self::ArraySlice
+            | Self::ArrayShift
+            | Self::ArrayUnshift
+            | Self::ArrayReverse => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -377,6 +383,9 @@ impl NativeFunction {
             Self::ArrayIncludes => "includes",
             Self::ArrayPop => "pop",
             Self::ArraySlice => "slice",
+            Self::ArrayShift => "shift",
+            Self::ArrayUnshift => "unshift",
+            Self::ArrayReverse => "reverse",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -770,6 +779,9 @@ struct Realm {
     array_includes: Option<Value>,
     array_pop: Option<Value>,
     array_slice: Option<Value>,
+    array_shift: Option<Value>,
+    array_unshift: Option<Value>,
+    array_reverse: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -825,6 +837,9 @@ impl Realm {
             array_includes: None,
             array_pop: None,
             array_slice: None,
+            array_shift: None,
+            array_unshift: None,
+            array_reverse: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1107,6 +1122,9 @@ impl Trace for Realm {
         self.array_includes.trace(tracer);
         self.array_pop.trace(tracer);
         self.array_slice.trace(tracer);
+        self.array_shift.trace(tracer);
+        self.array_unshift.trace(tracer);
+        self.array_reverse.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -2051,6 +2069,42 @@ impl Isolate {
         self.realm.array_slice = Some(slice);
         let slice_atom = self.intern_intrinsic_name(b"slice")?;
         self.set_intrinsic_data_property(prototype, slice_atom, slice, true)?;
+        let shift = self.allocate_native_function(
+            NativeFunction::ArrayShift,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_shift = Some(shift);
+        let shift_atom = self.intern_intrinsic_name(b"shift")?;
+        self.set_intrinsic_data_property(prototype, shift_atom, shift, true)?;
+        let unshift = self.allocate_native_function(
+            NativeFunction::ArrayUnshift,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_unshift = Some(unshift);
+        let unshift_atom = self.intern_intrinsic_name(b"unshift")?;
+        self.set_intrinsic_data_property(prototype, unshift_atom, unshift, true)?;
+        let reverse = self.allocate_native_function(
+            NativeFunction::ArrayReverse,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_reverse = Some(reverse);
+        let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
+        self.set_intrinsic_data_property(prototype, reverse_atom, reverse, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -3088,6 +3142,95 @@ impl Isolate {
             return Ok(length.saturating_sub((-number).ceil() as u64));
         }
         Ok(number.ceil().min(length as f64) as u64)
+    }
+
+    /// Implements `Array.prototype.shift` while preserving holes and generic receiver behavior.
+    fn array_shift(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        if length == 0 {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        }
+        let first_key = self.safe_integer_property_atom(0)?;
+        let first = self
+            .get_data_property(site.this_value, first_key)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        for index in 1..length {
+            let source_key = self.safe_integer_property_atom(index)?;
+            let target_key = self.safe_integer_property_atom(index - 1)?;
+            if let Some(value) = self.get_data_property(site.this_value, source_key)? {
+                self.set_own_data_property(site.this_value, target_key, value)?;
+            } else if !self.delete_own_data_property(site.this_value, target_key)? {
+                return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+            }
+        }
+        let last_key = self.safe_integer_property_atom(length - 1)?;
+        if !self.delete_own_data_property(site.this_value, last_key)? {
+            return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+        }
+        let length_atom = self.length_atom()?;
+        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(length - 1))?;
+        Ok(first)
+    }
+
+    /// Implements `Array.prototype.unshift` with backwards indexed movement and exact length.
+    fn array_unshift(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        let count = u64::from(site.argument_count);
+        let new_length = length
+            .checked_add(count)
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        for index in (0..length).rev() {
+            let source_key = self.safe_integer_property_atom(index)?;
+            let target_key = self.safe_integer_property_atom(index + count)?;
+            if let Some(value) = self.get_data_property(site.this_value, source_key)? {
+                self.set_own_data_property(site.this_value, target_key, value)?;
+            } else if !self.delete_own_data_property(site.this_value, target_key)? {
+                return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+            }
+        }
+        for index in 0..site.argument_count {
+            let value = self
+                .call_argument(site, index)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            let key = self.safe_integer_property_atom(u64::from(index))?;
+            self.set_own_data_property(site.this_value, key, value)?;
+        }
+        let length_atom = self.length_atom()?;
+        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(new_length))?;
+        Ok(safe_integer_value(new_length))
+    }
+
+    /// Implements `Array.prototype.reverse` by swapping present indexed properties and holes.
+    fn array_reverse(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        for lower in 0..(length / 2) {
+            let upper = length - lower - 1;
+            let lower_key = self.safe_integer_property_atom(lower)?;
+            let upper_key = self.safe_integer_property_atom(upper)?;
+            let lower_value = self.get_data_property(site.this_value, lower_key)?;
+            let upper_value = self.get_data_property(site.this_value, upper_key)?;
+            match (lower_value, upper_value) {
+                (Some(left), Some(right)) => {
+                    self.set_own_data_property(site.this_value, lower_key, right)?;
+                    self.set_own_data_property(site.this_value, upper_key, left)?;
+                }
+                (Some(left), None) => {
+                    self.set_own_data_property(site.this_value, upper_key, left)?;
+                    if !self.delete_own_data_property(site.this_value, lower_key)? {
+                        return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+                    }
+                }
+                (None, Some(right)) => {
+                    self.set_own_data_property(site.this_value, lower_key, right)?;
+                    if !self.delete_own_data_property(site.this_value, upper_key)? {
+                        return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+                    }
+                }
+                (None, None) => {}
+            }
+        }
+        Ok(site.this_value)
     }
 
     fn array_element_or_undefined(
@@ -6497,6 +6640,18 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArraySlice) => {
                     let value = self.array_slice(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayShift) => {
+                    let value = self.array_shift(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayUnshift) => {
+                    let value = self.array_unshift(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayReverse) => {
+                    let value = self.array_reverse(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {

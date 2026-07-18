@@ -1709,6 +1709,30 @@ mod tests {
         );
         assert_eq!(
             execute_source(
+                143,
+                "let values = [1, , 3]; values.shift() === 1 && values.length === 2 && values[0] === undefined && values[1] === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                144,
+                "let values = [2, 3]; values.unshift(0, 1) === 4 && values.join('-') === '0-1-2-3';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                145,
+                "let values = [1, , 3, 4]; values.reverse(); values.length === 4 && values[0] === 4 && values[1] === 3 && values[2] === undefined && values[3] === 1;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
                 127,
                 "let recursive = []; recursive.push(recursive); let descriptor = Object.getOwnPropertyDescriptor([], 'length'); [1, , null, undefined, 4].join('-') === '1----4' && recursive.join() === '' && descriptor.writable === true && descriptor.enumerable === false && descriptor.configurable === false;",
             )
