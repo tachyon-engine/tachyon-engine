@@ -1947,6 +1947,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                160,
+                "let boxed = new Number(-3); let method = Number.prototype.valueOf; let descriptor = Object.getOwnPropertyDescriptor(Number.prototype, 'valueOf'); let rejected = false; let invalidRadix = false; try { method.call({}); } catch (error) { rejected = error instanceof TypeError; } try { boxed.toString(1); } catch (error) { invalidRadix = error instanceof RangeError; } boxed.valueOf() === -3 && boxed.toString() === '-3' && Number.prototype.valueOf() === 0 && (4).toString() === '4' && method.call(4) === 4 && boxed instanceof Number && Object.getPrototypeOf(boxed) === Number.prototype && Object.prototype.toString.call(boxed) === '[object Number]' && descriptor.value === method && descriptor.writable && !descriptor.enumerable && descriptor.configurable && rejected && invalidRadix;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.

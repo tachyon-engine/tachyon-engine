@@ -326,6 +326,22 @@ impl Trace for OrdinaryObject {
     }
 }
 
+/// Ordinary wrapper carrying the specification's private `[[NumberData]]` slot.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct NumberObject {
+    pub(crate) number_data: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for NumberObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.number_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::size_of;

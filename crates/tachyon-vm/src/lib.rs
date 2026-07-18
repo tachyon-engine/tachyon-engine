@@ -45,7 +45,8 @@ use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 use object::{
-    OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId, ShapeTable,
+    NumberObject, OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId,
+    ShapeTable,
 };
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
@@ -174,6 +175,7 @@ pub enum ExecutionError {
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
+    InvalidNumberRadix(Value),
     NumberStringAllocationFailed,
     StringBufferAllocationFailed,
     UnsupportedTypeof(Value),
@@ -263,6 +265,8 @@ enum NativeFunction {
     NumberIsFinite,
     NumberIsInteger,
     NumberIsSafeInteger,
+    NumberToString,
+    NumberValueOf,
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
@@ -357,10 +361,14 @@ impl NativeFunction {
             Self::NumberIsNaN
             | Self::NumberIsFinite
             | Self::NumberIsInteger
-            | Self::NumberIsSafeInteger => 1,
+            | Self::NumberIsSafeInteger
+            | Self::NumberToString => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
-            Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
+            Self::ObjectToString
+            | Self::NumberValueOf
+            | Self::FunctionPrototype
+            | Self::ArrayToString => 0,
         }
     }
 
@@ -391,6 +399,8 @@ impl NativeFunction {
             Self::NumberIsFinite => "isFinite",
             Self::NumberIsInteger => "isInteger",
             Self::NumberIsSafeInteger => "isSafeInteger",
+            Self::NumberToString => "toString",
+            Self::NumberValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
@@ -400,6 +410,7 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Reference) => "ReferenceError",
             Self::ErrorConstructor(NativeErrorKind::Syntax) => "SyntaxError",
             Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
+            Self::ErrorConstructor(NativeErrorKind::Range) => "RangeError",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -431,10 +442,17 @@ pub enum NativeErrorKind {
     Reference,
     Syntax,
     Type,
+    Range,
 }
 
 impl NativeErrorKind {
-    const ALL: [Self; 4] = [Self::Error, Self::Reference, Self::Syntax, Self::Type];
+    const ALL: [Self; 5] = [
+        Self::Error,
+        Self::Reference,
+        Self::Syntax,
+        Self::Type,
+        Self::Range,
+    ];
 
     #[inline(always)]
     const fn index(self) -> usize {
@@ -448,6 +466,7 @@ impl NativeErrorKind {
             Self::Reference => "ReferenceError",
             Self::Syntax => "SyntaxError",
             Self::Type => "TypeError",
+            Self::Range => "RangeError",
         }
     }
 }
@@ -508,6 +527,7 @@ enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
+    Number(GcRef<NumberObject>),
 }
 
 impl ObjectReceiver {
@@ -517,6 +537,7 @@ impl ObjectReceiver {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
+            Self::Number(number) => Value::from_heap_ref(number.raw()),
         }
     }
 }
@@ -585,6 +606,7 @@ struct VmTypes {
     environment: GcType<Environment>,
     for_in_iterator: GcType<ForInIterator>,
     function: GcType<FunctionObject>,
+    number_object: GcType<NumberObject>,
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
     string: GcType<JsString>,
@@ -841,10 +863,13 @@ struct Realm {
     object_prevent_extensions: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
+    number_prototype: Option<Value>,
     number_is_nan: Option<Value>,
     number_is_finite: Option<Value>,
     number_is_integer: Option<Value>,
     number_is_safe_integer: Option<Value>,
+    number_to_string: Option<Value>,
+    number_value_of: Option<Value>,
     boolean_constructor: Option<Value>,
     function_constructor: Option<Value>,
     math_object: Option<Value>,
@@ -908,10 +933,13 @@ impl Realm {
             object_prevent_extensions: None,
             string_constructor: None,
             number_constructor: None,
+            number_prototype: None,
             number_is_nan: None,
             number_is_finite: None,
             number_is_integer: None,
             number_is_safe_integer: None,
+            number_to_string: None,
+            number_value_of: None,
             boolean_constructor: None,
             function_constructor: None,
             math_object: None,
@@ -1202,10 +1230,13 @@ impl Trace for Realm {
         self.object_prevent_extensions.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
+        self.number_prototype.trace(tracer);
         self.number_is_nan.trace(tracer);
         self.number_is_finite.trace(tracer);
         self.number_is_integer.trace(tracer);
         self.number_is_safe_integer.trace(tracer);
+        self.number_to_string.trace(tracer);
+        self.number_value_of.trace(tracer);
         self.boolean_constructor.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
@@ -1478,6 +1509,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            number_object: registry
+                .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             ordinary_object: registry
                 .try_register("OrdinaryObject")
@@ -1844,6 +1878,27 @@ impl Isolate {
         self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Number prototype");
+        let number_prototype = self.allocate_number_object(
+            Value::from_i32(0),
+            object_prototype,
+            AllocationSpace::Old,
+        )?;
+        self.realm.number_prototype = Some(number_prototype);
+        self.set_function_prototype(number, number_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(number_prototype, constructor_atom, number, true)?;
+        let to_string = allocate(self, NativeFunction::NumberToString)?;
+        self.realm.number_to_string = Some(to_string);
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_intrinsic_data_property(number_prototype, to_string_atom, to_string, true)?;
+        let value_of = allocate(self, NativeFunction::NumberValueOf)?;
+        self.realm.number_value_of = Some(value_of);
+        let value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
+        self.set_intrinsic_data_property(number_prototype, value_of_atom, value_of, true)?;
         let is_nan = allocate(self, NativeFunction::NumberIsNaN)?;
         self.realm.number_is_nan = Some(is_nan);
         let is_nan_atom = self.intern_intrinsic_name(b"isNaN")?;
@@ -1981,6 +2036,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"ReferenceError")?,
                 self.intern_intrinsic_name(b"SyntaxError")?,
                 self.intern_intrinsic_name(b"TypeError")?,
+                self.intern_intrinsic_name(b"RangeError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             object: self.intern_intrinsic_name(b"Object")?,
@@ -2719,6 +2775,41 @@ impl Isolate {
         Ok(Value::from_heap_ref(object.raw()))
     }
 
+    /// Allocates one boxed Number while keeping its data and prototype live across collection.
+    fn allocate_number_object(
+        &mut self,
+        number_data: Value,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(numeric_value(number_data).is_some());
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.number_object,
+                0,
+                0,
+                NumberObject {
+                    number_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
     /// Allocates one Array exotic while keeping its ordinary prototype edge in the pending payload.
     fn create_array_object_with_prototype(
         &mut self,
@@ -2882,6 +2973,61 @@ impl Isolate {
         }
     }
 
+    /// Implements the shared thisNumberValue brand check for Number prototype methods.
+    fn this_number_value(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        if numeric_value(receiver).is_some() {
+            return Ok(receiver);
+        }
+        let raw = receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        let number = self
+            .heap
+            .checked_reference(raw, self.types.number_object)
+            .map_err(|_| ExecutionError::NotObject(receiver))?;
+        self.heap.with_running_scope(|scope| {
+            let number = scope.root(number).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(number, self.types.number_object)
+                    .map(|number| number.number_data)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Converts a Number receiver through the canonical decimal formatter used by ToString.
+    fn number_to_decimal_string(
+        &mut self,
+        receiver: Value,
+        radix: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let number = self.this_number_value(receiver)?;
+        if let Some(radix) = radix
+            && radix.as_immediate() != Some(Immediate::Undefined)
+        {
+            let converted = self.convert_to_number(radix)?;
+            let radix_number = numeric_value(converted)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(radix))?;
+            let integer = if radix_number.is_nan() {
+                0.0
+            } else {
+                radix_number.trunc()
+            };
+            if !(2.0..=36.0).contains(&integer) {
+                return Err(ExecutionError::InvalidNumberRadix(radix));
+            }
+            if integer != 10.0 {
+                return Err(ExecutionError::UnsupportedNumberConversion(radix));
+            }
+        }
+        let mut units = Vec::new();
+        self.append_primitive_string_units(number, &mut units)?;
+        self.allocate_runtime_string(
+            JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Implements the ordinary tag-producing subset of Object.prototype.toString.
     fn object_to_string(&mut self, value: Value) -> Result<Value, ExecutionError> {
         let tag = if let Some(immediate) = value.as_immediate() {
@@ -2891,7 +3037,14 @@ impl Isolate {
                 Immediate::True | Immediate::False => "[object Boolean]",
                 Immediate::Hole | Immediate::Uninitialized => "[object Object]",
             }
-        } else if value.as_i32().is_some() || value.as_f64().is_some() {
+        } else if value.as_i32().is_some()
+            || value.as_f64().is_some()
+            || value.as_heap_ref().is_some_and(|raw| {
+                self.heap
+                    .checked_reference(raw, self.types.number_object)
+                    .is_ok()
+            })
+        {
             "[object Number]"
         } else if let Some(raw) = value.as_heap_ref()
             && self.heap.checked_reference(raw, self.types.string).is_ok()
@@ -3701,7 +3854,13 @@ impl Isolate {
         receiver: Value,
         key: AtomId,
     ) -> Result<Option<Value>, ExecutionError> {
-        let mut current = receiver;
+        let mut current = if numeric_value(receiver).is_some() {
+            self.realm
+                .number_prototype
+                .expect("Number prototype initializes before property access")
+        } else {
+            receiver
+        };
         loop {
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
@@ -5130,6 +5289,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Array(array), ordinary));
         }
+        if let Ok(number) = self.heap.checked_reference(raw, self.types.number_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(number).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.number_object)
+                        .map(|number| number.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Number(number), ordinary));
+        }
         let function = self
             .heap
             .checked_reference(raw, self.types.function)
@@ -5185,6 +5356,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
+                let number = scope.root(number).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(number, self.types.number_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
         }
     }
 
@@ -5221,6 +5403,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
+                let number = scope.root(number).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(number, self.types.number_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -5286,6 +5479,22 @@ impl Isolate {
                     .map_err(ExecutionError::HeapReference)?;
                 Ok(())
             }),
+            ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
+                let number = scope.root(number).map_err(ExecutionError::Root)?;
+                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let number = no_gc
+                        .borrow_mut(number, self.types.number_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    number.ordinary.shape = shape;
+                    number.ordinary.storage = Some(storage);
+                    Ok::<(), ExecutionError>(())
+                })?;
+                scope
+                    .write_barrier(number, storage_local)
+                    .map_err(ExecutionError::HeapReference)?;
+                Ok(())
+            }),
         }
     }
 
@@ -5298,6 +5507,10 @@ impl Isolate {
             .checked_reference(raw, self.types.ordinary_object)
             .is_ok()
             || self.heap.checked_reference(raw, self.types.array).is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.number_object)
+                .is_ok()
             || self
                 .heap
                 .checked_reference(raw, self.types.function)
@@ -6620,9 +6833,24 @@ impl Isolate {
                     site.callee = target;
                     site.new_target = new_target;
                 }
+                FunctionExecutable::Native(NativeFunction::NumberConstructor) => {
+                    let value =
+                        self.primitive_constructor_value(NativeFunction::NumberConstructor, &site)?;
+                    let prototype_atom = self.prototype_atom()?;
+                    let prototype = self
+                        .get_data_property(site.new_target, prototype_atom)?
+                        .filter(|value| self.is_object_value(*value))
+                        .unwrap_or_else(|| {
+                            self.realm
+                                .number_prototype
+                                .expect("Number prototype initializes before construction")
+                        });
+                    let object =
+                        self.allocate_number_object(value, prototype, AllocationSpace::Young)?;
+                    return self.write(caller_base, destination, object);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
-                    | NativeFunction::NumberConstructor
                     | NativeFunction::BooleanConstructor),
                 ) => {
                     let value = self.primitive_constructor_value(native, &site)?;
@@ -6762,6 +6990,15 @@ impl Isolate {
                             Immediate::False
                         }),
                     );
+                }
+                FunctionExecutable::Native(NativeFunction::NumberValueOf) => {
+                    let value = self.this_number_value(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::NumberToString) => {
+                    let radix = self.call_argument(&site, 0)?;
+                    let value = self.number_to_decimal_string(site.this_value, radix)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
@@ -7463,6 +7700,7 @@ fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),
+        ExecutionError::InvalidNumberRadix(_) => Some(NativeErrorKind::Range),
         _ => None,
     }
 }
@@ -8608,6 +8846,36 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    fn boxed_number_data_and_properties_survive_forced_major_allocations() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let prototype = isolate.realm.number_prototype.unwrap();
+        let boxed = isolate
+            .allocate_number_object(Value::from_i32(-7), prototype, AllocationSpace::Young)
+            .unwrap();
+        isolate.fiber.registers.push(boxed);
+        let key = isolate.intern_intrinsic_name(b"field").unwrap();
+        isolate
+            .set_own_data_property(boxed, key, Value::from_i32(11))
+            .unwrap();
+        assert_eq!(isolate.this_number_value(boxed).unwrap().as_i32(), Some(-7));
+        assert_eq!(
+            isolate
+                .get_data_property(boxed, key)
+                .unwrap()
+                .unwrap()
+                .as_i32(),
+            Some(11)
+        );
+        assert_eq!(
+            isolate.object_snapshot(boxed).unwrap().1.prototype,
+            prototype
+        );
     }
 
     #[test]
