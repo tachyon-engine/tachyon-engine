@@ -445,11 +445,12 @@ impl Isolate {
         module: &CompiledModule,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.execute_with_batch::<1>(module, budget)
+        let code = self.load_module(module)?;
+        self.execute_loaded(code, budget)
     }
 
     /// Resolves immutable scope names once and publishes one bounded isolate-local code entry.
-    fn load_code(&mut self, module: &CompiledModule) -> Result<CodeId, ExecutionError> {
+    pub fn load_module(&mut self, module: &CompiledModule) -> Result<CodeId, ExecutionError> {
         if let Some(index) = self
             .loaded_code
             .iter()
@@ -496,6 +497,15 @@ impl Isolate {
         Ok(code)
     }
 
+    /// Executes already-loaded code without repeating module identity or scope-name resolution.
+    pub fn execute_loaded(
+        &mut self,
+        code: CodeId,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        self.execute_loaded_with_batch::<1>(code, budget)
+    }
+
     #[inline(always)]
     fn loaded_code(&self, code: CodeId) -> Result<&LoadedCode, ExecutionError> {
         self.loaded_code
@@ -513,14 +523,25 @@ impl Isolate {
     }
 
     /// Executes with a fixed internal batch size so each monomorphization preserves the same fuel contract.
+    #[cfg(test)]
     fn execute_with_batch<const N: usize>(
         &mut self,
         module: &CompiledModule,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        let code = self.load_module(module)?;
+        self.execute_loaded_with_batch::<N>(code, budget)
+    }
+
+    /// Runs one resolved code entry with a test-selectable dispatch batch monomorphization.
+    fn execute_loaded_with_batch<const N: usize>(
+        &mut self,
+        code: CodeId,
         mut budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
         assert!(N > 0, "interpreter batch size must be non-zero");
-        let code = self.load_code(module)?;
-        self.enter(code, module.entry_function())?;
+        let entry_function = self.loaded_code(code)?.module.entry_function();
+        self.enter(code, entry_function)?;
         loop {
             if budget.fuel == 0 || budget.quantum == 0 {
                 return Ok(RunOutcome::BudgetExhausted);
@@ -1445,7 +1466,7 @@ mod tests {
         };
         let mut isolate = test_isolate();
         let module = state_module(FunctionKind::Module, layout);
-        let code = isolate.load_code(&module).unwrap();
+        let code = isolate.load_module(&module).unwrap();
         isolate.enter(code, FunctionId::new(0)).unwrap();
 
         assert!(isolate.fiber.frames.capacity() >= 1);
@@ -1466,7 +1487,7 @@ mod tests {
         };
         let mut isolate = test_isolate();
         let module = state_module(FunctionKind::Script, layout);
-        let code = isolate.load_code(&module).unwrap();
+        let code = isolate.load_module(&module).unwrap();
         isolate.enter(code, FunctionId::new(0)).unwrap();
         let raw = RawHeapRef::new(16).expect("valid logical address");
         isolate.fiber.registers[0] = Value::from_heap_ref(raw);

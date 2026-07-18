@@ -4,7 +4,7 @@ use tachyon_bytecode::CompiledModule;
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RealmLimits,
+    AtomHashSeed, AtomTableConfig, CodeId, ExecutionBudget, Isolate, IsolateConfig, RealmLimits,
     RunOutcome, StackLimits,
 };
 
@@ -32,6 +32,7 @@ struct PreparedRequest {
     source: Arc<str>,
     mode: MeasurementMode,
     module: Option<CompiledModule>,
+    code: Option<CodeId>,
     isolate: Isolate,
 }
 
@@ -118,8 +119,12 @@ impl TachyonInProcessAdapter {
             .module
             .as_ref()
             .ok_or_else(|| AdapterError::Setup("prepared Tachyon module is missing".into()))?;
+        let code = prepared
+            .code
+            .ok_or_else(|| AdapterError::Setup("prepared Tachyon code is missing".into()))?;
         let start = Instant::now();
-        execute_once(&mut prepared.isolate, module)?;
+        black_box(module);
+        execute_loaded_once(&mut prepared.isolate, code)?;
         Ok(SampleMetrics {
             elapsed_ns: elapsed_ns(start),
             iterations: 1,
@@ -136,9 +141,13 @@ impl TachyonInProcessAdapter {
             .module
             .as_ref()
             .ok_or_else(|| AdapterError::Setup("prepared Tachyon module is missing".into()))?;
+        let code = prepared
+            .code
+            .ok_or_else(|| AdapterError::Setup("prepared Tachyon code is missing".into()))?;
         let start = Instant::now();
+        black_box(module);
         for _ in 0..iterations {
-            execute_once(&mut prepared.isolate, module)?;
+            execute_loaded_once(&mut prepared.isolate, code)?;
         }
         Ok(SampleMetrics {
             elapsed_ns: elapsed_ns(start),
@@ -173,14 +182,23 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
             MeasurementMode::ParseCompileExecute => None,
             MeasurementMode::ColdStart => unreachable!("cold start returned above"),
         };
+        let mut isolate = Isolate::new(self.config.isolate).map_err(|error| {
+            AdapterError::Setup(format!("Tachyon isolate creation failed: {error:?}").into())
+        })?;
+        let code = module
+            .as_ref()
+            .map(|module| isolate.load_module(module))
+            .transpose()
+            .map_err(|error| {
+                AdapterError::Setup(format!("Tachyon module load failed: {error:?}").into())
+            })?;
         self.prepared = Some(PreparedRequest {
             script_id: request.script_id.clone(),
             source: Arc::clone(&request.source),
             mode: request.mode,
             module,
-            isolate: Isolate::new(self.config.isolate).map_err(|error| {
-                AdapterError::Setup(format!("Tachyon isolate creation failed: {error:?}").into())
-            })?,
+            code,
+            isolate,
         });
         Ok(())
     }
@@ -216,7 +234,7 @@ fn source_text(source: Arc<str>) -> SourceText {
 
 /// Executes one complete entry job and rejects throws or impossible unbounded-budget suspension.
 fn execute_once(isolate: &mut Isolate, module: &CompiledModule) -> Result<(), AdapterError> {
-    match isolate
+    let outcome = isolate
         .execute(
             module,
             ExecutionBudget {
@@ -224,8 +242,26 @@ fn execute_once(isolate: &mut Isolate, module: &CompiledModule) -> Result<(), Ad
                 quantum: u32::MAX,
             },
         )
-        .map_err(|error| AdapterError::Engine(format!("execution failed: {error:?}").into()))?
-    {
+        .map_err(|error| AdapterError::Engine(format!("execution failed: {error:?}").into()))?;
+    observe_outcome(outcome)
+}
+
+/// Executes one previously loaded entry without repeating module identity/name resolution.
+fn execute_loaded_once(isolate: &mut Isolate, code: CodeId) -> Result<(), AdapterError> {
+    let outcome = isolate
+        .execute_loaded(
+            code,
+            ExecutionBudget {
+                fuel: u64::MAX,
+                quantum: u32::MAX,
+            },
+        )
+        .map_err(|error| AdapterError::Engine(format!("execution failed: {error:?}").into()))?;
+    observe_outcome(outcome)
+}
+
+fn observe_outcome(outcome: RunOutcome) -> Result<(), AdapterError> {
+    match outcome {
         RunOutcome::Completed(value) => {
             black_box(value);
             Ok(())
