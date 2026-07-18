@@ -2,13 +2,13 @@
 
 use tachyon_bytecode::{
     BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule, FunctionId,
-    FunctionKind, FunctionLayout, FunctionMetadata, Label, MAX_ENCODED_INSTRUCTION_WORDS, Opcode,
-    RegisterId, SourceSpan as BytecodeSourceSpan,
+    FunctionKind, FunctionLayout, FunctionMetadata, HandlerEntry, HandlerKind, Label,
+    MAX_ENCODED_INSTRUCTION_WORDS, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
 use crate::hir::HirAssignmentTarget;
 use crate::{
-    CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction,
+    CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind, HirFunction,
     HirFunctionDeclaration, HirLogicalOperator, HirProgram, HirStatement, HirStatementKind,
     HirSwitchCase, HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind,
     ProgramKind, SourceName, SourceSpan, SourceText,
@@ -58,6 +58,7 @@ fn lower_entry(
             HirStatementKind::Block(_)
                 | HirStatementKind::If { .. }
                 | HirStatementKind::Switch { .. }
+                | HirStatementKind::Try { .. }
                 | HirStatementKind::Break
                 | HirStatementKind::Throw(_)
         )
@@ -87,12 +88,15 @@ fn lower_entry(
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "bytecode words",
         })?;
+    let handler_count = statements_handler_count(hir.statements())?;
+    let max_handler_depth = statements_handler_depth(hir.statements())?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(word_capacity, hir_label_count(hir)?),
         constants,
         scope_names,
         locals: Vec::with_capacity(hir_binding_count(hir)?),
         break_targets: Vec::with_capacity(statements_switch_count(hir.statements())?),
+        handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
     };
@@ -133,6 +137,7 @@ fn lower_entry(
                         HirStatementKind::Block(_)
                         | HirStatementKind::If { .. }
                         | HirStatementKind::Switch { .. }
+                        | HirStatementKind::Try { .. }
                         | HirStatementKind::Break
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
@@ -152,6 +157,7 @@ fn lower_entry(
         &[result.index()],
         SourceSpan { start: 0, end: 0 },
     )?;
+    let handlers = freeze_handlers(lowerer.handlers)?;
     let (bytecode, source_map, register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
     let kind = match hir.kind() {
@@ -163,10 +169,11 @@ fn lower_entry(
         kind,
         layout: FunctionLayout {
             register_count,
+            max_handler_depth,
             ..FunctionLayout::default()
         },
         source_map,
-        handlers: Default::default(),
+        handlers,
         suspend_points: Default::default(),
         feedback_sites: Default::default(),
     };
@@ -190,6 +197,8 @@ fn lower_function(
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function bytecode words",
         })?;
+    let handler_count = statements_handler_count(&function.body)?;
+    let max_handler_depth = statements_handler_depth(&function.body)?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(
             instruction_capacity,
@@ -207,6 +216,7 @@ fn lower_function(
                 })?,
         ),
         break_targets: Vec::with_capacity(statements_switch_count(&function.body)?),
+        handlers: Vec::with_capacity(handler_count),
         next_register: 0,
         source_name: source.name().clone(),
     };
@@ -229,6 +239,7 @@ fn lower_function(
         let undefined = lowerer.load_undefined(function.span)?;
         lowerer.emit(Opcode::Return, &[undefined.index()], function.span)?;
     }
+    let handlers = freeze_handlers(lowerer.handlers)?;
     let (bytecode, source_map, register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
     let function_id = function
@@ -246,10 +257,11 @@ fn lower_function(
                 register_count,
                 argument_count: u32::try_from(function.parameters.len())
                     .map_err(|_| CompileError::RegisterOverflow)?,
+                max_handler_depth,
                 ..FunctionLayout::default()
             },
             source_map,
-            handlers: Default::default(),
+            handlers,
             suspend_points: Default::default(),
             feedback_sites: Default::default(),
         },
@@ -262,6 +274,7 @@ struct Lowerer<'a> {
     scope_names: &'a mut Vec<std::sync::Arc<str>>,
     locals: Vec<LocalBinding>,
     break_targets: Vec<Label>,
+    handlers: Vec<Option<HandlerEntry>>,
     next_register: u32,
     source_name: SourceName,
 }
@@ -373,6 +386,17 @@ impl Lowerer<'_> {
                 self.entry_switch_statement(discriminant, cases, result, statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => self.entry_try_statement(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                result,
+                statement.span,
+            ),
             HirStatementKind::Break => {
                 let target = self.current_break_target(statement.span)?;
                 self.emit_jump(target, statement.span)?;
@@ -473,6 +497,16 @@ impl Lowerer<'_> {
                 self.function_switch_statement(discriminant, cases, statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => self.function_try_statement(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                statement.span,
+            ),
             HirStatementKind::Break => {
                 let target = self.current_break_target(statement.span)?;
                 self.emit_jump(target, statement.span)?;
@@ -518,6 +552,173 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(end_label)
             .map_err(CompileError::Builder)
+    }
+
+    /// Lowers a script try/catch into one immutable range while sharing UpdateEmpty state.
+    fn entry_try_statement(
+        &mut self,
+        block: &[HirStatement],
+        handler: Option<&HirCatchClause>,
+        finalizer: Option<&[HirStatement]>,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        if finalizer.is_some() {
+            return Err(self.unsupported(span, "finally statement"));
+        }
+        let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
+        let handler_slot = self.reserve_handler();
+        let protected_start = self.emit_marker(span)?;
+        let try_terminal = self.entry_statement_list(block, result)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.emit_jump(end, span)?;
+        let checkpoint = self.locals.len();
+        let handler_offset = self.emit_catch_binding(handler)?;
+        let catch_terminal = self.entry_statement_list(&handler.body, result)?;
+        self.locals.truncate(checkpoint);
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.publish_catch_handler(handler_slot, protected_start, handler_offset)?;
+        Ok(try_terminal && catch_terminal)
+    }
+
+    /// Lowers an ordinary-function try/catch with identical handler and lexical checkpoints.
+    fn function_try_statement(
+        &mut self,
+        block: &[HirStatement],
+        handler: Option<&HirCatchClause>,
+        finalizer: Option<&[HirStatement]>,
+        span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        if finalizer.is_some() {
+            return Err(self.unsupported(span, "finally statement"));
+        }
+        let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
+        let handler_slot = self.reserve_handler();
+        let protected_start = self.emit_marker(span)?;
+        let try_terminal = self.function_statement_list(block)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.emit_jump(end, span)?;
+        let checkpoint = self.locals.len();
+        let handler_offset = self.emit_catch_binding(handler)?;
+        let catch_terminal = self.function_statement_list(&handler.body)?;
+        self.locals.truncate(checkpoint);
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.publish_catch_handler(handler_slot, protected_start, handler_offset)?;
+        Ok(try_terminal && catch_terminal)
+    }
+
+    fn entry_statement_list(
+        &mut self,
+        statements: &[HirStatement],
+        result: RegisterId,
+    ) -> Result<bool, CompileError> {
+        let checkpoint = self.locals.len();
+        let mut terminal = false;
+        for statement in statements {
+            terminal = self.entry_statement(statement, result)?;
+            if terminal {
+                break;
+            }
+        }
+        self.locals.truncate(checkpoint);
+        Ok(terminal)
+    }
+
+    fn function_statement_list(
+        &mut self,
+        statements: &[HirStatement],
+    ) -> Result<bool, CompileError> {
+        let checkpoint = self.locals.len();
+        let mut terminal = false;
+        for statement in statements {
+            terminal = self.function_statement(statement)?;
+            if terminal {
+                break;
+            }
+        }
+        self.locals.truncate(checkpoint);
+        Ok(terminal)
+    }
+
+    /// Emits the handler entry and optionally binds its pending exception register lexically.
+    fn emit_catch_binding(
+        &mut self,
+        handler: &HirCatchClause,
+    ) -> Result<tachyon_bytecode::WordOffset, CompileError> {
+        let exception = self.register()?;
+        let offset = self
+            .builder
+            .emit(
+                Opcode::LoadException,
+                &[exception.index()],
+                BytecodeSourceSpan {
+                    start: handler.span.start,
+                    end: handler.span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        if let Some(parameter) = &handler.parameter {
+            self.locals.push(LocalBinding {
+                name: parameter.name.clone(),
+                register: exception,
+                mutable: true,
+            });
+        }
+        Ok(offset)
+    }
+
+    fn reserve_handler(&mut self) -> usize {
+        let index = self.handlers.len();
+        self.handlers.push(None);
+        index
+    }
+
+    fn emit_marker(
+        &mut self,
+        span: SourceSpan,
+    ) -> Result<tachyon_bytecode::WordOffset, CompileError> {
+        self.builder
+            .emit(
+                Opcode::Nop,
+                &[],
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)
+    }
+
+    fn publish_catch_handler(
+        &mut self,
+        slot: usize,
+        protected_start: tachyon_bytecode::WordOffset,
+        handler: tachyon_bytecode::WordOffset,
+    ) -> Result<(), CompileError> {
+        let entry = HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        };
+        *self
+            .handlers
+            .get_mut(slot)
+            .ok_or(CompileError::UnboundExceptionHandler)? = Some(entry);
+        Ok(())
+    }
+
+    fn unsupported(&self, span: SourceSpan, syntax: &'static str) -> CompileError {
+        CompileError::UnsupportedSyntax {
+            source_name: self.source_name.clone(),
+            span,
+            syntax,
+        }
     }
 
     /// Emits switch dispatch and script clause bodies while preserving UpdateEmpty completion state.
@@ -1072,6 +1273,154 @@ fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
     statements_instruction_count(hir.statements())
 }
 
+/// Adds every owned try child with the same checked collection-specific counter.
+fn try_children_count(
+    block: &[HirStatement],
+    handler: Option<&HirCatchClause>,
+    finalizer: Option<&[HirStatement]>,
+    collection: &'static str,
+    counter: fn(&[HirStatement]) -> Result<usize, CompileError>,
+) -> Result<usize, CompileError> {
+    let mut count = counter(block)?;
+    if let Some(handler) = handler {
+        count = checked_count_add(count, counter(&handler.body)?, collection)?;
+    }
+    if let Some(finalizer) = finalizer {
+        count = checked_count_add(count, counter(finalizer)?, collection)?;
+    }
+    Ok(count)
+}
+
+fn freeze_handlers(
+    handlers: Vec<Option<HandlerEntry>>,
+) -> Result<std::sync::Arc<[HandlerEntry]>, CompileError> {
+    let mut frozen = Vec::with_capacity(handlers.len());
+    for handler in handlers {
+        frozen.push(handler.ok_or(CompileError::UnboundExceptionHandler)?);
+    }
+    Ok(frozen.into())
+}
+
+/// Counts handler records exactly, including nested ranges in every try arm.
+fn statements_handler_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Block(statements) => statements_handler_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut nested = statements_handler_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_handler_count(core::slice::from_ref(alternate))?,
+                        "exception handlers",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                let mut nested = 0;
+                for case in cases.iter() {
+                    nested = checked_count_add(
+                        nested,
+                        statements_handler_count(&case.consequent)?,
+                        "exception handlers",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let nested = try_children_count(
+                    block,
+                    handler.as_ref(),
+                    finalizer.as_deref(),
+                    "exception handlers",
+                    statements_handler_count,
+                )?;
+                checked_count_add(nested, usize::from(handler.is_some()), "exception handlers")?
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, nested, "exception handlers")?;
+    }
+    Ok(count)
+}
+
+/// Computes exact simultaneous catch-range depth rather than total handler count.
+fn statements_handler_depth(statements: &[HirStatement]) -> Result<u32, CompileError> {
+    let mut depth = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Block(statements) => statements_handler_depth(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let consequent = statements_handler_depth(core::slice::from_ref(consequent))?;
+                let alternate = alternate
+                    .as_ref()
+                    .map(|statement| statements_handler_depth(core::slice::from_ref(statement)))
+                    .transpose()?
+                    .unwrap_or(0);
+                consequent.max(alternate)
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                let mut nested = 0;
+                for case in cases.iter() {
+                    nested = nested.max(statements_handler_depth(&case.consequent)?);
+                }
+                nested
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let block = statements_handler_depth(block)?
+                    .checked_add(u32::from(handler.is_some()))
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "exception handler depth",
+                    })?;
+                let handler = handler
+                    .as_ref()
+                    .map(|handler| statements_handler_depth(&handler.body))
+                    .transpose()?
+                    .unwrap_or(0);
+                let finalizer = finalizer
+                    .as_ref()
+                    .map(|statements| statements_handler_depth(statements))
+                    .transpose()?
+                    .unwrap_or(0);
+                block.max(handler).max(finalizer)
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        depth = depth.max(nested);
+    }
+    Ok(depth)
+}
+
 /// Computes a checked upper bound for module scope-name interning before HIR lowering starts.
 fn hir_scope_name_capacity(hir: &HirProgram) -> Result<usize, CompileError> {
     let mut count = statements_scope_name_count(hir.statements())?;
@@ -1132,6 +1481,17 @@ fn statements_scope_name_count(statements: &[HirStatement]) -> Result<usize, Com
                 discriminant,
                 cases,
             } => switch_scope_name_count(discriminant, cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "scope names",
+                statements_scope_name_count,
+            )?,
             HirStatementKind::Return(argument) => argument
                 .as_ref()
                 .map(expression_scope_name_count)
@@ -1272,6 +1632,24 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 discriminant,
                 cases,
             } => switch_instruction_count(discriminant, cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let nested = try_children_count(
+                    block,
+                    handler.as_ref(),
+                    finalizer.as_deref(),
+                    "bytecode instructions",
+                    statements_instruction_count,
+                )?;
+                checked_count_add(
+                    nested,
+                    if handler.is_some() { 3 } else { 0 },
+                    "bytecode instructions",
+                )?
+            }
             HirStatementKind::Break => 1,
             HirStatementKind::Empty => 0,
         };
@@ -1452,6 +1830,17 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 discriminant,
                 cases,
             } => switch_literal_count(discriminant, cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "bytecode constants",
+                statements_literal_count,
+            )?,
             HirStatementKind::FunctionDeclaration(_) => 0,
             HirStatementKind::Break | HirStatementKind::Empty => 0,
         };
@@ -1522,6 +1911,28 @@ fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, Compil
                 nested
             }
             HirStatementKind::Switch { cases, .. } => switch_binding_count(cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let nested = try_children_count(
+                    block,
+                    handler.as_ref(),
+                    finalizer.as_deref(),
+                    "local bindings",
+                    statements_binding_count,
+                )?;
+                checked_count_add(
+                    nested,
+                    usize::from(
+                        handler
+                            .as_ref()
+                            .is_some_and(|handler| handler.parameter.is_some()),
+                    ),
+                    "local bindings",
+                )?
+            }
             HirStatementKind::Expression(_)
             | HirStatementKind::Break
             | HirStatementKind::Return(_)
@@ -1626,6 +2037,26 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                     "bytecode labels",
                 )?;
             }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                count = checked_count_add(
+                    count,
+                    try_children_count(
+                        block,
+                        handler.as_ref(),
+                        finalizer.as_deref(),
+                        "bytecode labels",
+                        statements_label_count,
+                    )?,
+                    "bytecode labels",
+                )?;
+                if handler.is_some() {
+                    count = checked_count_add(count, 1, "bytecode labels")?;
+                }
+            }
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Empty => {}
@@ -1678,6 +2109,17 @@ fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, Com
                 nested
             }
             HirStatementKind::Switch { cases, .. } => switch_expression_count(cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "entry completion instructions",
+                statements_expression_count,
+            )?,
             HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
@@ -1735,6 +2177,17 @@ fn statements_switch_count(statements: &[HirStatement]) -> Result<usize, Compile
                 }
                 count
             }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "switch control targets",
+                statements_switch_count,
+            )?,
             HirStatementKind::Expression(_)
             | HirStatementKind::VariableDeclaration(_)
             | HirStatementKind::FunctionDeclaration(_)

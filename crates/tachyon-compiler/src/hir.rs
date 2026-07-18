@@ -94,10 +94,22 @@ pub enum HirStatementKind {
         discriminant: HirExpression,
         cases: Arc<[HirSwitchCase]>,
     },
+    Try {
+        block: Arc<[HirStatement]>,
+        handler: Option<HirCatchClause>,
+        finalizer: Option<Arc<[HirStatement]>>,
+    },
     Break,
     Return(Option<HirExpression>),
     Throw(HirExpression),
     Empty,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirCatchClause {
+    pub span: SourceSpan,
+    pub parameter: Option<HirBinding>,
+    pub body: Arc<[HirStatement]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -350,6 +362,9 @@ fn lower_statement(
         Statement::SwitchStatement(statement) => {
             lower_switch_statement(statement, source, next_binding, functions)
         }
+        Statement::TryStatement(statement) => {
+            lower_try_statement(statement, source, next_binding, functions)
+        }
         Statement::BreakStatement(statement) if statement.label.is_none() => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
@@ -382,6 +397,88 @@ fn lower_statement(
             "statement",
         )),
     }
+}
+
+/// Owns try/catch/finally bodies while restricting the first catch slice to identifier binding.
+fn lower_try_statement(
+    statement: &oxc::ast::ast::TryStatement<'_>,
+    source: &SourceText,
+    next_binding: &mut u32,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirStatement, CompileError> {
+    let mut block = Vec::with_capacity(statement.block.body.len());
+    for statement in &statement.block.body {
+        block.push(lower_statement(
+            statement,
+            source,
+            next_binding,
+            functions,
+            false,
+        )?);
+    }
+    let handler = statement
+        .handler
+        .as_ref()
+        .map(|handler| {
+            let parameter = handler
+                .param
+                .as_ref()
+                .map(|parameter| match &parameter.pattern {
+                    BindingPattern::BindingIdentifier(identifier) => new_binding(
+                        identifier.name.as_str(),
+                        source_span(identifier.span),
+                        next_binding,
+                    ),
+                    _ => Err(unsupported(
+                        source.name(),
+                        source_span(parameter.span),
+                        "catch binding pattern",
+                    )),
+                })
+                .transpose()?;
+            let mut body = Vec::with_capacity(handler.body.body.len());
+            for statement in &handler.body.body {
+                body.push(lower_statement(
+                    statement,
+                    source,
+                    next_binding,
+                    functions,
+                    false,
+                )?);
+            }
+            Ok(HirCatchClause {
+                span: source_span(handler.span),
+                parameter,
+                body: body.into(),
+            })
+        })
+        .transpose()?;
+    let finalizer = statement
+        .finalizer
+        .as_ref()
+        .map(|finalizer| {
+            let mut statements = Vec::with_capacity(finalizer.body.len());
+            for statement in &finalizer.body {
+                statements.push(lower_statement(
+                    statement,
+                    source,
+                    next_binding,
+                    functions,
+                    false,
+                )?);
+            }
+            Ok::<Arc<[HirStatement]>, CompileError>(statements.into())
+        })
+        .transpose()?;
+    Ok(HirStatement {
+        span: source_span(statement.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::Try {
+            block: block.into(),
+            handler,
+            finalizer,
+        },
+    })
 }
 
 /// Copies switch clause order exactly because default placement controls subsequent fallthrough.

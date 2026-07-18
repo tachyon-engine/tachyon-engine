@@ -138,6 +138,8 @@ pub enum Opcode {
     SetById = 29,
     /// Calls callee at receiver+1 with arguments following it while preserving `this`.
     CallWithReceiver = 30,
+    /// Moves the fiber's pending thrown value into a catch-local register.
+    LoadException = 31,
 }
 
 impl Opcode {
@@ -171,7 +173,7 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
-            Self::CreateObject => 1,
+            Self::CreateObject | Self::LoadException => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver => 3,
         }
     }
@@ -214,6 +216,7 @@ impl Opcode {
             28 => Some(Self::GetById),
             29 => Some(Self::SetById),
             30 => Some(Self::CallWithReceiver),
+            31 => Some(Self::LoadException),
             _ => None,
         }
     }
@@ -571,6 +574,11 @@ impl BytecodeBuilder {
         Ok(())
     }
 
+    /// Returns the next instruction boundary for immutable side-table construction.
+    pub fn current_offset(&self) -> Result<WordOffset, BuilderError> {
+        self.next_word_offset()
+    }
+
     /// Emits an instruction in its smallest representation and records its source span without retaining AST data.
     pub fn emit(
         &mut self,
@@ -716,7 +724,7 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::Return
             | Opcode::Throw => &[0],
-            Opcode::CreateObject => &[0],
+            Opcode::CreateObject | Opcode::LoadException => &[0],
             Opcode::Move | Opcode::Not | Opcode::Negate => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div | Opcode::StrictEqual => {
@@ -1553,7 +1561,7 @@ fn verify_instruction(
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
-        Opcode::CreateObject => check_register(operands[0])?,
+        Opcode::CreateObject | Opcode::LoadException => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;

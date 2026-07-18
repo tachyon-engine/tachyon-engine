@@ -607,4 +607,45 @@ mod tests {
         let value = execute_source(24, "1 / 0 === Infinity && 1 / -0 === -Infinity;");
         assert_eq!(value.as_immediate(), Some(tachyon_value::Immediate::True));
     }
+
+    #[test]
+    fn try_catch_preserves_binding_normal_path_and_nested_completion() {
+        assert_eq!(
+            execute_source(
+                25,
+                "let result = 0; try { throw 42; } catch (error) { result = error; } result;",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                26,
+                "let result = 1; try { result = 7; } catch (error) { result = 9; } result;",
+            )
+            .as_i32(),
+            Some(7)
+        );
+        assert_eq!(
+            execute_source(27, "try { throw 5; } catch { 8; }").as_i32(),
+            Some(8)
+        );
+        assert_eq!(
+            execute_source(
+                28,
+                "let result = 0; try { try { throw 3; } catch (inner) { throw inner; } } catch (outer) { result = outer; } result;",
+            )
+            .as_i32(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn callee_throw_enters_caller_catch_without_native_unwind() {
+        let value = execute_source(
+            29,
+            "function fail() { throw 42; } let result = 0; try { fail(); } catch (error) { result = error; } result;",
+        );
+        assert_eq!(value.as_i32(), Some(42));
+    }
 }

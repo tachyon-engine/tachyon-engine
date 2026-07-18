@@ -64,7 +64,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
     match opcode {
         Opcode::Nop => {}
         Opcode::LoadUndefined => write!(output, " r{}", operands[0])?,
-        Opcode::CreateObject => write!(output, " r{}", operands[0])?,
+        Opcode::CreateObject | Opcode::LoadException => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,

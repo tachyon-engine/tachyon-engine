@@ -20,10 +20,10 @@ use std::sync::Arc;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentTarget, HirBinaryOperator, HirBinding,
-    HirExpression, HirExpressionKind, HirFunction, HirFunctionDeclaration, HirLogicalOperator,
-    HirProgram, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
-    HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId,
-    ScopeId, StatementCompletion,
+    HirCatchClause, HirExpression, HirExpressionKind, HirFunction, HirFunctionDeclaration,
+    HirLogicalOperator, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
+    HirUnaryOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
+    ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -48,6 +48,7 @@ pub enum CompileError {
     LoweringCapacityOverflow {
         collection: &'static str,
     },
+    UnboundExceptionHandler,
 }
 
 /// The stateless frontend boundary; source and all host configuration must be supplied per call.
@@ -465,6 +466,47 @@ mod tests {
             error,
             CompileError::UnsupportedSyntax {
                 syntax: "assignment to immutable local",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compiler_freezes_nested_try_catch_ranges_and_exact_depth() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "try { try { throw 1; } catch (inner) { throw inner; } } catch (outer) { outer; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let function = module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap();
+        assert_eq!(function.handlers().len(), 2);
+        assert_eq!(function.layout().max_handler_depth, 2);
+        let outer = function.handlers()[0];
+        let inner = function.handlers()[1];
+        assert!(outer.protected_start.index() < inner.protected_start.index());
+        assert!(inner.protected_end.index() < outer.protected_end.index());
+        let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+        assert_eq!(disassembly.matches("LoadException").count(), 2);
+    }
+
+    #[test]
+    fn compiler_keeps_finally_explicitly_unsupported_until_completion_replay() {
+        let error = Compiler
+            .compile(
+                source(MediaType::JavaScript, "try { 1; } finally { 2; }"),
+                CompileOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnsupportedSyntax {
+                syntax: "finally statement",
                 ..
             }
         ));

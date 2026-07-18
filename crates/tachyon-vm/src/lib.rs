@@ -27,8 +27,8 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32};
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout, Opcode, RegisterId,
-    WordOffset, decode_instruction,
+    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout, HandlerEntry,
+    HandlerKind, Opcode, RegisterId, WordOffset, decode_instruction,
 };
 use tachyon_gc::{
     AllocationSpace, GcRef, GcType, Heap, HeapLimit, HeapReferenceError, ManagedAllocationError,
@@ -145,6 +145,8 @@ pub enum ExecutionError {
     HeapReference(HeapReferenceError),
     Root(RootError),
     NoGcBorrow(NoGcBorrowError),
+    MissingPendingException,
+    UnsupportedExceptionHandler(HandlerKind),
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
     LoadedModuleLimit { limit: u32 },
@@ -198,6 +200,7 @@ struct CallSite {
     callee_register: u32,
     argument_count: u32,
     this_value: Value,
+    call_site: WordOffset,
 }
 
 impl Trace for FunctionObject {
@@ -353,6 +356,7 @@ struct Frame {
     argument_count: u32,
     handler_base: u32,
     completion_base: u32,
+    call_site: Option<WordOffset>,
 }
 
 /// The dynamic handler state selected from immutable bytecode handler metadata.
@@ -377,6 +381,7 @@ struct Fiber {
     registers: Vec<Value>,
     handlers: Vec<ActiveHandler>,
     completions: Vec<Completion>,
+    pending_exception: Option<Value>,
 }
 
 impl Fiber {
@@ -416,6 +421,7 @@ impl Fiber {
                 Completion::Return(value) | Completion::Throw(value) => value.trace(tracer),
             }
         }
+        self.pending_exception.trace(tracer);
     }
 }
 
@@ -825,6 +831,7 @@ impl Isolate {
             budget.quantum -= 1;
             if let Some(outcome) = self.dispatch(
                 frame.code,
+                frame.pc,
                 instruction.opcode,
                 instruction.operands,
                 frame.base,
@@ -840,11 +847,13 @@ impl Isolate {
     fn dispatch(
         &mut self,
         code: CodeId,
+        instruction_offset: WordOffset,
         opcode: Opcode,
         operands: [u32; 3],
         base: u32,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         match opcode {
+            Opcode::Nop => {}
             Opcode::LoadUndefined => self.write(
                 base,
                 operands[0],
@@ -941,6 +950,14 @@ impl Isolate {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
             }
+            Opcode::LoadException => {
+                let value = self
+                    .fiber
+                    .pending_exception
+                    .take()
+                    .ok_or(ExecutionError::MissingPendingException)?;
+                self.write(base, operands[0], value)?;
+            }
             Opcode::GetById => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
@@ -961,10 +978,18 @@ impl Isolate {
                 operands[1],
                 operands[2],
                 Value::from_immediate(Immediate::Undefined),
+                instruction_offset,
             )?,
             Opcode::CallWithReceiver => {
                 let receiver = self.read(base, operands[1])?;
-                self.call(base, operands[0], operands[1] + 1, operands[2], receiver)?;
+                self.call(
+                    base,
+                    operands[0],
+                    operands[1] + 1,
+                    operands[2],
+                    receiver,
+                    instruction_offset,
+                )?;
             }
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
@@ -975,7 +1000,7 @@ impl Isolate {
             }
             Opcode::Throw => {
                 let value = self.read(base, operands[0])?;
-                return Ok(self.unhandled_throw(value));
+                return self.throw_value(value, instruction_offset);
             }
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
@@ -1021,6 +1046,7 @@ impl Isolate {
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
+        self.fiber.pending_exception = None;
         self.reserve_entry_state(layout, register_count)?;
         self.fiber
             .registers
@@ -1039,6 +1065,7 @@ impl Isolate {
             argument_count: 0,
             handler_base: 0,
             completion_base: 0,
+            call_site: None,
         });
         Ok(())
     }
@@ -1089,6 +1116,7 @@ impl Isolate {
         callee_register: u32,
         argument_count: u32,
         this_value: Value,
+        call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         let callee = self.read(caller_base, callee_register)?;
         let raw = callee
@@ -1129,6 +1157,7 @@ impl Isolate {
                 callee_register,
                 argument_count,
                 this_value,
+                call_site,
             },
         )
     }
@@ -1200,6 +1229,7 @@ impl Isolate {
             argument_count: site.argument_count,
             handler_base: self.fiber.handlers.len() as u32,
             completion_base: self.fiber.completions.len() as u32,
+            call_site: Some(site.call_site),
         });
         Ok(())
     }
@@ -1229,6 +1259,74 @@ impl Isolate {
             .base;
         self.write(caller_base, destination.index(), value)?;
         Ok(None)
+    }
+
+    /// Propagates a thrown value through explicit frames until an immutable handler range matches.
+    #[cold]
+    #[inline(never)]
+    fn throw_value(
+        &mut self,
+        value: Value,
+        mut instruction_offset: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        loop {
+            let frame = *self
+                .fiber
+                .frames
+                .last()
+                .expect("throw dispatch always has an active frame");
+            if let Some(handler) = self.find_exception_handler(frame, instruction_offset)? {
+                if handler.kind != HandlerKind::Catch {
+                    return Err(ExecutionError::UnsupportedExceptionHandler(handler.kind));
+                }
+                let active = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("matched handler retains its frame");
+                active.pc = handler.handler;
+                self.fiber.handlers.truncate(frame.handler_base as usize);
+                self.fiber
+                    .completions
+                    .truncate(frame.completion_base as usize);
+                self.fiber.pending_exception = Some(value);
+                return Ok(None);
+            }
+            if self.fiber.frames.len() == 1 {
+                return Ok(self.unhandled_throw(value));
+            }
+            let frame = self
+                .fiber
+                .frames
+                .pop()
+                .expect("non-entry throw retains a callee frame");
+            self.fiber.registers.truncate(frame.base as usize);
+            self.fiber.handlers.truncate(frame.handler_base as usize);
+            self.fiber
+                .completions
+                .truncate(frame.completion_base as usize);
+            instruction_offset = frame
+                .call_site
+                .expect("every non-entry frame records its caller call-site");
+        }
+    }
+
+    /// Selects the innermost half-open handler range for one verified function offset.
+    #[inline]
+    fn find_exception_handler(
+        &self,
+        frame: Frame,
+        instruction_offset: WordOffset,
+    ) -> Result<Option<HandlerEntry>, ExecutionError> {
+        let function = self
+            .loaded_code(frame.code)?
+            .module
+            .function(frame.function)
+            .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
+        Ok(function.handlers().iter().rev().copied().find(|handler| {
+            handler.protected_start.index() <= instruction_offset.index()
+                && instruction_offset.index() < handler.protected_end.index()
+        }))
     }
 
     /// Preserves the active fiber as the root owner until the host observes the unhandled value.
@@ -1733,6 +1831,21 @@ mod tests {
         assert_eq!(isolate.fiber.frames.last().unwrap().this_value, receiver);
     }
 
+    fn assert_catch_batch<const N: usize>() {
+        for module in [direct_catch_module(), cross_frame_catch_module()] {
+            let outcome = test_isolate()
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 32,
+                        quantum: 32,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+        }
+    }
+
     #[test]
     fn interpreter_executes_int32_arithmetic() {
         assert_batch_result::<1>();
@@ -1867,6 +1980,15 @@ mod tests {
     }
 
     #[test]
+    fn catch_dispatch_and_cross_frame_throw_work_for_every_dispatch_batch() {
+        assert_catch_batch::<1>();
+        assert_catch_batch::<2>();
+        assert_catch_batch::<4>();
+        assert_catch_batch::<8>();
+        assert_catch_batch::<16>();
+    }
+
+    #[test]
     fn property_publication_roots_receiver_and_heap_value_across_forced_major() {
         let mut isolate = test_isolate();
         isolate
@@ -1947,6 +2069,7 @@ mod tests {
             Completion::Return(Value::from_heap_ref(raw)),
             Completion::Throw(Value::from_heap_ref(raw)),
         ]);
+        isolate.fiber.pending_exception = Some(Value::from_heap_ref(raw));
         let mut tracer = RewritingTracer;
 
         isolate.trace_roots(&mut tracer);
@@ -1961,6 +2084,10 @@ mod tests {
             isolate.fiber.completions[0],
             Completion::Return(value) if value.as_heap_ref() == Some(rewritten)
         ));
+        assert_eq!(
+            isolate.fiber.pending_exception.and_then(Value::as_heap_ref),
+            Some(rewritten)
+        );
         assert!(matches!(
             isolate.fiber.completions[1],
             Completion::Throw(value) if value.as_heap_ref() == Some(rewritten)
@@ -2355,6 +2482,109 @@ mod tests {
                 bytecode,
                 metadata,
             )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a same-frame catch range with a pending-exception load at its handler target.
+    fn direct_catch_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(10, 1);
+        let end = builder.new_label().unwrap();
+        let protected_start = builder.emit(Opcode::Nop, &[], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[0, 42], span).unwrap();
+        builder.emit(Opcode::Throw, &[0], span).unwrap();
+        builder.emit_jump(end, span).unwrap();
+        let handler = builder.emit(Opcode::LoadException, &[1], span).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        builder.bind_label(end).unwrap();
+        builder.emit(Opcode::LoadUndefined, &[2], span).unwrap();
+        builder.emit(Opcode::Return, &[2], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let mut metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        CompiledModule::new(
+            Arc::from("direct catch"),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a caller handler around a call whose callee throws through its explicit frame.
+    fn cross_frame_catch_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(12, 1);
+        let end = entry.new_label().unwrap();
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        let protected_start = entry.emit(Opcode::Nop, &[], span).unwrap();
+        entry.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
+        entry.emit_jump(end, span).unwrap();
+        let handler = entry.emit(Opcode::LoadException, &[2], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+        entry.bind_label(end).unwrap();
+        entry.emit(Opcode::LoadUndefined, &[3], span).unwrap();
+        entry.emit(Opcode::Return, &[3], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callee = BytecodeBuilder::with_capacity(2, 0);
+        callee.emit(Opcode::LoadImmediate, &[0, 42], span).unwrap();
+        callee.emit(Opcode::Throw, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+        let mut entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        entry_metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        let callee_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callee_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callee_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("cross-frame catch"),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
             FunctionId::new(0),
         )
         .unwrap()
