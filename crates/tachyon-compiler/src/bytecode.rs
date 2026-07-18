@@ -1986,6 +1986,7 @@ impl Lowerer<'_> {
             HirBinaryOperator::LessEqual => Opcode::LessEqual,
             HirBinaryOperator::GreaterEqual => Opcode::GreaterEqual,
             HirBinaryOperator::InstanceOf => Opcode::InstanceOf,
+            HirBinaryOperator::In => Opcode::HasProperty,
             _ => {
                 return Err(CompileError::UnsupportedSyntax {
                     source_name: self.source_name.clone(),

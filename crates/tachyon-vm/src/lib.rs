@@ -2496,6 +2496,20 @@ impl Isolate {
                     }),
                 )?;
             }
+            Opcode::HasProperty => {
+                let key = self.property_key_atom(self.read(base, operands[1])?)?;
+                let receiver = self.read(base, operands[2])?;
+                let result = self.get_data_property(receiver, key)?.is_some();
+                self.write(
+                    base,
+                    operands[0],
+                    Value::from_immediate(if result {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    }),
+                )?;
+            }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;

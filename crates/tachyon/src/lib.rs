@@ -1338,6 +1338,19 @@ mod tests {
     }
 
     #[test]
+    /// Covers own and inherited ordinary data-property membership checks.
+    fn in_operator_checks_supported_objects() {
+        assert_eq!(
+            execute_source(111, "'answer' in { answer: 42 };").as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(112, "'missing' in { answer: 42 };").as_immediate(),
+            Some(tachyon_value::Immediate::False)
+        );
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

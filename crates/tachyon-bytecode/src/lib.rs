@@ -185,6 +185,7 @@ pub enum Opcode {
     GreaterEqual = 59,
     LooseEqual = 60,
     LooseNotEqual = 61,
+    HasProperty = 62,
 }
 
 impl Opcode {
@@ -240,7 +241,7 @@ impl Opcode {
             | Self::GreaterThan
             | Self::LessEqual
             | Self::GreaterEqual => 3,
-            Self::LooseEqual | Self::LooseNotEqual => 3,
+            Self::LooseEqual | Self::LooseNotEqual | Self::HasProperty => 3,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -318,6 +319,7 @@ impl Opcode {
             59 => Some(Self::GreaterEqual),
             60 => Some(Self::LooseEqual),
             61 => Some(Self::LooseNotEqual),
+            62 => Some(Self::HasProperty),
             _ => None,
         }
     }
@@ -871,6 +873,7 @@ impl BytecodeBuilder {
             | Opcode::GreaterEqual
             | Opcode::LooseEqual
             | Opcode::LooseNotEqual
+            | Opcode::HasProperty
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
@@ -1864,6 +1867,7 @@ fn verify_instruction(
         | Opcode::GreaterEqual
         | Opcode::LooseEqual
         | Opcode::LooseNotEqual
+        | Opcode::HasProperty
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {
