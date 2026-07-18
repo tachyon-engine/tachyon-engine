@@ -443,6 +443,10 @@ impl Isolate {
                 }
                 return self.return_from_callee(value);
             }
+            Opcode::Throw => {
+                let value = self.read(base, operands[0])?;
+                return Ok(self.unhandled_throw(value));
+            }
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
@@ -665,6 +669,13 @@ impl Isolate {
             .base;
         self.write(caller_base, destination.index(), value)?;
         Ok(None)
+    }
+
+    /// Preserves the active fiber as the root owner until the host observes the unhandled value.
+    #[cold]
+    #[inline(never)]
+    fn unhandled_throw(&mut self, value: Value) -> Option<RunOutcome> {
+        Some(RunOutcome::Thrown(value))
     }
 
     /// Reserves the exact entry-function execution windows before any opcode can push into them.
@@ -907,6 +918,60 @@ mod tests {
         .unwrap()
     }
 
+    /// Builds a callee throw so batch tests cover abrupt exit after an explicit frame switch.
+    fn throwing_call_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 0 };
+        let mut entry = BytecodeBuilder::default();
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::Call, &[1, 0, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[1], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut callee = BytecodeBuilder::default();
+        callee.emit(Opcode::LoadImmediate, &[0, 7], span).unwrap();
+        callee.emit(Opcode::Throw, &[0], span).unwrap();
+        let (callee_bytecode, callee_source_map, callee_registers) = callee.finish().unwrap();
+
+        CompiledModule::new(
+            Arc::from("function fail() { throw 7; } fail();"),
+            vec![],
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Script,
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callee_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Ordinary,
+                        layout: FunctionLayout {
+                            register_count: callee_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: callee_source_map,
+                        handlers: Arc::default(),
+                        suspend_points: Arc::default(),
+                        feedback_sites: Arc::default(),
+                    },
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
     fn assert_call_batch<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -918,6 +983,19 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    fn assert_throw_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &throwing_call_module(),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Thrown(value) if value.as_i32() == Some(7)));
     }
 
     #[test]
@@ -979,6 +1057,15 @@ mod tests {
         assert_call_batch::<4>();
         assert_call_batch::<8>();
         assert_call_batch::<16>();
+    }
+
+    #[test]
+    fn callee_throw_exits_every_dispatch_batch_without_native_unwind() {
+        assert_throw_batch::<1>();
+        assert_throw_batch::<2>();
+        assert_throw_batch::<4>();
+        assert_throw_batch::<8>();
+        assert_throw_batch::<16>();
     }
 
     #[test]

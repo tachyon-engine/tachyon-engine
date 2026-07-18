@@ -84,7 +84,14 @@ pub enum HirStatementKind {
     Expression(HirExpression),
     VariableDeclaration(HirVariableDeclaration),
     FunctionDeclaration(HirFunctionDeclaration),
+    Block(Arc<[HirStatement]>),
+    If {
+        test: HirExpression,
+        consequent: Box<HirStatement>,
+        alternate: Option<Box<HirStatement>>,
+    },
     Return(Option<HirExpression>),
+    Throw(HirExpression),
     Empty,
 }
 
@@ -264,6 +271,45 @@ fn lower_statement(
         Statement::FunctionDeclaration(function) if allow_function_declaration => {
             lower_function_declaration(function, source, next_binding, functions)
         }
+        Statement::BlockStatement(block) => {
+            let mut statements = Vec::with_capacity(block.body.len());
+            for statement in &block.body {
+                statements.push(lower_statement(
+                    statement,
+                    source,
+                    next_binding,
+                    functions,
+                    false,
+                )?);
+            }
+            Ok(HirStatement {
+                span: source_span(block.span),
+                completion: StatementCompletion::Empty,
+                kind: HirStatementKind::Block(statements.into()),
+            })
+        }
+        Statement::IfStatement(statement) => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::If {
+                test: lower_expression(&statement.test, source)?,
+                consequent: Box::new(lower_statement(
+                    &statement.consequent,
+                    source,
+                    next_binding,
+                    functions,
+                    false,
+                )?),
+                alternate: statement
+                    .alternate
+                    .as_ref()
+                    .map(|alternate| {
+                        lower_statement(alternate, source, next_binding, functions, false)
+                            .map(Box::new)
+                    })
+                    .transpose()?,
+            },
+        }),
         Statement::ReturnStatement(statement) if !allow_function_declaration => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
@@ -274,6 +320,11 @@ fn lower_statement(
                     .map(|argument| lower_expression(argument, source))
                     .transpose()?,
             ),
+        }),
+        Statement::ThrowStatement(statement) => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: HirStatementKind::Throw(lower_expression(&statement.argument, source)?),
         }),
         _ => Err(unsupported(
             source.name(),

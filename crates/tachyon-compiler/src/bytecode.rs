@@ -43,11 +43,27 @@ fn lower_entry(
     hir: &HirProgram,
     constants: &mut Vec<BytecodeConstant>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
+    let has_control_flow = hir.statements().iter().any(|statement| {
+        matches!(
+            statement.kind,
+            HirStatementKind::Block(_) | HirStatementKind::If { .. } | HirStatementKind::Throw(_)
+        )
+    });
     let has_expression = hir
         .statements()
         .iter()
         .any(|statement| matches!(&statement.kind, HirStatementKind::Expression(_)));
-    let result_instruction_count = if has_expression { 1 } else { 2 };
+    let result_instruction_count = if has_control_flow {
+        statements_expression_count(hir.statements())?
+            .checked_add(2)
+            .ok_or(CompileError::LoweringCapacityOverflow {
+                collection: "entry completion instructions",
+            })?
+    } else if has_expression {
+        1
+    } else {
+        2
+    };
     let instruction_upper_bound = hir_instruction_count(hir)?
         .checked_add(result_instruction_count)
         .ok_or(CompileError::LoweringCapacityOverflow {
@@ -70,32 +86,47 @@ fn lower_entry(
             lowerer.function_declaration(declaration, statement.span)?;
         }
     }
-    let result = match hir.statements() {
-        [] => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
-        statements => {
-            let mut result = None;
-            for statement in statements {
-                match &statement.kind {
-                    HirStatementKind::Expression(expression) => {
-                        result = Some(lowerer.expression(expression)?);
-                    }
-                    HirStatementKind::VariableDeclaration(declaration) => {
-                        lowerer.variable_declaration(declaration)?;
-                    }
-                    HirStatementKind::FunctionDeclaration(_) => {}
-                    HirStatementKind::Return(_) => {
-                        return Err(CompileError::UnsupportedSyntax {
-                            source_name: source.name().clone(),
-                            span: statement.span,
-                            syntax: "top-level return",
-                        });
-                    }
-                    HirStatementKind::Empty => {}
-                }
+    let result = if has_control_flow {
+        let result = lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?;
+        for statement in hir.statements() {
+            if lowerer.entry_statement(statement, result)? {
+                break;
             }
-            match result {
-                Some(result) => result,
-                None => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
+        }
+        result
+    } else {
+        match hir.statements() {
+            [] => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
+            statements => {
+                let mut result = None;
+                for statement in statements {
+                    match &statement.kind {
+                        HirStatementKind::Expression(expression) => {
+                            result = Some(lowerer.expression(expression)?);
+                        }
+                        HirStatementKind::VariableDeclaration(declaration) => {
+                            lowerer.variable_declaration(declaration)?;
+                        }
+                        HirStatementKind::FunctionDeclaration(_) => {}
+                        HirStatementKind::Return(_) => {
+                            return Err(CompileError::UnsupportedSyntax {
+                                source_name: source.name().clone(),
+                                span: statement.span,
+                                syntax: "top-level return",
+                            });
+                        }
+                        HirStatementKind::Block(_)
+                        | HirStatementKind::If { .. }
+                        | HirStatementKind::Throw(_) => {
+                            unreachable!("control flow uses entry lowering")
+                        }
+                        HirStatementKind::Empty => {}
+                    }
+                }
+                match result {
+                    Some(result) => result,
+                    None => lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?,
+                }
             }
         }
     };
@@ -147,7 +178,15 @@ fn lower_function(
             statements_label_count(&function.body)?,
         ),
         constants,
-        locals: Vec::with_capacity(function.parameters.len()),
+        locals: Vec::with_capacity(
+            function
+                .parameters
+                .len()
+                .checked_add(statements_binding_count(&function.body)?)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "function local bindings",
+                })?,
+        ),
         next_register: 0,
         source_name: source.name().clone(),
     };
@@ -162,6 +201,9 @@ fn lower_function(
     let mut terminal = false;
     for statement in function.body.iter() {
         terminal = lowerer.function_statement(statement)?;
+        if terminal {
+            break;
+        }
     }
     if !terminal {
         let undefined = lowerer.load_undefined(function.span)?;
@@ -251,7 +293,100 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Lowers one function-body statement and reports whether it ends in an explicit return.
+    /// Lowers one script statement while preserving the most recent non-empty completion value.
+    fn entry_statement(
+        &mut self,
+        statement: &HirStatement,
+        result: RegisterId,
+    ) -> Result<bool, CompileError> {
+        match &statement.kind {
+            HirStatementKind::Expression(expression) => {
+                let value = self.expression(expression)?;
+                self.emit(
+                    Opcode::Move,
+                    &[result.index(), value.index()],
+                    statement.span,
+                )?;
+                Ok(false)
+            }
+            HirStatementKind::VariableDeclaration(declaration) => {
+                self.variable_declaration(declaration)?;
+                Ok(false)
+            }
+            HirStatementKind::FunctionDeclaration(_) | HirStatementKind::Empty => Ok(false),
+            HirStatementKind::Throw(argument) => {
+                let value = self.expression(argument)?;
+                self.emit(Opcode::Throw, &[value.index()], statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::Block(statements) => {
+                let checkpoint = self.locals.len();
+                let mut terminal = false;
+                for statement in statements.iter() {
+                    terminal = self.entry_statement(statement, result)?;
+                    if terminal {
+                        break;
+                    }
+                }
+                self.locals.truncate(checkpoint);
+                Ok(terminal)
+            }
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => self.entry_if_statement(
+                test,
+                consequent,
+                alternate.as_deref(),
+                result,
+                statement.span,
+            ),
+            HirStatementKind::Return(_) => Err(CompileError::UnsupportedSyntax {
+                source_name: self.source_name.clone(),
+                span: statement.span,
+                syntax: "top-level return",
+            }),
+        }
+    }
+
+    /// Emits a script conditional and updates the shared completion register only in executed arms.
+    fn entry_if_statement(
+        &mut self,
+        test: &HirExpression,
+        consequent: &HirStatement,
+        alternate: Option<&HirStatement>,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        let test = self.expression(test)?;
+        let alternate_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let bytecode_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        self.builder
+            .emit_jump_if_false(test, alternate_label, bytecode_span)
+            .map_err(CompileError::Builder)?;
+        let consequent_terminal = self.entry_statement(consequent, result)?;
+        self.builder
+            .emit_jump(end_label, bytecode_span)
+            .map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(alternate_label)
+            .map_err(CompileError::Builder)?;
+        let alternate_terminal = alternate
+            .map(|alternate| self.entry_statement(alternate, result))
+            .transpose()?
+            .unwrap_or(false);
+        self.builder
+            .bind_label(end_label)
+            .map_err(CompileError::Builder)?;
+        Ok(alternate.is_some() && consequent_terminal && alternate_terminal)
+    }
+
+    /// Lowers one function-body statement and reports whether it ends in an abrupt completion.
     fn function_statement(&mut self, statement: &HirStatement) -> Result<bool, CompileError> {
         match &statement.kind {
             HirStatementKind::Expression(expression) => {
@@ -270,6 +405,31 @@ impl Lowerer<'_> {
                 self.emit(Opcode::Return, &[value.index()], statement.span)?;
                 Ok(true)
             }
+            HirStatementKind::Throw(argument) => {
+                let value = self.expression(argument)?;
+                self.emit(Opcode::Throw, &[value.index()], statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::Block(statements) => {
+                let checkpoint = self.locals.len();
+                let mut terminal = false;
+                for statement in statements.iter() {
+                    terminal = self.function_statement(statement)?;
+                    if terminal {
+                        break;
+                    }
+                }
+                self.locals.truncate(checkpoint);
+                Ok(terminal)
+            }
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                self.if_statement(test, consequent, alternate.as_deref(), statement.span)?;
+                Ok(false)
+            }
             HirStatementKind::Empty => Ok(false),
             HirStatementKind::FunctionDeclaration(_) => Err(CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
@@ -277,6 +437,39 @@ impl Lowerer<'_> {
                 syntax: "nested function declaration",
             }),
         }
+    }
+
+    /// Emits a structured conditional while leaving both lexical branches to the statement lowerer.
+    fn if_statement(
+        &mut self,
+        test: &HirExpression,
+        consequent: &HirStatement,
+        alternate: Option<&HirStatement>,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let test = self.expression(test)?;
+        let alternate_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end_label = self.builder.new_label().map_err(CompileError::Builder)?;
+        let bytecode_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        self.builder
+            .emit_jump_if_false(test, alternate_label, bytecode_span)
+            .map_err(CompileError::Builder)?;
+        self.function_statement(consequent)?;
+        self.builder
+            .emit_jump(end_label, bytecode_span)
+            .map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(alternate_label)
+            .map_err(CompileError::Builder)?;
+        if let Some(alternate) = alternate {
+            self.function_statement(alternate)?;
+        }
+        self.builder
+            .bind_label(end_label)
+            .map_err(CompileError::Builder)
     }
 
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
@@ -565,6 +758,7 @@ fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
     statements_instruction_count(hir.statements())
 }
 
+/// Computes a checked instruction upper bound across nested structured statements.
 fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
     for statement in statements {
@@ -583,6 +777,33 @@ fn statements_instruction_count(statements: &[HirStatement]) -> Result<usize, Co
                 .ok_or(CompileError::LoweringCapacityOverflow {
                     collection: "bytecode instructions",
                 })?,
+            HirStatementKind::Throw(argument) => checked_count_add(
+                expression_instruction_count(argument)?,
+                1,
+                "bytecode instructions",
+            )?,
+            HirStatementKind::Block(statements) => statements_instruction_count(statements)?,
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let mut count = expression_instruction_count(test)?;
+                count = checked_count_add(count, 2, "bytecode instructions")?;
+                count = checked_count_add(
+                    count,
+                    statements_instruction_count(core::slice::from_ref(consequent))?,
+                    "bytecode instructions",
+                )?;
+                if let Some(alternate) = alternate {
+                    count = checked_count_add(
+                        count,
+                        statements_instruction_count(core::slice::from_ref(alternate))?,
+                        "bytecode instructions",
+                    )?;
+                }
+                count
+            }
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
@@ -668,6 +889,7 @@ fn hir_literal_count(hir: &HirProgram) -> Result<usize, CompileError> {
     Ok(count)
 }
 
+/// Counts literal constants recursively before the module-wide pool is allocated.
 fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
     for statement in statements {
@@ -681,6 +903,28 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 .map(expression_literal_count)
                 .transpose()?
                 .unwrap_or(0),
+            HirStatementKind::Throw(argument) => expression_literal_count(argument)?,
+            HirStatementKind::Block(statements) => statements_literal_count(statements)?,
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let mut count = expression_literal_count(test)?;
+                count = checked_count_add(
+                    count,
+                    statements_literal_count(core::slice::from_ref(consequent))?,
+                    "bytecode constants",
+                )?;
+                if let Some(alternate) = alternate {
+                    count = checked_count_add(
+                        count,
+                        statements_literal_count(core::slice::from_ref(alternate))?,
+                        "bytecode constants",
+                    )?;
+                }
+                count
+            }
             HirStatementKind::FunctionDeclaration(_) => 0,
             HirStatementKind::Empty => 0,
         };
@@ -704,13 +948,38 @@ fn declaration_literal_count(declaration: &HirVariableDeclaration) -> Result<usi
 }
 
 fn hir_binding_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    statements_binding_count(hir.statements())
+}
+
+/// Counts all lexical bindings as a checked upper bound for the lowering-time local stack.
+fn statements_binding_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
-    for statement in hir.statements() {
-        if let HirStatementKind::VariableDeclaration(declaration) = &statement.kind {
-            count = checked_count_add(count, declaration.declarators.len(), "local bindings")?;
-        } else if matches!(statement.kind, HirStatementKind::FunctionDeclaration(_)) {
-            count = checked_count_add(count, 1, "local bindings")?;
-        }
+    for statement in statements {
+        let statement_count = match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => declaration.declarators.len(),
+            HirStatementKind::FunctionDeclaration(_) => 1,
+            HirStatementKind::Block(statements) => statements_binding_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut nested = statements_binding_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_binding_count(core::slice::from_ref(alternate))?,
+                        "local bindings",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, statement_count, "local bindings")?;
     }
     Ok(count)
 }
@@ -720,6 +989,7 @@ fn hir_label_count(hir: &HirProgram) -> Result<usize, CompileError> {
     statements_label_count(hir.statements())
 }
 
+/// Counts structured-statement and expression labels before builder allocation.
 fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
     let mut count = 0;
     for statement in statements {
@@ -753,8 +1023,72 @@ fn statements_label_count(statements: &[HirStatement]) -> Result<usize, CompileE
                     )?;
                 }
             }
+            HirStatementKind::Throw(argument) => {
+                count =
+                    checked_count_add(count, expression_label_count(argument)?, "bytecode labels")?;
+            }
+            HirStatementKind::Block(statements) => {
+                count = checked_count_add(
+                    count,
+                    statements_label_count(statements)?,
+                    "bytecode labels",
+                )?;
+            }
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                count = checked_count_add(count, expression_label_count(test)?, "bytecode labels")?;
+                count = checked_count_add(count, 2, "bytecode labels")?;
+                count = checked_count_add(
+                    count,
+                    statements_label_count(core::slice::from_ref(consequent))?,
+                    "bytecode labels",
+                )?;
+                if let Some(alternate) = alternate {
+                    count = checked_count_add(
+                        count,
+                        statements_label_count(core::slice::from_ref(alternate))?,
+                        "bytecode labels",
+                    )?;
+                }
+            }
             HirStatementKind::FunctionDeclaration(_) | HirStatementKind::Empty => {}
         }
+    }
+    Ok(count)
+}
+
+/// Counts expression statements whose values may update a structured script completion.
+fn statements_expression_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let statement_count = match &statement.kind {
+            HirStatementKind::Expression(_) => 1,
+            HirStatementKind::Block(statements) => statements_expression_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut nested = statements_expression_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_expression_count(core::slice::from_ref(alternate))?,
+                        "entry completion instructions",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, statement_count, "entry completion instructions")?;
     }
     Ok(count)
 }

@@ -264,6 +264,93 @@ mod tests {
     }
 
     #[test]
+    /// Exercises UpdateEmpty-style script completion through nested lexical blocks and branches.
+    fn top_level_block_and_if_preserve_script_completion() {
+        let source = SourceText::new(
+            SourceId::new(11),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("1; if (false) { 2; } else { { let local = 3; local; } }"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
+
+    #[test]
+    /// Exercises source-level branch lowering inside an explicit JavaScript call frame.
+    fn function_if_selects_return_without_rust_recursion() {
+        let source = SourceText::new(
+            SourceId::new(12),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("function select(flag) { if (flag) { return 1; } return 2; } select(false);"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(2)));
+    }
+
+    #[test]
+    /// Confirms source-level throw exits through the VM outcome instead of Rust unwinding.
+    fn callee_throw_becomes_an_explicit_vm_outcome() {
+        let source = SourceText::new(
+            SourceId::new(13),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("function fail() { throw 7; } fail();"),
+        );
+        let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+        let outcome = test_isolate()
+            .execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Thrown(value) if value.as_i32() == Some(7)));
+    }
+
+    #[test]
+    /// Confirms lowering-time lexical checkpoints remove a block binding before later lookup.
+    fn block_lexical_binding_is_not_visible_after_the_block() {
+        let source = SourceText::new(
+            SourceId::new(14),
+            SourceName::new("embedded-input"),
+            MediaType::JavaScript,
+            Arc::from("function scoped() { { let hidden = 1; } return hidden; } scoped();"),
+        );
+        let error = Compiler
+            .compile(source, CompileOptions::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            tachyon_compiler::CompileError::UnsupportedSyntax {
+                syntax: "unresolved identifier",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn logical_not_uses_the_shared_truthiness_contract() {
         let source = SourceText::new(
             SourceId::new(10),

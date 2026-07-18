@@ -253,11 +253,23 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_harness_and_async_protocol_are_explicit() {
-        assert!(matches!(
+    fn control_flow_harness_executes_in_tachyon() {
+        assert_eq!(
             execute(&composed(
                 "1 + 2;",
                 &[("assert.js", "function assert() { if (true) {} }")],
+                false
+            )),
+            EngineOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn unsupported_member_harness_and_async_protocol_are_explicit() {
+        assert!(matches!(
+            execute(&composed(
+                "1 + 2;",
+                &[("assert.js", "assert.value;")],
                 false
             )),
             EngineOutcome::Unsupported { .. }

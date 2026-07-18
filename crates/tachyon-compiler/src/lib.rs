@@ -298,7 +298,57 @@ mod tests {
     }
 
     #[test]
-    fn compiler_rejects_assignment_to_immutable_local_until_throw_lowering_exists() {
+    /// Confirms control-flow HIR owns every nested node after the Oxc arena is dropped.
+    fn hir_owns_nested_block_if_and_throw_statements() {
+        let hir = Compiler
+            .lower_to_hir(
+                source(
+                    MediaType::JavaScript,
+                    "if (false) { let hidden = 1; } else { throw 7; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let [statement] = hir.statements() else {
+            panic!("expected one conditional statement");
+        };
+        let HirStatementKind::If {
+            consequent,
+            alternate: Some(alternate),
+            ..
+        } = &statement.kind
+        else {
+            panic!("expected owned conditional arms");
+        };
+        assert!(matches!(consequent.kind, HirStatementKind::Block(_)));
+        assert!(matches!(alternate.kind, HirStatementKind::Block(_)));
+        let HirStatementKind::Block(statements) = &alternate.kind else {
+            unreachable!();
+        };
+        assert!(matches!(statements[0].kind, HirStatementKind::Throw(_)));
+    }
+
+    #[test]
+    /// Confirms structured entry lowering produces verifier-accepted branch and abrupt opcodes.
+    fn compiler_emits_verified_top_level_branch_and_throw() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "if (false) { 1; } else { throw 7; }"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(disassembly.contains("JumpIfFalse"));
+        assert!(disassembly.contains("Throw"));
+    }
+
+    #[test]
+    fn compiler_rejects_assignment_to_immutable_local() {
         let error = Compiler
             .compile(
                 source(MediaType::JavaScript, "const answer = 42; answer = 0;"),
