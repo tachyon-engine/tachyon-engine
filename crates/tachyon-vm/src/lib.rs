@@ -264,11 +264,13 @@ enum NativeFunction {
     ObjectIsExtensible,
     ObjectPreventExtensions,
     StringConstructor,
+    SymbolConstructor,
     NumberConstructor,
     NumberIsNaN,
     NumberIsFinite,
     NumberIsInteger,
     NumberIsSafeInteger,
+    NumberToExponential,
     NumberToFixed,
     NumberToString,
     NumberValueOf,
@@ -367,11 +369,13 @@ impl NativeFunction {
             | Self::NumberIsFinite
             | Self::NumberIsInteger
             | Self::NumberIsSafeInteger
+            | Self::NumberToExponential
             | Self::NumberToFixed
             | Self::NumberToString => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString
+            | Self::SymbolConstructor
             | Self::NumberValueOf
             | Self::FunctionPrototype
             | Self::ArrayToString => 0,
@@ -400,11 +404,13 @@ impl NativeFunction {
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
+            Self::SymbolConstructor => "Symbol",
             Self::NumberConstructor => "Number",
             Self::NumberIsNaN => "isNaN",
             Self::NumberIsFinite => "isFinite",
             Self::NumberIsInteger => "isInteger",
             Self::NumberIsSafeInteger => "isSafeInteger",
+            Self::NumberToExponential => "toExponential",
             Self::NumberToFixed => "toFixed",
             Self::NumberToString => "toString",
             Self::NumberValueOf => "valueOf",
@@ -529,6 +535,18 @@ struct FunctionObject {
     ordinary: OrdinaryObject,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SymbolValue {
+    description: Option<Value>,
+}
+
+impl Trace for SymbolValue {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.description.trace(tracer);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
@@ -617,6 +635,7 @@ struct VmTypes {
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
     string: GcType<JsString>,
+    symbol: GcType<SymbolValue>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -637,6 +656,7 @@ struct RealmIntrinsicAtoms {
     array: AtomId,
     object: AtomId,
     string: AtomId,
+    symbol: AtomId,
     number: AtomId,
     boolean: AtomId,
     function: AtomId,
@@ -644,7 +664,7 @@ struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 10 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 11 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -869,12 +889,14 @@ struct Realm {
     object_is_extensible: Option<Value>,
     object_prevent_extensions: Option<Value>,
     string_constructor: Option<Value>,
+    symbol_constructor: Option<Value>,
     number_constructor: Option<Value>,
     number_prototype: Option<Value>,
     number_is_nan: Option<Value>,
     number_is_finite: Option<Value>,
     number_is_integer: Option<Value>,
     number_is_safe_integer: Option<Value>,
+    number_to_exponential: Option<Value>,
     number_to_fixed: Option<Value>,
     number_to_string: Option<Value>,
     number_value_of: Option<Value>,
@@ -940,12 +962,14 @@ impl Realm {
             object_is_extensible: None,
             object_prevent_extensions: None,
             string_constructor: None,
+            symbol_constructor: None,
             number_constructor: None,
             number_prototype: None,
             number_is_nan: None,
             number_is_finite: None,
             number_is_integer: None,
             number_is_safe_integer: None,
+            number_to_exponential: None,
             number_to_fixed: None,
             number_to_string: None,
             number_value_of: None,
@@ -1238,12 +1262,14 @@ impl Trace for Realm {
         self.object_is_extensible.trace(tracer);
         self.object_prevent_extensions.trace(tracer);
         self.string_constructor.trace(tracer);
+        self.symbol_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.number_prototype.trace(tracer);
         self.number_is_nan.trace(tracer);
         self.number_is_finite.trace(tracer);
         self.number_is_integer.trace(tracer);
         self.number_is_safe_integer.trace(tracer);
+        self.number_to_exponential.trace(tracer);
         self.number_to_fixed.trace(tracer);
         self.number_to_string.trace(tracer);
         self.number_value_of.trace(tracer);
@@ -1531,6 +1557,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             string: registry
                 .try_register("JsString")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            symbol: registry
+                .try_register("SymbolValue")
                 .map_err(IsolateCreationError::TypeRegistration)?,
         };
         let shapes =
@@ -1886,6 +1915,7 @@ impl Isolate {
             )
         };
         self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
+        self.realm.symbol_constructor = Some(allocate(self, NativeFunction::SymbolConstructor)?);
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
         let object_prototype = self
@@ -1901,6 +1931,15 @@ impl Isolate {
         self.set_function_prototype(number, number_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(number_prototype, constructor_atom, number, true)?;
+        let to_exponential = allocate(self, NativeFunction::NumberToExponential)?;
+        self.realm.number_to_exponential = Some(to_exponential);
+        let to_exponential_atom = self.intern_intrinsic_name(b"toExponential")?;
+        self.set_intrinsic_data_property(
+            number_prototype,
+            to_exponential_atom,
+            to_exponential,
+            true,
+        )?;
         let to_fixed = allocate(self, NativeFunction::NumberToFixed)?;
         self.realm.number_to_fixed = Some(to_fixed);
         let to_fixed_atom = self.intern_intrinsic_name(b"toFixed")?;
@@ -2055,6 +2094,7 @@ impl Isolate {
             array: self.intern_intrinsic_name(b"Array")?,
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
+            symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
             function: self.intern_intrinsic_name(b"Function")?,
@@ -2426,6 +2466,13 @@ impl Isolate {
             self.realm
                 .string_constructor
                 .expect("String initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.symbol,
+            self.realm
+                .symbol_constructor
+                .expect("Symbol initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(
@@ -2969,6 +3016,9 @@ impl Isolate {
                     JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
                 )
             }
+            NativeFunction::SymbolConstructor => self.allocate_symbol(
+                argument.filter(|value| value.as_immediate() != Some(Immediate::Undefined)),
+            ),
             NativeFunction::NumberConstructor => {
                 let argument = argument.unwrap_or(Value::from_i32(0));
                 self.convert_to_number(argument)
@@ -2985,6 +3035,27 @@ impl Isolate {
                 Immediate::Undefined,
             ))),
         }
+    }
+
+    /// Allocates one unique Symbol primitive while retaining its optional description as a GC edge.
+    fn allocate_symbol(&mut self, description: Option<Value>) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.symbol,
+                0,
+                0,
+                SymbolValue { description },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map(|symbol| Value::from_heap_ref(symbol.raw()))
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     /// Implements the shared thisNumberValue brand check for Number prototype methods.
@@ -3050,6 +3121,45 @@ impl Isolate {
         self.allocate_runtime_string(
             JsString::try_from_latin1(formatted.as_bytes())
                 .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Implements Number.prototype.toExponential with exact binary-rational rounding.
+    fn number_to_exponential(
+        &mut self,
+        receiver: Value,
+        fraction_digits: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        let number = self.this_number_value(receiver)?;
+        let fraction_digits = match fraction_digits {
+            Some(value) if value.as_immediate() != Some(Immediate::Undefined) => {
+                Some(self.integer_or_infinity_argument(Some(value), 0.0)?)
+            }
+            _ => None,
+        };
+        let number = numeric_value(number).expect("thisNumberValue always returns a number");
+        if number.is_finite()
+            && fraction_digits.is_some_and(|digits| !(0.0..=100.0).contains(&digits))
+        {
+            return Err(ExecutionError::InvalidNumberPrecision(Value::from_f64(
+                fraction_digits.unwrap_or_default(),
+            )));
+        }
+        let fraction_digits = fraction_digits.map(|digits| digits as u8);
+        let mut buffer = [0; tuning::numbers::EXPONENTIAL_FORMAT_BUFFER_SIZE];
+        let formatted =
+            number::format_exponential(number, fraction_digits, &mut buffer).map_err(|error| {
+                match error {
+                    number::NumberFormatError::BufferExhausted => {
+                        ExecutionError::NumberFormatBufferExhausted
+                    }
+                    number::NumberFormatError::InvalidDigit => {
+                        ExecutionError::NumberFormatInvalidDigit
+                    }
+                }
+            })?;
+        self.allocate_runtime_string(
+            JsString::try_from_latin1(formatted).map_err(ExecutionError::PropertyKeyString)?,
         )
     }
 
@@ -5847,6 +5957,9 @@ impl Isolate {
                 let raw = value
                     .as_heap_ref()
                     .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+                if self.heap.checked_reference(raw, self.types.symbol).is_ok() {
+                    return Err(ExecutionError::NotObject(value));
+                }
                 let Ok(reference) = self.heap.checked_reference(raw, self.types.string) else {
                     if self.is_object_value(value) {
                         let value_of = self.intern_intrinsic_name(b"valueOf")?;
@@ -5904,6 +6017,9 @@ impl Isolate {
             .ok_or(ExecutionError::UnsupportedTypeof(value))?;
         if self.heap.checked_reference(raw, self.types.string).is_ok() {
             return Ok(strings.string);
+        }
+        if self.heap.checked_reference(raw, self.types.symbol).is_ok() {
+            return Ok(strings.symbol);
         }
         if self
             .heap
@@ -7082,6 +7198,11 @@ impl Isolate {
                     let value = self.this_number_value(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::NumberToExponential) => {
+                    let fraction_digits = self.call_argument(&site, 0)?;
+                    let value = self.number_to_exponential(site.this_value, fraction_digits)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::NumberToFixed) => {
                     let fraction_digits = self.call_argument(&site, 0)?;
                     let value = self.number_to_fixed(site.this_value, fraction_digits)?;
@@ -7098,6 +7219,7 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
+                    | NativeFunction::SymbolConstructor
                     | NativeFunction::NumberConstructor
                     | NativeFunction::BooleanConstructor),
                 ) => {
@@ -8970,6 +9092,42 @@ mod tests {
             isolate.object_snapshot(boxed).unwrap().1.prototype,
             prototype
         );
+    }
+
+    #[test]
+    /// Keeps a pending Symbol description live before allocation and through a later full major.
+    fn symbol_description_survives_forced_major_allocations() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let description = isolate
+            .allocate_runtime_string(JsString::try_from_latin1(b"description").unwrap())
+            .unwrap();
+        let symbol = isolate.allocate_symbol(Some(description)).unwrap();
+        isolate.fiber.registers.push(symbol);
+        isolate
+            .allocate_runtime_string(JsString::try_from_latin1(b"collect").unwrap())
+            .unwrap();
+        let raw = symbol.as_heap_ref().unwrap();
+        let symbol = isolate
+            .heap
+            .checked_reference(raw, isolate.types.symbol)
+            .unwrap();
+        let description = isolate.heap.with_running_scope(|scope| {
+            let symbol = scope.root(symbol).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(symbol, isolate.types.symbol)
+                    .map(|symbol| symbol.description.unwrap())
+                    .unwrap()
+            })
+        });
+        let mut units = Vec::new();
+        isolate
+            .append_primitive_string_units(description, &mut units)
+            .unwrap();
+        assert_eq!(units, "description".encode_utf16().collect::<Vec<_>>());
     }
 
     #[test]

@@ -2036,6 +2036,22 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                166,
+                "let rangeError = false; try { (3).toExponential(101); } catch (error) { rangeError = error instanceof RangeError; } (123.456).toExponential(3) === '1.235e+2' && (0.9999).toExponential(0) === '1e+0' && (25).toExponential(0) === '3e+1' && (0).toExponential(2) === '0.00e+0' && (100).toExponential() === '1e+2' && Infinity.toExponential(1000) === 'Infinity' && Number.prototype.toExponential.length === 1 && rangeError;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                167,
+                "let rejected = false; let constructed = false; let symbol = Symbol('description'); try { +symbol; } catch (error) { rejected = error instanceof TypeError; } try { new Symbol(); } catch (error) { constructed = error instanceof TypeError; } typeof symbol === 'symbol' && symbol !== Symbol('description') && rejected && constructed;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.
