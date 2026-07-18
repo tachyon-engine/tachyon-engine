@@ -126,6 +126,14 @@ mod tests {
     }
 
     #[test]
+    fn arrow_function_expression_can_be_called() {
+        assert_eq!(
+            execute_source(147, "let add = (left, right) => left + right; add(2, 3);").as_i32(),
+            Some(5)
+        );
+    }
+
+    #[test]
     fn declaration_only_script_returns_undefined() {
         let source = SourceText::new(
             SourceId::new(3),

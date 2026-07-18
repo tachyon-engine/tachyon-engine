@@ -977,6 +977,93 @@ fn lower_function_stencil(
     Ok(id)
 }
 
+/// Copies the supported synchronous arrow subset into the same owned stencil used by functions.
+fn lower_arrow_function_stencil(
+    function: &oxc::ast::ast::ArrowFunctionExpression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<FunctionStencilId, CompileError> {
+    if function.r#async || function.params.rest.is_some() {
+        return Err(unsupported(
+            source.name(),
+            source_span(function.span),
+            "async/rest arrow function",
+        ));
+    }
+    let mut parameters = Vec::with_capacity(function.params.items.len());
+    let mut parameter_initializers = Vec::with_capacity(function.params.items.len());
+    for parameter in &function.params.items {
+        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
+            return Err(unsupported(
+                source.name(),
+                source_span(parameter.pattern.span()),
+                "arrow parameter binding pattern",
+            ));
+        };
+        parameters.push(new_binding(identifier, source, semantic)?);
+        parameter_initializers.push(
+            parameter
+                .initializer
+                .as_ref()
+                .map(|initializer| lower_expression(initializer, source, semantic, functions))
+                .transpose()?,
+        );
+    }
+    let mut statements = Vec::with_capacity(function.body.statements.len());
+    if function.expression {
+        let [Statement::ExpressionStatement(statement)] = function.body.statements.as_slice()
+        else {
+            return Err(unsupported(
+                source.name(),
+                source_span(function.span),
+                "arrow expression body",
+            ));
+        };
+        statements.push(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Value,
+            kind: HirStatementKind::Return(Some(lower_expression(
+                &statement.expression,
+                source,
+                semantic,
+                functions,
+            )?)),
+        });
+    } else {
+        for statement in &function.body.statements {
+            statements.push(lower_statement(
+                statement,
+                source,
+                semantic,
+                functions,
+                StatementContext::FunctionBody,
+            )?);
+        }
+    }
+    let id = FunctionStencilId(
+        u32::try_from(functions.len()).map_err(|_| CompileError::BindingOverflow)?,
+    );
+    let oxc_scope = function
+        .scope_id
+        .get()
+        .ok_or_else(|| missing_semantic(source, source_span(function.span), "arrow scope"))?;
+    functions.push(HirFunction {
+        id,
+        span: source_span(function.span),
+        name: None,
+        parameters: parameters.into(),
+        parameter_initializers: parameter_initializers.into(),
+        body: statements.into(),
+        scope: to_scope_id(oxc_scope),
+        strict: semantic
+            .scoping()
+            .scope_flags(oxc_scope)
+            .contains(OxcScopeFlags::StrictMode),
+    });
+    Ok(id)
+}
+
 fn new_binding(
     identifier: &oxc::ast::ast::BindingIdentifier<'_>,
     source: &SourceText,
@@ -1096,6 +1183,9 @@ fn lower_expression(
                 "named function expression",
             ));
         }
+        Expression::ArrowFunctionExpression(function) => HirExpressionKind::Function(
+            lower_arrow_function_stencil(function, source, semantic, functions)?,
+        ),
         Expression::ThisExpression(_) => HirExpressionKind::This,
         Expression::MetaProperty(property)
             if property.meta.name == "new" && property.property.name == "target" =>
