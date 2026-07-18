@@ -162,6 +162,7 @@ pub enum ExecutionError {
     Root(RootError),
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
+    MissingNativeContinuation,
     UnsupportedExceptionHandler(HandlerKind),
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
@@ -1408,6 +1409,37 @@ struct CodeLoadRoots<'a> {
     constant_values: &'a mut Vec<Option<Value>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NativeContinuationSite {
+    caller_base: u32,
+    destination: u32,
+    call_site: WordOffset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToPrimitiveStage {
+    ValueOf,
+    ToString,
+}
+
+/// Resumable native work owned by a JS callback frame instead of the Rust call stack.
+#[derive(Clone, Copy, Debug)]
+struct NativeContinuation {
+    site: NativeContinuationSite,
+    native: NativeFunction,
+    receiver: Value,
+    object: Value,
+    stage: ToPrimitiveStage,
+}
+
+impl Trace for NativeContinuation {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.receiver.trace(tracer);
+        self.object.trace(tracer);
+    }
+}
+
 impl Trace for CodeLoadRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
@@ -1426,6 +1458,7 @@ struct Frame {
     base: u32,
     environment: Option<GcRef<Environment>>,
     return_register: Option<RegisterId>,
+    return_continuation: bool,
     this_value: Value,
     new_target: Value,
     construct_receiver: Option<Value>,
@@ -1454,6 +1487,7 @@ struct ActiveHandler {
 enum Completion {
     Return(Value),
     Throw(Value),
+    Native(NativeContinuation),
 }
 
 #[derive(Debug, Default)]
@@ -1511,6 +1545,7 @@ impl Fiber {
         for completion in &mut self.completions {
             match completion {
                 Completion::Return(value) | Completion::Throw(value) => value.trace(tracer),
+                Completion::Native(continuation) => continuation.trace(tracer),
             }
         }
         self.pending_exception.trace(tracer);
@@ -3211,6 +3246,142 @@ impl Isolate {
         self.allocate_runtime_string(
             JsString::try_from_latin1(formatted).map_err(ExecutionError::PropertyKeyString)?,
         )
+    }
+
+    /// Starts one Number method, suspending only when its argument requires a JavaScript callback.
+    fn dispatch_number_method(
+        &mut self,
+        native: NativeFunction,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let argument = self.call_argument(site, 0)?;
+        if let Some(object) = argument
+            && self.is_object_value(object)
+        {
+            let receiver = self.this_number_value(site.this_value)?;
+            let continuation = NativeContinuation {
+                site: NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                native,
+                receiver,
+                object,
+                stage: ToPrimitiveStage::ValueOf,
+            };
+            return self.advance_number_conversion(continuation, None);
+        }
+        let value = self.finish_number_method(native, site.this_value, argument)?;
+        self.write(site.caller_base, site.destination, value)
+    }
+
+    /// Advances ordinary ToPrimitive(number hint) without recursively entering the interpreter.
+    fn advance_number_conversion(
+        &mut self,
+        mut continuation: NativeContinuation,
+        mut returned: Option<Value>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            if let Some(value) = returned.take() {
+                if !self.is_object_value(value) {
+                    let converted = self.convert_to_number(value)?;
+                    let result = self.finish_number_method(
+                        continuation.native,
+                        continuation.receiver,
+                        Some(converted),
+                    )?;
+                    return self.write(
+                        continuation.site.caller_base,
+                        continuation.site.destination,
+                        result,
+                    );
+                }
+                if continuation.stage == ToPrimitiveStage::ToString {
+                    return Err(ExecutionError::NotObject(continuation.object));
+                }
+                continuation.stage = ToPrimitiveStage::ToString;
+            }
+            let name = match continuation.stage {
+                ToPrimitiveStage::ValueOf => b"valueOf".as_slice(),
+                ToPrimitiveStage::ToString => b"toString".as_slice(),
+            };
+            let atom = self.intern_intrinsic_name(name)?;
+            let method = self.get_data_property(continuation.object, atom)?;
+            let Some(method) =
+                method.filter(|method| self.resolve_function_object(*method).is_ok())
+            else {
+                if continuation.stage == ToPrimitiveStage::ValueOf {
+                    continuation.stage = ToPrimitiveStage::ToString;
+                    continue;
+                }
+                return Err(ExecutionError::NotObject(continuation.object));
+            };
+            self.fiber
+                .completions
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
+            self.fiber
+                .completions
+                .push(Completion::Native(continuation));
+            let frame_depth = self.fiber.frames.len();
+            let call_result = self.call(CallSite {
+                caller_base: continuation.site.caller_base,
+                destination: continuation.site.destination,
+                callee: method,
+                argument_base: 0,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: continuation.object,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: continuation.site.call_site,
+            });
+            if let Err(error) = call_result {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+            if self.fiber.frames.len() != frame_depth {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("a suspended callback publishes its callee frame");
+                frame.return_register = None;
+                frame.return_continuation = true;
+                return Ok(());
+            }
+            continuation = self.pop_native_continuation()?;
+            returned =
+                Some(self.read(continuation.site.caller_base, continuation.site.destination)?);
+        }
+    }
+
+    /// Removes the exact native sentinel published before a callback call attempt.
+    #[inline]
+    fn pop_native_continuation(&mut self) -> Result<NativeContinuation, ExecutionError> {
+        match self.fiber.completions.pop() {
+            Some(Completion::Native(continuation)) => Ok(continuation),
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
+    /// Completes one Number method after its optional argument has become a primitive Number.
+    fn finish_number_method(
+        &mut self,
+        native: NativeFunction,
+        receiver: Value,
+        argument: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
+        match native {
+            NativeFunction::NumberToExponential => self.number_to_exponential(receiver, argument),
+            NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
+            NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),
+            NativeFunction::NumberToString => self.number_to_string(receiver, argument),
+            _ => unreachable!("only Number argument methods create this continuation"),
+        }
     }
 
     /// Implements Number::toString for decimal and shortest round-trip radix representations.
@@ -6963,6 +7134,7 @@ impl Isolate {
             base: 0,
             environment: None,
             return_register: None,
+            return_continuation: false,
             this_value: if matches!(kind, FunctionKind::Module) {
                 Value::from_immediate(Immediate::Undefined)
             } else {
@@ -7248,26 +7420,12 @@ impl Isolate {
                     let value = self.this_number_value(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(NativeFunction::NumberToExponential) => {
-                    let fraction_digits = self.call_argument(&site, 0)?;
-                    let value = self.number_to_exponential(site.this_value, fraction_digits)?;
-                    return self.write(site.caller_base, site.destination, value);
-                }
-                FunctionExecutable::Native(NativeFunction::NumberToFixed) => {
-                    let fraction_digits = self.call_argument(&site, 0)?;
-                    let value = self.number_to_fixed(site.this_value, fraction_digits)?;
-                    return self.write(site.caller_base, site.destination, value);
-                }
-                FunctionExecutable::Native(NativeFunction::NumberToPrecision) => {
-                    let precision = self.call_argument(&site, 0)?;
-                    let value = self.number_to_precision(site.this_value, precision)?;
-                    return self.write(site.caller_base, site.destination, value);
-                }
-                FunctionExecutable::Native(NativeFunction::NumberToString) => {
-                    let radix = self.call_argument(&site, 0)?;
-                    let value = self.number_to_string(site.this_value, radix)?;
-                    return self.write(site.caller_base, site.destination, value);
-                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::NumberToExponential
+                    | NativeFunction::NumberToFixed
+                    | NativeFunction::NumberToPrecision
+                    | NativeFunction::NumberToString),
+                ) => return self.dispatch_number_method(native, &site),
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
@@ -7730,6 +7888,7 @@ impl Isolate {
             base: callee_base,
             environment: target.environment,
             return_register: Some(RegisterId::new(site.destination)),
+            return_continuation: false,
             this_value,
             new_target: site.new_target,
             construct_receiver: site.construct_receiver,
@@ -7790,9 +7949,17 @@ impl Isolate {
         };
         self.fiber.registers.truncate(frame.base as usize);
         self.fiber.handlers.truncate(frame.handler_base as usize);
+        let continuation = if frame.return_continuation {
+            Some(self.pop_native_continuation()?)
+        } else {
+            None
+        };
         self.fiber
             .completions
             .truncate(frame.completion_base as usize);
+        if let Some(continuation) = continuation {
+            return self.resume_native_continuation(continuation, value);
+        }
         let destination = frame
             .return_register
             .expect("non-entry frames always retain a caller destination");
@@ -7804,6 +7971,23 @@ impl Isolate {
             .base;
         self.write(caller_base, destination.index(), value)?;
         Ok(None)
+    }
+
+    /// Resumes native work after a callback return and maps language failures at the original call site.
+    fn resume_native_continuation(
+        &mut self,
+        continuation: NativeContinuation,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.advance_number_conversion(continuation, Some(value)) {
+            Ok(()) => Ok(None),
+            Err(error) => {
+                let Some(kind) = execution_error_kind(&error) else {
+                    return Err(error);
+                };
+                self.throw_native_error(kind, continuation.site.call_site)
+            }
+        }
     }
 
     /// Propagates a thrown value through explicit frames until an immutable handler range matches.
@@ -9035,6 +9219,24 @@ mod tests {
     }
 
     #[test]
+    fn native_continuation_resumes_for_every_dispatch_batch_and_forced_major() {
+        assert_number_continuation_batch::<1>();
+        assert_number_continuation_batch::<2>();
+        assert_number_continuation_batch::<4>();
+        assert_number_continuation_batch::<8>();
+        assert_number_continuation_batch::<16>();
+    }
+
+    #[test]
+    fn native_continuation_throw_reaches_original_call_site_for_every_dispatch_batch() {
+        assert_number_continuation_throw_batch::<1>();
+        assert_number_continuation_throw_batch::<2>();
+        assert_number_continuation_throw_batch::<4>();
+        assert_number_continuation_throw_batch::<8>();
+        assert_number_continuation_throw_batch::<16>();
+    }
+
+    #[test]
     fn bound_argument_prefix_forwards_for_every_dispatch_batch() {
         assert_bound_function_batch::<1>();
         assert_bound_function_batch::<2>();
@@ -10113,6 +10315,49 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    /// Exercises callback-local catch, continuation resume, and GC tracing for one dispatch batch.
+    fn assert_number_continuation_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &number_continuation_module(),
+                ExecutionBudget {
+                    fuel: 24,
+                    quantum: 24,
+                },
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Completed(value)
+                    if value.as_immediate() == Some(Immediate::True)
+            ),
+            "unexpected continuation outcome: {outcome:?}"
+        );
+    }
+
+    /// Exercises a callback throw reaching the handler around the original native call site.
+    fn assert_number_continuation_throw_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &number_continuation_throw_module(),
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
     fn assert_bound_function_batch<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -10773,6 +11018,167 @@ mod tests {
             vec![
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 CompiledFunctionTemplate::new(FunctionId::new(1), callee_bytecode, callee_metadata),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds `(1.25).toFixed({ valueOf() { return 1; } }) === "1.3"` for trampoline tests.
+    fn number_continuation_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(13, 2);
+        entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+        entry.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+        entry.emit(Opcode::GetById, &[2, 1, 2], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[3], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[4, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[3, 4, 3], span).unwrap();
+        entry.emit(Opcode::LoadConstant, &[5, 0], span).unwrap();
+        entry.emit(Opcode::Move, &[6, 2], span).unwrap();
+        entry.emit(Opcode::Move, &[7, 3], span).unwrap();
+        entry
+            .emit(Opcode::CallWithReceiver, &[8, 5, 1], span)
+            .unwrap();
+        entry.emit(Opcode::LoadConstant, &[9, 1], span).unwrap();
+        entry.emit(Opcode::StrictEqual, &[10, 8, 9], span).unwrap();
+        entry.emit(Opcode::Return, &[10], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut callback = BytecodeBuilder::with_capacity(6, 1);
+        let protected_start = callback.emit(Opcode::Nop, &[], span).unwrap();
+        callback
+            .emit(Opcode::LoadImmediate, &[0, 42], span)
+            .unwrap();
+        callback.emit(Opcode::Throw, &[0], span).unwrap();
+        let handler = callback.emit(Opcode::LoadException, &[1], span).unwrap();
+        callback.emit(Opcode::LoadImmediate, &[2, 1], span).unwrap();
+        callback.emit(Opcode::Return, &[2], span).unwrap();
+        let (callback_bytecode, callback_source_map, callback_registers) =
+            callback.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        let mut callback_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callback_registers,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map: callback_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        callback_metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        CompiledModule::new(
+            Arc::from("Number ToPrimitive continuation"),
+            vec![
+                BytecodeConstant::NumberBits(1.25_f64.to_bits()),
+                BytecodeConstant::string_from_utf16("1.3".encode_utf16().collect()),
+            ],
+            vec![
+                Arc::from("Number"),
+                Arc::from("prototype"),
+                Arc::from("toFixed"),
+                Arc::from("valueOf"),
+            ],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callback_bytecode,
+                    callback_metadata,
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a protected Number call whose `valueOf` callback throws through its continuation.
+    fn number_continuation_throw_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(16, 2);
+        let end = entry.new_label().unwrap();
+        entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+        entry.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+        entry.emit(Opcode::GetById, &[2, 1, 2], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[3], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[4, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[3, 4, 3], span).unwrap();
+        entry.emit(Opcode::LoadConstant, &[5, 0], span).unwrap();
+        entry.emit(Opcode::Move, &[6, 2], span).unwrap();
+        entry.emit(Opcode::Move, &[7, 3], span).unwrap();
+        let protected_start = entry.emit(Opcode::Nop, &[], span).unwrap();
+        entry
+            .emit(Opcode::CallWithReceiver, &[8, 5, 1], span)
+            .unwrap();
+        entry.emit_jump(end, span).unwrap();
+        let handler = entry.emit(Opcode::LoadException, &[9], span).unwrap();
+        entry.emit(Opcode::Return, &[9], span).unwrap();
+        entry.bind_label(end).unwrap();
+        entry.emit(Opcode::LoadUndefined, &[10], span).unwrap();
+        entry.emit(Opcode::Return, &[10], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut callback = BytecodeBuilder::with_capacity(2, 0);
+        callback
+            .emit(Opcode::LoadImmediate, &[0, 42], span)
+            .unwrap();
+        callback.emit(Opcode::Throw, &[0], span).unwrap();
+        let (callback_bytecode, callback_source_map, callback_registers) =
+            callback.finish().unwrap();
+        let mut entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        entry_metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        let callback_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: callback_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: callback_source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("Number continuation callback throw"),
+            vec![BytecodeConstant::NumberBits(1.25_f64.to_bits())],
+            vec![
+                Arc::from("Number"),
+                Arc::from("prototype"),
+                Arc::from("toFixed"),
+                Arc::from("valueOf"),
+            ],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    callback_bytecode,
+                    callback_metadata,
+                ),
             ],
             FunctionId::new(0),
         )

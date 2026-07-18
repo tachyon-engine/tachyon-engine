@@ -2060,6 +2060,14 @@ mod tests {
             .as_immediate(),
             Some(tachyon_value::Immediate::True),
         );
+        assert_eq!(
+            execute_source(
+                169,
+                "let order = 0; let fallback = { valueOf() { order = order * 10 + 1; return {}; }, toString() { order = order * 10 + 2; return '2'; } }; let direct = { valueOf() { order = order * 10 + 3; return 1; }, toString() { order = 99; return 2; } }; let recovered = { valueOf() { try { throw 7; } catch (error) { return error - 6; } } }; let thrown = false; try { (1).toFixed({ valueOf() { throw 42; } }); } catch (error) { thrown = error === 42; } (1.25).toFixed(fallback) === '1.25' && (1.25).toFixed(direct) === '1.3' && (1.25).toFixed(recovered) === '1.3' && order === 123 && thrown;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     /// Verifies Object.prototype.toString reports the primitive and object tags used by harnesses.
