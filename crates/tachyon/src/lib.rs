@@ -1086,6 +1086,39 @@ mod tests {
         );
     }
 
+    /// Verifies short-circuit assignment stores only when its logical condition requires it.
+    #[test]
+    fn logical_assignment_short_circuits_and_preserves_values() {
+        assert_eq!(
+            execute_source(54, "let x = 0; x &&= 42; x;").as_i32(),
+            Some(0)
+        );
+        assert_eq!(
+            execute_source(55, "let x = 0; x ||= 42; x;").as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(56, "let x = null; x ??= 42; x;").as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(57, "let x = 1; x &&= 42; x;").as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(58, "let box = { value: 0 }; box.value ||= 42; box.value;").as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                59,
+                "let box = { value: 1 }; box['value'] &&= 42; box.value;"
+            )
+            .as_i32(),
+            Some(42)
+        );
+    }
+
     #[test]
     fn closure_environment_preserves_mutable_state_across_calls() {
         assert_eq!(

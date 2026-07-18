@@ -286,6 +286,7 @@ pub enum HirAssignmentTarget {
 pub enum HirAssignmentOperator {
     Assign,
     Binary(HirBinaryOperator),
+    Logical(HirLogicalOperator),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1301,11 +1302,22 @@ fn lower_assignment_operator(
     if operator.is_assign() {
         return Ok(HirAssignmentOperator::Assign);
     }
-    operator
-        .to_binary_operator()
-        .map(lower_binary_operator)
-        .map(HirAssignmentOperator::Binary)
-        .ok_or_else(|| unsupported(source.name(), source_span(span), "assignment operator"))
+    if let Some(binary) = operator.to_binary_operator().map(lower_binary_operator) {
+        return Ok(HirAssignmentOperator::Binary(binary));
+    }
+    let logical = match operator {
+        AssignmentOperator::LogicalAnd => HirLogicalOperator::And,
+        AssignmentOperator::LogicalOr => HirLogicalOperator::Or,
+        AssignmentOperator::LogicalNullish => HirLogicalOperator::Coalesce,
+        _ => {
+            return Err(unsupported(
+                source.name(),
+                source_span(span),
+                "assignment operator",
+            ));
+        }
+    };
+    Ok(HirAssignmentOperator::Logical(logical))
 }
 
 /// Owns identifier and static-member references while rejecting patterns and computed properties.

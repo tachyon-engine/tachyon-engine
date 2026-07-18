@@ -1884,6 +1884,10 @@ impl Lowerer<'_> {
                             let right = self.expression(value)?;
                             self.emit_binary(operator, old_value, right, span)?
                         }
+                        HirAssignmentOperator::Logical(operator) => {
+                            let old_value = self.snapshot_local(&binding, span)?;
+                            self.logical_assignment(operator, old_value, value, span, None)?
+                        }
                     };
                     self.write_local(&binding, result, span)?;
                     return Ok(result);
@@ -1898,6 +1902,10 @@ impl Lowerer<'_> {
                             let old_value = self.snapshot_local(&binding, span)?;
                             let right = self.expression(value)?;
                             self.emit_binary(operator, old_value, right, span)?
+                        }
+                        HirAssignmentOperator::Logical(operator) => {
+                            let old_value = self.snapshot_local(&binding, span)?;
+                            self.logical_assignment(operator, old_value, value, span, None)?
                         }
                     };
                     self.write_local(&binding, result, span)?;
@@ -1920,12 +1928,29 @@ impl Lowerer<'_> {
                         let right = self.expression(value)?;
                         self.emit_binary(operator, old_value, right, span)?
                     }
+                    HirAssignmentOperator::Logical(operator) => {
+                        let old_value = self.register()?;
+                        self.emit(
+                            Opcode::GetById,
+                            &[old_value.index(), receiver.index(), property],
+                            span,
+                        )?;
+                        self.logical_assignment(
+                            operator,
+                            old_value,
+                            value,
+                            span,
+                            Some((Opcode::SetById, receiver.index(), property)),
+                        )?
+                    }
                 };
-                self.emit(
-                    Opcode::SetById,
-                    &[receiver.index(), result.index(), property],
-                    span,
-                )?;
+                if !matches!(operator, HirAssignmentOperator::Logical(_)) {
+                    self.emit(
+                        Opcode::SetById,
+                        &[receiver.index(), result.index(), property],
+                        span,
+                    )?;
+                }
                 Ok(result)
             }
             HirAssignmentTarget::ComputedMember { object, property } => {
@@ -1943,12 +1968,29 @@ impl Lowerer<'_> {
                         let right = self.expression(value)?;
                         self.emit_binary(operator, old_value, right, span)?
                     }
+                    HirAssignmentOperator::Logical(operator) => {
+                        let old_value = self.register()?;
+                        self.emit(
+                            Opcode::GetByValue,
+                            &[old_value.index(), receiver.index(), property.index()],
+                            span,
+                        )?;
+                        self.logical_assignment(
+                            operator,
+                            old_value,
+                            value,
+                            span,
+                            Some((Opcode::SetByValue, receiver.index(), property.index())),
+                        )?
+                    }
                 };
-                self.emit(
-                    Opcode::SetByValue,
-                    &[receiver.index(), result.index(), property.index()],
-                    span,
-                )?;
+                if !matches!(operator, HirAssignmentOperator::Logical(_)) {
+                    self.emit(
+                        Opcode::SetByValue,
+                        &[receiver.index(), result.index(), property.index()],
+                        span,
+                    )?;
+                }
                 Ok(result)
             }
         }
@@ -1971,6 +2013,11 @@ impl Lowerer<'_> {
                 self.emit(Opcode::LoadScope, &[old_value.index(), scope_name], span)?;
                 let right = self.expression(value)?;
                 self.emit_binary(operator, old_value, right, span)?
+            }
+            HirAssignmentOperator::Logical(operator) => {
+                let old_value = self.register()?;
+                self.emit(Opcode::LoadScope, &[old_value.index(), scope_name], span)?;
+                self.logical_assignment(operator, old_value, value, span, None)?
             }
         };
         self.emit(
@@ -2190,6 +2237,41 @@ impl Lowerer<'_> {
         .map_err(CompileError::Builder)?;
         let right = self.expression(right)?;
         self.emit(Opcode::Move, &[destination.index(), right.index()], span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        Ok(destination)
+    }
+
+    /// Preserves an assignment target's old value and evaluates RHS only when its logical test fails.
+    fn logical_assignment(
+        &mut self,
+        operator: HirLogicalOperator,
+        old: RegisterId,
+        value: &HirExpression,
+        span: SourceSpan,
+        store: Option<(Opcode, u32, u32)>,
+    ) -> Result<RegisterId, CompileError> {
+        let destination = self.register()?;
+        self.emit(Opcode::Move, &[destination.index(), old.index()], span)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let source_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        match operator {
+            HirLogicalOperator::And => self.builder.emit_jump_if_false(old, end, source_span),
+            HirLogicalOperator::Or => self.builder.emit_jump_if_true(old, end, source_span),
+            HirLogicalOperator::Coalesce => {
+                self.builder.emit_jump_if_not_nullish(old, end, source_span)
+            }
+        }
+        .map_err(CompileError::Builder)?;
+        let right = self.expression(value)?;
+        self.emit(Opcode::Move, &[destination.index(), right.index()], span)?;
+        if let Some((opcode, receiver, property)) = store {
+            self.emit(opcode, &[receiver, destination.index(), property], span)?;
+        }
         self.builder
             .bind_label(end)
             .map_err(CompileError::Builder)?;
@@ -3483,6 +3565,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             let own_instructions = match (operator, target) {
                 (HirAssignmentOperator::Assign, _) => 1,
                 (HirAssignmentOperator::Binary(_), _) => 3,
+                (HirAssignmentOperator::Logical(_), _) => 5,
             };
             checked_count_add(operands, own_instructions, "bytecode instructions")
         }
@@ -4256,7 +4339,11 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             expression_label_count(property)?,
             "bytecode labels",
         ),
-        HirExpressionKind::Assignment { target, value, .. } => {
+        HirExpressionKind::Assignment {
+            operator,
+            target,
+            value,
+        } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object)?,
@@ -4266,7 +4353,13 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                     "bytecode labels",
                 )?,
             };
-            checked_count_add(target, expression_label_count(value)?, "bytecode labels")
+            let nested =
+                checked_count_add(target, expression_label_count(value)?, "bytecode labels")?;
+            if matches!(operator, HirAssignmentOperator::Logical(_)) {
+                checked_count_add(nested, 1, "bytecode labels")
+            } else {
+                Ok(nested)
+            }
         }
         HirExpressionKind::Update { target, .. } => match target {
             HirAssignmentTarget::Identifier(_) => Ok(0),
