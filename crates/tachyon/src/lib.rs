@@ -837,7 +837,8 @@ mod tests {
             Err(ExecutionError::LoadedModuleLimit { limit: 1 })
         ));
 
-        let mut global_limited = test_isolate_with_realm_limits(RealmLimits::new(2, 1));
+        let mut global_limited =
+            test_isolate_with_realm_limits(RealmLimits::new(2, 1).with_max_shapes(64));
         global_limited
             .execute(
                 &first,
@@ -964,6 +965,15 @@ mod tests {
             .as_i32(),
             Some(42)
         );
+    }
+
+    #[test]
+    fn function_prototype_call_forwards_this_and_positional_arguments() {
+        let value = execute_source(
+            60,
+            "function sum(left, right) { return this + left + right; } sum.call(10, 20, 12);",
+        );
+        assert_eq!(value.as_i32(), Some(42));
     }
 
     #[test]
