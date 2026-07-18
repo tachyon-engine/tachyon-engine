@@ -797,12 +797,19 @@ mod tests {
             }) if matches!(properties[0].key, HirObjectPropertyKey::Computed(_))
         ));
         assert!(matches!(
-            Compiler.lower_to_hir(
-                source(MediaType::JavaScript, "({ ...other });"),
-                CompileOptions::default(),
-            ),
-            Err(CompileError::UnsupportedSyntax {
-                syntax: "object spread",
+            Compiler
+                .lower_to_hir(
+                    source(MediaType::JavaScript, "({ ...other });"),
+                    CompileOptions::default(),
+                )
+                .unwrap()
+                .statements()
+                .first(),
+            Some(HirStatement {
+                kind: HirStatementKind::Expression(HirExpression {
+                    kind: HirExpressionKind::Call { .. },
+                    ..
+                }),
                 ..
             })
         ));
