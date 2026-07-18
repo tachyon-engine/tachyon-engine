@@ -29,7 +29,7 @@ pub struct ExternalProcessConfig {
     pub maximum_output_bytes: usize,
 }
 
-/// Serial Boa/QuickJS/Escargot CLI adapter that honestly exposes cold-start timing only.
+/// Serial Escargot CLI adapter that honestly exposes cold-start timing only.
 pub struct ExternalProcessAdapter {
     identity: EngineIdentity,
     config: ExternalProcessConfig,
@@ -54,7 +54,7 @@ impl ExternalProcessAdapter {
     ) -> Result<Self, AdapterError> {
         if identity.kind != EngineKind::EscargotCli {
             return Err(AdapterError::Setup(
-                "external process adapter requires a CLI engine kind".into(),
+                "external process adapter requires EscargotCli identity".into(),
             ));
         }
         if config.timeout.is_zero() || config.maximum_output_bytes == 0 {

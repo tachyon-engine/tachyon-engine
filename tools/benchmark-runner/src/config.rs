@@ -331,7 +331,7 @@ fn validate_external_engines(profiles: &[ExternalEngineProfile]) -> Result<(), &
             return Err("external engine profile IDs must be unique");
         }
         if profile.kind != EngineKind::EscargotCli {
-            return Err("external engine profiles require a CLI engine kind");
+            return Err("external engine profiles require EscargotCli identity");
         }
         if profile.id.is_empty()
             || profile.name.is_empty()
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn external_profiles_reject_duplicates_unsafe_paths_and_non_cli_kinds() {
+    fn external_profiles_reject_duplicates_unsafe_paths_and_non_escargot_kinds() {
         let config = BenchmarkConfig::parse(CONFIG).unwrap();
         let mut duplicate = config.clone();
         duplicate
@@ -497,7 +497,7 @@ mod tests {
         fixture.external_engines[0].kind = EngineKind::Fixture;
         assert_eq!(
             fixture.validate(),
-            Err("external engine profiles require a CLI engine kind")
+            Err("external engine profiles require EscargotCli identity")
         );
 
         let mut shell = BenchmarkConfig::parse(CONFIG).unwrap();

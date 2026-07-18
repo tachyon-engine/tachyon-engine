@@ -40,6 +40,35 @@ fn request(source: &str, mode: MeasurementMode) -> BenchmarkRequest {
 }
 
 #[test]
+/// Locks Boa and rquickjs to their linked adapters instead of executable launch paths.
+fn external_adapter_rejects_linked_boa_and_rquickjs_identities() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-engine.sh");
+    for kind in [EngineKind::BoaInProcess, EngineKind::RQuickJsInProcess] {
+        let result = ExternalProcessAdapter::new(
+            EngineIdentity {
+                name: "linked engine".into(),
+                kind,
+                version: "fixture".into(),
+                commit: "fixture".into(),
+                features: "none".into(),
+                build_flags: "fixture".into(),
+                binary_size_bytes: None,
+            },
+            ExternalProcessConfig {
+                executable: "/bin/sh".into(),
+                fixed_arguments: vec![OsString::from(&fixture)],
+                timeout: Duration::from_secs(1),
+                maximum_output_bytes: 1024,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(AdapterError::Setup(message)) if message.contains("EscargotCli")
+        ));
+    }
+}
+
+#[test]
 fn external_adapter_executes_prepared_source_and_records_binary_size() {
     let mut adapter = adapter(Duration::from_secs(1), 1024);
     let request = request("success", MeasurementMode::ColdStart);
