@@ -206,6 +206,7 @@ pub struct HirBinding {
     pub scope: ScopeId,
     pub span: SourceSpan,
     pub name: Arc<str>,
+    pub captured: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -804,12 +805,40 @@ fn new_binding(
         .symbol_id
         .get()
         .ok_or_else(|| missing_semantic(source, span, "binding symbol"))?;
+    let binding_scope = semantic.scoping().symbol_scope_id(symbol);
+    let binding_function = nearest_function_scope(semantic, binding_scope);
+    let captured = binding_function.is_some_and(|binding_function| {
+        semantic
+            .scoping()
+            .get_resolved_references(symbol)
+            .any(|reference| {
+                nearest_function_scope(semantic, reference.scope_id()) != Some(binding_function)
+            })
+    });
     Ok(HirBinding {
         id: BindingId(symbol.index() as u32),
-        scope: to_scope_id(semantic.scoping().symbol_scope_id(symbol)),
+        scope: to_scope_id(binding_scope),
         span,
         name: Arc::from(identifier.name.as_str()),
+        captured,
     })
+}
+
+/// Finds the activation-owning function scope for capture analysis without retaining Oxc IDs.
+fn nearest_function_scope(
+    semantic: &Semantic<'_>,
+    mut scope: oxc::semantic::ScopeId,
+) -> Option<oxc::semantic::ScopeId> {
+    loop {
+        if semantic
+            .scoping()
+            .scope_flags(scope)
+            .contains(OxcScopeFlags::Function)
+        {
+            return Some(scope);
+        }
+        scope = semantic.scoping().scope_parent_id(scope)?;
+    }
 }
 
 /// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.

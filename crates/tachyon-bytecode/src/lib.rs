@@ -158,6 +158,10 @@ pub enum Opcode {
     InstanceOf = 40,
     /// Stores register 0 only when scope-name operand 1 already resolves.
     StoreResolvedScope = 41,
+    /// Loads a verifier-owned binding-plan entry into register operand 0.
+    LoadBinding = 42,
+    /// Stores register operand 0 through verifier-owned binding-plan entry operand 1.
+    StoreBinding = 43,
 }
 
 impl Opcode {
@@ -184,7 +188,9 @@ impl Opcode {
             | Self::CreateClosure
             | Self::LoadScope
             | Self::StoreScope
-            | Self::StoreResolvedScope => 2,
+            | Self::StoreResolvedScope
+            | Self::LoadBinding
+            | Self::StoreBinding => 2,
             Self::Typeof => 2,
             Self::Add
             | Self::Sub
@@ -252,6 +258,8 @@ impl Opcode {
             39 => Some(Self::DeclareScope),
             40 => Some(Self::InstanceOf),
             41 => Some(Self::StoreResolvedScope),
+            42 => Some(Self::LoadBinding),
+            43 => Some(Self::StoreBinding),
             _ => None,
         }
     }
@@ -473,6 +481,7 @@ pub struct VerifyContext {
     pub constant_count: u32,
     pub function_count: u32,
     pub scope_name_count: u32,
+    pub binding_plan_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -500,6 +509,11 @@ pub enum VerifyError {
         offset: WordOffset,
         function: u32,
         function_count: u32,
+    },
+    BindingPlanOutOfRange {
+        offset: WordOffset,
+        binding: u32,
+        binding_plan_count: u32,
     },
     InvalidCallArgumentWindow {
         offset: WordOffset,
@@ -755,9 +769,11 @@ impl BytecodeBuilder {
             | Opcode::LoadImmediate
             | Opcode::LoadConstant
             | Opcode::LoadScope
+            | Opcode::LoadBinding
             | Opcode::CreateClosure
             | Opcode::StoreScope
             | Opcode::StoreResolvedScope
+            | Opcode::StoreBinding
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject
@@ -1227,7 +1243,13 @@ impl CompiledModule {
             constant_count,
             function_count,
             scope_name_count,
+            binding_plan_count: 0,
         };
+        let max_environment_slot_count = templates
+            .iter()
+            .map(|template| template.metadata.layout.environment_slot_count)
+            .max()
+            .unwrap_or(0);
         let mut functions = Vec::with_capacity(templates.len());
         for (index, template) in templates.into_iter().enumerate() {
             let expected = FunctionId::new(index as u32);
@@ -1241,6 +1263,11 @@ impl CompiledModule {
                 .bytecode
                 .verify(VerifyContext {
                     register_count: template.metadata.layout.register_count,
+                    binding_plan_count: u32::try_from(template.metadata.binding_plan.len())
+                        .map_err(|_| ModuleBuildError::InvalidFunctionLayout {
+                            function: template.id,
+                            layout: template.metadata.layout,
+                        })?,
                     ..context
                 })
                 .map_err(|error| ModuleBuildError::VerifyFunction {
@@ -1266,6 +1293,7 @@ impl CompiledModule {
                 template.id,
                 &template.metadata.binding_plan,
                 template.metadata.layout,
+                max_environment_slot_count,
             )?;
             validate_suspend_points(
                 template.id,
@@ -1491,6 +1519,7 @@ fn validate_binding_plan(
     function: FunctionId,
     bindings: &[BindingPlanEntry],
     layout: FunctionLayout,
+    max_environment_slot_count: u32,
 ) -> Result<(), ModuleBuildError> {
     for binding in bindings {
         if binding.name.is_empty() {
@@ -1509,11 +1538,11 @@ fn validate_binding_plan(
                     register_count: layout.register_count,
                 });
             }
-            BindingLocation::Environment { slot, .. } if slot >= layout.environment_slot_count => {
+            BindingLocation::Environment { slot, .. } if slot >= max_environment_slot_count => {
                 return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
                     function,
                     binding: binding.clone(),
-                    environment_slot_count: layout.environment_slot_count,
+                    environment_slot_count: max_environment_slot_count,
                 });
             }
             _ => {}
@@ -1687,7 +1716,8 @@ fn verify_instruction(
         | Opcode::LoadTrue
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
-        | Opcode::LoadScope => check_register(operands[0])?,
+        | Opcode::LoadScope
+        | Opcode::LoadBinding => check_register(operands[0])?,
         Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
             check_register(operands[0])?
         }
@@ -1757,7 +1787,9 @@ fn verify_instruction(
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
-        Opcode::StoreScope | Opcode::StoreResolvedScope => check_register(operands[0])?,
+        Opcode::StoreScope | Opcode::StoreResolvedScope | Opcode::StoreBinding => {
+            check_register(operands[0])?
+        }
     }
     if instruction.opcode == Opcode::LoadConstant && operands[1] >= context.constant_count {
         return Err(VerifyError::ConstantOutOfRange {
@@ -1784,6 +1816,17 @@ fn verify_instruction(
             offset,
             function: operands[1],
             function_count: context.function_count,
+        });
+    }
+    if matches!(
+        instruction.opcode,
+        Opcode::LoadBinding | Opcode::StoreBinding
+    ) && operands[1] >= context.binding_plan_count
+    {
+        return Err(VerifyError::BindingPlanOutOfRange {
+            offset,
+            binding: operands[1],
+            binding_plan_count: context.binding_plan_count,
         });
     }
     if matches!(
@@ -1826,6 +1869,7 @@ mod tests {
             constant_count: 2,
             function_count: 1,
             scope_name_count: 1,
+            binding_plan_count: 1,
         }
     }
     #[test]
@@ -1911,6 +1955,20 @@ mod tests {
             Err(VerifyError::ScopeNameOutOfRange {
                 scope_name: 1,
                 scope_name_count: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_binding_plan_index_past_function_table() {
+        let mut words = encode_instruction(Opcode::LoadBinding, &[0, 1]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        assert!(matches!(
+            Bytecode::from_words(words).verify(context()),
+            Err(VerifyError::BindingPlanOutOfRange {
+                binding: 1,
+                binding_plan_count: 1,
                 ..
             })
         ));

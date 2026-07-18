@@ -966,6 +966,26 @@ mod tests {
     }
 
     #[test]
+    fn closure_environment_preserves_mutable_state_across_calls() {
+        assert_eq!(
+            execute_source(
+                51,
+                "function outer() { let value = 1; return function() { value += 1; return value; }; } let next = outer(); next(); next();",
+            )
+            .as_i32(),
+            Some(3)
+        );
+        assert_eq!(
+            execute_source(
+                52,
+                "function outer() { let first = 20; return function() { let second = 22; return function() { return first + second; }; }; } outer()()();",
+            )
+            .as_i32(),
+            Some(42)
+        );
+    }
+
+    #[test]
     /// Covers both script completion and ordinary-function loop control paths.
     fn classic_for_loop_runs_update_on_continue_and_exits_on_break() {
         assert_eq!(

@@ -328,8 +328,8 @@ mod tests {
     }
 
     #[test]
-    fn compiler_rejects_capture_until_environment_storage_is_emitted() {
-        let error = Compiler
+    fn compiler_emits_owned_and_inherited_environment_binding_plans() {
+        let module = Compiler
             .compile(
                 source(
                     MediaType::JavaScript,
@@ -337,14 +337,23 @@ mod tests {
                 ),
                 CompileOptions::default(),
             )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            CompileError::UnsupportedSyntax {
-                syntax: "captured binding requires environment storage",
-                ..
-            }
-        ));
+            .unwrap();
+        let inner = module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap();
+        let outer = module
+            .function(tachyon_bytecode::FunctionId::new(2))
+            .unwrap();
+        assert_eq!(outer.layout().environment_slot_count, 1);
+        assert_eq!(inner.layout().environment_slot_count, 0);
+        assert!(outer.binding_plan().iter().any(|binding| matches!(
+            binding.location,
+            tachyon_bytecode::BindingLocation::Environment { depth: 0, slot: 0 }
+        )));
+        assert!(inner.binding_plan().iter().any(|binding| matches!(
+            binding.location,
+            tachyon_bytecode::BindingLocation::Environment { depth: 0, slot: 0 }
+        )));
     }
 
     #[test]

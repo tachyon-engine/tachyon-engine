@@ -18,6 +18,7 @@ use crate::{
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
 pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
+    let environments = EnvironmentPlans::new(hir)?;
     let mut constants = Vec::with_capacity(hir_literal_count(hir)?);
     let mut scope_names = Vec::with_capacity(hir_scope_name_capacity(hir)?);
     let template_capacity =
@@ -28,12 +29,20 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
                 collection: "compiled functions",
             })?;
     let mut templates = Vec::with_capacity(template_capacity);
-    templates.push(lower_entry(source, hir, &mut constants, &mut scope_names)?);
-    for function in hir.functions() {
+    templates.push(lower_entry(
+        source,
+        hir,
+        &environments,
+        &mut constants,
+        &mut scope_names,
+    )?);
+    for (function_index, function) in hir.functions().iter().enumerate() {
         templates.push(lower_function(
             source,
             function,
+            function_index,
             hir.root_scope(),
+            &environments,
             &mut constants,
             &mut scope_names,
         )?);
@@ -52,6 +61,7 @@ pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledMod
 fn lower_entry(
     source: &SourceText,
     hir: &HirProgram,
+    environments: &EnvironmentPlans,
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
@@ -119,6 +129,8 @@ fn lower_entry(
         source_name: source.name().clone(),
         script_scope: true,
         root_scope: hir.root_scope(),
+        function_scope: None,
+        environments,
     };
     for statement in hir.statements() {
         if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
@@ -216,11 +228,220 @@ fn lower_entry(
     ))
 }
 
+#[derive(Clone, Debug)]
+struct CapturedSlot {
+    id: BindingId,
+    slot: u32,
+    name: std::sync::Arc<str>,
+    mutable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct FunctionEnvironmentPlan {
+    scope: ScopeId,
+    parent_function: Option<usize>,
+    slots: Vec<CapturedSlot>,
+}
+
+#[derive(Clone, Debug)]
+struct EnvironmentPlans {
+    functions: Vec<FunctionEnvironmentPlan>,
+}
+
+impl EnvironmentPlans {
+    /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
+    fn new(hir: &HirProgram) -> Result<Self, CompileError> {
+        let mut functions = Vec::with_capacity(hir.functions().len());
+        for function in hir.functions() {
+            let capacity = function
+                .parameters
+                .len()
+                .checked_add(statements_binding_count(&function.body)?)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "captured environment slots",
+                })?;
+            let mut slots = Vec::with_capacity(capacity);
+            for parameter in function.parameters.iter() {
+                push_captured_slot(parameter, true, &mut slots)?;
+            }
+            collect_captured_slots(&function.body, &mut slots)?;
+            functions.push(FunctionEnvironmentPlan {
+                scope: function.scope,
+                parent_function: None,
+                slots,
+            });
+        }
+        for index in 0..functions.len() {
+            functions[index].parent_function =
+                nearest_parent_function(functions[index].scope, hir.scopes(), &functions);
+        }
+        Ok(Self { functions })
+    }
+
+    #[inline(always)]
+    fn local_slot(&self, function_scope: ScopeId, binding: BindingId) -> Option<&CapturedSlot> {
+        self.functions
+            .iter()
+            .find(|function| function.scope == function_scope)?
+            .slots
+            .iter()
+            .find(|slot| slot.id == binding)
+    }
+
+    /// Resolves a captured reference to the nearest allocated environment chain node.
+    fn reference_slot(
+        &self,
+        current_scope: ScopeId,
+        binding: BindingId,
+    ) -> Option<(u32, &CapturedSlot)> {
+        let current = self
+            .functions
+            .iter()
+            .position(|function| function.scope == current_scope)?;
+        let target = self
+            .functions
+            .iter()
+            .position(|function| function.slots.iter().any(|slot| slot.id == binding))?;
+        let mut cursor = if self.functions[current].slots.is_empty() {
+            self.nearest_environment_parent(current)?
+        } else {
+            current
+        };
+        let mut depth = 0_u32;
+        while cursor != target {
+            cursor = self.nearest_environment_parent(cursor)?;
+            depth = depth.checked_add(1)?;
+        }
+        let slot = self.functions[target]
+            .slots
+            .iter()
+            .find(|slot| slot.id == binding)?;
+        Some((depth, slot))
+    }
+
+    fn nearest_environment_parent(&self, mut function: usize) -> Option<usize> {
+        loop {
+            function = self.functions[function].parent_function?;
+            if !self.functions[function].slots.is_empty() {
+                return Some(function);
+            }
+        }
+    }
+}
+
+fn nearest_parent_function(
+    scope: ScopeId,
+    scopes: &[crate::HirScope],
+    functions: &[FunctionEnvironmentPlan],
+) -> Option<usize> {
+    let mut parent = scopes.get(scope.index() as usize)?.parent;
+    while let Some(scope) = parent {
+        if let Some(index) = functions
+            .iter()
+            .position(|function| function.scope == scope)
+        {
+            return Some(index);
+        }
+        parent = scopes.get(scope.index() as usize)?.parent;
+    }
+    None
+}
+
+fn push_captured_slot(
+    binding: &crate::HirBinding,
+    mutable: bool,
+    slots: &mut Vec<CapturedSlot>,
+) -> Result<(), CompileError> {
+    if !binding.captured || slots.iter().any(|slot| slot.id == binding.id) {
+        return Ok(());
+    }
+    let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
+    slots.push(CapturedSlot {
+        id: binding.id,
+        slot,
+        name: binding.name.clone(),
+        mutable,
+    });
+    Ok(())
+}
+
+/// Walks activation-owned declarations while nested function bodies remain separate stencils.
+fn collect_captured_slots(
+    statements: &[HirStatement],
+    slots: &mut Vec<CapturedSlot>,
+) -> Result<(), CompileError> {
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => {
+                let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                for declarator in declaration.declarators.iter() {
+                    push_captured_slot(&declarator.binding, mutable, slots)?;
+                }
+            }
+            HirStatementKind::FunctionDeclaration(declaration) => {
+                push_captured_slot(&declaration.binding, true, slots)?;
+            }
+            HirStatementKind::Block(body) => collect_captured_slots(body, slots)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                collect_captured_slots(core::slice::from_ref(consequent), slots)?;
+                if let Some(alternate) = alternate {
+                    collect_captured_slots(core::slice::from_ref(alternate), slots)?;
+                }
+            }
+            HirStatementKind::For {
+                initializer, body, ..
+            } => {
+                if let Some(HirForInitializer::Variable(declaration)) = initializer {
+                    let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                    for declarator in declaration.declarators.iter() {
+                        push_captured_slot(&declarator.binding, mutable, slots)?;
+                    }
+                }
+                collect_captured_slots(core::slice::from_ref(body), slots)?;
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                for case in cases.iter() {
+                    collect_captured_slots(&case.consequent, slots)?;
+                }
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                collect_captured_slots(block, slots)?;
+                if let Some(handler) = handler {
+                    if let Some(parameter) = &handler.parameter {
+                        push_captured_slot(parameter, true, slots)?;
+                    }
+                    collect_captured_slots(&handler.body, slots)?;
+                }
+                if let Some(finalizer) = finalizer {
+                    collect_captured_slots(finalizer, slots)?;
+                }
+            }
+            HirStatementKind::Expression(_)
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Empty => {}
+        }
+    }
+    Ok(())
+}
+
 /// Lowers one ordinary function with parameter registers fixed at the front of its frame.
 fn lower_function(
     source: &SourceText,
     function: &HirFunction,
+    function_index: usize,
     root_scope: ScopeId,
+    environments: &EnvironmentPlans,
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
@@ -236,6 +457,7 @@ fn lower_function(
         .count();
     let instruction_capacity = statements_instruction_count(&function.body)?
         .checked_add(var_initialization_count)
+        .and_then(|count| count.checked_add(function.parameters.len()))
         .and_then(|count| count.checked_add(2))
         .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
         .ok_or(CompileError::LoweringCapacityOverflow {
@@ -271,17 +493,23 @@ fn lower_function(
         source_name: source.name().clone(),
         script_scope: false,
         root_scope,
+        function_scope: Some(function.scope),
+        environments,
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
-        lowerer.add_local(parameter, register, true);
+        lowerer.add_local(parameter, Some(register), true)?;
     }
     for binding in &var_bindings {
         if lowerer.local_by_id(binding.id).is_some() {
             continue;
         }
-        let register = lowerer.load_undefined(function.span)?;
-        lowerer.add_local(binding, register, true);
+        if binding.captured {
+            lowerer.add_local(binding, None, true)?;
+        } else {
+            let register = lowerer.load_undefined(function.span)?;
+            lowerer.add_local(binding, Some(register), true)?;
+        }
     }
     let mut terminal = false;
     for statement in function.body.iter() {
@@ -314,6 +542,10 @@ fn lower_function(
                 argument_count: u32::try_from(function.parameters.len())
                     .map_err(|_| CompileError::RegisterOverflow)?,
                 max_handler_depth,
+                environment_slot_count: u32::try_from(
+                    environments.functions[function_index].slots.len(),
+                )
+                .map_err(|_| CompileError::BindingOverflow)?,
                 ..FunctionLayout::default()
             },
             source_map,
@@ -338,13 +570,21 @@ struct Lowerer<'a> {
     source_name: SourceName,
     script_scope: bool,
     root_scope: ScopeId,
+    function_scope: Option<ScopeId>,
+    environments: &'a EnvironmentPlans,
 }
 
 #[derive(Clone, Debug)]
 struct LocalBinding {
     id: BindingId,
-    register: RegisterId,
+    storage: LocalStorage,
     mutable: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LocalStorage {
+    Register(RegisterId),
+    Environment { plan: u32 },
 }
 
 impl Lowerer<'_> {
@@ -885,7 +1125,7 @@ impl Lowerer<'_> {
             )
             .map_err(CompileError::Builder)?;
         if let Some(parameter) = &handler.parameter {
-            self.add_local(parameter, exception, true);
+            self.add_local(parameter, Some(exception), true)?;
         }
         Ok(offset)
     }
@@ -1173,20 +1413,25 @@ impl Lowerer<'_> {
                 left,
                 right,
             } => self.logical(*operator, left, right, expression.span),
-            HirExpressionKind::Identifier(reference) => match self.local_reference(reference) {
-                Some(binding) => Ok(binding.register),
-                None => {
-                    self.require_global_reference(reference, expression.span)?;
-                    let destination = self.register()?;
-                    let scope_name = self.global_binding(&reference.name, true)?;
-                    self.emit(
-                        Opcode::LoadScope,
-                        &[destination.index(), scope_name],
-                        expression.span,
-                    )?;
-                    Ok(destination)
+            HirExpressionKind::Identifier(reference) => {
+                match self.local_reference(reference).cloned() {
+                    Some(binding) => self.read_local(&binding, expression.span),
+                    None => {
+                        if let Some(binding) = self.captured_reference(reference)? {
+                            return self.read_local(&binding, expression.span);
+                        }
+                        self.require_global_reference(reference, expression.span)?;
+                        let destination = self.register()?;
+                        let scope_name = self.global_binding(&reference.name, true)?;
+                        self.emit(
+                            Opcode::LoadScope,
+                            &[destination.index(), scope_name],
+                            expression.span,
+                        )?;
+                        Ok(destination)
+                    }
                 }
-            },
+            }
             HirExpressionKind::Function(function) => {
                 let destination = self.register()?;
                 let function = function
@@ -1282,21 +1527,27 @@ impl Lowerer<'_> {
                     let result = match operator {
                         HirAssignmentOperator::Assign => self.expression(value)?,
                         HirAssignmentOperator::Binary(operator) => {
-                            let old_value = self.register()?;
-                            self.emit(
-                                Opcode::Move,
-                                &[old_value.index(), binding.register.index()],
-                                span,
-                            )?;
+                            let old_value = self.snapshot_local(&binding, span)?;
                             let right = self.expression(value)?;
                             self.emit_binary(operator, old_value, right, span)?
                         }
                     };
-                    self.emit(
-                        Opcode::Move,
-                        &[binding.register.index(), result.index()],
-                        span,
-                    )?;
+                    self.write_local(&binding, result, span)?;
+                    return Ok(result);
+                }
+                if let Some(binding) = self.captured_reference(target)? {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "assignment to immutable capture"));
+                    }
+                    let result = match operator {
+                        HirAssignmentOperator::Assign => self.expression(value)?,
+                        HirAssignmentOperator::Binary(operator) => {
+                            let old_value = self.snapshot_local(&binding, span)?;
+                            let right = self.expression(value)?;
+                            self.emit_binary(operator, old_value, right, span)?
+                        }
+                    };
+                    self.write_local(&binding, result, span)?;
                     return Ok(result);
                 }
                 self.scope_assignment(operator, target, value, span)
@@ -1439,21 +1690,21 @@ impl Lowerer<'_> {
                     if !binding.mutable {
                         return Err(self.unsupported(span, "update of immutable local"));
                     }
-                    let result = if prefix {
-                        None
-                    } else {
-                        let old = self.register()?;
-                        self.emit(Opcode::Move, &[old.index(), binding.register.index()], span)?;
-                        Some(old)
-                    };
+                    let old = self.snapshot_local(&binding, span)?;
                     let one = self.load_immediate(1, span)?;
-                    let updated = self.emit_binary(opcode, binding.register, one, span)?;
-                    self.emit(
-                        Opcode::Move,
-                        &[binding.register.index(), updated.index()],
-                        span,
-                    )?;
-                    return Ok(result.unwrap_or(updated));
+                    let updated = self.emit_binary(opcode, old, one, span)?;
+                    self.write_local(&binding, updated, span)?;
+                    return Ok(if prefix { updated } else { old });
+                }
+                if let Some(binding) = self.captured_reference(target)? {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "update of immutable capture"));
+                    }
+                    let old = self.snapshot_local(&binding, span)?;
+                    let one = self.load_immediate(1, span)?;
+                    let updated = self.emit_binary(opcode, old, one, span)?;
+                    self.write_local(&binding, updated, span)?;
+                    return Ok(if prefix { updated } else { old });
                 }
                 self.scope_update(opcode, prefix, target, span)
             }
@@ -1764,9 +2015,9 @@ impl Lowerer<'_> {
             };
             self.add_local(
                 &declarator.binding,
-                register,
+                Some(register),
                 declaration.kind == HirVariableDeclarationKind::Let,
-            );
+            )?;
         }
         Ok(())
     }
@@ -1782,11 +2033,7 @@ impl Lowerer<'_> {
             };
             let value = self.expression(initializer)?;
             if let Some(binding) = self.local_by_id(declarator.binding.id).cloned() {
-                self.emit(
-                    Opcode::Move,
-                    &[binding.register.index(), value.index()],
-                    declarator.span,
-                )?;
+                self.write_local(&binding, value, declarator.span)?;
             } else if self.script_scope {
                 let scope_name = self.global_binding(&declarator.binding.name, true)?;
                 self.emit(
@@ -1860,18 +2107,132 @@ impl Lowerer<'_> {
         Ok(register)
     }
 
-    /// Publishes one frame binding and its verifier-owned storage contract together.
-    fn add_local(&mut self, binding: &crate::HirBinding, register: RegisterId, mutable: bool) {
-        self.binding_plan.push(BindingPlanEntry {
-            name: binding.name.clone(),
-            location: BindingLocation::FrameRegister(register),
-            mutable,
-        });
+    fn add_binding_plan(&mut self, entry: BindingPlanEntry) -> Result<u32, CompileError> {
+        if let Some(index) = self
+            .binding_plan
+            .iter()
+            .position(|existing| existing == &entry)
+        {
+            return u32::try_from(index).map_err(|_| CompileError::BindingOverflow);
+        }
+        let index =
+            u32::try_from(self.binding_plan.len()).map_err(|_| CompileError::BindingOverflow)?;
+        self.binding_plan.push(entry);
+        Ok(index)
+    }
+
+    /// Materializes one ancestor capture as this function's immutable binding-plan entry.
+    fn captured_reference(
+        &mut self,
+        reference: &HirIdentifierReference,
+    ) -> Result<Option<LocalBinding>, CompileError> {
+        let (Some(function_scope), Some(binding)) = (self.function_scope, reference.binding) else {
+            return Ok(None);
+        };
+        let Some((depth, slot)) = self.environments.reference_slot(function_scope, binding) else {
+            return Ok(None);
+        };
+        let plan = self.add_binding_plan(BindingPlanEntry {
+            name: slot.name.clone(),
+            location: BindingLocation::Environment {
+                depth,
+                slot: slot.slot,
+            },
+            mutable: slot.mutable,
+        })?;
+        Ok(Some(LocalBinding {
+            id: binding,
+            storage: LocalStorage::Environment { plan },
+            mutable: slot.mutable,
+        }))
+    }
+
+    fn read_local(
+        &mut self,
+        binding: &LocalBinding,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        match binding.storage {
+            LocalStorage::Register(register) => Ok(register),
+            LocalStorage::Environment { plan } => {
+                let destination = self.register()?;
+                self.emit(Opcode::LoadBinding, &[destination.index(), plan], span)?;
+                Ok(destination)
+            }
+        }
+    }
+
+    fn snapshot_local(
+        &mut self,
+        binding: &LocalBinding,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let value = self.read_local(binding, span)?;
+        if matches!(binding.storage, LocalStorage::Environment { .. }) {
+            return Ok(value);
+        }
+        let snapshot = self.register()?;
+        self.emit(Opcode::Move, &[snapshot.index(), value.index()], span)?;
+        Ok(snapshot)
+    }
+
+    fn write_local(
+        &mut self,
+        binding: &LocalBinding,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        match binding.storage {
+            LocalStorage::Register(register) => {
+                self.emit(Opcode::Move, &[register.index(), value.index()], span)
+            }
+            LocalStorage::Environment { plan } => {
+                self.emit(Opcode::StoreBinding, &[value.index(), plan], span)
+            }
+        }
+    }
+
+    /// Publishes one local binding and initializes promoted parameters through verified bytecode.
+    fn add_local(
+        &mut self,
+        binding: &crate::HirBinding,
+        register: Option<RegisterId>,
+        mutable: bool,
+    ) -> Result<(), CompileError> {
+        let storage = if let Some(function_scope) = self.function_scope
+            && let Some(slot) = self.environments.local_slot(function_scope, binding.id)
+        {
+            let plan = self.add_binding_plan(BindingPlanEntry {
+                name: slot.name.clone(),
+                location: BindingLocation::Environment {
+                    depth: 0,
+                    slot: slot.slot,
+                },
+                mutable: slot.mutable,
+            })?;
+            if let Some(register) = register {
+                self.emit(
+                    Opcode::StoreBinding,
+                    &[register.index(), plan],
+                    binding.span,
+                )?;
+            }
+            LocalStorage::Environment { plan }
+        } else {
+            let register = register.ok_or(CompileError::RegisterOverflow)?;
+            self.add_binding_plan(BindingPlanEntry {
+                name: binding.name.clone(),
+                location: BindingLocation::FrameRegister(register),
+                mutable,
+            })?;
+            LocalStorage::Register(register)
+        };
         self.locals.push(LocalBinding {
             id: binding.id,
-            register,
+            storage,
             mutable,
         });
+        Ok(())
     }
 
     /// Records one global-property binding once while returning its shared module name index.

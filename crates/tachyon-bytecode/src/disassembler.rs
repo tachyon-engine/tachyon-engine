@@ -124,6 +124,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::StoreScope | Opcode::StoreResolvedScope => {
             write!(output, " r{}, scope={}", operands[0], operands[1])?
         }
+        Opcode::LoadBinding | Opcode::StoreBinding => {
+            write!(output, " r{}, binding={}", operands[0], operands[1])?
+        }
         Opcode::Await | Opcode::Yield => write!(
             output,
             " r{}, r{}, suspend={}",

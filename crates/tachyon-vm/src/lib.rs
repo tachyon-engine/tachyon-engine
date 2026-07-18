@@ -27,13 +27,13 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32};
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout, HandlerEntry,
-    HandlerKind, Opcode, RegisterId, WordOffset, decode_instruction,
+    BindingLocation, BytecodeConstant, CompiledModule, FunctionId, FunctionKind, FunctionLayout,
+    HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset, decode_instruction,
 };
 use tachyon_gc::{
-    AllocationSpace, GcRef, GcType, Heap, HeapAllocationError, HeapLimit, HeapReferenceError,
-    ManagedAllocationError, NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError,
-    TypeRegistry,
+    AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
+    HeapReferenceError, ManagedAllocationError, NoGcBorrowError, RootError, Trace, Tracer,
+    TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::{Immediate, Value};
 
@@ -128,13 +128,16 @@ pub enum RunOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
-    InvalidDispatchBatch { batch: usize },
+    InvalidDispatchBatch {
+        batch: usize,
+    },
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
     HandlerStackTooLarge(u32),
     CompletionStackTooLarge(u32),
     FrameAllocationFailed,
     RegisterAllocationFailed,
+    EnvironmentStorageAllocationFailed,
     HandlerAllocationFailed,
     CompletionAllocationFailed,
     DecodeInvariant(WordOffset),
@@ -150,9 +153,16 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     UnsupportedExceptionHandler(HandlerKind),
-    CallStackLimit { limit: u32 },
-    RegisterStackLimit { limit: u32, requested: u32 },
-    LoadedModuleLimit { limit: u32 },
+    CallStackLimit {
+        limit: u32,
+    },
+    RegisterStackLimit {
+        limit: u32,
+        requested: u32,
+    },
+    LoadedModuleLimit {
+        limit: u32,
+    },
     LoadedCodeAllocationFailed,
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),
@@ -164,10 +174,26 @@ pub enum ExecutionError {
     UnsupportedPropertyKey(Value),
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
-    InvalidScopeName { code: CodeId, scope_name: u32 },
+    InvalidScopeName {
+        code: CodeId,
+        scope_name: u32,
+    },
+    InvalidBindingPlan {
+        code: CodeId,
+        function: FunctionId,
+        binding: u32,
+    },
+    InvalidBindingLocation(BindingLocation),
+    MissingEnvironment,
+    InvalidEnvironmentSlot {
+        depth: u32,
+        slot: u32,
+    },
     UnresolvedBinding(AtomId),
     ReadOnlyBinding(AtomId),
-    GlobalBindingLimit { limit: u32 },
+    GlobalBindingLimit {
+        limit: u32,
+    },
     GlobalBindingAllocationFailed,
     GlobalBindingIndexAllocationFailed,
     Shape(ShapeError),
@@ -183,12 +209,23 @@ pub enum IsolateCreationError {
     HeapAllocation(HeapAllocationError),
 }
 
-/// A future GC-managed lexical environment. Its concrete payload arrives with M5.
 #[derive(Debug)]
-struct Environment;
+struct Environment {
+    parent: Option<GcRef<Environment>>,
+    slots: Box<[Value]>,
+}
 
 impl Trace for Environment {
-    fn trace(&mut self, _: &mut dyn Tracer) {}
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.parent.trace(tracer);
+        self.slots.trace(tracer);
+    }
+}
+
+impl GcExternalMemory for Environment {
+    fn external_memory_bytes(&self) -> usize {
+        self.slots.len() * core::mem::size_of::<Value>()
+    }
 }
 
 /// Minimal callable payload; properties and captured environments extend this object in M5.
@@ -247,6 +284,7 @@ impl Trace for FunctionObject {
 
 #[derive(Clone, Copy)]
 struct VmTypes {
+    environment: GcType<Environment>,
     function: GcType<FunctionObject>,
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
@@ -639,6 +677,9 @@ impl Isolate {
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
+            environment: registry
+                .try_register("Environment")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1643,6 +1684,14 @@ impl Isolate {
                 let value = self.read(base, operands[0])?;
                 self.store_resolved_scope(code, operands[1], value)?;
             }
+            Opcode::LoadBinding => {
+                let value = self.load_binding(code, operands[1])?;
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::StoreBinding => {
+                let value = self.read(base, operands[0])?;
+                self.store_binding(code, operands[1], value)?;
+            }
             Opcode::DeclareScope => {
                 self.declare_scope(code, operands[0])?;
             }
@@ -1837,6 +1886,148 @@ impl Isolate {
         Err(ExecutionError::UnresolvedBinding(resolution.atom))
     }
 
+    fn current_binding_location(
+        &self,
+        code: CodeId,
+        binding: u32,
+    ) -> Result<BindingLocation, ExecutionError> {
+        let function_id = self
+            .fiber
+            .frames
+            .last()
+            .expect("binding access always has an active frame")
+            .function;
+        self.loaded_code(code)?
+            .module
+            .function(function_id)
+            .and_then(|function| function.binding_plan().get(binding as usize))
+            .map(|binding| binding.location)
+            .ok_or(ExecutionError::InvalidBindingPlan {
+                code,
+                function: function_id,
+                binding,
+            })
+    }
+
+    fn environment_at_depth(&mut self, depth: u32) -> Result<GcRef<Environment>, ExecutionError> {
+        let mut environment = self
+            .fiber
+            .frames
+            .last()
+            .and_then(|frame| frame.environment)
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        for _ in 0..depth {
+            environment = self.heap.with_running_scope(|scope| {
+                let local = scope.root(environment).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.environment)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .parent
+                        .ok_or(ExecutionError::MissingEnvironment)
+                })
+            })?;
+        }
+        Ok(environment)
+    }
+
+    fn load_binding(&mut self, code: CodeId, binding: u32) -> Result<Value, ExecutionError> {
+        let BindingLocation::Environment { depth, slot } =
+            self.current_binding_location(code, binding)?
+        else {
+            return Err(ExecutionError::InvalidBindingLocation(
+                self.current_binding_location(code, binding)?,
+            ));
+        };
+        let environment = self.environment_at_depth(depth)?;
+        self.heap.with_running_scope(|scope| {
+            let local = scope.root(environment).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(local, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .slots
+                    .get(slot as usize)
+                    .copied()
+                    .ok_or(ExecutionError::InvalidEnvironmentSlot { depth, slot })
+            })
+        })
+    }
+
+    /// Mutates one environment slot and records an old-to-young edge when the value is managed.
+    fn store_binding(
+        &mut self,
+        code: CodeId,
+        binding: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let location = self.current_binding_location(code, binding)?;
+        let BindingLocation::Environment { depth, slot } = location else {
+            return Err(ExecutionError::InvalidBindingLocation(location));
+        };
+        let environment = self.environment_at_depth(depth)?;
+        self.heap.with_running_scope(|scope| {
+            let local = scope.root(environment).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let environment = no_gc
+                    .borrow_mut(local, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let target = environment
+                    .slots
+                    .get_mut(slot as usize)
+                    .ok_or(ExecutionError::InvalidEnvironmentSlot { depth, slot })?;
+                *target = value;
+                Ok::<(), ExecutionError>(())
+            })
+        })?;
+        if let Some(target) = value.as_heap_ref() {
+            self.heap
+                .write_barrier(environment.raw(), target)
+                .map_err(ExecutionError::HeapReference)?;
+        }
+        Ok(())
+    }
+
+    /// Allocates the current activation's exact captured-slot backing after its frame is rooted.
+    fn allocate_current_environment(&mut self, slot_count: u32) -> Result<(), ExecutionError> {
+        if slot_count == 0 {
+            return Ok(());
+        }
+        let slot_count = usize::try_from(slot_count)
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        let mut slots = Vec::new();
+        slots
+            .try_reserve_exact(slot_count)
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        slots.resize(slot_count, Value::from_immediate(Immediate::Undefined));
+        let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let environment = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.environment,
+                0,
+                Environment {
+                    parent,
+                    slots: slots.into_boxed_slice(),
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("environment allocation retains its frame")
+            .environment = Some(environment);
+        Ok(())
+    }
+
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
         let (layout, kind) = {
             let function = self
@@ -1883,7 +2074,7 @@ impl Isolate {
             construct_receiver: None,
             call_site: None,
         });
-        Ok(())
+        self.allocate_current_environment(layout.environment_slot_count)
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
@@ -2075,6 +2266,12 @@ impl Isolate {
             completion_base: self.fiber.completions.len() as u32,
             call_site: Some(site.call_site),
         });
+        if let Err(error) = self.allocate_current_environment(target.layout.environment_slot_count)
+        {
+            self.fiber.frames.pop();
+            self.fiber.registers.truncate(callee_base as usize);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -2391,8 +2588,9 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_bytecode::{
-        Bytecode, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule,
-        FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan, encode_instruction,
+        BindingPlanEntry, Bytecode, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate,
+        CompiledModule, FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan,
+        encode_instruction,
     };
     use tachyon_gc::{ForcedCollectionMode, GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
@@ -2415,6 +2613,70 @@ mod tests {
 
     fn less_than_module() -> CompiledModule {
         binary_module(Opcode::LessThan, "1 < 2")
+    }
+
+    /// Builds a closure whose empty activation inherits and mutates the entry environment.
+    fn captured_environment_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::default();
+        entry.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
+        entry.emit(Opcode::StoreBinding, &[0, 0], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+        entry.emit(Opcode::Call, &[2, 1, 0], span).unwrap();
+        entry.emit(Opcode::Call, &[3, 1, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[3], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+
+        let mut closure = BytecodeBuilder::default();
+        closure.emit(Opcode::LoadBinding, &[0, 0], span).unwrap();
+        closure.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+        closure.emit(Opcode::Add, &[2, 0, 1], span).unwrap();
+        closure.emit(Opcode::StoreBinding, &[2, 0], span).unwrap();
+        closure.emit(Opcode::Return, &[2], span).unwrap();
+        let (closure_bytecode, closure_source_map, closure_registers) = closure.finish().unwrap();
+        let binding_plan: Arc<[BindingPlanEntry]> = Arc::from([BindingPlanEntry {
+            name: Arc::from("value"),
+            location: BindingLocation::Environment { depth: 0, slot: 0 },
+            mutable: true,
+        }]);
+        CompiledModule::new(
+            Arc::from("captured environment"),
+            vec![],
+            vec![],
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Script,
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            environment_slot_count: 1,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        binding_plan: binding_plan.clone(),
+                        ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    closure_bytecode,
+                    FunctionMetadata {
+                        kind: FunctionKind::Ordinary,
+                        layout: FunctionLayout {
+                            register_count: closure_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: closure_source_map,
+                        binding_plan,
+                        ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                    },
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
     }
 
     /// Compares the canonical typeof number value with an independently loaded string literal.
@@ -2763,6 +3025,19 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    fn assert_captured_environment_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &captured_environment_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
     }
 
     fn assert_throw_batch<const N: usize>() {
@@ -3151,6 +3426,33 @@ mod tests {
         assert_call_batch::<4>();
         assert_call_batch::<8>();
         assert_call_batch::<16>();
+    }
+
+    #[test]
+    fn captured_environments_work_for_every_dispatch_batch() {
+        assert_captured_environment_batch::<1>();
+        assert_captured_environment_batch::<2>();
+        assert_captured_environment_batch::<4>();
+        assert_captured_environment_batch::<8>();
+        assert_captured_environment_batch::<16>();
+    }
+
+    #[test]
+    fn captured_environment_survives_forced_major_allocation() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<8>(
+                &captured_environment_module(),
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
     }
 
     #[test]
