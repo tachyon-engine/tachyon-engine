@@ -2048,6 +2048,17 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Sequence(expressions) => {
+                let mut result = None;
+                for expression in expressions.iter() {
+                    result = Some(self.expression(expression)?);
+                }
+                result.ok_or_else(|| CompileError::UnsupportedSyntax {
+                    source_name: self.source_name.clone(),
+                    span: expression.span,
+                    syntax: "empty sequence expression",
+                })
+            }
             HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
                 let object = self.register()?;
                 let create = if matches!(&expression.kind, HirExpressionKind::Array(_)) {
@@ -3510,6 +3521,17 @@ fn switch_scope_name_count(
 fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
+        HirExpressionKind::Sequence(expressions) => {
+            let mut count = 0;
+            for expression in expressions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(expression)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {
@@ -3833,6 +3855,17 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Sequence(expressions) => {
+            let mut count = 0;
+            for expression in expressions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(expression)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 1;
             for property in properties.iter() {
@@ -4719,6 +4752,17 @@ fn statements_loop_count(statements: &[HirStatement]) -> Result<usize, CompileEr
 /// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
 fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Sequence(expressions) => {
+            let mut count = 0;
+            for expression in expressions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_label_count(expression)?,
+                    "bytecode labels",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {
@@ -4816,6 +4860,17 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
 
 fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Sequence(expressions) => {
+            let mut count = 0;
+            for expression in expressions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_literal_count(expression)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
             let mut count = 0;
             for property in properties.iter() {

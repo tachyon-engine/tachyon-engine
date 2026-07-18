@@ -310,6 +310,7 @@ pub enum HirExpressionKind {
     Function(FunctionStencilId),
     This,
     NewTarget,
+    Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
     Array(Arc<[HirObjectProperty]>),
     StaticMember {
@@ -1191,6 +1192,13 @@ fn lower_expression(
             if property.meta.name == "new" && property.property.name == "target" =>
         {
             HirExpressionKind::NewTarget
+        }
+        Expression::SequenceExpression(sequence) => {
+            let mut expressions = Vec::with_capacity(sequence.expressions.len());
+            for expression in &sequence.expressions {
+                expressions.push(lower_expression(expression, source, semantic, functions)?);
+            }
+            HirExpressionKind::Sequence(expressions.into())
         }
         Expression::ArrayExpression(array) => {
             let mut accumulated = None;

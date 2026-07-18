@@ -134,6 +134,22 @@ mod tests {
     }
 
     #[test]
+    fn sequence_expression_preserves_side_effects_and_last_value() {
+        assert_eq!(
+            execute_source(
+                155,
+                "let value = 0; let result = (value = 1, value += 2, value * 10); result + value;",
+            )
+            .as_i32(),
+            Some(33)
+        );
+        assert_eq!(
+            execute_source(156, "let choose = () => (1, 2, 42); choose();").as_i32(),
+            Some(42)
+        );
+    }
+
+    #[test]
     fn declaration_only_script_returns_undefined() {
         let source = SourceText::new(
             SourceId::new(3),
