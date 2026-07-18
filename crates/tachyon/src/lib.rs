@@ -230,6 +230,144 @@ mod tests {
     }
 
     #[test]
+    /// Covers simple, compound, update, nested-function, and cross-source resolved global writes.
+    fn identifier_assignment_updates_resolved_global_bindings() {
+        assert_eq!(
+            execute_source(
+                50,
+                "var value = 1; value = 2; value += 3; value++; ++value; value;",
+            )
+            .as_i32(),
+            Some(7)
+        );
+        assert_eq!(
+            execute_source(
+                51,
+                "var value = 1; function update() { value += 2; value++; } update(); value;",
+            )
+            .as_i32(),
+            Some(4)
+        );
+
+        let first = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(52),
+                    SourceName::new("first"),
+                    MediaType::JavaScript,
+                    Arc::from("var shared = 1;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let second = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(53),
+                    SourceName::new("second"),
+                    MediaType::JavaScript,
+                    Arc::from("shared = 9; shared;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut isolate = test_isolate();
+        isolate
+            .execute(
+                &first,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute(
+                &second,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(9)));
+
+        let declaration = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(56),
+                    SourceName::new("function-declaration"),
+                    MediaType::JavaScript,
+                    Arc::from("function published() { return 1; }"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let reassignment = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(57),
+                    SourceName::new("function-reassignment"),
+                    MediaType::JavaScript,
+                    Arc::from("published = 11; published;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let mut isolate = test_isolate();
+        isolate
+            .execute(
+                &declaration,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute(
+                &reassignment,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(11)));
+    }
+
+    #[test]
+    fn sloppy_intrinsic_assignment_is_ignored_without_creating_a_global() {
+        let value = execute_source(54, "Infinity = 1; Infinity;");
+        assert_eq!(value.as_f64(), Some(f64::INFINITY));
+    }
+
+    #[test]
+    fn strict_module_intrinsic_assignment_reports_a_read_only_binding() {
+        let module = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(55),
+                    SourceName::new("strict.mjs"),
+                    MediaType::Mjs,
+                    Arc::from("Infinity = 1;"),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        assert!(matches!(
+            test_isolate().execute(
+                &module,
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                }
+            ),
+            Err(ExecutionError::ReadOnlyBinding(_))
+        ));
+    }
+
+    #[test]
     fn later_declarator_reads_preceding_local_binding() {
         let source = SourceText::new(
             SourceId::new(4),
@@ -597,8 +735,7 @@ mod tests {
                 CompileOptions::default(),
             )
             .unwrap();
-        let mut code_limited =
-            test_isolate_with_realm_limits(RealmLimits::new(1, 2).with_max_shapes(3));
+        let mut code_limited = test_isolate_with_realm_limits(RealmLimits::new(1, 2));
         for _ in 0..2 {
             code_limited
                 .execute(
@@ -621,8 +758,7 @@ mod tests {
             Err(ExecutionError::LoadedModuleLimit { limit: 1 })
         ));
 
-        let mut global_limited =
-            test_isolate_with_realm_limits(RealmLimits::new(2, 1).with_max_shapes(3));
+        let mut global_limited = test_isolate_with_realm_limits(RealmLimits::new(2, 1));
         global_limited
             .execute(
                 &first,

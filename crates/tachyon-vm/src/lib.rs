@@ -166,6 +166,7 @@ pub enum ExecutionError {
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
     UnresolvedBinding(AtomId),
+    ReadOnlyBinding(AtomId),
     GlobalBindingLimit { limit: u32 },
     GlobalBindingAllocationFailed,
     Shape(ShapeError),
@@ -195,6 +196,7 @@ struct FunctionObject {
     code: CodeId,
     function: FunctionId,
     environment: Option<GcRef<Environment>>,
+    function_prototype: Option<Value>,
     ordinary: OrdinaryObject,
 }
 
@@ -237,6 +239,7 @@ impl Trace for FunctionObject {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.environment.trace(tracer);
+        self.function_prototype.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }
@@ -345,6 +348,20 @@ impl Realm {
         self.globals.push(GlobalBinding { name, value });
         Ok(())
     }
+
+    #[inline(always)]
+    fn set_existing(&mut self, name: AtomId, value: Value) -> bool {
+        let Some(binding) = self
+            .globals
+            .iter_mut()
+            .rev()
+            .find(|binding| binding.name == name)
+        else {
+            return false;
+        };
+        binding.value = value;
+        true
+    }
 }
 
 impl Trace for Realm {
@@ -425,11 +442,24 @@ struct PropertyMutationRoots<'a> {
     receiver: Value,
 }
 
+struct PrototypeInitializationRoots<'a> {
+    vm: VmRoots<'a>,
+    function: Value,
+}
+
 impl Trace for PropertyMutationRoots<'_> {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.receiver.trace(tracer);
+    }
+}
+
+impl Trace for PrototypeInitializationRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.function.trace(tracer);
     }
 }
 
@@ -647,17 +677,6 @@ impl Isolate {
         Ok(Value::from_heap_ref(object.raw()))
     }
 
-    /// Reads one own ordinary data property without allocating or invoking exotic behavior.
-    #[inline]
-    fn get_own_data_property(
-        &mut self,
-        receiver: Value,
-        key: AtomId,
-    ) -> Result<Option<Value>, ExecutionError> {
-        let (_, snapshot) = self.object_snapshot(receiver)?;
-        self.data_property_from_snapshot(snapshot, key)
-    }
-
     /// Walks ordinary prototype links without allocating or invoking accessor/exotic behavior.
     fn get_data_property(
         &mut self,
@@ -666,6 +685,10 @@ impl Isolate {
     ) -> Result<Option<Value>, ExecutionError> {
         let mut current = receiver;
         loop {
+            if self.is_function_prototype_property(current, key) {
+                self.intrinsic_property_atoms.prototype = Some(key);
+                return self.ensure_function_prototype(current).map(Some);
+            }
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
                 return Ok(Some(value));
@@ -732,6 +755,130 @@ impl Isolate {
         Ok(atom)
     }
 
+    #[inline(always)]
+    fn is_function_prototype_property(&self, receiver: Value, key: AtomId) -> bool {
+        let Some(raw) = receiver.as_heap_ref() else {
+            return false;
+        };
+        if self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .is_err()
+        {
+            return false;
+        }
+        self.intrinsic_property_atoms.prototype == Some(key)
+            || self
+                .atoms
+                .get(key)
+                .is_some_and(|name| name.equals_latin1(b"prototype"))
+    }
+
+    /// Materializes the spec-visible function prototype only on first observation or construction.
+    fn ensure_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        let existing = self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(function, self.types.function)
+                    .map(|function| function.function_prototype)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if let Some(prototype) = existing {
+            return Ok(prototype);
+        }
+        self.materialize_function_prototype(function)
+    }
+
+    /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
+    fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
+        let constructor_atom = self.constructor_atom()?;
+        let shape = self
+            .shapes
+            .transition_add(
+                ShapeId::EMPTY,
+                constructor_atom,
+                PropertyAttributes::DEFAULT_DATA,
+            )
+            .map_err(ExecutionError::Shape)?;
+        let mut roots = PrototypeInitializationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            function,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.property_storage,
+                0,
+                PropertyStorage {
+                    slots: Box::new([roots.function]),
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let prototype = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                OrdinaryObject {
+                    shape,
+                    storage: Some(storage),
+                    prototype: Value::from_immediate(Immediate::Null),
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let function = roots.function;
+        self.set_function_prototype(function, Value::from_heap_ref(prototype.raw()))?;
+        Ok(Value::from_heap_ref(prototype.raw()))
+    }
+
+    /// Replaces the inline function prototype slot and records its possible young edge.
+    fn set_function_prototype(
+        &mut self,
+        function: Value,
+        prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(function, self.types.function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.function_prototype = Some(prototype);
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(function, prototype)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
     /// Implements ordinary HasInstance over the current constructor prototype and object chain.
     fn ordinary_instance_of(
         &mut self,
@@ -775,6 +922,10 @@ impl Isolate {
         key: AtomId,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        if self.is_function_prototype_property(receiver, key) {
+            self.intrinsic_property_atoms.prototype = Some(key);
+            return self.set_function_prototype(receiver, value);
+        }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             debug_assert_eq!(property.attributes, PropertyAttributes::DEFAULT_DATA);
@@ -1419,6 +1570,11 @@ impl Isolate {
                 let value = self.read(base, operands[0])?;
                 self.realm.set(name, value)?;
             }
+            Opcode::StoreResolvedScope => {
+                let name = self.scope_atom(code, operands[1])?;
+                let value = self.read(base, operands[0])?;
+                self.store_resolved_scope(name, value)?;
+            }
             Opcode::DeclareScope => {
                 let name = self.scope_atom(code, operands[0])?;
                 self.declare_scope(name)?;
@@ -1554,6 +1710,26 @@ impl Isolate {
             .set(name, Value::from_immediate(Immediate::Undefined))
     }
 
+    /// Updates a mutable global or applies the strict/sloppy primitive-intrinsic write contract.
+    fn store_resolved_scope(&mut self, name: AtomId, value: Value) -> Result<(), ExecutionError> {
+        if self.realm.set_existing(name, value) {
+            return Ok(());
+        }
+        if self.scope_value(name).is_some() {
+            let strict = self
+                .fiber
+                .frames
+                .last()
+                .is_some_and(|frame| frame.strictness == Strictness::Strict);
+            return if strict {
+                Err(ExecutionError::ReadOnlyBinding(name))
+            } else {
+                Ok(())
+            };
+        }
+        Err(ExecutionError::UnresolvedBinding(name))
+    }
+
     fn enter(&mut self, code: CodeId, function_id: FunctionId) -> Result<(), ExecutionError> {
         let (layout, kind) = {
             let function = self
@@ -1616,8 +1792,6 @@ impl Isolate {
             .module
             .function(function)
             .ok_or(ExecutionError::MissingEntryFunction(function))?;
-        let prototype_atom = self.prototype_atom()?;
-        let constructor_atom = self.constructor_atom()?;
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
@@ -1635,6 +1809,7 @@ impl Isolate {
                     code,
                     function,
                     environment,
+                    function_prototype: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         storage: None,
@@ -1645,15 +1820,7 @@ impl Isolate {
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        self.write(base, destination, Value::from_heap_ref(closure.raw()))?;
-        let prototype = self.create_ordinary_object()?;
-        let closure = self.read(base, destination)?;
-        self.set_own_data_property(closure, prototype_atom, prototype)?;
-        let closure = self.read(base, destination)?;
-        let prototype = self
-            .get_own_data_property(closure, prototype_atom)?
-            .expect("a newly initialized ordinary function owns its prototype");
-        self.set_own_data_property(prototype, constructor_atom, closure)
+        self.write(base, destination, Value::from_heap_ref(closure.raw()))
     }
 
     /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
@@ -2185,7 +2352,9 @@ mod tests {
         let mut builder = BytecodeBuilder::with_capacity(6, 0);
         builder.emit(Opcode::DeclareScope, &[0], span).unwrap();
         builder.emit(Opcode::LoadImmediate, &[0, 7], span).unwrap();
-        builder.emit(Opcode::StoreScope, &[0, 0], span).unwrap();
+        builder
+            .emit(Opcode::StoreResolvedScope, &[0, 0], span)
+            .unwrap();
         builder.emit(Opcode::DeclareScope, &[0], span).unwrap();
         builder.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
         builder.emit(Opcode::Return, &[1], span).unwrap();
@@ -2907,6 +3076,50 @@ mod tests {
             RunOutcome::Completed(value)
                 if value.as_immediate() == Some(Immediate::True)
         ));
+    }
+
+    #[test]
+    /// Plain closure creation stays allocation-light until prototype observation materializes it.
+    fn function_prototype_is_lazily_materialized_with_constructor_back_reference() {
+        let mut isolate = test_isolate();
+        let outcome = isolate
+            .execute_with_batch::<8>(
+                &call_module(),
+                ExecutionBudget {
+                    fuel: 1,
+                    quantum: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::BudgetExhausted);
+        let function = isolate.fiber.registers[0];
+        let reference = isolate
+            .heap
+            .checked_reference(function.as_heap_ref().unwrap(), isolate.types.function)
+            .unwrap();
+        let before = isolate.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).unwrap();
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(function, isolate.types.function)
+                    .unwrap()
+                    .function_prototype
+            })
+        });
+        assert!(before.is_none());
+
+        let prototype_atom = isolate.prototype_atom().unwrap();
+        let prototype = isolate
+            .get_data_property(function, prototype_atom)
+            .unwrap()
+            .unwrap();
+        let constructor_atom = isolate.constructor_atom().unwrap();
+        assert_eq!(
+            isolate
+                .get_data_property(prototype, constructor_atom)
+                .unwrap(),
+            Some(function)
+        );
     }
 
     #[test]

@@ -156,6 +156,8 @@ pub enum Opcode {
     DeclareScope = 39,
     /// Tests register 1's ordinary prototype chain against callable register 2.
     InstanceOf = 40,
+    /// Stores register 0 only when scope-name operand 1 already resolves.
+    StoreResolvedScope = 41,
 }
 
 impl Opcode {
@@ -181,7 +183,8 @@ impl Opcode {
             | Self::JumpIfNotNullish
             | Self::CreateClosure
             | Self::LoadScope
-            | Self::StoreScope => 2,
+            | Self::StoreScope
+            | Self::StoreResolvedScope => 2,
             Self::Typeof => 2,
             Self::Add
             | Self::Sub
@@ -248,6 +251,7 @@ impl Opcode {
             38 => Some(Self::Typeof),
             39 => Some(Self::DeclareScope),
             40 => Some(Self::InstanceOf),
+            41 => Some(Self::StoreResolvedScope),
             _ => None,
         }
     }
@@ -753,6 +757,7 @@ impl BytecodeBuilder {
             | Opcode::LoadScope
             | Opcode::CreateClosure
             | Opcode::StoreScope
+            | Opcode::StoreResolvedScope
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject
@@ -1670,7 +1675,7 @@ fn verify_instruction(
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
-        Opcode::StoreScope => check_register(operands[0])?,
+        Opcode::StoreScope | Opcode::StoreResolvedScope => check_register(operands[0])?,
     }
     if instruction.opcode == Opcode::LoadConstant && operands[1] >= context.constant_count {
         return Err(VerifyError::ConstantOutOfRange {
@@ -1680,7 +1685,7 @@ fn verify_instruction(
         });
     }
     let scope_name = match instruction.opcode {
-        Opcode::LoadScope | Opcode::StoreScope => Some(operands[1]),
+        Opcode::LoadScope | Opcode::StoreScope | Opcode::StoreResolvedScope => Some(operands[1]),
         Opcode::DeclareScope => Some(operands[0]),
         Opcode::GetById | Opcode::SetById => Some(operands[2]),
         _ => None,

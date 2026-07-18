@@ -368,11 +368,6 @@ impl Lowerer<'_> {
         self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
         let scope_name = self.scope_name(&declaration.binding.name)?;
         self.emit(Opcode::StoreScope, &[register.index(), scope_name], span)?;
-        self.locals.push(LocalBinding {
-            name: declaration.binding.name.clone(),
-            register,
-            mutable: true,
-        });
         Ok(())
     }
 
@@ -1268,40 +1263,31 @@ impl Lowerer<'_> {
     ) -> Result<RegisterId, CompileError> {
         match target {
             HirAssignmentTarget::Identifier(target) => {
-                let binding =
-                    self.local(target)
-                        .cloned()
-                        .ok_or_else(|| CompileError::UnsupportedSyntax {
-                            source_name: self.source_name.clone(),
-                            span,
-                            syntax: "unresolved assignment target",
-                        })?;
-                if !binding.mutable {
-                    return Err(CompileError::UnsupportedSyntax {
-                        source_name: self.source_name.clone(),
-                        span,
-                        syntax: "assignment to immutable local",
-                    });
-                }
-                let result = match operator {
-                    HirAssignmentOperator::Assign => self.expression(value)?,
-                    HirAssignmentOperator::Binary(operator) => {
-                        let old_value = self.register()?;
-                        self.emit(
-                            Opcode::Move,
-                            &[old_value.index(), binding.register.index()],
-                            span,
-                        )?;
-                        let right = self.expression(value)?;
-                        self.emit_binary(operator, old_value, right, span)?
+                if let Some(binding) = self.local(target).cloned() {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "assignment to immutable local"));
                     }
-                };
-                self.emit(
-                    Opcode::Move,
-                    &[binding.register.index(), result.index()],
-                    span,
-                )?;
-                Ok(result)
+                    let result = match operator {
+                        HirAssignmentOperator::Assign => self.expression(value)?,
+                        HirAssignmentOperator::Binary(operator) => {
+                            let old_value = self.register()?;
+                            self.emit(
+                                Opcode::Move,
+                                &[old_value.index(), binding.register.index()],
+                                span,
+                            )?;
+                            let right = self.expression(value)?;
+                            self.emit_binary(operator, old_value, right, span)?
+                        }
+                    };
+                    self.emit(
+                        Opcode::Move,
+                        &[binding.register.index(), result.index()],
+                        span,
+                    )?;
+                    return Ok(result);
+                }
+                self.scope_assignment(operator, target, value, span)
             }
             HirAssignmentTarget::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
@@ -1350,6 +1336,32 @@ impl Lowerer<'_> {
                 Ok(result)
             }
         }
+    }
+
+    /// Preserves identifier-reference order while updating only an already resolved scope binding.
+    fn scope_assignment(
+        &mut self,
+        operator: HirAssignmentOperator,
+        target: &std::sync::Arc<str>,
+        value: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let scope_name = self.scope_name(target)?;
+        let result = match operator {
+            HirAssignmentOperator::Assign => self.expression(value)?,
+            HirAssignmentOperator::Binary(operator) => {
+                let old_value = self.register()?;
+                self.emit(Opcode::LoadScope, &[old_value.index(), scope_name], span)?;
+                let right = self.expression(value)?;
+                self.emit_binary(operator, old_value, right, span)?
+            }
+        };
+        self.emit(
+            Opcode::StoreResolvedScope,
+            &[result.index(), scope_name],
+            span,
+        )?;
+        Ok(result)
     }
 
     /// Emits one supported binary operation over already evaluated values.
@@ -1410,28 +1422,27 @@ impl Lowerer<'_> {
         };
         match target {
             HirAssignmentTarget::Identifier(target) => {
-                let binding = self
-                    .local(target)
-                    .cloned()
-                    .ok_or_else(|| self.unsupported(span, "unresolved update target"))?;
-                if !binding.mutable {
-                    return Err(self.unsupported(span, "update of immutable local"));
+                if let Some(binding) = self.local(target).cloned() {
+                    if !binding.mutable {
+                        return Err(self.unsupported(span, "update of immutable local"));
+                    }
+                    let result = if prefix {
+                        None
+                    } else {
+                        let old = self.register()?;
+                        self.emit(Opcode::Move, &[old.index(), binding.register.index()], span)?;
+                        Some(old)
+                    };
+                    let one = self.load_immediate(1, span)?;
+                    let updated = self.emit_binary(opcode, binding.register, one, span)?;
+                    self.emit(
+                        Opcode::Move,
+                        &[binding.register.index(), updated.index()],
+                        span,
+                    )?;
+                    return Ok(result.unwrap_or(updated));
                 }
-                let result = if prefix {
-                    None
-                } else {
-                    let old = self.register()?;
-                    self.emit(Opcode::Move, &[old.index(), binding.register.index()], span)?;
-                    Some(old)
-                };
-                let one = self.load_immediate(1, span)?;
-                let updated = self.emit_binary(opcode, binding.register, one, span)?;
-                self.emit(
-                    Opcode::Move,
-                    &[binding.register.index(), updated.index()],
-                    span,
-                )?;
-                Ok(result.unwrap_or(updated))
+                self.scope_update(opcode, prefix, target, span)
             }
             HirAssignmentTarget::StaticMember { object, property } => {
                 let receiver = self.expression(object)?;
@@ -1484,6 +1495,34 @@ impl Lowerer<'_> {
                 Ok(result.unwrap_or(updated))
             }
         }
+    }
+
+    /// Loads, snapshots, updates, and stores one dynamically resolved identifier exactly once.
+    fn scope_update(
+        &mut self,
+        opcode: HirBinaryOperator,
+        prefix: bool,
+        target: &std::sync::Arc<str>,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let scope_name = self.scope_name(target)?;
+        let old = self.register()?;
+        self.emit(Opcode::LoadScope, &[old.index(), scope_name], span)?;
+        let result = if prefix {
+            None
+        } else {
+            let snapshot = self.register()?;
+            self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
+            Some(snapshot)
+        };
+        let one = self.load_immediate(1, span)?;
+        let updated = self.emit_binary(opcode, old, one, span)?;
+        self.emit(
+            Opcode::StoreResolvedScope,
+            &[updated.index(), scope_name],
+            span,
+        )?;
+        Ok(result.unwrap_or(updated))
     }
 
     /// Preserves the left operand value and evaluates the right operand only when required.
@@ -2237,7 +2276,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         ),
         HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
-                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::Identifier(_) => 1,
                 HirAssignmentTarget::StaticMember { object, .. } => {
                     checked_count_add(expression_scope_name_count(object)?, 1, "scope names")?
                 }
@@ -2250,7 +2289,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             checked_count_add(target, expression_scope_name_count(value)?, "scope names")
         }
         HirExpressionKind::Update { target, .. } => match target {
-            HirAssignmentTarget::Identifier(_) => Ok(0),
+            HirAssignmentTarget::Identifier(_) => Ok(1),
             HirAssignmentTarget::StaticMember { object, .. } => {
                 checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
             }
@@ -2534,6 +2573,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             checked_count_add(operands, own_instructions, "bytecode instructions")
         }
         HirExpressionKind::Update { prefix, target, .. } => {
+            let identifier_target = matches!(target, HirAssignmentTarget::Identifier(_));
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => checked_count_add(
@@ -2550,7 +2590,12 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     checked_count_add(operands, 1, "bytecode instructions")?
                 }
             };
-            let own = if *prefix { 3 } else { 4 };
+            let own = match (identifier_target, *prefix) {
+                (true, true) => 4,
+                (true, false) => 5,
+                (false, true) => 3,
+                (false, false) => 4,
+            };
             checked_count_add(target, own, "bytecode instructions")
         }
         HirExpressionKind::Unary { argument, .. } => checked_count_add(

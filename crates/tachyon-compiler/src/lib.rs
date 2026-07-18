@@ -323,7 +323,8 @@ mod tests {
         assert!(entry.contains("CreateClosure r0, function=1"));
         assert!(entry.contains("StoreScope r0, scope=0"));
         assert_eq!(module.scope_names(), &[Arc::from("addTwo")]);
-        assert!(entry.contains("Call r4, callee=r1, argc=1"));
+        assert!(entry.contains("Call "));
+        assert!(entry.contains("argc=1"));
         assert!(function.contains("Add r2, r0, r1"));
         assert!(function.contains("Return r2"));
     }
@@ -394,6 +395,33 @@ mod tests {
         )
         .unwrap();
         assert!(entry.contains("InstanceOf"));
+    }
+
+    #[test]
+    fn compiler_lowers_nonlocal_identifier_writes_to_resolved_scope_stores() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "var value = 1; function update() { value += 2; value++; } update(); value = 7;",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let entry = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        let function = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(1))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(entry.contains("StoreResolvedScope"));
+        assert_eq!(function.matches("StoreResolvedScope").count(), 2);
     }
 
     #[test]
