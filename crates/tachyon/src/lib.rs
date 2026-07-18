@@ -1575,6 +1575,27 @@ mod tests {
         );
     }
 
+    /// Verifies the shared Function identity and the current always-extensible object policy.
+    #[test]
+    fn function_identity_and_object_extensibility_are_published() {
+        assert_eq!(
+            execute_source(
+                78,
+                "Function.prototype.constructor === Function && Object.getPrototypeOf(Function) === Function.prototype;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                79,
+                "Object.isExtensible({}) && Object.isExtensible(function () {}) && !Object.isExtensible(1) && !Object.isExtensible(null);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
     #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {

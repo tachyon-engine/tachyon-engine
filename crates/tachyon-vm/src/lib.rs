@@ -186,6 +186,7 @@ pub enum ExecutionError {
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
     UnsupportedErrorMessage(Value),
+    UnsupportedDynamicFunctionConstructor,
     NotObject(Value),
 }
 
@@ -232,11 +233,13 @@ enum NativeFunction {
     ObjectGetPrototypeOf,
     ObjectCreate,
     ObjectIsPrototypeOf,
+    ObjectIsExtensible,
     StringConstructor,
     NumberConstructor,
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
+    FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
     ArrayConstructor,
     ArrayConcat,
@@ -256,10 +259,12 @@ impl NativeFunction {
             | Self::ObjectEntries
             | Self::ObjectGetPrototypeOf
             | Self::ObjectIsPrototypeOf
+            | Self::ObjectIsExtensible
             | Self::StringConstructor
             | Self::NumberConstructor
             | Self::BooleanConstructor
             | Self::FunctionPrototypeCall
+            | Self::FunctionConstructor
             | Self::ErrorConstructor(_)
             | Self::ArrayConstructor
             | Self::ArrayConcat => 1,
@@ -283,11 +288,13 @@ impl NativeFunction {
             Self::ObjectGetPrototypeOf => "getPrototypeOf",
             Self::ObjectCreate => "create",
             Self::ObjectIsPrototypeOf => "isPrototypeOf",
+            Self::ObjectIsExtensible => "isExtensible",
             Self::StringConstructor => "String",
             Self::NumberConstructor => "Number",
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
+            Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
             Self::ErrorConstructor(NativeErrorKind::Reference) => "ReferenceError",
             Self::ErrorConstructor(NativeErrorKind::Syntax) => "SyntaxError",
@@ -455,10 +462,11 @@ struct RealmIntrinsicAtoms {
     string: AtomId,
     number: AtomId,
     boolean: AtomId,
+    function: AtomId,
 }
 
 impl RealmIntrinsicAtoms {
-    const BINDING_COUNT: usize = 8 + NativeErrorKind::ALL.len();
+    const BINDING_COUNT: usize = 9 + NativeErrorKind::ALL.len();
 
     #[inline(always)]
     fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -660,9 +668,11 @@ struct Realm {
     object_get_prototype_of: Option<Value>,
     object_create: Option<Value>,
     object_is_prototype_of: Option<Value>,
+    object_is_extensible: Option<Value>,
     string_constructor: Option<Value>,
     number_constructor: Option<Value>,
     boolean_constructor: Option<Value>,
+    function_constructor: Option<Value>,
     error_intrinsics: ErrorIntrinsics,
     typeof_strings: TypeofStrings,
     limits: RealmLimits,
@@ -698,9 +708,11 @@ impl Realm {
             object_get_prototype_of: None,
             object_create: None,
             object_is_prototype_of: None,
+            object_is_extensible: None,
             string_constructor: None,
             number_constructor: None,
             boolean_constructor: None,
+            function_constructor: None,
             error_intrinsics: ErrorIntrinsics::default(),
             typeof_strings,
             limits,
@@ -963,9 +975,11 @@ impl Trace for Realm {
         self.object_get_prototype_of.trace(tracer);
         self.object_create.trace(tracer);
         self.object_is_prototype_of.trace(tracer);
+        self.object_is_extensible.trace(tracer);
         self.string_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.boolean_constructor.trace(tracer);
+        self.function_constructor.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.typeof_strings.trace(tracer);
     }
@@ -1441,7 +1455,18 @@ impl Isolate {
         )?;
         self.realm.object_is_prototype_of = Some(is_prototype_of);
         let is_prototype_atom = self.intern_intrinsic_name(b"isPrototypeOf")?;
-        self.set_own_data_property(object_prototype, is_prototype_atom, is_prototype_of)
+        self.set_own_data_property(object_prototype, is_prototype_atom, is_prototype_of)?;
+        let is_extensible = self.allocate_native_function(
+            NativeFunction::ObjectIsExtensible,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_is_extensible = Some(is_extensible);
+        let is_extensible_atom = self.intern_intrinsic_name(b"isExtensible")?;
+        self.set_own_data_property(constructor, is_extensible_atom, is_extensible)
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.
@@ -1513,7 +1538,19 @@ impl Isolate {
             },
         )?;
         self.realm.function_prototype = Some(function_prototype);
-        self.set_function_internal_prototype(call, function_prototype)
+        self.set_function_internal_prototype(call, function_prototype)?;
+        let constructor = self.allocate_native_function(
+            NativeFunction::FunctionConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.function_constructor = Some(constructor);
+        self.set_function_prototype(constructor, function_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_own_data_property(function_prototype, constructor_atom, constructor)
     }
 
     /// Interns every mandatory global name before reserving the dense atom-indexed binding table.
@@ -1533,6 +1570,7 @@ impl Isolate {
             string: self.intern_intrinsic_name(b"String")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
+            function: self.intern_intrinsic_name(b"Function")?,
         })
     }
 
@@ -1690,6 +1728,13 @@ impl Isolate {
             self.realm
                 .boolean_constructor
                 .expect("Boolean initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.function,
+            self.realm
+                .function_constructor
+                .expect("Function initializes before global publication"),
             true,
         )?;
         Ok(())
@@ -4367,6 +4412,9 @@ impl Isolate {
                 let array = self.create_array_from_site(&site)?;
                 return self.write(caller_base, destination, array);
             }
+            FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
+                return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+            }
             FunctionExecutable::Bytecode { .. } => {}
             FunctionExecutable::Native(_) => {
                 return Err(ExecutionError::NonConstructor(constructor));
@@ -4558,6 +4606,20 @@ impl Isolate {
                         }),
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectIsExtensible) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if self.is_object_value(value) {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);
@@ -4587,6 +4649,9 @@ impl Isolate {
                             .ok_or(ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
                         site.argument_count -= 1;
                     }
+                }
+                FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
+                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                     let message = self.call_argument(&site, 0)?;
