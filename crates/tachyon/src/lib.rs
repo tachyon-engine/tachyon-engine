@@ -1269,6 +1269,14 @@ mod tests {
     }
 
     #[test]
+    /// Covers ToNumber plus ECMAScript ToInt32 wrapping for bitwise complement.
+    fn bitwise_not_converts_supported_primitives() {
+        assert_eq!(execute_source(93, "~1;").as_i32(), Some(-2));
+        assert_eq!(execute_source(94, "~'1';").as_i32(), Some(-2));
+        assert_eq!(execute_source(95, "~null;").as_i32(), Some(-1));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

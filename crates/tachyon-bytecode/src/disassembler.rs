@@ -76,9 +76,12 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,
         Opcode::LoadImmediate => write!(output, " r{}, imm={}", operands[0], operands[1])?,
         Opcode::LoadConstant => write!(output, " r{}, const={}", operands[0], operands[1])?,
-        Opcode::Move | Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber => {
-            write!(output, " r{}, r{}", operands[0], operands[1])?
-        }
+        Opcode::Move
+        | Opcode::Not
+        | Opcode::Negate
+        | Opcode::Typeof
+        | Opcode::ToNumber
+        | Opcode::BitwiseNot => write!(output, " r{}, r{}", operands[0], operands[1])?,
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul

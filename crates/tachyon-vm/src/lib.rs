@@ -2400,6 +2400,10 @@ impl Isolate {
                 let value = self.convert_to_number(self.read(base, operands[1])?)?;
                 self.write(base, operands[0], value)?;
             }
+            Opcode::BitwiseNot => {
+                let number = self.convert_to_number(self.read(base, operands[1])?)?;
+                self.write(base, operands[0], numeric_bitwise_not(number))?;
+            }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -3480,6 +3484,27 @@ fn numeric_negate(value: Value) -> Value {
         Some(Immediate::True) => -1.0,
         _ => f64::NAN,
     })
+}
+
+/// Applies ECMAScript ToInt32 before complementing, including modulo-2^32 wrapping.
+#[inline(always)]
+fn numeric_bitwise_not(value: Value) -> Value {
+    let number = value
+        .as_i32()
+        .map(f64::from)
+        .or_else(|| value.as_f64())
+        .unwrap_or(f64::NAN);
+    let integer = if number.is_finite() && number != 0.0 {
+        let modulo = number.trunc().rem_euclid(4_294_967_296.0);
+        if modulo >= 2_147_483_648.0 {
+            modulo - 4_294_967_296.0
+        } else {
+            modulo
+        }
+    } else {
+        0.0
+    };
+    Value::from_i32(!(integer as i32))
 }
 
 #[inline(always)]

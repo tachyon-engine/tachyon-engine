@@ -170,6 +170,8 @@ pub enum Opcode {
     ReturnUndefined = 46,
     /// Converts a primitive value to the current numeric subset.
     ToNumber = 47,
+    /// Applies ECMAScript ToInt32 and bitwise complement to a numeric value.
+    BitwiseNot = 48,
 }
 
 impl Opcode {
@@ -199,7 +201,7 @@ impl Opcode {
             | Self::StoreResolvedScope
             | Self::DeclareGlobalLexical
             | Self::InitializeGlobalLexical => 2,
-            Self::Typeof | Self::ToNumber => 2,
+            Self::Typeof | Self::ToNumber | Self::BitwiseNot => 2,
             Self::Add
             | Self::Sub
             | Self::Mul
@@ -277,6 +279,7 @@ impl Opcode {
             45 => Some(Self::InitializeGlobalLexical),
             46 => Some(Self::ReturnUndefined),
             47 => Some(Self::ToNumber),
+            48 => Some(Self::BitwiseNot),
             _ => None,
         }
     }
@@ -804,9 +807,12 @@ impl BytecodeBuilder {
             | Opcode::LoadException
             | Opcode::LoadThis
             | Opcode::LoadNewTarget => &[0],
-            Opcode::Move | Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber => {
-                &[0, 1]
-            }
+            Opcode::Move
+            | Opcode::Not
+            | Opcode::Negate
+            | Opcode::Typeof
+            | Opcode::ToNumber
+            | Opcode::BitwiseNot => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -1784,7 +1790,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber => {
+        Opcode::Not | Opcode::Negate | Opcode::Typeof | Opcode::ToNumber | Opcode::BitwiseNot => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }

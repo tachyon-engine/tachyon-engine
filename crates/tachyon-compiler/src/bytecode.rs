@@ -1681,6 +1681,19 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Unary {
+                operator: HirUnaryOperator::BitwiseNot,
+                argument,
+            } => {
+                let argument = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::BitwiseNot,
+                    &[destination.index(), argument.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Binary {
                 operator,
                 left,
