@@ -278,6 +278,8 @@ enum NativeFunction {
     ArrayShift,
     ArrayUnshift,
     ArrayReverse,
+    ArrayFill,
+    ArrayLastIndexOf,
     ArrayToString,
     MathPow,
 }
@@ -334,7 +336,9 @@ impl NativeFunction {
             | Self::ArraySlice
             | Self::ArrayShift
             | Self::ArrayUnshift
-            | Self::ArrayReverse => 1,
+            | Self::ArrayReverse
+            | Self::ArrayFill
+            | Self::ArrayLastIndexOf => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
             Self::MathPow => 2,
             Self::ObjectToString | Self::FunctionPrototype | Self::ArrayToString => 0,
@@ -386,6 +390,8 @@ impl NativeFunction {
             Self::ArrayShift => "shift",
             Self::ArrayUnshift => "unshift",
             Self::ArrayReverse => "reverse",
+            Self::ArrayFill => "fill",
+            Self::ArrayLastIndexOf => "lastIndexOf",
             Self::ArrayToString => "toString",
             Self::MathPow => "pow",
         }
@@ -782,6 +788,8 @@ struct Realm {
     array_shift: Option<Value>,
     array_unshift: Option<Value>,
     array_reverse: Option<Value>,
+    array_fill: Option<Value>,
+    array_last_index_of: Option<Value>,
     array_to_string: Option<Value>,
     object_constructor: Option<Value>,
     object_prototype: Option<Value>,
@@ -840,6 +848,8 @@ impl Realm {
             array_shift: None,
             array_unshift: None,
             array_reverse: None,
+            array_fill: None,
+            array_last_index_of: None,
             array_to_string: None,
             object_constructor: None,
             object_prototype: None,
@@ -1125,6 +1135,8 @@ impl Trace for Realm {
         self.array_shift.trace(tracer);
         self.array_unshift.trace(tracer);
         self.array_reverse.trace(tracer);
+        self.array_fill.trace(tracer);
+        self.array_last_index_of.trace(tracer);
         self.array_to_string.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
@@ -2105,6 +2117,30 @@ impl Isolate {
         self.realm.array_reverse = Some(reverse);
         let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
         self.set_intrinsic_data_property(prototype, reverse_atom, reverse, true)?;
+        let fill = self.allocate_native_function(
+            NativeFunction::ArrayFill,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_fill = Some(fill);
+        let fill_atom = self.intern_intrinsic_name(b"fill")?;
+        self.set_intrinsic_data_property(prototype, fill_atom, fill, true)?;
+        let last_index_of = self.allocate_native_function(
+            NativeFunction::ArrayLastIndexOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_last_index_of = Some(last_index_of);
+        let last_index_of_atom = self.intern_intrinsic_name(b"lastIndexOf")?;
+        self.set_intrinsic_data_property(prototype, last_index_of_atom, last_index_of, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
@@ -3141,7 +3177,7 @@ impl Isolate {
         if number.is_sign_negative() {
             return Ok(length.saturating_sub((-number).ceil() as u64));
         }
-        Ok(number.ceil().min(length as f64) as u64)
+        Ok(number.floor().min(length as f64) as u64)
     }
 
     /// Implements `Array.prototype.shift` while preserving holes and generic receiver behavior.
@@ -3231,6 +3267,60 @@ impl Isolate {
             }
         }
         Ok(site.this_value)
+    }
+
+    /// Implements `Array.prototype.fill` with ToInteger-relative bounds and hole materialization.
+    fn array_fill(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        let value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
+        let end_value = self
+            .call_argument(site, 2)?
+            .unwrap_or(safe_integer_value(length));
+        let start = self.relative_array_index(start_value, length)?;
+        let end = self.relative_array_index(end_value, length)?;
+        for index in start..end {
+            let key = self.safe_integer_property_atom(index)?;
+            self.set_own_data_property(site.this_value, key, value)?;
+        }
+        Ok(site.this_value)
+    }
+
+    /// Implements `Array.prototype.lastIndexOf` using reverse strict-equality search.
+    fn array_last_index_of(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let length = self.length_of_array_like(site.this_value)?;
+        if length == 0 {
+            return Ok(Value::from_i32(-1));
+        }
+        let search = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let from = self
+            .call_argument(site, 1)?
+            .unwrap_or(safe_integer_value(length - 1));
+        let number = numeric_value(self.convert_to_number(from)?).unwrap_or(f64::NAN);
+        let mut index = if number.is_nan() {
+            length - 1
+        } else if number.is_sign_negative() {
+            length.saturating_sub((-number).ceil() as u64)
+        } else {
+            number.floor().min((length - 1) as f64) as u64
+        };
+        loop {
+            let key = self.safe_integer_property_atom(index)?;
+            if let Some(value) = self.get_data_property(site.this_value, key)?
+                && self.strict_equal_values(value, search)?
+            {
+                return Ok(safe_integer_value(index));
+            }
+            if index == 0 {
+                break;
+            }
+            index -= 1;
+        }
+        Ok(Value::from_i32(-1))
     }
 
     fn array_element_or_undefined(
@@ -6676,6 +6766,14 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayReverse) => {
                     let value = self.array_reverse(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayFill) => {
+                    let value = self.array_fill(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayLastIndexOf) => {
+                    let value = self.array_last_index_of(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {

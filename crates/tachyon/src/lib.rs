@@ -1741,6 +1741,22 @@ mod tests {
         );
         assert_eq!(
             execute_source(
+                148,
+                "let values = [1, 2, 3, 2]; values.lastIndexOf(2) === 3 && values.lastIndexOf(2, -2) === 1;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                149,
+                "let values = [1, , 3, 4]; values.fill(0, 1, -1) === values && values.join('-') === '1-0-0-4';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
                 127,
                 "let recursive = []; recursive.push(recursive); let descriptor = Object.getOwnPropertyDescriptor([], 'length'); [1, , null, undefined, 4].join('-') === '1----4' && recursive.join() === '' && descriptor.writable === true && descriptor.enumerable === false && descriptor.configurable === false;",
             )
