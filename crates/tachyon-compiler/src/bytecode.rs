@@ -2323,8 +2323,13 @@ impl Lowerer<'_> {
                 | HirBinaryOperator::StrictNotEqual
         ) {
             let equal = self.register()?;
+            let equality = if operator == HirBinaryOperator::StrictNotEqual {
+                Opcode::StrictEqual
+            } else {
+                Opcode::LooseEqual
+            };
             self.emit(
-                Opcode::LooseEqual,
+                equality,
                 &[equal.index(), left.index(), right.index()],
                 span,
             )?;
@@ -3895,7 +3900,10 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 expression_instruction_count(right)?,
                 "bytecode instructions",
             )?;
-            let own = if matches!(operator, HirBinaryOperator::StrictNotEqual) {
+            let own = if matches!(
+                operator,
+                HirBinaryOperator::NotEqual | HirBinaryOperator::StrictNotEqual
+            ) {
                 2
             } else {
                 1

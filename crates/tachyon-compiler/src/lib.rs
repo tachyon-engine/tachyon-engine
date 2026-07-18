@@ -405,6 +405,25 @@ mod tests {
     }
 
     #[test]
+    fn compiler_keeps_loose_and_strict_inequality_opcodes_distinct() {
+        let module = Compiler
+            .compile(
+                source(MediaType::JavaScript, "'0' != 0; '0' !== 0;"),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(disassembly.matches("LooseEqual").count(), 1);
+        assert_eq!(disassembly.matches("StrictEqual").count(), 1);
+        assert_eq!(disassembly.matches("Not").count(), 2);
+    }
+
+    #[test]
     fn function_hir_owns_parameters_body_and_direct_call() {
         let hir = Compiler
             .lower_to_hir(
