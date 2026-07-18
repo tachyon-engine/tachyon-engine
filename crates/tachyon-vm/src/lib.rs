@@ -819,7 +819,7 @@ impl Isolate {
         code: CodeId,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.execute_loaded_with_batch::<1>(code, budget)
+        self.execute_loaded_with_batch::<{ tuning::dispatch::DEFAULT_DISPATCH_BATCH }>(code, budget)
     }
 
     #[inline(always)]
@@ -2045,6 +2045,21 @@ mod tests {
             result,
             Err(ExecutionError::InvalidDispatchBatch { batch: 0 })
         );
+    }
+
+    #[test]
+    fn public_execute_uses_the_tuned_non_scalar_dispatch_batch() {
+        assert_eq!(tuning::dispatch::DEFAULT_DISPATCH_BATCH, 8);
+        let outcome = test_isolate()
+            .execute(
+                &arithmetic_module(),
+                ExecutionBudget {
+                    fuel: 4,
+                    quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
     }
 
     #[test]
