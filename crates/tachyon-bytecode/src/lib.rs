@@ -146,6 +146,10 @@ pub enum Opcode {
     LoadNewTarget = 34,
     /// Performs the current numeric less-than subset over registers 1 and 2.
     LessThan = 35,
+    /// Loads a property using a runtime key value.
+    GetByValue = 36,
+    /// Stores a property using a runtime key value.
+    SetByValue = 37,
 }
 
 impl Opcode {
@@ -177,6 +181,8 @@ impl Opcode {
             | Self::Div
             | Self::StrictEqual
             | Self::LessThan
+            | Self::GetByValue
+            | Self::SetByValue
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
@@ -228,6 +234,8 @@ impl Opcode {
             33 => Some(Self::LoadThis),
             34 => Some(Self::LoadNewTarget),
             35 => Some(Self::LessThan),
+            36 => Some(Self::GetByValue),
+            37 => Some(Self::SetByValue),
             _ => None,
         }
     }
@@ -746,7 +754,9 @@ impl BytecodeBuilder {
             | Opcode::Mul
             | Opcode::Div
             | Opcode::StrictEqual
-            | Opcode::LessThan => &[0, 1, 2],
+            | Opcode::LessThan
+            | Opcode::GetByValue
+            | Opcode::SetByValue => &[0, 1, 2],
             Opcode::GetById | Opcode::SetById => &[0, 1],
             Opcode::Call | Opcode::Construct => {
                 for &index in &[0, 1] {
@@ -1594,7 +1604,9 @@ fn verify_instruction(
         | Opcode::Mul
         | Opcode::Div
         | Opcode::StrictEqual
-        | Opcode::LessThan => {
+        | Opcode::LessThan
+        | Opcode::GetByValue
+        | Opcode::SetByValue => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;

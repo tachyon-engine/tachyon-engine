@@ -155,6 +155,9 @@ pub enum ExecutionError {
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),
     ScopeNameString(StringAllocationError),
+    PropertyKeyAtom(AtomTableError),
+    PropertyKeyString(StringAllocationError),
+    UnsupportedPropertyKey(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
     UnresolvedBinding(AtomId),
@@ -838,6 +841,23 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
     }
 
+    /// Converts the current integer PropertyKey subset through a bounded stack formatting buffer.
+    #[cold]
+    fn property_key_atom(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
+        let integer = value
+            .as_i32()
+            .ok_or(ExecutionError::UnsupportedPropertyKey(value))?;
+        let key = Int32PropertyKey::new(integer);
+        if let Some(atom) = self.atoms.find_latin1(key.as_bytes()) {
+            return Ok(atom);
+        }
+        let string =
+            JsString::try_from_latin1(key.as_bytes()).map_err(ExecutionError::PropertyKeyString)?;
+        self.atoms
+            .try_intern(string)
+            .map_err(ExecutionError::PropertyKeyAtom)
+    }
+
     /// Executes with a fixed internal batch size so each monomorphization preserves the same fuel contract.
     #[cfg(test)]
     fn execute_with_batch<const N: usize>(
@@ -1069,6 +1089,20 @@ impl Isolate {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
+                self.set_own_data_property(receiver, key, value)?;
+            }
+            Opcode::GetByValue => {
+                let receiver = self.read(base, operands[1])?;
+                let key = self.property_key_atom(self.read(base, operands[2])?)?;
+                let value = self
+                    .get_own_data_property(receiver, key)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::SetByValue => {
+                let receiver = self.read(base, operands[0])?;
+                let value = self.read(base, operands[1])?;
+                let key = self.property_key_atom(self.read(base, operands[2])?)?;
                 self.set_own_data_property(receiver, key, value)?;
             }
             Opcode::Call => self.call(CallSite {
@@ -1551,6 +1585,41 @@ fn strictness_for(kind: FunctionKind) -> Strictness {
     }
 }
 
+struct Int32PropertyKey {
+    bytes: [u8; 11],
+    start: u8,
+}
+
+impl Int32PropertyKey {
+    /// Formats every i32 PropertyKey into owned stack storage without Rust formatting machinery.
+    fn new(value: i32) -> Self {
+        let mut bytes = [0_u8; 11];
+        let mut start = bytes.len();
+        let mut magnitude = value.unsigned_abs();
+        loop {
+            start -= 1;
+            bytes[start] = b'0' + (magnitude % 10) as u8;
+            magnitude /= 10;
+            if magnitude == 0 {
+                break;
+            }
+        }
+        if value < 0 {
+            start -= 1;
+            bytes[start] = b'-';
+        }
+        Self {
+            bytes,
+            start: start as u8,
+        }
+    }
+
+    #[inline(always)]
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[self.start as usize..]
+    }
+}
+
 #[inline(always)]
 fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
     if let (Some(left), Some(right)) = (left.as_i32(), right.as_i32()) {
@@ -1971,6 +2040,19 @@ mod tests {
         }
     }
 
+    fn assert_dynamic_property_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &dynamic_property_module(),
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
     fn assert_method_receiver_batch<const N: usize>() {
         let mut isolate = test_isolate();
         let outcome = isolate
@@ -2162,6 +2244,47 @@ mod tests {
         assert_property_batch::<4>();
         assert_property_batch::<8>();
         assert_property_batch::<16>();
+    }
+
+    #[test]
+    fn computed_property_access_works_for_every_dispatch_batch() {
+        assert_dynamic_property_batch::<1>();
+        assert_dynamic_property_batch::<2>();
+        assert_dynamic_property_batch::<4>();
+        assert_dynamic_property_batch::<8>();
+        assert_dynamic_property_batch::<16>();
+    }
+
+    #[test]
+    /// Forces collection during first numeric-key publication to exercise the shared rooting path.
+    fn computed_property_publication_roots_receiver_across_forced_major() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &dynamic_property_module(),
+                ExecutionBudget {
+                    fuel: 8,
+                    quantum: 8,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    fn integer_property_keys_preserve_ecmascript_decimal_spelling() {
+        for (value, expected) in [
+            (i32::MIN, "-2147483648"),
+            (-1, "-1"),
+            (0, "0"),
+            (i32::MAX, "2147483647"),
+        ] {
+            let key = Int32PropertyKey::new(value);
+            assert_eq!(key.as_bytes(), expected.as_bytes());
+        }
     }
 
     #[test]
@@ -2641,6 +2764,39 @@ mod tests {
             Arc::from("properties"),
             Vec::new(),
             vec![Arc::from("answer"), Arc::from("other")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a numeric-key write/read pair over one ordinary object.
+    fn dynamic_property_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(6, 0);
+        builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[1, 0], span).unwrap();
+        builder.emit(Opcode::LoadImmediate, &[2, 42], span).unwrap();
+        builder.emit(Opcode::SetByValue, &[0, 2, 1], span).unwrap();
+        builder.emit(Opcode::GetByValue, &[3, 0, 1], span).unwrap();
+        builder.emit(Opcode::Return, &[3], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        let metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("dynamic properties"),
+            Vec::new(),
+            Vec::new(),
             vec![CompiledFunctionTemplate::new(
                 FunctionId::new(0),
                 bytecode,

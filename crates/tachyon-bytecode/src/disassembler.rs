@@ -80,7 +80,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::Mul
         | Opcode::Div
         | Opcode::StrictEqual
-        | Opcode::LessThan => write!(
+        | Opcode::LessThan
+        | Opcode::GetByValue
+        | Opcode::SetByValue => write!(
             output,
             " r{}, r{}, r{}",
             operands[0], operands[1], operands[2]

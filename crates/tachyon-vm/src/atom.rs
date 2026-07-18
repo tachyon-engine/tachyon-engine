@@ -3,7 +3,7 @@
 use core::num::NonZeroU32;
 
 use crate::{
-    string::JsString,
+    string::{JsString, JsStringView},
     tuning::strings::{ATOM_LOAD_DENOMINATOR, ATOM_LOAD_NUMERATOR, INITIAL_ATOM_BUCKETS},
 };
 use tachyon_gc::GcExternalMemory;
@@ -194,6 +194,13 @@ impl AtomTable {
         self.find_hashed(string, string.hash_with_seed(self.config.hash_seed))
     }
 
+    /// Probes an existing Latin-1 atom without allocating an owned candidate string.
+    #[must_use]
+    pub(crate) fn find_latin1(&self, value: &[u8]) -> Option<AtomId> {
+        let view = JsStringView::Latin1(value);
+        self.find_view_hashed(view, view.hash_with_seed(self.config.hash_seed))
+    }
+
     #[must_use]
     pub fn get(&self, atom: AtomId) -> Option<&JsString> {
         self.entries
@@ -216,6 +223,10 @@ impl AtomTable {
     }
 
     fn find_hashed(&self, string: &JsString, hash: u64) -> Option<AtomId> {
+        self.find_view_hashed(string.as_view(), hash)
+    }
+
+    fn find_view_hashed(&self, string: JsStringView<'_>, hash: u64) -> Option<AtomId> {
         if self.buckets.is_empty() {
             return None;
         }
@@ -224,7 +235,7 @@ impl AtomTable {
         loop {
             let atom = self.buckets[bucket]?;
             let entry = &self.entries[atom.index() as usize];
-            if entry.hash == hash && entry.string == *string {
+            if entry.hash == hash && entry.string.as_view() == string {
                 return Some(atom);
             }
             bucket = (bucket + 1) & mask;
@@ -315,6 +326,18 @@ mod tests {
         assert_eq!(atoms.get(latin1).unwrap().code_unit_at(0), Some(0x00e9));
         assert_eq!(atoms.stats().entries, 1);
         assert_eq!(atoms.stats().retained_string_bytes, 1);
+    }
+
+    #[test]
+    fn borrowed_latin1_probe_finds_existing_atom_without_publication() {
+        let mut atoms = table(8, 64);
+        let key = atoms
+            .try_intern(JsString::try_from_latin1(b"123").unwrap())
+            .unwrap();
+        let before = atoms.stats();
+        assert_eq!(atoms.find_latin1(b"123"), Some(key));
+        assert_eq!(atoms.find_latin1(b"124"), None);
+        assert_eq!(atoms.stats(), before);
     }
 
     #[test]

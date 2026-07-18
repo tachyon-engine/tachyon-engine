@@ -741,4 +741,25 @@ mod tests {
             Some(10)
         );
     }
+
+    #[test]
+    /// Checks update results and one-shot object/key evaluation through source compilation.
+    fn computed_members_preserve_reference_evaluation_and_updates() {
+        assert_eq!(
+            execute_source(
+                40,
+                "function Box() { this[0] = 40; } let box = new Box(); box[0]++; box[0] += 1; box[0];",
+            )
+            .as_i32(),
+            Some(42)
+        );
+        assert_eq!(
+            execute_source(
+                41,
+                "function Box() { this[0] = 1; this.calls = 0; } function target(receiver) { receiver.calls += 1; return receiver; } function key(receiver) { receiver.calls += 1; return 0; } let box = new Box(); target(box)[key(box)] += 2; box.calls === 2 && box[0] === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
 }

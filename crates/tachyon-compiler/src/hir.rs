@@ -192,6 +192,10 @@ pub enum HirAssignmentTarget {
         object: Box<HirExpression>,
         property: Arc<str>,
     },
+    ComputedMember {
+        object: Box<HirExpression>,
+        property: Box<HirExpression>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,6 +217,10 @@ pub enum HirExpressionKind {
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
+    },
+    ComputedMember {
+        object: Box<HirExpression>,
+        property: Box<HirExpression>,
     },
     Unary {
         operator: HirUnaryOperator,
@@ -853,6 +861,22 @@ fn lower_expression(
                 property: Arc::from(expression.property.name.as_str()),
             }
         }
+        Expression::ComputedMemberExpression(expression) if !expression.optional => {
+            HirExpressionKind::ComputedMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+                property: Box::new(lower_expression(
+                    &expression.expression,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+            }
+        }
         Expression::UnaryExpression(expression) => HirExpressionKind::Unary {
             operator: lower_unary_operator(expression.operator),
             argument: Box::new(lower_expression(
@@ -1023,6 +1047,22 @@ fn lower_assignment_target(
                 property: Arc::from(expression.property.name.as_str()),
             })
         }
+        AssignmentTarget::ComputedMemberExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::ComputedMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+                property: Box::new(lower_expression(
+                    &expression.expression,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+            })
+        }
         _ => Err(unsupported(
             source.name(),
             source_span(target.span()),
@@ -1051,6 +1091,22 @@ fn lower_update_target(
                     functions,
                 )?),
                 property: Arc::from(expression.property.name.as_str()),
+            })
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::ComputedMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
+                property: Box::new(lower_expression(
+                    &expression.expression,
+                    source,
+                    next_binding,
+                    functions,
+                )?),
             })
         }
         _ => Err(unsupported(

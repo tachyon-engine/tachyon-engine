@@ -1144,6 +1144,17 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::ComputedMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.expression(property)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::GetByValue,
+                    &[destination.index(), receiver.index(), property.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Assignment {
                 operator,
                 target,
@@ -1241,6 +1252,29 @@ impl Lowerer<'_> {
                 )?;
                 Ok(result)
             }
+            HirAssignmentTarget::ComputedMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.expression(property)?;
+                let result = match operator {
+                    HirAssignmentOperator::Assign => self.expression(value)?,
+                    HirAssignmentOperator::Binary(operator) => {
+                        let old_value = self.register()?;
+                        self.emit(
+                            Opcode::GetByValue,
+                            &[old_value.index(), receiver.index(), property.index()],
+                            span,
+                        )?;
+                        let right = self.expression(value)?;
+                        self.emit_binary(operator, old_value, right, span)?
+                    }
+                };
+                self.emit(
+                    Opcode::SetByValue,
+                    &[receiver.index(), result.index(), property.index()],
+                    span,
+                )?;
+                Ok(result)
+            }
         }
     }
 
@@ -1334,6 +1368,31 @@ impl Lowerer<'_> {
                 self.emit(
                     Opcode::SetById,
                     &[receiver.index(), updated.index(), property],
+                    span,
+                )?;
+                Ok(result.unwrap_or(updated))
+            }
+            HirAssignmentTarget::ComputedMember { object, property } => {
+                let receiver = self.expression(object)?;
+                let property = self.expression(property)?;
+                let old = self.register()?;
+                self.emit(
+                    Opcode::GetByValue,
+                    &[old.index(), receiver.index(), property.index()],
+                    span,
+                )?;
+                let result = if prefix {
+                    None
+                } else {
+                    let snapshot = self.register()?;
+                    self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
+                    Some(snapshot)
+                };
+                let one = self.load_immediate(1, span)?;
+                let updated = self.emit_binary(opcode, old, one, span)?;
+                self.emit(
+                    Opcode::SetByValue,
+                    &[receiver.index(), updated.index(), property.index()],
                     span,
                 )?;
                 Ok(result.unwrap_or(updated))
@@ -1955,6 +2014,11 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         HirExpressionKind::StaticMember { object, .. } => {
             checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
         }
+        HirExpressionKind::ComputedMember { object, property } => checked_count_add(
+            expression_scope_name_count(object)?,
+            expression_scope_name_count(property)?,
+            "scope names",
+        ),
         HirExpressionKind::Unary { argument, .. } => expression_scope_name_count(argument),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_scope_name_count(left)?,
@@ -1972,6 +2036,11 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                 HirAssignmentTarget::StaticMember { object, .. } => {
                     checked_count_add(expression_scope_name_count(object)?, 1, "scope names")?
                 }
+                HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                    expression_scope_name_count(object)?,
+                    expression_scope_name_count(property)?,
+                    "scope names",
+                )?,
             };
             checked_count_add(target, expression_scope_name_count(value)?, "scope names")
         }
@@ -1980,6 +2049,11 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             HirAssignmentTarget::StaticMember { object, .. } => {
                 checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
             }
+            HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                expression_scope_name_count(object)?,
+                expression_scope_name_count(property)?,
+                "scope names",
+            ),
         },
         HirExpressionKind::Conditional {
             test,
@@ -2204,6 +2278,14 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             1,
             "bytecode instructions",
         ),
+        HirExpressionKind::ComputedMember { object, property } => {
+            let operands = checked_count_add(
+                expression_instruction_count(object)?,
+                expression_instruction_count(property)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(operands, 1, "bytecode instructions")
+        }
         HirExpressionKind::Assignment {
             operator,
             target,
@@ -2214,6 +2296,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 HirAssignmentTarget::StaticMember { object, .. } => {
                     expression_instruction_count(object)?
                 }
+                HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    expression_instruction_count(property)?,
+                    "bytecode instructions",
+                )?,
             };
             let operands = checked_count_add(
                 target,
@@ -2234,6 +2321,14 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     1,
                     "bytecode instructions",
                 )?,
+                HirAssignmentTarget::ComputedMember { object, property } => {
+                    let operands = checked_count_add(
+                        expression_instruction_count(object)?,
+                        expression_instruction_count(property)?,
+                        "bytecode instructions",
+                    )?;
+                    checked_count_add(operands, 1, "bytecode instructions")?
+                }
             };
             let own = if *prefix { 3 } else { 4 };
             checked_count_add(target, own, "bytecode instructions")
@@ -2894,16 +2989,31 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             checked_count_add(nested, 1, "bytecode labels")
         }
         HirExpressionKind::StaticMember { object, .. } => expression_label_count(object),
+        HirExpressionKind::ComputedMember { object, property } => checked_count_add(
+            expression_label_count(object)?,
+            expression_label_count(property)?,
+            "bytecode labels",
+        ),
         HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object)?,
+                HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                    expression_label_count(object)?,
+                    expression_label_count(property)?,
+                    "bytecode labels",
+                )?,
             };
             checked_count_add(target, expression_label_count(value)?, "bytecode labels")
         }
         HirExpressionKind::Update { target, .. } => match target {
             HirAssignmentTarget::Identifier(_) => Ok(0),
             HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object),
+            HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                expression_label_count(object)?,
+                expression_label_count(property)?,
+                "bytecode labels",
+            ),
         },
         HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {
@@ -2949,12 +3059,22 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::StaticMember { object, .. } => expression_literal_count(object),
+        HirExpressionKind::ComputedMember { object, property } => checked_count_add(
+            expression_literal_count(object)?,
+            expression_literal_count(property)?,
+            "bytecode constants",
+        ),
         HirExpressionKind::Assignment { target, value, .. } => {
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {
                     expression_literal_count(object)?
                 }
+                HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                    expression_literal_count(object)?,
+                    expression_literal_count(property)?,
+                    "bytecode constants",
+                )?,
             };
             checked_count_add(
                 target,
@@ -2965,6 +3085,11 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
         HirExpressionKind::Update { target, .. } => match target {
             HirAssignmentTarget::Identifier(_) => Ok(0),
             HirAssignmentTarget::StaticMember { object, .. } => expression_literal_count(object),
+            HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                expression_literal_count(object)?,
+                expression_literal_count(property)?,
+                "bytecode constants",
+            ),
         },
         HirExpressionKind::Unary { argument, .. } => expression_literal_count(argument),
         HirExpressionKind::Conditional {

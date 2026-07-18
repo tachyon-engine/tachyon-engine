@@ -187,7 +187,7 @@ impl JsStringView<'_> {
 
     /// Hashes identical code-unit sequences identically across the 8-bit and 16-bit representations.
     #[allow(deprecated)] // `SipHasher` is the stable keyed SipHash API; M13 may replace the backend.
-    fn hash_with_seed(self, seed: AtomHashSeed) -> u64 {
+    pub(crate) fn hash_with_seed(self, seed: AtomHashSeed) -> u64 {
         let mut hasher = SipHasher::new_with_keys(seed.key0(), seed.key1());
         for index in 0..self.len() {
             hasher.write(
