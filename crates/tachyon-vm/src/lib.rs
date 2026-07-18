@@ -2409,6 +2409,15 @@ impl Isolate {
                 let right = self.read(base, operands[2])?;
                 self.write(base, operands[0], numeric_binary(opcode, left, right))?;
             }
+            Opcode::BitwiseAnd | Opcode::BitwiseOr | Opcode::BitwiseXor => {
+                let left = self.convert_to_number(self.read(base, operands[1])?)?;
+                let right = self.convert_to_number(self.read(base, operands[2])?)?;
+                self.write(
+                    base,
+                    operands[0],
+                    numeric_bitwise_binary(opcode, left, right),
+                )?;
+            }
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
@@ -3505,6 +3514,37 @@ fn numeric_bitwise_not(value: Value) -> Value {
         0.0
     };
     Value::from_i32(!(integer as i32))
+}
+
+/// Applies ToInt32 to both operands and performs one supported bitwise operation.
+#[inline(always)]
+fn numeric_bitwise_binary(opcode: Opcode, left: Value, right: Value) -> Value {
+    let left = numeric_bitwise_int32(left);
+    let right = numeric_bitwise_int32(right);
+    let result = match opcode {
+        Opcode::BitwiseAnd => left & right,
+        Opcode::BitwiseOr => left | right,
+        Opcode::BitwiseXor => left ^ right,
+        _ => unreachable!("bitwise binary dispatch only supplies bitwise opcodes"),
+    };
+    Value::from_i32(result)
+}
+
+#[inline(always)]
+fn numeric_bitwise_int32(value: Value) -> i32 {
+    value.as_i32().unwrap_or_else(|| {
+        let number = value.as_f64().unwrap_or(f64::NAN);
+        if !number.is_finite() || number == 0.0 {
+            return 0;
+        }
+        let modulo = number.trunc().rem_euclid(4_294_967_296.0);
+        let signed = if modulo >= 2_147_483_648.0 {
+            modulo - 4_294_967_296.0
+        } else {
+            modulo
+        };
+        signed as i32
+    })
 }
 
 #[inline(always)]

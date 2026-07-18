@@ -1277,6 +1277,14 @@ mod tests {
     }
 
     #[test]
+    /// Covers numeric/string coercion and integer results for all bitwise binary operators.
+    fn bitwise_binary_converts_supported_primitives() {
+        assert_eq!(execute_source(96, "5 & 3;").as_i32(), Some(1));
+        assert_eq!(execute_source(97, "'5' | 2;").as_i32(), Some(7));
+        assert_eq!(execute_source(98, "5 ^ 3;").as_i32(), Some(6));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

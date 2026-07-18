@@ -172,6 +172,9 @@ pub enum Opcode {
     ToNumber = 47,
     /// Applies ECMAScript ToInt32 and bitwise complement to a numeric value.
     BitwiseNot = 48,
+    BitwiseAnd = 49,
+    BitwiseOr = 50,
+    BitwiseXor = 51,
 }
 
 impl Opcode {
@@ -216,6 +219,7 @@ impl Opcode {
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
+            Self::BitwiseAnd | Self::BitwiseOr | Self::BitwiseXor => 3,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -280,6 +284,9 @@ impl Opcode {
             46 => Some(Self::ReturnUndefined),
             47 => Some(Self::ToNumber),
             48 => Some(Self::BitwiseNot),
+            49 => Some(Self::BitwiseAnd),
+            50 => Some(Self::BitwiseOr),
+            51 => Some(Self::BitwiseXor),
             _ => None,
         }
     }
@@ -820,6 +827,9 @@ impl BytecodeBuilder {
             | Opcode::Div
             | Opcode::StrictEqual
             | Opcode::LessThan
+            | Opcode::BitwiseAnd
+            | Opcode::BitwiseOr
+            | Opcode::BitwiseXor
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
@@ -1800,6 +1810,9 @@ fn verify_instruction(
         | Opcode::Div
         | Opcode::StrictEqual
         | Opcode::LessThan
+        | Opcode::BitwiseAnd
+        | Opcode::BitwiseOr
+        | Opcode::BitwiseXor
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {
