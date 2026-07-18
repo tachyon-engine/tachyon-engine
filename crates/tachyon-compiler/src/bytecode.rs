@@ -676,7 +676,7 @@ struct LocalBinding {
 #[derive(Clone, Copy, Debug)]
 enum LocalStorage {
     Register(RegisterId),
-    Environment { plan: u32 },
+    Environment { depth: u32, slot: u32 },
 }
 
 impl Lowerer<'_> {
@@ -2253,7 +2253,7 @@ impl Lowerer<'_> {
         let Some((depth, slot)) = self.environments.reference_slot(function_scope, binding) else {
             return Ok(None);
         };
-        let plan = self.add_binding_plan(BindingPlanEntry {
+        self.add_binding_plan(BindingPlanEntry {
             name: slot.name.clone(),
             location: BindingLocation::Environment {
                 depth,
@@ -2263,7 +2263,10 @@ impl Lowerer<'_> {
         })?;
         Ok(Some(LocalBinding {
             id: binding,
-            storage: LocalStorage::Environment { plan },
+            storage: LocalStorage::Environment {
+                depth,
+                slot: slot.slot,
+            },
             mutable: slot.mutable,
         }))
     }
@@ -2275,9 +2278,13 @@ impl Lowerer<'_> {
     ) -> Result<RegisterId, CompileError> {
         match binding.storage {
             LocalStorage::Register(register) => Ok(register),
-            LocalStorage::Environment { plan } => {
+            LocalStorage::Environment { depth, slot } => {
                 let destination = self.register()?;
-                self.emit(Opcode::LoadBinding, &[destination.index(), plan], span)?;
+                self.emit(
+                    Opcode::LoadEnvironment,
+                    &[destination.index(), depth, slot],
+                    span,
+                )?;
                 Ok(destination)
             }
         }
@@ -2307,9 +2314,11 @@ impl Lowerer<'_> {
             LocalStorage::Register(register) => {
                 self.emit(Opcode::Move, &[register.index(), value.index()], span)
             }
-            LocalStorage::Environment { plan } => {
-                self.emit(Opcode::StoreBinding, &[value.index(), plan], span)
-            }
+            LocalStorage::Environment { depth, slot } => self.emit(
+                Opcode::StoreEnvironment,
+                &[value.index(), depth, slot],
+                span,
+            ),
         }
     }
 
@@ -2323,7 +2332,7 @@ impl Lowerer<'_> {
         let storage = if let Some(function_scope) = self.function_scope
             && let Some(slot) = self.environments.local_slot(function_scope, binding.id)
         {
-            let plan = self.add_binding_plan(BindingPlanEntry {
+            self.add_binding_plan(BindingPlanEntry {
                 name: slot.name.clone(),
                 location: BindingLocation::Environment {
                     depth: 0,
@@ -2333,12 +2342,15 @@ impl Lowerer<'_> {
             })?;
             if let Some(register) = register {
                 self.emit(
-                    Opcode::StoreBinding,
-                    &[register.index(), plan],
+                    Opcode::StoreEnvironment,
+                    &[register.index(), 0, slot.slot],
                     binding.span,
                 )?;
             }
-            LocalStorage::Environment { plan }
+            LocalStorage::Environment {
+                depth: 0,
+                slot: slot.slot,
+            }
         } else {
             let register = register.ok_or(CompileError::RegisterOverflow)?;
             self.add_binding_plan(BindingPlanEntry {

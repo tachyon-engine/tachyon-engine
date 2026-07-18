@@ -158,10 +158,10 @@ pub enum Opcode {
     InstanceOf = 40,
     /// Stores register 0 only when scope-name operand 1 already resolves.
     StoreResolvedScope = 41,
-    /// Loads a verifier-owned binding-plan entry into register operand 0.
-    LoadBinding = 42,
-    /// Stores register operand 0 through verifier-owned binding-plan entry operand 1.
-    StoreBinding = 43,
+    /// Loads environment depth operand 1 and slot operand 2 into register operand 0.
+    LoadEnvironment = 42,
+    /// Stores register operand 0 into environment depth operand 1 and slot operand 2.
+    StoreEnvironment = 43,
     /// Declares one global lexical binding from scope-name operand 0 and mutability operand 1.
     DeclareGlobalLexical = 44,
     /// Initializes global lexical scope-name operand 1 from register operand 0 exactly once.
@@ -193,8 +193,6 @@ impl Opcode {
             | Self::LoadScope
             | Self::StoreScope
             | Self::StoreResolvedScope
-            | Self::LoadBinding
-            | Self::StoreBinding
             | Self::DeclareGlobalLexical
             | Self::InitializeGlobalLexical => 2,
             Self::Typeof => 2,
@@ -207,6 +205,8 @@ impl Opcode {
             | Self::InstanceOf
             | Self::GetByValue
             | Self::SetByValue
+            | Self::LoadEnvironment
+            | Self::StoreEnvironment
             | Self::Call
             | Self::Await
             | Self::Yield => 3,
@@ -264,8 +264,8 @@ impl Opcode {
             39 => Some(Self::DeclareScope),
             40 => Some(Self::InstanceOf),
             41 => Some(Self::StoreResolvedScope),
-            42 => Some(Self::LoadBinding),
-            43 => Some(Self::StoreBinding),
+            42 => Some(Self::LoadEnvironment),
+            43 => Some(Self::StoreEnvironment),
             44 => Some(Self::DeclareGlobalLexical),
             45 => Some(Self::InitializeGlobalLexical),
             _ => None,
@@ -489,7 +489,7 @@ pub struct VerifyContext {
     pub constant_count: u32,
     pub function_count: u32,
     pub scope_name_count: u32,
-    pub binding_plan_count: u32,
+    pub max_environment_slot_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -518,10 +518,10 @@ pub enum VerifyError {
         function: u32,
         function_count: u32,
     },
-    BindingPlanOutOfRange {
+    EnvironmentSlotOutOfRange {
         offset: WordOffset,
-        binding: u32,
-        binding_plan_count: u32,
+        slot: u32,
+        max_environment_slot_count: u32,
     },
     InvalidBooleanOperand {
         offset: WordOffset,
@@ -781,11 +781,9 @@ impl BytecodeBuilder {
             | Opcode::LoadImmediate
             | Opcode::LoadConstant
             | Opcode::LoadScope
-            | Opcode::LoadBinding
             | Opcode::CreateClosure
             | Opcode::StoreScope
             | Opcode::StoreResolvedScope
-            | Opcode::StoreBinding
             | Opcode::InitializeGlobalLexical
             | Opcode::Return
             | Opcode::Throw => &[0],
@@ -804,6 +802,7 @@ impl BytecodeBuilder {
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
+            Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],
             Opcode::GetById | Opcode::SetById => &[0, 1],
             Opcode::Call | Opcode::Construct => {
                 for &index in &[0, 1] {
@@ -1276,18 +1275,18 @@ impl CompiledModule {
             });
         }
 
-        let context = VerifyContext {
-            register_count: 0,
-            constant_count,
-            function_count,
-            scope_name_count,
-            binding_plan_count: 0,
-        };
         let max_environment_slot_count = templates
             .iter()
             .map(|template| template.metadata.layout.environment_slot_count)
             .max()
             .unwrap_or(0);
+        let context = VerifyContext {
+            register_count: 0,
+            constant_count,
+            function_count,
+            scope_name_count,
+            max_environment_slot_count,
+        };
         let mut functions = Vec::with_capacity(templates.len());
         for (index, template) in templates.into_iter().enumerate() {
             let expected = FunctionId::new(index as u32);
@@ -1310,11 +1309,6 @@ impl CompiledModule {
                 .bytecode
                 .verify(VerifyContext {
                     register_count: template.metadata.layout.register_count,
-                    binding_plan_count: u32::try_from(template.metadata.binding_plan.len())
-                        .map_err(|_| ModuleBuildError::InvalidFunctionLayout {
-                            function: template.id,
-                            layout: template.metadata.layout,
-                        })?,
                     ..context
                 })
                 .map_err(|error| ModuleBuildError::VerifyFunction {
@@ -1763,8 +1757,7 @@ fn verify_instruction(
         | Opcode::LoadTrue
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
-        | Opcode::LoadScope
-        | Opcode::LoadBinding => check_register(operands[0])?,
+        | Opcode::LoadScope => check_register(operands[0])?,
         Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
             check_register(operands[0])?
         }
@@ -1789,6 +1782,7 @@ fn verify_instruction(
             check_register(operands[1])?;
             check_register(operands[2])?;
         }
+        Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
         Opcode::GetById | Opcode::SetById => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1834,10 +1828,9 @@ fn verify_instruction(
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
-        Opcode::StoreScope
-        | Opcode::StoreResolvedScope
-        | Opcode::StoreBinding
-        | Opcode::InitializeGlobalLexical => check_register(operands[0])?,
+        Opcode::StoreScope | Opcode::StoreResolvedScope | Opcode::InitializeGlobalLexical => {
+            check_register(operands[0])?
+        }
     }
     if instruction.opcode == Opcode::LoadConstant && operands[1] >= context.constant_count {
         return Err(VerifyError::ConstantOutOfRange {
@@ -1870,13 +1863,13 @@ fn verify_instruction(
     }
     if matches!(
         instruction.opcode,
-        Opcode::LoadBinding | Opcode::StoreBinding
-    ) && operands[1] >= context.binding_plan_count
+        Opcode::LoadEnvironment | Opcode::StoreEnvironment
+    ) && operands[2] >= context.max_environment_slot_count
     {
-        return Err(VerifyError::BindingPlanOutOfRange {
+        return Err(VerifyError::EnvironmentSlotOutOfRange {
             offset,
-            binding: operands[1],
-            binding_plan_count: context.binding_plan_count,
+            slot: operands[2],
+            max_environment_slot_count: context.max_environment_slot_count,
         });
     }
     if instruction.opcode == Opcode::DeclareGlobalLexical && operands[1] > 1 {
@@ -1925,7 +1918,7 @@ mod tests {
             constant_count: 2,
             function_count: 1,
             scope_name_count: 1,
-            binding_plan_count: 1,
+            max_environment_slot_count: 2,
         }
     }
     #[test]
@@ -2017,14 +2010,14 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_binding_plan_index_past_function_table() {
-        let mut words = encode_instruction(Opcode::LoadBinding, &[0, 1]).unwrap();
+    fn verifier_rejects_environment_slot_past_module_maximum() {
+        let mut words = encode_instruction(Opcode::LoadEnvironment, &[0, 1, 2]).unwrap();
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         assert!(matches!(
             Bytecode::from_words(words).verify(context()),
-            Err(VerifyError::BindingPlanOutOfRange {
-                binding: 1,
-                binding_plan_count: 1,
+            Err(VerifyError::EnvironmentSlotOutOfRange {
+                slot: 2,
+                max_environment_slot_count: 2,
                 ..
             })
         ));

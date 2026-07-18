@@ -354,6 +354,34 @@ mod tests {
             binding.location,
             tachyon_bytecode::BindingLocation::Environment { depth: 0, slot: 0 }
         )));
+        let outer_bytecode = tachyon_bytecode::disassemble(outer).unwrap();
+        let inner_bytecode = tachyon_bytecode::disassemble(inner).unwrap();
+        assert!(outer_bytecode.contains("StoreEnvironment r0, depth=0, slot=0"));
+        assert!(inner_bytecode.contains("LoadEnvironment r0, depth=0, slot=0"));
+    }
+
+    #[test]
+    /// Confirms compressed environment chains remain explicit in direct opcode operands.
+    fn compiler_emits_nonzero_environment_depth_without_runtime_plan_lookup() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function outer() { let x = 1; return function() { let y = 2; return function() { return x + y; }; }; }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let disassembly = module
+            .functions()
+            .iter()
+            .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            disassembly
+                .iter()
+                .any(|code| code.contains("LoadEnvironment") && code.contains("depth=1"))
+        );
     }
 
     #[test]

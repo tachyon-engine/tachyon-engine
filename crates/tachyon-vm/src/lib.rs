@@ -27,9 +27,9 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
-    BindingLocation, BytecodeConstant, CompiledModule, DecodeError, DecodedInstruction, FunctionId,
-    FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode,
-    RegisterId, WordOffset, decode_instruction,
+    BytecodeConstant, CompiledModule, DecodeError, DecodedInstruction, FunctionId, FunctionKind,
+    FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset,
+    decode_instruction,
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
@@ -130,9 +130,7 @@ pub enum RunOutcome {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
-    InvalidDispatchBatch {
-        batch: usize,
-    },
+    InvalidDispatchBatch { batch: usize },
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
     HandlerStackTooLarge(u32),
@@ -155,16 +153,9 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     UnsupportedExceptionHandler(HandlerKind),
-    CallStackLimit {
-        limit: u32,
-    },
-    RegisterStackLimit {
-        limit: u32,
-        requested: u32,
-    },
-    LoadedModuleLimit {
-        limit: u32,
-    },
+    CallStackLimit { limit: u32 },
+    RegisterStackLimit { limit: u32, requested: u32 },
+    LoadedModuleLimit { limit: u32 },
     LoadedCodeAllocationFailed,
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),
@@ -176,30 +167,16 @@ pub enum ExecutionError {
     UnsupportedPropertyKey(Value),
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
-    InvalidScopeName {
-        code: CodeId,
-        scope_name: u32,
-    },
-    InvalidBindingPlan {
-        code: CodeId,
-        function: FunctionId,
-        binding: u32,
-    },
-    InvalidBindingLocation(BindingLocation),
+    InvalidScopeName { code: CodeId, scope_name: u32 },
     MissingEnvironment,
-    InvalidEnvironmentSlot {
-        depth: u32,
-        slot: u32,
-    },
+    InvalidEnvironmentSlot { depth: u32, slot: u32 },
     UnresolvedBinding(AtomId),
     ReadOnlyBinding(AtomId),
     UninitializedBinding(AtomId),
     ImmutableBinding(AtomId),
     GlobalLexicalRedeclaration(AtomId),
     GlobalLexicalAlreadyInitialized(AtomId),
-    GlobalBindingLimit {
-        limit: u32,
-    },
+    GlobalBindingLimit { limit: u32 },
     GlobalBindingAllocationFailed,
     GlobalBindingIndexAllocationFailed,
     IntrinsicBindingAllocationFailed,
@@ -2410,13 +2387,13 @@ impl Isolate {
                 let value = self.read(base, operands[0])?;
                 self.store_resolved_scope(code, operands[1], value)?;
             }
-            Opcode::LoadBinding => {
-                let value = self.load_binding(code, operands[1])?;
+            Opcode::LoadEnvironment => {
+                let value = self.load_environment(operands[1], operands[2])?;
                 self.write(base, operands[0], value)?;
             }
-            Opcode::StoreBinding => {
+            Opcode::StoreEnvironment => {
                 let value = self.read(base, operands[0])?;
-                self.store_binding(code, operands[1], value)?;
+                self.store_environment(operands[1], operands[2], value)?;
             }
             Opcode::DeclareScope => {
                 self.declare_scope(code, operands[0])?;
@@ -2678,29 +2655,6 @@ impl Isolate {
         self.realm.initialize_lexical(slot, value)
     }
 
-    fn current_binding_location(
-        &self,
-        code: CodeId,
-        binding: u32,
-    ) -> Result<BindingLocation, ExecutionError> {
-        let function_id = self
-            .fiber
-            .frames
-            .last()
-            .expect("binding access always has an active frame")
-            .function;
-        self.loaded_code(code)?
-            .module
-            .function(function_id)
-            .and_then(|function| function.binding_plan().get(binding as usize))
-            .map(|binding| binding.location)
-            .ok_or(ExecutionError::InvalidBindingPlan {
-                code,
-                function: function_id,
-                binding,
-            })
-    }
-
     fn environment_at_depth(&mut self, depth: u32) -> Result<GcRef<Environment>, ExecutionError> {
         let mut environment = self
             .fiber
@@ -2710,10 +2664,9 @@ impl Isolate {
             .ok_or(ExecutionError::MissingEnvironment)?;
         for _ in 0..depth {
             environment = self.heap.with_running_scope(|scope| {
-                let local = scope.root(environment).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
-                        .borrow(local, self.types.environment)
+                        .borrow_reference(environment, self.types.environment)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .parent
                         .ok_or(ExecutionError::MissingEnvironment)
@@ -2723,20 +2676,12 @@ impl Isolate {
         Ok(environment)
     }
 
-    fn load_binding(&mut self, code: CodeId, binding: u32) -> Result<Value, ExecutionError> {
-        let BindingLocation::Environment { depth, slot } =
-            self.current_binding_location(code, binding)?
-        else {
-            return Err(ExecutionError::InvalidBindingLocation(
-                self.current_binding_location(code, binding)?,
-            ));
-        };
+    fn load_environment(&mut self, depth: u32, slot: u32) -> Result<Value, ExecutionError> {
         let environment = self.environment_at_depth(depth)?;
         self.heap.with_running_scope(|scope| {
-            let local = scope.root(environment).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
-                    .borrow(local, self.types.environment)
+                    .borrow_reference(environment, self.types.environment)
                     .map_err(ExecutionError::NoGcBorrow)?
                     .slots
                     .get(slot as usize)
@@ -2747,22 +2692,17 @@ impl Isolate {
     }
 
     /// Mutates one environment slot and records an old-to-young edge when the value is managed.
-    fn store_binding(
+    fn store_environment(
         &mut self,
-        code: CodeId,
-        binding: u32,
+        depth: u32,
+        slot: u32,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        let location = self.current_binding_location(code, binding)?;
-        let BindingLocation::Environment { depth, slot } = location else {
-            return Err(ExecutionError::InvalidBindingLocation(location));
-        };
         let environment = self.environment_at_depth(depth)?;
         self.heap.with_running_scope(|scope| {
-            let local = scope.root(environment).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 let environment = no_gc
-                    .borrow_mut(local, self.types.environment)
+                    .borrow_reference_mut(environment, self.types.environment)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 let target = environment
                     .slots
@@ -3498,9 +3438,9 @@ mod tests {
     use std::sync::Arc;
 
     use tachyon_bytecode::{
-        BindingPlanEntry, Bytecode, BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate,
-        CompiledModule, FunctionId, FunctionKind, FunctionLayout, FunctionMetadata, SourceSpan,
-        encode_instruction,
+        BindingLocation, BindingPlanEntry, Bytecode, BytecodeBuilder, BytecodeConstant,
+        CompiledFunctionTemplate, CompiledModule, FunctionId, FunctionKind, FunctionLayout,
+        FunctionMetadata, SourceSpan, encode_instruction,
     };
     use tachyon_gc::{ForcedCollectionMode, GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
@@ -3530,7 +3470,9 @@ mod tests {
         let span = SourceSpan { start: 0, end: 1 };
         let mut entry = BytecodeBuilder::default();
         entry.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
-        entry.emit(Opcode::StoreBinding, &[0, 0], span).unwrap();
+        entry
+            .emit(Opcode::StoreEnvironment, &[0, 0, 0], span)
+            .unwrap();
         entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
         entry.emit(Opcode::Call, &[2, 1, 0], span).unwrap();
         entry.emit(Opcode::Call, &[3, 1, 0], span).unwrap();
@@ -3538,10 +3480,14 @@ mod tests {
         let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
 
         let mut closure = BytecodeBuilder::default();
-        closure.emit(Opcode::LoadBinding, &[0, 0], span).unwrap();
+        closure
+            .emit(Opcode::LoadEnvironment, &[0, 0, 0], span)
+            .unwrap();
         closure.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
         closure.emit(Opcode::Add, &[2, 0, 1], span).unwrap();
-        closure.emit(Opcode::StoreBinding, &[2, 0], span).unwrap();
+        closure
+            .emit(Opcode::StoreEnvironment, &[2, 0, 0], span)
+            .unwrap();
         closure.emit(Opcode::Return, &[2], span).unwrap();
         let (closure_bytecode, closure_source_map, closure_registers) = closure.finish().unwrap();
         let binding_plan: Arc<[BindingPlanEntry]> = Arc::from([BindingPlanEntry {

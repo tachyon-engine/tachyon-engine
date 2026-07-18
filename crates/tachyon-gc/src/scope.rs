@@ -379,9 +379,20 @@ impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
         local: Local<'scope, T>,
         object_type: GcType<T>,
     ) -> Result<&T, NoGcBorrowError> {
-        let payload = self
-            .heap
-            .checked_payload_shared(local.as_gc_ref(), object_type)?;
+        self.borrow_reference(local.as_gc_ref(), object_type)
+    }
+
+    /// Borrows a typed live reference without redundantly publishing it as a temporary root.
+    ///
+    /// The caller must already retain the reference in a traced owner if it needs to survive a
+    /// future collection. This borrow itself cannot overlap allocation or collection because the
+    /// `NoGcScope` exclusively holds the heap, and descriptor/liveness checks still run here.
+    pub fn borrow_reference<T: Trace + 'static>(
+        &self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<&T, NoGcBorrowError> {
+        let payload = self.heap.checked_payload_shared(reference, object_type)?;
         // SAFETY: checked resolution matched this heap's Rust TypeId, header descriptor, payload
         // layout, allocation bit, and owner address. `NoGcScope` exclusively borrows the heap and
         // exposes no allocation/collection API for the returned reference's borrow lifetime.
@@ -394,9 +405,16 @@ impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
         local: Local<'scope, T>,
         object_type: GcType<T>,
     ) -> Result<&mut T, NoGcBorrowError> {
-        let mut payload = self
-            .heap
-            .checked_payload_mut(local.as_gc_ref(), object_type)?;
+        self.borrow_reference_mut(local.as_gc_ref(), object_type)
+    }
+
+    /// Exclusively borrows a typed live reference without publishing a temporary root.
+    pub fn borrow_reference_mut<T: Trace + 'static>(
+        &mut self,
+        reference: GcRef<T>,
+        object_type: GcType<T>,
+    ) -> Result<&mut T, NoGcBorrowError> {
+        let mut payload = self.heap.checked_payload_mut(reference, object_type)?;
         // SAFETY: checked resolution proves the concrete `T`; the exclusive borrow of this
         // `NoGcScope` prevents any second shared/mutable payload borrow or heap operation until the
         // returned reference expires.
@@ -648,6 +666,41 @@ mod tests {
                     &Payload { value: 11 }
                 );
             });
+        });
+    }
+
+    #[test]
+    /// Direct typed-reference borrows validate payloads without growing the temporary-root stack.
+    fn no_gc_scope_borrows_traced_references_without_root_publication() {
+        let mut types = TypeRegistry::new();
+        let payload_type = types.try_register::<Payload>("Payload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                payload_type,
+                0,
+                0,
+                Payload { value: 7 },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+
+        heap.with_running_scope(|running| {
+            let before = running.temporary_root_stats();
+            running.with_no_gc_scope(|no_gc| {
+                assert_eq!(
+                    no_gc
+                        .borrow_reference(reference, payload_type)
+                        .unwrap()
+                        .value,
+                    7
+                );
+                no_gc
+                    .borrow_reference_mut(reference, payload_type)
+                    .unwrap()
+                    .value = 11;
+            });
+            assert_eq!(running.temporary_root_stats(), before);
         });
     }
 
