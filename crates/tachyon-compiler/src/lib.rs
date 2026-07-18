@@ -704,20 +704,21 @@ mod tests {
     }
 
     #[test]
-    fn compiler_rejects_assignment_to_immutable_local() {
-        let error = Compiler
+    fn compiler_marks_global_lexical_const_as_immutable() {
+        let module = Compiler
             .compile(
                 source(MediaType::JavaScript, "const answer = 42; answer = 0;"),
                 CompileOptions::default(),
             )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            CompileError::UnsupportedSyntax {
-                syntax: "assignment to immutable local",
-                ..
-            }
-        ));
+            .unwrap();
+        let entry = module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap();
+        assert!(entry.binding_plan().iter().any(|binding| {
+            binding.name.as_ref() == "answer"
+                && binding.location == tachyon_bytecode::BindingLocation::GlobalLexical
+                && !binding.mutable
+        }));
     }
 
     #[test]

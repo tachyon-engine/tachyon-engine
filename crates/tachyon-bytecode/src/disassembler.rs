@@ -64,6 +64,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
     match opcode {
         Opcode::Nop => {}
         Opcode::DeclareScope => write!(output, " scope={}", operands[0])?,
+        Opcode::DeclareGlobalLexical => {
+            write!(output, " scope={}, mutable={}", operands[0], operands[1])?
+        }
         Opcode::LoadUndefined => write!(output, " r{}", operands[0])?,
         Opcode::CreateObject | Opcode::LoadException | Opcode::LoadThis | Opcode::LoadNewTarget => {
             write!(output, " r{}", operands[0])?
@@ -126,6 +129,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         }
         Opcode::LoadBinding | Opcode::StoreBinding => {
             write!(output, " r{}, binding={}", operands[0], operands[1])?
+        }
+        Opcode::InitializeGlobalLexical => {
+            write!(output, " r{}, scope={}", operands[0], operands[1])?
         }
         Opcode::Await | Opcode::Yield => write!(
             output,

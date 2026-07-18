@@ -75,8 +75,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 4,
-                    quantum: 4,
+                    fuel: 8,
+                    quantum: 8,
                 },
             )
             .unwrap();
@@ -96,8 +96,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 4,
-                    quantum: 4,
+                    fuel: 8,
+                    quantum: 8,
                 },
             )
             .unwrap();
@@ -117,8 +117,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 4,
-                    quantum: 4,
+                    fuel: 8,
+                    quantum: 8,
                 },
             )
             .unwrap();
@@ -138,8 +138,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 3,
-                    quantum: 3,
+                    fuel: 8,
+                    quantum: 8,
                 },
             )
             .unwrap();
@@ -380,8 +380,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 6,
-                    quantum: 6,
+                    fuel: 12,
+                    quantum: 12,
                 },
             )
             .unwrap();
@@ -401,8 +401,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 7,
-                    quantum: 7,
+                    fuel: 12,
+                    quantum: 12,
                 },
             )
             .unwrap();
@@ -422,8 +422,8 @@ mod tests {
             .execute(
                 &module,
                 ExecutionBudget {
-                    fuel: 4,
-                    quantum: 4,
+                    fuel: 8,
+                    quantum: 8,
                 },
             )
             .unwrap();
@@ -708,6 +708,85 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+
+    #[test]
+    /// Covers declarative global visibility, TDZ, immutable assignment, and cross-script redeclaration.
+    fn global_lexical_bindings_preserve_ecmascript_state() {
+        let compile = |id, name, text| {
+            Compiler
+                .compile(
+                    SourceText::new(
+                        SourceId::new(id),
+                        SourceName::new(name),
+                        MediaType::JavaScript,
+                        Arc::from(text),
+                    ),
+                    CompileOptions::default(),
+                )
+                .unwrap()
+        };
+        let setup = compile(
+            55,
+            "lexical-setup.js",
+            "let retained = 41; function read() { return retained + 1; }",
+        );
+        let body = compile(56, "lexical-body.js", "read();");
+        let mut isolate = test_isolate();
+        let body_code = isolate.load_module(&body).unwrap();
+        isolate
+            .execute(
+                &setup,
+                ExecutionBudget {
+                    fuel: 32,
+                    quantum: 32,
+                },
+            )
+            .unwrap();
+        let outcome = isolate
+            .execute_loaded(
+                body_code,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+
+        let tdz = compile(57, "tdz.js", "value; let value = 1;");
+        assert!(matches!(
+            test_isolate().execute(
+                &tdz,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16
+                }
+            ),
+            Err(ExecutionError::UninitializedBinding(_))
+        ));
+        let immutable = compile(58, "const.js", "const value = 1; value = 2;");
+        assert!(matches!(
+            test_isolate().execute(
+                &immutable,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16
+                }
+            ),
+            Err(ExecutionError::ImmutableBinding(_))
+        ));
+        let redeclaration = compile(59, "redeclaration.js", "let retained = 2;");
+        assert!(matches!(
+            isolate.execute(
+                &redeclaration,
+                ExecutionBudget {
+                    fuel: 16,
+                    quantum: 16
+                }
+            ),
+            Err(ExecutionError::GlobalLexicalRedeclaration(_))
+        ));
     }
 
     #[test]

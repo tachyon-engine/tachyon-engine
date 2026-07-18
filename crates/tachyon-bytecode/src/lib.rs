@@ -162,6 +162,10 @@ pub enum Opcode {
     LoadBinding = 42,
     /// Stores register operand 0 through verifier-owned binding-plan entry operand 1.
     StoreBinding = 43,
+    /// Declares one global lexical binding from scope-name operand 0 and mutability operand 1.
+    DeclareGlobalLexical = 44,
+    /// Initializes global lexical scope-name operand 1 from register operand 0 exactly once.
+    InitializeGlobalLexical = 45,
 }
 
 impl Opcode {
@@ -190,7 +194,9 @@ impl Opcode {
             | Self::StoreScope
             | Self::StoreResolvedScope
             | Self::LoadBinding
-            | Self::StoreBinding => 2,
+            | Self::StoreBinding
+            | Self::DeclareGlobalLexical
+            | Self::InitializeGlobalLexical => 2,
             Self::Typeof => 2,
             Self::Add
             | Self::Sub
@@ -260,6 +266,8 @@ impl Opcode {
             41 => Some(Self::StoreResolvedScope),
             42 => Some(Self::LoadBinding),
             43 => Some(Self::StoreBinding),
+            44 => Some(Self::DeclareGlobalLexical),
+            45 => Some(Self::InitializeGlobalLexical),
             _ => None,
         }
     }
@@ -515,6 +523,10 @@ pub enum VerifyError {
         binding: u32,
         binding_plan_count: u32,
     },
+    InvalidBooleanOperand {
+        offset: WordOffset,
+        operand: u32,
+    },
     InvalidCallArgumentWindow {
         offset: WordOffset,
         callee: u32,
@@ -761,7 +773,7 @@ impl BytecodeBuilder {
 
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
-            Opcode::Nop | Opcode::Jump | Opcode::DeclareScope => &[],
+            Opcode::Nop | Opcode::Jump | Opcode::DeclareScope | Opcode::DeclareGlobalLexical => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -774,6 +786,7 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::StoreResolvedScope
             | Opcode::StoreBinding
+            | Opcode::InitializeGlobalLexical
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject
@@ -1709,7 +1722,7 @@ fn verify_instruction(
         }
     };
     match instruction.opcode {
-        Opcode::Nop | Opcode::Jump | Opcode::DeclareScope => {}
+        Opcode::Nop | Opcode::Jump | Opcode::DeclareScope | Opcode::DeclareGlobalLexical => {}
         Opcode::LoadUndefined
         | Opcode::LoadNull
         | Opcode::LoadFalse
@@ -1787,9 +1800,10 @@ fn verify_instruction(
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
-        Opcode::StoreScope | Opcode::StoreResolvedScope | Opcode::StoreBinding => {
-            check_register(operands[0])?
-        }
+        Opcode::StoreScope
+        | Opcode::StoreResolvedScope
+        | Opcode::StoreBinding
+        | Opcode::InitializeGlobalLexical => check_register(operands[0])?,
     }
     if instruction.opcode == Opcode::LoadConstant && operands[1] >= context.constant_count {
         return Err(VerifyError::ConstantOutOfRange {
@@ -1801,6 +1815,8 @@ fn verify_instruction(
     let scope_name = match instruction.opcode {
         Opcode::LoadScope | Opcode::StoreScope | Opcode::StoreResolvedScope => Some(operands[1]),
         Opcode::DeclareScope => Some(operands[0]),
+        Opcode::DeclareGlobalLexical => Some(operands[0]),
+        Opcode::InitializeGlobalLexical => Some(operands[1]),
         Opcode::GetById | Opcode::SetById => Some(operands[2]),
         _ => None,
     };
@@ -1827,6 +1843,12 @@ fn verify_instruction(
             offset,
             binding: operands[1],
             binding_plan_count: context.binding_plan_count,
+        });
+    }
+    if instruction.opcode == Opcode::DeclareGlobalLexical && operands[1] > 1 {
+        return Err(VerifyError::InvalidBooleanOperand {
+            offset,
+            operand: operands[1],
         });
     }
     if matches!(
@@ -1971,6 +1993,17 @@ mod tests {
                 binding_plan_count: 1,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_non_boolean_global_lexical_mutability() {
+        let mut words = encode_instruction(Opcode::DeclareGlobalLexical, &[0, 2]).unwrap();
+        words.extend(encode_instruction(Opcode::LoadUndefined, &[0]).unwrap());
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        assert!(matches!(
+            Bytecode::from_words(words).verify(context()),
+            Err(VerifyError::InvalidBooleanOperand { operand: 2, .. })
         ));
     }
 

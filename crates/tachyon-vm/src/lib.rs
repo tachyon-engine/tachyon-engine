@@ -191,6 +191,10 @@ pub enum ExecutionError {
     },
     UnresolvedBinding(AtomId),
     ReadOnlyBinding(AtomId),
+    UninitializedBinding(AtomId),
+    ImmutableBinding(AtomId),
+    GlobalLexicalRedeclaration(AtomId),
+    GlobalLexicalAlreadyInitialized(AtomId),
     GlobalBindingLimit {
         limit: u32,
     },
@@ -337,6 +341,7 @@ impl Trace for LoadedCode {
 #[derive(Clone, Copy, Debug)]
 struct ScopeResolution {
     atom: AtomId,
+    lexical_slot: Option<GlobalLexicalSlotId>,
     global_slot: Option<GlobalSlotId>,
 }
 
@@ -368,8 +373,40 @@ impl GlobalSlotId {
 const _: [(); 4] = [(); core::mem::size_of::<GlobalSlotId>()];
 const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalSlotId>>()];
 
+#[derive(Clone, Copy, Debug)]
+struct GlobalLexicalBinding {
+    name: AtomId,
+    value: Value,
+    mutable: bool,
+    initialized: bool,
+}
+
+/// A stable isolate-local index into the declarative global environment record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(transparent)]
+struct GlobalLexicalSlotId(NonZeroU32);
+
+impl GlobalLexicalSlotId {
+    fn from_index(index: usize) -> Option<Self> {
+        u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(NonZeroU32::new)
+            .map(Self)
+    }
+
+    const fn index(self) -> usize {
+        (self.0.get() - 1) as usize
+    }
+}
+
+const _: [(); 4] = [(); core::mem::size_of::<GlobalLexicalSlotId>()];
+const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalLexicalSlotId>>()];
+
 #[derive(Debug)]
 struct Realm {
+    global_lexicals: Vec<GlobalLexicalBinding>,
+    global_lexical_slots_by_atom: Vec<Option<GlobalLexicalSlotId>>,
     global_bindings: Vec<GlobalBinding>,
     global_slots_by_atom: Vec<Option<GlobalSlotId>>,
     typeof_strings: TypeofStrings,
@@ -379,11 +416,105 @@ struct Realm {
 impl Realm {
     fn new(limits: RealmLimits, typeof_strings: TypeofStrings) -> Self {
         Self {
+            global_lexicals: Vec::new(),
+            global_lexical_slots_by_atom: Vec::new(),
             global_bindings: Vec::new(),
             global_slots_by_atom: Vec::new(),
             typeof_strings,
             limits,
         }
+    }
+
+    #[inline(always)]
+    fn resolve_lexical(&self, name: AtomId) -> Option<GlobalLexicalSlotId> {
+        let slot = self
+            .global_lexical_slots_by_atom
+            .get(name.index() as usize)
+            .copied()
+            .flatten()?;
+        debug_assert_eq!(self.global_lexicals[slot.index()].name, name);
+        Some(slot)
+    }
+
+    fn lexical_value(&self, slot: GlobalLexicalSlotId) -> Result<Value, ExecutionError> {
+        let binding = &self.global_lexicals[slot.index()];
+        if binding.initialized {
+            Ok(binding.value)
+        } else {
+            Err(ExecutionError::UninitializedBinding(binding.name))
+        }
+    }
+
+    /// Publishes an uninitialized declarative binding after reserving both stable-index tables.
+    fn declare_lexical(&mut self, name: AtomId, mutable: bool) -> Result<(), ExecutionError> {
+        if self.resolve_lexical(name).is_some() || self.resolve(name).is_some() {
+            return Err(ExecutionError::GlobalLexicalRedeclaration(name));
+        }
+        if self
+            .global_lexicals
+            .len()
+            .saturating_add(self.global_bindings.len())
+            >= self.limits.max_global_bindings as usize
+        {
+            return Err(ExecutionError::GlobalBindingLimit {
+                limit: self.limits.max_global_bindings,
+            });
+        }
+        let required_slots = (name.index() as usize)
+            .checked_add(1)
+            .ok_or(ExecutionError::GlobalBindingIndexAllocationFailed)?;
+        let additional_slots =
+            required_slots.saturating_sub(self.global_lexical_slots_by_atom.len());
+        self.global_lexical_slots_by_atom
+            .try_reserve_exact(additional_slots)
+            .map_err(|_| ExecutionError::GlobalBindingIndexAllocationFailed)?;
+        self.global_lexicals
+            .try_reserve_exact(1)
+            .map_err(|_| ExecutionError::GlobalBindingAllocationFailed)?;
+        self.global_lexical_slots_by_atom
+            .resize(required_slots, None);
+        let slot = GlobalLexicalSlotId::from_index(self.global_lexicals.len())
+            .ok_or(ExecutionError::GlobalBindingLimit { limit: u32::MAX })?;
+        self.global_lexicals.push(GlobalLexicalBinding {
+            name,
+            value: Value::from_immediate(Immediate::Undefined),
+            mutable,
+            initialized: false,
+        });
+        self.global_lexical_slots_by_atom[name.index() as usize] = Some(slot);
+        Ok(())
+    }
+
+    fn initialize_lexical(
+        &mut self,
+        slot: GlobalLexicalSlotId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let binding = &mut self.global_lexicals[slot.index()];
+        if binding.initialized {
+            return Err(ExecutionError::GlobalLexicalAlreadyInitialized(
+                binding.name,
+            ));
+        }
+        binding.value = value;
+        binding.initialized = true;
+        Ok(())
+    }
+
+    fn set_lexical(
+        &mut self,
+        slot: GlobalLexicalSlotId,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let binding = &mut self.global_lexicals[slot.index()];
+        if !binding.initialized {
+            return Err(ExecutionError::UninitializedBinding(binding.name));
+        }
+        if !binding.mutable {
+            return Err(ExecutionError::ImmutableBinding(binding.name));
+        }
+        binding.value = value;
+        Ok(())
     }
 
     #[inline(always)]
@@ -400,11 +531,19 @@ impl Realm {
 
     /// Updates an existing slot or atomically publishes one after both backing reserves succeed.
     fn set(&mut self, name: AtomId, value: Value) -> Result<(), ExecutionError> {
+        if self.resolve_lexical(name).is_some() {
+            return Err(ExecutionError::GlobalLexicalRedeclaration(name));
+        }
         if let Some(slot) = self.resolve(name) {
             self.set_slot(slot, value);
             return Ok(());
         }
-        if self.global_bindings.len() >= self.limits.max_global_bindings as usize {
+        if self
+            .global_lexicals
+            .len()
+            .saturating_add(self.global_bindings.len())
+            >= self.limits.max_global_bindings as usize
+        {
             return Err(ExecutionError::GlobalBindingLimit {
                 limit: self.limits.max_global_bindings,
             });
@@ -441,6 +580,9 @@ impl Realm {
 
 impl Trace for Realm {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
+        for binding in &mut self.global_lexicals {
+            binding.value.trace(tracer);
+        }
         for binding in &mut self.global_bindings {
             binding.value.trace(tracer);
         }
@@ -1248,6 +1390,7 @@ impl Isolate {
             match self.atoms.try_intern(string) {
                 Ok(atom) => scope_resolutions.push(ScopeResolution {
                     atom,
+                    lexical_slot: self.realm.resolve_lexical(atom),
                     global_slot: self.realm.resolve(atom),
                 }),
                 Err(error) => {
@@ -1340,14 +1483,17 @@ impl Isolate {
             .get(scope_name as usize)
             .copied()
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })?;
-        if resolution.global_slot.is_some() {
+        if resolution.lexical_slot.is_some() || resolution.global_slot.is_some() {
             return Ok(resolution);
         }
-        let Some(global_slot) = self.realm.resolve(resolution.atom) else {
+        let lexical_slot = self.realm.resolve_lexical(resolution.atom);
+        let global_slot = self.realm.resolve(resolution.atom);
+        if lexical_slot.is_none() && global_slot.is_none() {
             return Ok(resolution);
-        };
+        }
         let resolved = ScopeResolution {
-            global_slot: Some(global_slot),
+            lexical_slot,
+            global_slot,
             ..resolution
         };
         self.loaded_code
@@ -1672,7 +1818,7 @@ impl Isolate {
             Opcode::LoadScope => {
                 let resolution = self.scope_resolution(code, operands[1])?;
                 let value = self
-                    .scope_value(resolution)
+                    .scope_value(resolution)?
                     .ok_or(ExecutionError::UnresolvedBinding(resolution.atom))?;
                 self.write(base, operands[0], value)?;
             }
@@ -1694,6 +1840,13 @@ impl Isolate {
             }
             Opcode::DeclareScope => {
                 self.declare_scope(code, operands[0])?;
+            }
+            Opcode::DeclareGlobalLexical => {
+                self.declare_global_lexical(code, operands[0], operands[1] != 0)?;
+            }
+            Opcode::InitializeGlobalLexical => {
+                let value = self.read(base, operands[0])?;
+                self.initialize_global_lexical(code, operands[1], value)?;
             }
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
@@ -1817,12 +1970,15 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn scope_value(&self, resolution: ScopeResolution) -> Option<Value> {
-        self.intrinsic_scope_value(resolution.atom).or_else(|| {
+    fn scope_value(&self, resolution: ScopeResolution) -> Result<Option<Value>, ExecutionError> {
+        if let Some(slot) = resolution.lexical_slot {
+            return self.realm.lexical_value(slot).map(Some);
+        }
+        Ok(self.intrinsic_scope_value(resolution.atom).or_else(|| {
             resolution
                 .global_slot
                 .and_then(|slot| self.realm.get_slot(slot))
-        })
+        }))
     }
 
     /// Writes through a cached global slot or publishes the binding once on the cold path.
@@ -1852,7 +2008,10 @@ impl Isolate {
         &mut self,
         resolution: ScopeResolution,
     ) -> Result<(), ExecutionError> {
-        if self.scope_value(resolution).is_some() {
+        if resolution.lexical_slot.is_some() {
+            return Err(ExecutionError::GlobalLexicalRedeclaration(resolution.atom));
+        }
+        if self.scope_value(resolution)?.is_some() {
             return Ok(());
         }
         self.realm
@@ -1867,6 +2026,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
+        if let Some(slot) = resolution.lexical_slot {
+            return self.realm.set_lexical(slot, value);
+        }
         if let Some(slot) = resolution.global_slot {
             self.realm.set_slot(slot, value);
             return Ok(());
@@ -1884,6 +2046,32 @@ impl Isolate {
             };
         }
         Err(ExecutionError::UnresolvedBinding(resolution.atom))
+    }
+
+    fn declare_global_lexical(
+        &mut self,
+        code: CodeId,
+        scope_name: u32,
+        mutable: bool,
+    ) -> Result<(), ExecutionError> {
+        let resolution = self.scope_resolution(code, scope_name)?;
+        if resolution.lexical_slot.is_some() || resolution.global_slot.is_some() {
+            return Err(ExecutionError::GlobalLexicalRedeclaration(resolution.atom));
+        }
+        self.realm.declare_lexical(resolution.atom, mutable)
+    }
+
+    fn initialize_global_lexical(
+        &mut self,
+        code: CodeId,
+        scope_name: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let resolution = self.scope_resolution(code, scope_name)?;
+        let slot = resolution
+            .lexical_slot
+            .ok_or(ExecutionError::UnresolvedBinding(resolution.atom))?;
+        self.realm.initialize_lexical(slot, value)
     }
 
     fn current_binding_location(
@@ -2749,6 +2937,41 @@ mod tests {
         .unwrap()
     }
 
+    /// Exercises declarative global declaration, one-time initialization, and lexical-first load.
+    fn global_lexical_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut builder = BytecodeBuilder::with_capacity(5, 0);
+        builder
+            .emit(Opcode::DeclareGlobalLexical, &[0, 1], span)
+            .unwrap();
+        builder.emit(Opcode::LoadImmediate, &[0, 42], span).unwrap();
+        builder
+            .emit(Opcode::InitializeGlobalLexical, &[0, 0], span)
+            .unwrap();
+        builder.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
+        builder.emit(Opcode::Return, &[1], span).unwrap();
+        let (bytecode, source_map, register_count) = builder.finish().unwrap();
+        CompiledModule::new(
+            Arc::from("let answer = 42; answer;"),
+            Vec::new(),
+            vec![Arc::from("answer")],
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count,
+                        ..FunctionLayout::default()
+                    },
+                    source_map,
+                    ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                },
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
     /// Freezes one builder into a script module with caller-provided immutable constants.
     fn single_function_module(
         source: &'static str,
@@ -3204,6 +3427,15 @@ mod tests {
     }
 
     #[test]
+    fn global_lexical_access_works_for_every_dispatch_batch() {
+        assert_global_lexical_batch::<1>();
+        assert_global_lexical_batch::<2>();
+        assert_global_lexical_batch::<4>();
+        assert_global_lexical_batch::<8>();
+        assert_global_lexical_batch::<16>();
+    }
+
+    #[test]
     /// Forces collection between loaded literals so pending and published caches must both trace.
     fn loaded_string_constants_survive_forced_major_during_module_load() {
         let mut isolate = test_isolate();
@@ -3252,8 +3484,10 @@ mod tests {
             isolate
                 .scope_value(ScopeResolution {
                     atom: infinity,
+                    lexical_slot: None,
                     global_slot: isolate.realm.resolve(infinity),
                 })
+                .unwrap()
                 .and_then(Value::as_f64),
             Some(f64::INFINITY)
         );
@@ -3269,6 +3503,7 @@ mod tests {
         isolate
             .declare_scope_resolution(ScopeResolution {
                 atom: infinity,
+                lexical_slot: None,
                 global_slot: None,
             })
             .unwrap();
@@ -3853,6 +4088,19 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(7)));
+    }
+
+    fn assert_global_lexical_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &global_lexical_module(),
+                ExecutionBudget {
+                    fuel: 5,
+                    quantum: 5,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
     fn assert_batch_budget<const N: usize>() {

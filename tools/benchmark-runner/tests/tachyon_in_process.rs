@@ -41,7 +41,7 @@ fn request(script: &CorpusScript, mode: MeasurementMode) -> BenchmarkRequest {
     }
 }
 
-/// Proves all three timing boundaries execute the checked-in Oxc-to-VM foundation slice.
+/// Proves script and main-function entries use only timing boundaries they can repeat honestly.
 #[test]
 fn tachyon_adapter_executes_all_honest_in_process_modes() {
     let (config, corpus) = config_and_corpus();
@@ -54,21 +54,22 @@ fn tachyon_adapter_executes_all_honest_in_process_modes() {
     for mode in [
         MeasurementMode::ParseCompileExecute,
         MeasurementMode::PrecompiledExecute,
-        MeasurementMode::SteadyState,
     ] {
         let request = request(script, mode);
         adapter.prepare(&request).unwrap();
         let metrics = adapter.sample(&request).unwrap();
         assert!(metrics.elapsed_ns > 0);
-        assert_eq!(
-            metrics.iterations,
-            if mode == MeasurementMode::SteadyState {
-                8
-            } else {
-                1
-            }
-        );
+        assert_eq!(metrics.iterations, 1);
     }
+    let main_script = corpus
+        .iter()
+        .find(|script| script.config.id.as_ref() == "basic/call-loop")
+        .unwrap();
+    let request = request(main_script, MeasurementMode::SteadyState);
+    adapter.prepare(&request).unwrap();
+    let metrics = adapter.sample(&request).unwrap();
+    assert!(metrics.elapsed_ns > 0);
+    assert_eq!(metrics.iterations, 8);
 }
 
 /// Keeps process startup and unsupported future syntax out of successful in-process measurements.
@@ -134,4 +135,22 @@ fn main_function_corpus_executes_through_separate_invocation_code() {
         adapter.prepare(&request).unwrap();
         assert!(adapter.sample(&request).unwrap().elapsed_ns > 0);
     }
+}
+
+#[test]
+fn main_function_setup_can_publish_global_lexical_closure_state() {
+    let (config, corpus) = config_and_corpus();
+    let script = corpus
+        .iter()
+        .find(|script| script.config.id.as_ref() == "basic/closure")
+        .unwrap();
+    let mut request = request(script, MeasurementMode::SteadyState);
+    request.source = Arc::from(
+        "function outer() { let value = 42; return function() { return value; }; } let invoke = outer(); function main() { return invoke(); }",
+    );
+    let mut adapter = adapter(&config);
+    adapter.prepare(&request).unwrap();
+    let metrics = adapter.sample(&request).unwrap();
+    assert!(metrics.elapsed_ns > 0);
+    assert_eq!(metrics.iterations, 8);
 }

@@ -96,6 +96,7 @@ fn lower_entry(
     };
     let instruction_upper_bound = hir_instruction_count(hir)?
         .checked_add(var_bindings.len())
+        .and_then(|count| count.checked_add(environments.global_lexicals.len()))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "global var instantiation instructions",
         })?
@@ -132,6 +133,14 @@ fn lower_entry(
         function_scope: None,
         environments,
     };
+    for lexical in &environments.global_lexicals {
+        let scope_name = lowerer.global_lexical_binding(lexical)?;
+        lowerer.emit(
+            Opcode::DeclareGlobalLexical,
+            &[scope_name, u32::from(lexical.mutable)],
+            lexical.span,
+        )?;
+    }
     for statement in hir.statements() {
         if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
             lowerer.function_declaration(declaration, statement.span)?;
@@ -246,11 +255,42 @@ struct FunctionEnvironmentPlan {
 #[derive(Clone, Debug)]
 struct EnvironmentPlans {
     functions: Vec<FunctionEnvironmentPlan>,
+    global_lexicals: Vec<GlobalLexicalPlan>,
+}
+
+#[derive(Clone, Debug)]
+struct GlobalLexicalPlan {
+    id: BindingId,
+    name: std::sync::Arc<str>,
+    mutable: bool,
+    span: SourceSpan,
 }
 
 impl EnvironmentPlans {
     /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
     fn new(hir: &HirProgram) -> Result<Self, CompileError> {
+        let mut global_lexicals = Vec::with_capacity(statements_binding_count(hir.statements())?);
+        for statement in hir.statements() {
+            let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
+                continue;
+            };
+            if !matches!(
+                declaration.kind,
+                HirVariableDeclarationKind::Let | HirVariableDeclarationKind::Const
+            ) {
+                continue;
+            }
+            for declarator in declaration.declarators.iter() {
+                if declarator.binding.scope == hir.root_scope() {
+                    global_lexicals.push(GlobalLexicalPlan {
+                        id: declarator.binding.id,
+                        name: declarator.binding.name.clone(),
+                        mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                        span: declarator.span,
+                    });
+                }
+            }
+        }
         let mut functions = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
             let capacity = function
@@ -275,7 +315,10 @@ impl EnvironmentPlans {
             functions[index].parent_function =
                 nearest_parent_function(functions[index].scope, hir.scopes(), &functions);
         }
-        Ok(Self { functions })
+        Ok(Self {
+            functions,
+            global_lexicals,
+        })
     }
 
     #[inline(always)]
@@ -286,6 +329,13 @@ impl EnvironmentPlans {
             .slots
             .iter()
             .find(|slot| slot.id == binding)
+    }
+
+    #[inline(always)]
+    fn global_lexical(&self, binding: BindingId) -> Option<&GlobalLexicalPlan> {
+        self.global_lexicals
+            .iter()
+            .find(|lexical| lexical.id == binding)
     }
 
     /// Resolves a captured reference to the nearest allocated environment chain node.
@@ -1446,7 +1496,7 @@ impl Lowerer<'_> {
                         }
                         self.require_global_reference(reference, expression.span)?;
                         let destination = self.register()?;
-                        let scope_name = self.global_binding(&reference.name, true)?;
+                        let scope_name = self.resolved_global_binding(reference, true)?;
                         self.emit(
                             Opcode::LoadScope,
                             &[destination.index(), scope_name],
@@ -1634,7 +1684,7 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
         self.require_global_reference(target, span)?;
-        let scope_name = self.global_binding(&target.name, true)?;
+        let scope_name = self.resolved_global_binding(target, true)?;
         let result = match operator {
             HirAssignmentOperator::Assign => self.expression(value)?,
             HirAssignmentOperator::Binary(operator) => {
@@ -1794,7 +1844,7 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
         self.require_global_reference(target, span)?;
-        let scope_name = self.global_binding(&target.name, true)?;
+        let scope_name = self.resolved_global_binding(target, true)?;
         let old = self.register()?;
         self.emit(Opcode::LoadScope, &[old.index(), scope_name], span)?;
         let result = if prefix {
@@ -2037,6 +2087,19 @@ impl Lowerer<'_> {
                     });
                 }
             };
+            if self.script_scope && declarator.binding.scope == self.root_scope {
+                let lexical = self
+                    .environments
+                    .global_lexical(declarator.binding.id)
+                    .ok_or(CompileError::BindingOverflow)?;
+                let scope_name = self.global_lexical_binding(lexical)?;
+                self.emit(
+                    Opcode::InitializeGlobalLexical,
+                    &[register.index(), scope_name],
+                    declarator.span,
+                )?;
+                continue;
+            }
             self.add_local(
                 &declarator.binding,
                 Some(register),
@@ -2275,6 +2338,30 @@ impl Lowerer<'_> {
             self.binding_plan.push(entry);
         }
         Ok(scope_name)
+    }
+
+    fn global_lexical_binding(&mut self, lexical: &GlobalLexicalPlan) -> Result<u32, CompileError> {
+        let scope_name = self.scope_name(&lexical.name)?;
+        self.add_binding_plan(BindingPlanEntry {
+            name: lexical.name.clone(),
+            location: BindingLocation::GlobalLexical,
+            mutable: lexical.mutable,
+        })?;
+        Ok(scope_name)
+    }
+
+    fn resolved_global_binding(
+        &mut self,
+        reference: &HirIdentifierReference,
+        mutable: bool,
+    ) -> Result<u32, CompileError> {
+        if let Some(lexical) = reference
+            .binding
+            .and_then(|binding| self.environments.global_lexical(binding))
+        {
+            return self.global_lexical_binding(lexical);
+        }
+        self.global_binding(&reference.name, mutable)
     }
 
     /// Returns a module-stable scope-name index while retaining only one owned copy per spelling.
