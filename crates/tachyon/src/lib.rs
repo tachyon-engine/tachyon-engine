@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[test]
-    /// Covers primitive numeric conversion for unary plus without object/string coercion.
+    /// Covers primitive and callback-driven numeric conversion for unary plus.
     fn unary_plus_converts_supported_primitives() {
         assert_eq!(execute_source(84, "+1;").as_i32(), Some(1));
         assert_eq!(execute_source(85, "+true;").as_i32(), Some(1));
@@ -1537,6 +1537,14 @@ mod tests {
         );
         assert_eq!(execute_source(88, "+'0x10';").as_f64(), Some(16.0));
         assert_eq!(execute_source(89, "+'  1.5  ';").as_f64(), Some(1.5));
+        assert_eq!(
+            execute_source(
+                177,
+                "let order = 0; let direct = { valueOf() { order = order * 10 + 1; try { throw 8; } catch (error) { return error - 1; } }, toString() { order = 99; return 'wrong'; } }; let fallback = { valueOf() { order = order * 10 + 2; return {}; }, toString() { order = order * 10 + 3; return '8'; } }; let threw = false; try { +{ valueOf() { throw 42; } }; } catch (error) { threw = error === 42; } +direct === 7 && +fallback === 8 && order === 123 && threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
