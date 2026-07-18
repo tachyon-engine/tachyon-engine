@@ -1685,6 +1685,30 @@ mod tests {
         );
         assert_eq!(
             execute_source(
+                140,
+                "let values = [1, 2, 3]; values.pop() === 3 && values.length === 2 && values[1] === 2;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                141,
+                "let values = [1, , 3, 4]; let copy = values.slice(1, 3); copy.length === 2 && copy[0] === undefined && copy[1] === 3 && values.length === 4;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
+                142,
+                "let object = { length: 3 }; object[0] = 'a'; object[2] = 'c'; Array.prototype.slice.call(object, 0, 3).length === 3 && Array.prototype.pop.call(object) === 'c' && object.length === 2;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(
                 127,
                 "let recursive = []; recursive.push(recursive); let descriptor = Object.getOwnPropertyDescriptor([], 'length'); [1, , null, undefined, 4].join('-') === '1----4' && recursive.join() === '' && descriptor.writable === true && descriptor.enumerable === false && descriptor.configurable === false;",
             )
