@@ -154,6 +154,8 @@ pub enum Opcode {
     Typeof = 38,
     /// Creates a script-scoped var binding only when the global does not already exist.
     DeclareScope = 39,
+    /// Tests register 1's ordinary prototype chain against callable register 2.
+    InstanceOf = 40,
 }
 
 impl Opcode {
@@ -187,6 +189,7 @@ impl Opcode {
             | Self::Div
             | Self::StrictEqual
             | Self::LessThan
+            | Self::InstanceOf
             | Self::GetByValue
             | Self::SetByValue
             | Self::Call
@@ -244,6 +247,7 @@ impl Opcode {
             37 => Some(Self::SetByValue),
             38 => Some(Self::Typeof),
             39 => Some(Self::DeclareScope),
+            40 => Some(Self::InstanceOf),
             _ => None,
         }
     }
@@ -763,6 +767,7 @@ impl BytecodeBuilder {
             | Opcode::Div
             | Opcode::StrictEqual
             | Opcode::LessThan
+            | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
             Opcode::GetById | Opcode::SetById => &[0, 1],
@@ -1613,6 +1618,7 @@ fn verify_instruction(
         | Opcode::Div
         | Opcode::StrictEqual
         | Opcode::LessThan
+        | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {
             check_register(operands[0])?;

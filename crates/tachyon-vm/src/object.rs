@@ -207,12 +207,14 @@ impl GcExternalMemory for PropertyStorage {
 pub(crate) struct OrdinaryObject {
     pub(crate) shape: ShapeId,
     pub(crate) storage: Option<GcRef<PropertyStorage>>,
+    pub(crate) prototype: Value,
 }
 
 impl Trace for OrdinaryObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.storage.trace(tracer);
+        self.prototype.trace(tracer);
     }
 }
 

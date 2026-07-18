@@ -597,7 +597,8 @@ mod tests {
                 CompileOptions::default(),
             )
             .unwrap();
-        let mut code_limited = test_isolate_with_realm_limits(RealmLimits::new(1, 2));
+        let mut code_limited =
+            test_isolate_with_realm_limits(RealmLimits::new(1, 2).with_max_shapes(3));
         for _ in 0..2 {
             code_limited
                 .execute(
@@ -620,7 +621,8 @@ mod tests {
             Err(ExecutionError::LoadedModuleLimit { limit: 1 })
         ));
 
-        let mut global_limited = test_isolate_with_realm_limits(RealmLimits::new(2, 1));
+        let mut global_limited =
+            test_isolate_with_realm_limits(RealmLimits::new(2, 1).with_max_shapes(3));
         global_limited
             .execute(
                 &first,
@@ -779,6 +781,32 @@ mod tests {
             execute_source(
                 35,
                 "function Box() { return new.target; } let constructed = new Box() === Box; let called = Box() === undefined; constructed && called;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+    }
+
+    #[test]
+    /// Exercises observable default function prototypes and constructor-selected receiver chains.
+    fn instanceof_uses_the_current_constructor_prototype_chain() {
+        assert_eq!(
+            execute_source(
+                47,
+                "function Constructor() {} Constructor.prototype.constructor === Constructor && new Constructor() instanceof Constructor;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        );
+        assert_eq!(
+            execute_source(48, "function Constructor() {} 1 instanceof Constructor;")
+                .as_immediate(),
+            Some(tachyon_value::Immediate::False)
+        );
+        assert_eq!(
+            execute_source(
+                49,
+                "function Constructor() {} function Parent() {} Constructor.prototype = Parent.prototype; new Constructor() instanceof Parent;",
             )
             .as_immediate(),
             Some(tachyon_value::Immediate::True)

@@ -143,6 +143,7 @@ pub enum ExecutionError {
     InvalidRegister(RegisterId),
     NonCallable(Value),
     NonConstructor(Value),
+    InvalidInstanceofPrototype(Value),
     HeapAllocation(ManagedAllocationError),
     HeapReference(HeapReferenceError),
     Root(RootError),
@@ -246,6 +247,12 @@ struct VmTypes {
     ordinary_object: GcType<OrdinaryObject>,
     property_storage: GcType<PropertyStorage>,
     string: GcType<JsString>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct IntrinsicPropertyAtoms {
+    prototype: Option<AtomId>,
+    constructor: Option<AtomId>,
 }
 
 /// An isolate-local immutable-code index; zero stays reserved for niche optimization and validation.
@@ -555,6 +562,7 @@ pub struct Isolate {
     loaded_code: Vec<LoadedCode>,
     heap: Heap,
     types: VmTypes,
+    intrinsic_property_atoms: IntrinsicPropertyAtoms,
     stack_limits: StackLimits,
     _not_sync: Cell<()>,
 }
@@ -590,6 +598,7 @@ impl Isolate {
             loaded_code: Vec::new(),
             heap,
             types,
+            intrinsic_property_atoms: IntrinsicPropertyAtoms::default(),
             stack_limits: config.stack_limits,
             _not_sync: Cell::new(()),
         })
@@ -604,8 +613,16 @@ impl Isolate {
         &mut self.atoms
     }
 
-    /// Allocates an empty ordinary object through the managed young-generation path.
+    /// Allocates an empty ordinary object with a caller-selected prototype through managed GC.
     fn create_ordinary_object(&mut self) -> Result<Value, ExecutionError> {
+        self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))
+    }
+
+    /// Keeps a prototype edge in the pending payload so pre-allocation collection can rewrite it.
+    fn create_ordinary_object_with_prototype(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -621,6 +638,7 @@ impl Isolate {
                 OrdinaryObject {
                     shape: ShapeId::EMPTY,
                     storage: None,
+                    prototype,
                 },
                 AllocationSpace::Young,
                 roots,
@@ -637,6 +655,37 @@ impl Isolate {
         key: AtomId,
     ) -> Result<Option<Value>, ExecutionError> {
         let (_, snapshot) = self.object_snapshot(receiver)?;
+        self.data_property_from_snapshot(snapshot, key)
+    }
+
+    /// Walks ordinary prototype links without allocating or invoking accessor/exotic behavior.
+    fn get_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let mut current = receiver;
+        loop {
+            let (_, snapshot) = self.object_snapshot(current)?;
+            if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
+                return Ok(Some(value));
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(None);
+            }
+            if !self.is_object_value(snapshot.prototype) {
+                return Err(ExecutionError::NotObject(snapshot.prototype));
+            }
+            current = snapshot.prototype;
+        }
+    }
+
+    /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
+    fn data_property_from_snapshot(
+        &mut self,
+        snapshot: OrdinaryObject,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             return Ok(None);
         };
@@ -653,6 +702,70 @@ impl Isolate {
                     .map(|storage| storage.slots.get(property.slot as usize).copied())
             })
         })
+    }
+
+    fn prototype_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.prototype {
+            return Ok(atom);
+        }
+        let string =
+            JsString::try_from_latin1(b"prototype").map_err(ExecutionError::PropertyKeyString)?;
+        let atom = self
+            .atoms
+            .try_intern(string)
+            .map_err(ExecutionError::PropertyKeyAtom)?;
+        self.intrinsic_property_atoms.prototype = Some(atom);
+        Ok(atom)
+    }
+
+    fn constructor_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.constructor {
+            return Ok(atom);
+        }
+        let string =
+            JsString::try_from_latin1(b"constructor").map_err(ExecutionError::PropertyKeyString)?;
+        let atom = self
+            .atoms
+            .try_intern(string)
+            .map_err(ExecutionError::PropertyKeyAtom)?;
+        self.intrinsic_property_atoms.constructor = Some(atom);
+        Ok(atom)
+    }
+
+    /// Implements ordinary HasInstance over the current constructor prototype and object chain.
+    fn ordinary_instance_of(
+        &mut self,
+        value: Value,
+        constructor: Value,
+    ) -> Result<bool, ExecutionError> {
+        let raw = constructor
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(constructor))?;
+        self.heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(constructor))?;
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self.get_data_property(constructor, prototype_atom)?.ok_or(
+            ExecutionError::InvalidInstanceofPrototype(Value::from_immediate(Immediate::Undefined)),
+        )?;
+        if !self.is_object_value(prototype) {
+            return Err(ExecutionError::InvalidInstanceofPrototype(prototype));
+        }
+        if !self.is_object_value(value) {
+            return Ok(false);
+        }
+        let (_, mut snapshot) = self.object_snapshot(value)?;
+        loop {
+            let candidate = snapshot.prototype;
+            if candidate.as_immediate() == Some(Immediate::Null) {
+                return Ok(false);
+            }
+            if candidate == prototype {
+                return Ok(true);
+            }
+            let (_, next) = self.object_snapshot(candidate)?;
+            snapshot = next;
+        }
     }
 
     /// Updates an existing slot in place or publishes an exactly sized replacement backing.
@@ -1268,6 +1381,16 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::InstanceOf => {
+                let left = self.read(base, operands[1])?;
+                let right = self.read(base, operands[2])?;
+                let value = if self.ordinary_instance_of(left, right)? {
+                    Value::from_immediate(Immediate::True)
+                } else {
+                    Value::from_immediate(Immediate::False)
+                };
+                self.write(base, operands[0], value)?;
+            }
             Opcode::Jump => self.set_pc(WordOffset::new(operands[0])),
             Opcode::JumpIfFalse => {
                 if !self.is_truthy_value(self.read(base, operands[0])?)? {
@@ -1337,7 +1460,7 @@ impl Isolate {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
                 let value = self
-                    .get_own_data_property(receiver, key)?
+                    .get_data_property(receiver, key)?
                     .unwrap_or(Value::from_immediate(Immediate::Undefined));
                 self.write(base, operands[0], value)?;
             }
@@ -1351,7 +1474,7 @@ impl Isolate {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.property_key_atom(self.read(base, operands[2])?)?;
                 let value = self
-                    .get_own_data_property(receiver, key)?
+                    .get_data_property(receiver, key)?
                     .unwrap_or(Value::from_immediate(Immediate::Undefined));
                 self.write(base, operands[0], value)?;
             }
@@ -1493,6 +1616,8 @@ impl Isolate {
             .module
             .function(function)
             .ok_or(ExecutionError::MissingEntryFunction(function))?;
+        let prototype_atom = self.prototype_atom()?;
+        let constructor_atom = self.constructor_atom()?;
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
@@ -1513,13 +1638,22 @@ impl Isolate {
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         storage: None,
+                        prototype: Value::from_immediate(Immediate::Null),
                     },
                 },
                 AllocationSpace::Young,
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        self.write(base, destination, Value::from_heap_ref(closure.raw()))
+        self.write(base, destination, Value::from_heap_ref(closure.raw()))?;
+        let prototype = self.create_ordinary_object()?;
+        let closure = self.read(base, destination)?;
+        self.set_own_data_property(closure, prototype_atom, prototype)?;
+        let closure = self.read(base, destination)?;
+        let prototype = self
+            .get_own_data_property(closure, prototype_atom)?
+            .expect("a newly initialized ordinary function owns its prototype");
+        self.set_own_data_property(prototype, constructor_atom, closure)
     }
 
     /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
@@ -1539,7 +1673,12 @@ impl Isolate {
         self.heap
             .checked_reference(raw, self.types.function)
             .map_err(|_| ExecutionError::NonConstructor(constructor))?;
-        let receiver = self.create_ordinary_object()?;
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(constructor, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .unwrap_or(Value::from_immediate(Immediate::Null));
+        let receiver = self.create_ordinary_object_with_prototype(prototype)?;
         self.call(CallSite {
             caller_base,
             destination,
@@ -2453,6 +2592,23 @@ mod tests {
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
     }
 
+    fn assert_instanceof_batch<const N: usize>() {
+        let outcome = test_isolate()
+            .execute_with_batch::<N>(
+                &instanceof_module(),
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
+    }
+
     #[test]
     fn interpreter_executes_int32_arithmetic() {
         assert_batch_result::<1>();
@@ -2719,6 +2875,38 @@ mod tests {
         assert_construct_batch::<4>();
         assert_construct_batch::<8>();
         assert_construct_batch::<16>();
+    }
+
+    #[test]
+    fn instanceof_walks_prototypes_for_every_dispatch_batch() {
+        assert_instanceof_batch::<1>();
+        assert_instanceof_batch::<2>();
+        assert_instanceof_batch::<4>();
+        assert_instanceof_batch::<8>();
+        assert_instanceof_batch::<16>();
+    }
+
+    #[test]
+    /// Forced major collections cover closure prototype creation and receiver chain publication.
+    fn instanceof_prototype_chain_survives_forced_major() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute(
+                &instanceof_module(),
+                ExecutionBudget {
+                    fuel: 6,
+                    quantum: 6,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
     }
 
     #[test]
@@ -3558,6 +3746,55 @@ mod tests {
                     FunctionId::new(1),
                     constructor_bytecode,
                     constructor_metadata,
+                ),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds one default constructor, constructs its receiver, then checks the real prototype link.
+    fn instanceof_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(4, 0);
+        entry.emit(Opcode::CreateClosure, &[0, 1], span).unwrap();
+        entry.emit(Opcode::Construct, &[1, 0, 0], span).unwrap();
+        entry.emit(Opcode::InstanceOf, &[2, 1, 0], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let mut constructor = BytecodeBuilder::with_capacity(2, 0);
+        constructor.emit(Opcode::LoadUndefined, &[0], span).unwrap();
+        constructor.emit(Opcode::Return, &[0], span).unwrap();
+        let (constructor_bytecode, constructor_source_map, constructor_registers) =
+            constructor.finish().unwrap();
+        CompiledModule::new(
+            Arc::from("new Constructor() instanceof Constructor"),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(0),
+                    entry_bytecode,
+                    FunctionMetadata {
+                        layout: FunctionLayout {
+                            register_count: entry_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: entry_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                    },
+                ),
+                CompiledFunctionTemplate::new(
+                    FunctionId::new(1),
+                    constructor_bytecode,
+                    FunctionMetadata {
+                        layout: FunctionLayout {
+                            register_count: constructor_registers,
+                            ..FunctionLayout::default()
+                        },
+                        source_map: constructor_source_map,
+                        ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                    },
                 ),
             ],
             FunctionId::new(0),

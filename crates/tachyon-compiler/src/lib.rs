@@ -377,6 +377,26 @@ mod tests {
     }
 
     #[test]
+    fn compiler_lowers_instanceof_to_its_verified_opcode() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function Constructor() {} new Constructor() instanceof Constructor;",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let entry = tachyon_bytecode::disassemble(
+            module
+                .function(tachyon_bytecode::FunctionId::new(0))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(entry.contains("InstanceOf"));
+    }
+
+    #[test]
     /// Confirms control-flow HIR owns every nested node after the Oxc arena is dropped.
     fn hir_owns_nested_block_if_and_throw_statements() {
         let hir = Compiler
