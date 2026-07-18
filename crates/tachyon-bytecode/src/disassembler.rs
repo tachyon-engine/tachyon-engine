@@ -103,6 +103,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::LooseNotEqual
         | Opcode::HasProperty
         | Opcode::TypeofScope
+        | Opcode::DeleteById
+        | Opcode::DeleteByValue
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => write!(

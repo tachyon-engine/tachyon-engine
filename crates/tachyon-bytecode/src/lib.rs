@@ -19,6 +19,7 @@ pub use disassembler::{DisassemblyError, disassemble};
 
 const OPCODE_MASK: u8 = 0x3f;
 const FORMAT_MASK: u8 = 0xc0;
+const ESCAPE_FORMAT: u8 = 0xc0;
 const NORMAL_FORMAT: u8 = 0x40;
 const WIDE_FORMAT: u8 = 0x80;
 
@@ -187,6 +188,8 @@ pub enum Opcode {
     LooseNotEqual = 61,
     HasProperty = 62,
     TypeofScope = 63,
+    DeleteById = 64,
+    DeleteByValue = 65,
 }
 
 impl Opcode {
@@ -244,6 +247,7 @@ impl Opcode {
             | Self::GreaterEqual => 3,
             Self::LooseEqual | Self::LooseNotEqual | Self::HasProperty => 3,
             Self::TypeofScope => 2,
+            Self::DeleteById | Self::DeleteByValue => 3,
             Self::CreateObject | Self::LoadException | Self::LoadThis | Self::LoadNewTarget => 1,
             Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
         }
@@ -326,6 +330,14 @@ impl Opcode {
             _ => None,
         }
     }
+
+    const fn from_extended_base(base: u8) -> Option<Self> {
+        match base {
+            0 => Some(Self::DeleteById),
+            1 => Some(Self::DeleteByValue),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -395,6 +407,14 @@ pub fn encode_instruction(opcode: Opcode, operands: &[u32]) -> Result<Vec<u32>, 
         });
     }
 
+    if (opcode as u8) >= 64 {
+        let extension = (opcode as u8) - 64;
+        let mut words = Vec::with_capacity(1 + operands.len());
+        words.push(u32::from(ESCAPE_FORMAT | extension));
+        words.extend_from_slice(operands);
+        return Ok(words);
+    }
+
     let width = if operands.iter().all(|&operand| operand <= u8::MAX as u32) {
         OperandWidth::Compact
     } else if operands.iter().all(|&operand| operand <= u16::MAX as u32) {
@@ -442,13 +462,19 @@ pub fn decode_instruction(
         remaining_words: 0,
     })?;
     let raw = header as u8;
-    let opcode =
-        Opcode::from_base(raw & OPCODE_MASK).ok_or(DecodeError::InvalidOpcode { offset, raw })?;
-    let operand_count = opcode.operand_count();
     let format = raw & FORMAT_MASK;
 
-    if format == 0xc0 {
-        return Err(DecodeError::InvalidFormat { offset, raw });
+    let opcode = if format == ESCAPE_FORMAT {
+        Opcode::from_extended_base(raw & OPCODE_MASK)
+    } else {
+        Opcode::from_base(raw & OPCODE_MASK)
+    }
+    .ok_or(DecodeError::InvalidOpcode { offset, raw })?;
+    let operand_count = opcode.operand_count();
+    let operands = [0; 3];
+
+    if format == ESCAPE_FORMAT {
+        return decode_escape(words, offset, opcode, operands);
     }
     if format != 0 && header & 0xffff_ff00 != 0 {
         return Err(DecodeError::NonZeroReservedBits {
@@ -457,7 +483,7 @@ pub fn decode_instruction(
         });
     }
 
-    let mut operands = [0; 3];
+    let mut operands = operands;
     match format {
         0 => {
             for (index, operand) in operands.iter_mut().take(operand_count).enumerate() {
@@ -475,6 +501,34 @@ pub fn decode_instruction(
         WIDE_FORMAT => decode_wide(words, offset, opcode, operands),
         _ => Err(DecodeError::InvalidFormat { offset, raw }),
     }
+}
+
+fn decode_escape(
+    words: &[u32],
+    offset: WordOffset,
+    opcode: Opcode,
+    mut operands: [u32; 3],
+) -> Result<DecodedInstruction, DecodeError> {
+    let operand_count = opcode.operand_count();
+    let start = offset.index() as usize;
+    let expected_words = 1 + operand_count;
+    if words.len().saturating_sub(start) < expected_words {
+        return Err(DecodeError::Truncated {
+            offset,
+            expected_words,
+            remaining_words: words.len().saturating_sub(start),
+        });
+    }
+    for (index, operand) in operands.iter_mut().take(operand_count).enumerate() {
+        *operand = words[start + 1 + index];
+    }
+    Ok(DecodedInstruction {
+        opcode,
+        width: OperandWidth::Wide,
+        operands,
+        operand_count: operand_count as u8,
+        word_len: expected_words as u8,
+    })
 }
 
 fn decode_normal(
@@ -878,6 +932,8 @@ impl BytecodeBuilder {
             | Opcode::LooseEqual
             | Opcode::LooseNotEqual
             | Opcode::HasProperty
+            | Opcode::DeleteById
+            | Opcode::DeleteByValue
             | Opcode::InstanceOf
             | Opcode::GetByValue
             | Opcode::SetByValue => &[0, 1, 2],
@@ -1877,6 +1933,8 @@ fn verify_instruction(
         | Opcode::LooseEqual
         | Opcode::LooseNotEqual
         | Opcode::HasProperty
+        | Opcode::DeleteById
+        | Opcode::DeleteByValue
         | Opcode::InstanceOf
         | Opcode::GetByValue
         | Opcode::SetByValue => {
@@ -2052,6 +2110,16 @@ mod tests {
             .width,
             OperandWidth::Wide
         );
+    }
+
+    #[test]
+    fn extended_opcode_escape_roundtrips_full_operands() {
+        let words = encode_instruction(Opcode::DeleteById, &[7, 8, 9]).unwrap();
+        assert_eq!(words[0] as u8 & FORMAT_MASK, ESCAPE_FORMAT);
+        let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        assert_eq!(decoded.opcode, Opcode::DeleteById);
+        assert_eq!(decoded.operands, [7, 8, 9]);
+        assert_eq!(decoded.word_len, 4);
     }
     #[test]
     fn verifier_rejects_operand_word_jump_target() {

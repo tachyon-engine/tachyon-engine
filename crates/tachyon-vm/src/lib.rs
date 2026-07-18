@@ -1398,12 +1398,14 @@ impl Isolate {
             .expect("a non-empty shape always owns property storage");
         self.heap.with_running_scope(|scope| {
             let local = scope.root(storage).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(local, self.types.property_storage)
-                    .map_err(ExecutionError::NoGcBorrow)
-                    .map(|storage| storage.slots.get(property.slot as usize).copied())
-            })
+            scope
+                .with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.property_storage)
+                        .map_err(ExecutionError::NoGcBorrow)
+                        .map(|storage| storage.slots.get(property.slot as usize).copied())
+                })
+                .map(|value| value.filter(|value| value.as_immediate() != Some(Immediate::Hole)))
         })
     }
 
@@ -1684,6 +1686,24 @@ impl Isolate {
             return self.update_property_slot(snapshot, property.slot, value);
         }
         self.add_property_slot(object, snapshot, key, value)
+    }
+
+    /// Marks one own data property as deleted while retaining append-only shape metadata.
+    fn delete_own_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<bool, ExecutionError> {
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            return Ok(true);
+        };
+        self.update_property_slot(
+            snapshot,
+            property.slot,
+            Value::from_immediate(Immediate::Hole),
+        )?;
+        Ok(true)
     }
 
     /// Mutates a fixed existing slot and publishes its potential young edge to the barrier.
@@ -2517,6 +2537,34 @@ impl Isolate {
                     .unwrap_or(Value::from_immediate(Immediate::Undefined));
                 let value = self.typeof_value(value)?;
                 self.write(base, operands[0], value)?;
+            }
+            Opcode::DeleteById => {
+                let receiver = self.read(base, operands[1])?;
+                let key = self.scope_atom(code, operands[2])?;
+                let result = self.delete_own_data_property(receiver, key)?;
+                self.write(
+                    base,
+                    operands[0],
+                    Value::from_immediate(if result {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    }),
+                )?;
+            }
+            Opcode::DeleteByValue => {
+                let receiver = self.read(base, operands[1])?;
+                let key = self.property_key_atom(self.read(base, operands[2])?)?;
+                let result = self.delete_own_data_property(receiver, key)?;
+                self.write(
+                    base,
+                    operands[0],
+                    Value::from_immediate(if result {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    }),
+                )?;
             }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;

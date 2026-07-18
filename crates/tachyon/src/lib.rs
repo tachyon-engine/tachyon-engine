@@ -1361,6 +1361,19 @@ mod tests {
     }
 
     #[test]
+    /// Covers deleting ordinary own properties and observing the deleted slot as absent.
+    fn delete_removes_supported_object_properties() {
+        assert!(matches!(
+            execute_source(
+                114,
+                "let object = { answer: 42 }; delete object.answer; !('answer' in object);",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True)
+        ));
+    }
+
+    #[test]
     /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
     fn default_parameters_use_undefined_only_and_see_prior_parameters() {
         assert_eq!(

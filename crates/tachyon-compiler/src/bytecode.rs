@@ -1683,6 +1683,37 @@ impl Lowerer<'_> {
                 self.load_undefined(expression.span)
             }
             HirExpressionKind::Unary {
+                operator: HirUnaryOperator::Delete,
+                argument,
+            } => match &argument.kind {
+                HirExpressionKind::StaticMember { object, property } => {
+                    let receiver = self.expression(object)?;
+                    let destination = self.register()?;
+                    let property = self.scope_name(property)?;
+                    self.emit(
+                        Opcode::DeleteById,
+                        &[destination.index(), receiver.index(), property],
+                        expression.span,
+                    )?;
+                    Ok(destination)
+                }
+                HirExpressionKind::ComputedMember { object, property } => {
+                    let receiver = self.expression(object)?;
+                    let property = self.expression(property)?;
+                    let destination = self.register()?;
+                    self.emit(
+                        Opcode::DeleteByValue,
+                        &[destination.index(), receiver.index(), property.index()],
+                        expression.span,
+                    )?;
+                    Ok(destination)
+                }
+                _ => {
+                    self.expression(argument)?;
+                    self.load_boolean(true, expression.span)
+                }
+            },
+            HirExpressionKind::Unary {
                 operator: HirUnaryOperator::Plus,
                 argument,
             } => {
@@ -1828,11 +1859,6 @@ impl Lowerer<'_> {
             HirExpressionKind::New { callee, arguments } => {
                 self.construct_expression(callee, arguments, expression.span)
             }
-            _ => Err(CompileError::UnsupportedSyntax {
-                source_name: self.source_name.clone(),
-                span: expression.span,
-                syntax: "expression",
-            }),
         }
     }
 
