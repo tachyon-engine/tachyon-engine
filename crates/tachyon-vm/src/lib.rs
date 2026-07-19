@@ -1429,6 +1429,8 @@ enum ConversionConsumer {
     NativeCall(NativeFunction),
     NativeConstruct(NativeFunction),
     ToNumber,
+    Negate,
+    BitwiseNot,
 }
 
 impl ConversionConsumer {
@@ -1436,7 +1438,7 @@ impl ConversionConsumer {
     const fn native(self) -> Option<NativeFunction> {
         match self {
             Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native),
-            Self::ToNumber => None,
+            Self::ToNumber | Self::Negate | Self::BitwiseNot => None,
         }
     }
 
@@ -3350,17 +3352,24 @@ impl Isolate {
         self.write(site.caller_base, site.destination, value)
     }
 
-    /// Starts the cold object branch of ToNumber without burdening primitive opcode traffic.
+    /// Starts a cold object conversion without burdening primitive unary-op traffic.
     #[cold]
     #[inline(never)]
-    fn dispatch_object_to_number(
+    fn dispatch_object_numeric_unary(
         &mut self,
+        consumer: ConversionConsumer,
         caller_base: u32,
         destination: u32,
         object: Value,
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         debug_assert!(self.is_object_value(object));
+        debug_assert!(matches!(
+            consumer,
+            ConversionConsumer::ToNumber
+                | ConversionConsumer::Negate
+                | ConversionConsumer::BitwiseNot
+        ));
         self.advance_native_conversion(
             NativeContinuation {
                 site: NativeContinuationSite {
@@ -3368,7 +3377,7 @@ impl Isolate {
                     destination,
                     call_site,
                 },
-                consumer: ConversionConsumer::ToNumber,
+                consumer,
                 receiver: Value::from_immediate(Immediate::Undefined),
                 object,
                 stage: ToPrimitiveStage::ValueOf,
@@ -3386,11 +3395,6 @@ impl Isolate {
         loop {
             if let Some(value) = returned.take() {
                 if !self.is_object_value(value) {
-                    let value = if continuation.consumer.uses_string_hint() {
-                        value
-                    } else {
-                        self.convert_to_number(value)?
-                    };
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -3488,7 +3492,16 @@ impl Isolate {
             let Some(argument) = argument else {
                 return Err(ExecutionError::MissingNativeContinuation);
             };
-            return self.convert_to_number(argument);
+            return Ok(match consumer {
+                ConversionConsumer::ToNumber => self.convert_to_number(argument)?,
+                ConversionConsumer::Negate => numeric_negate(self.convert_to_number(argument)?),
+                ConversionConsumer::BitwiseNot => {
+                    numeric_bitwise_not(self.convert_to_number(argument)?)
+                }
+                ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
+                    unreachable!("native conversion consumers always carry a native function")
+                }
+            });
         };
         match native {
             NativeFunction::StringConstructor => self.primitive_string_value(argument),
@@ -6674,21 +6687,49 @@ impl Isolate {
                 self.write(base, operands[0], value)?;
             }
             Opcode::Negate => {
-                let value = numeric_negate(self.convert_to_number(self.read(base, operands[1])?)?);
-                self.write(base, operands[0], value)?;
+                let input = self.read(base, operands[1])?;
+                if self.is_object_value(input) {
+                    self.dispatch_object_numeric_unary(
+                        ConversionConsumer::Negate,
+                        base,
+                        operands[0],
+                        input,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let value = numeric_negate(self.convert_to_number(input)?);
+                    self.write(base, operands[0], value)?;
+                }
             }
             Opcode::ToNumber => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_to_number(base, operands[0], input, instruction_offset)?;
+                    self.dispatch_object_numeric_unary(
+                        ConversionConsumer::ToNumber,
+                        base,
+                        operands[0],
+                        input,
+                        instruction_offset,
+                    )?;
                 } else {
                     let value = self.convert_to_number(input)?;
                     self.write(base, operands[0], value)?;
                 }
             }
             Opcode::BitwiseNot => {
-                let number = self.convert_to_number(self.read(base, operands[1])?)?;
-                self.write(base, operands[0], numeric_bitwise_not(number))?;
+                let input = self.read(base, operands[1])?;
+                if self.is_object_value(input) {
+                    self.dispatch_object_numeric_unary(
+                        ConversionConsumer::BitwiseNot,
+                        base,
+                        operands[0],
+                        input,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let number = self.convert_to_number(input)?;
+                    self.write(base, operands[0], numeric_bitwise_not(number))?;
+                }
             }
             Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = self.read(base, operands[1])?;
@@ -9403,12 +9444,12 @@ mod tests {
     }
 
     #[test]
-    fn to_number_continuation_resumes_for_every_dispatch_batch_and_forced_major() {
-        assert_to_number_continuation_batch::<1>();
-        assert_to_number_continuation_batch::<2>();
-        assert_to_number_continuation_batch::<4>();
-        assert_to_number_continuation_batch::<8>();
-        assert_to_number_continuation_batch::<16>();
+    fn numeric_unary_continuations_resume_for_every_dispatch_batch_and_forced_major() {
+        assert_numeric_unary_continuation_batch::<1>();
+        assert_numeric_unary_continuation_batch::<2>();
+        assert_numeric_unary_continuation_batch::<4>();
+        assert_numeric_unary_continuation_batch::<8>();
+        assert_numeric_unary_continuation_batch::<16>();
     }
 
     #[test]
@@ -10555,26 +10596,32 @@ mod tests {
         ));
     }
 
-    /// Exercises Opcode::ToNumber callback resume and tracing for one dispatch batch.
-    fn assert_to_number_continuation_batch<const N: usize>() {
-        let mut isolate = test_isolate();
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
-        let outcome = isolate
-            .execute_with_batch::<N>(
-                &to_number_continuation_module(),
-                ExecutionBudget {
-                    fuel: 20,
-                    quantum: 20,
-                },
-            )
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            RunOutcome::Completed(value)
-                if value.as_immediate() == Some(Immediate::True)
-        ));
+    /// Exercises numeric unary callback resume and tracing for one dispatch batch.
+    fn assert_numeric_unary_continuation_batch<const N: usize>() {
+        for (opcode, expected) in [
+            (Opcode::ToNumber, 7),
+            (Opcode::Negate, -7),
+            (Opcode::BitwiseNot, -8),
+        ] {
+            let mut isolate = test_isolate();
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+            let outcome = isolate
+                .execute_with_batch::<N>(
+                    &numeric_unary_continuation_module(opcode, expected),
+                    ExecutionBudget {
+                        fuel: 20,
+                        quantum: 20,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                RunOutcome::Completed(value)
+                    if value.as_immediate() == Some(Immediate::True)
+            ));
+        }
     }
 
     fn assert_bound_function_batch<const N: usize>() {
@@ -11471,15 +11518,17 @@ mod tests {
         .unwrap()
     }
 
-    /// Builds `+{ valueOf() { try/catch; return 7; } } === 7` for opcode trampoline tests.
-    fn to_number_continuation_module() -> CompiledModule {
+    /// Builds a callback-driven numeric unary expression and compares its exact result.
+    fn numeric_unary_continuation_module(opcode: Opcode, expected: i32) -> CompiledModule {
         let span = SourceSpan { start: 0, end: 1 };
         let mut entry = BytecodeBuilder::with_capacity(7, 1);
         entry.emit(Opcode::CreateObject, &[0], span).unwrap();
         entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
         entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
-        entry.emit(Opcode::ToNumber, &[2, 0], span).unwrap();
-        entry.emit(Opcode::LoadImmediate, &[3, 7], span).unwrap();
+        entry.emit(opcode, &[2, 0], span).unwrap();
+        entry
+            .emit(Opcode::LoadImmediate, &[3, expected as u32], span)
+            .unwrap();
         entry.emit(Opcode::StrictEqual, &[4, 2, 3], span).unwrap();
         entry.emit(Opcode::Return, &[4], span).unwrap();
         let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
@@ -11519,7 +11568,7 @@ mod tests {
         }]
         .into();
         CompiledModule::new(
-            Arc::from("ToNumber continuation"),
+            Arc::from("numeric unary continuation"),
             Vec::new(),
             vec![Arc::from("valueOf")],
             vec![

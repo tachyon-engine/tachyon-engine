@@ -1553,6 +1553,14 @@ mod tests {
         assert_eq!(execute_source(90, "-'2.5';").as_f64(), Some(-2.5));
         assert_eq!(execute_source(91, "-true;").as_i32(), Some(-1));
         assert_eq!(execute_source(92, "-null;").as_f64(), Some(-0.0));
+        assert_eq!(
+            execute_source(
+                178,
+                "let order = 0; let direct = { valueOf() { order = order * 10 + 1; return 7; }, toString() { order = 99; return 'wrong'; } }; let fallback = { valueOf() { order = order * 10 + 2; return {}; }, toString() { order = order * 10 + 3; return '8'; } }; let threw = false; try { -{ valueOf() { throw 42; } }; } catch (error) { threw = error === 42; } -direct === -7 && -fallback === -8 && order === 123 && threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
@@ -1561,6 +1569,14 @@ mod tests {
         assert_eq!(execute_source(93, "~1;").as_i32(), Some(-2));
         assert_eq!(execute_source(94, "~'1';").as_i32(), Some(-2));
         assert_eq!(execute_source(95, "~null;").as_i32(), Some(-1));
+        assert_eq!(
+            execute_source(
+                179,
+                "let order = 0; let direct = { valueOf() { order = order * 10 + 1; return 1; }, toString() { order = 99; return 'wrong'; } }; let fallback = { valueOf() { order = order * 10 + 2; return {}; }, toString() { order = order * 10 + 3; return '2'; } }; let threw = false; try { ~{ valueOf() { throw 42; } }; } catch (error) { threw = error === 42; } ~direct === -2 && ~fallback === -3 && order === 123 && threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
