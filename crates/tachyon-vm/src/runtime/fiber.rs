@@ -263,6 +263,7 @@ pub(crate) struct Frame {
     pub(crate) new_target: Value,
     pub(crate) construct_receiver: Option<Value>,
     pub(crate) strictness: FunctionStrictness,
+    pub(crate) has_finally: bool,
     pub(crate) argument_base: u32,
     pub(crate) argument_prefix: Option<GcRef<BoundFunctionData>>,
     pub(crate) argument_prefix_offset: u32,
@@ -272,6 +273,8 @@ pub(crate) struct Frame {
     pub(crate) completion_base: u32,
     pub(crate) call_site: Option<WordOffset>,
 }
+
+const _: [(); 104] = [(); core::mem::size_of::<Frame>()];
 
 /// The dynamic handler state selected from immutable bytecode handler metadata.
 #[derive(Clone, Copy, Debug)]

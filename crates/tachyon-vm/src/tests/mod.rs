@@ -16,6 +16,7 @@ mod calls;
 mod control;
 mod dispatch;
 mod environments;
+mod finally;
 mod fixtures;
 mod properties;
 mod realm_gc;

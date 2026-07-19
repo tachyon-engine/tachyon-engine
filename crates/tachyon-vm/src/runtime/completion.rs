@@ -251,6 +251,16 @@ impl CompletionStack {
         }
     }
 
+    /// Drops abandoned callback trampolines without crossing a frame or language checkpoint.
+    #[inline]
+    pub(crate) fn discard_native_suffix(&mut self, frame_completion_base: u32) {
+        while self.entries.len() > frame_completion_base as usize
+            && matches!(self.entries.last(), Some(CompletionEntry::Native(_)))
+        {
+            self.entries.pop();
+        }
+    }
+
     /// Restores the newest saved language completion without crossing its frame checkpoint.
     #[inline]
     #[cfg_attr(

@@ -73,8 +73,6 @@ use object::{
 use property::{PropertyRead, PropertyWrite};
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
-#[cfg(test)]
-use runtime::fiber::ActiveHandler;
 use runtime::{
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
@@ -87,10 +85,10 @@ use runtime::{
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
-        ArrayAllocationRoots, CodeLoadRoots, ConversionCallbackStage, ConversionConsumer,
-        ConversionContinuation, Fiber, Frame, NativeContinuation, NativeContinuationSite,
-        PropertyMutationRoots, PrototypeInitializationRoots, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ActiveHandler, ArrayAllocationRoots, CodeLoadRoots, ConversionCallbackStage,
+        ConversionConsumer, ConversionContinuation, Fiber, Frame, NativeContinuation,
+        NativeContinuationSite, PropertyMutationRoots, PrototypeInitializationRoots,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, Realm, TypeofStrings},
 };

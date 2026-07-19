@@ -446,6 +446,28 @@ fn compiler_lowers_catch_finally_and_break_without_copying_the_finalizer() {
 }
 
 #[test]
+/// Keeps a structural terminal after a function's necessarily abrupt completion replay.
+fn compiler_terminates_function_return_through_finally() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function f() { try { return 7; } finally { 1; } } f();",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let function = module
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+    assert!(disassembly.ends_with("ReturnUndefined\n"));
+    let handler = function.handlers()[0];
+    assert_eq!(handler.kind, tachyon_bytecode::HandlerKind::Finally);
+    assert!(handler.handler_end.index() < function.bytecode().bytecode().words().len() as u32);
+}
+
+#[test]
 fn compiler_preserves_static_member_receiver_and_property_names() {
     let module = Compiler
         .compile(

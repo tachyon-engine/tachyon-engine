@@ -112,7 +112,7 @@ pub(super) fn statements_instruction_count(
                     statements_instruction_count,
                 )?;
                 let control = if finalizer.is_some() {
-                    3 + usize::from(handler.is_some()) * 2
+                    4 + usize::from(handler.is_some()) * 2
                 } else if handler.is_some() {
                     3
                 } else {

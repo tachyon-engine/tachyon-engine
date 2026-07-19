@@ -183,17 +183,12 @@ pub(super) fn validate_handlers(
             }
         }
         let mut depth = 0u32;
-        let mut finally_depth = 0u32;
         for &candidate in &handlers[..=index] {
             if handler_contains(candidate, current) {
                 depth += 1;
-                if candidate.kind == HandlerKind::Finally {
-                    finally_depth += 1;
-                }
             }
         }
         max_depth.handlers = max_depth.handlers.max(depth);
-        max_depth.finally_handlers = max_depth.finally_handlers.max(finally_depth);
     }
     for &current in handlers
         .iter()
@@ -218,17 +213,6 @@ pub(super) fn validate_handlers(
         max_depth.handlers = max_depth
             .handlers
             .max(protected_depth.saturating_add(active_outer_finalizers));
-        if current.kind == HandlerKind::Finally {
-            let protected_finally_depth = handlers
-                .iter()
-                .filter(|candidate| {
-                    candidate.kind == HandlerKind::Finally && handler_contains(**candidate, current)
-                })
-                .count() as u32;
-            max_depth.finally_handlers = max_depth
-                .finally_handlers
-                .max(protected_finally_depth.saturating_add(active_outer_finalizers));
-        }
     }
     Ok(max_depth)
 }

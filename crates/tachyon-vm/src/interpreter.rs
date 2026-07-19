@@ -1006,15 +1006,56 @@ impl Isolate {
             )?,
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
-                return self.finish_return(value);
+                if !self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("return retains its frame")
+                    .has_finally
+                {
+                    return self.finish_return(value);
+                }
+                return self
+                    .dispatch_abrupt(CompletionRecord::return_value(value), instruction_offset);
             }
             Opcode::ReturnUndefined => {
                 let value = Value::from_immediate(Immediate::Undefined);
-                return self.finish_return(value);
+                if !self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("return retains its frame")
+                    .has_finally
+                {
+                    return self.finish_return(value);
+                }
+                return self
+                    .dispatch_abrupt(CompletionRecord::return_value(value), instruction_offset);
             }
             Opcode::Throw => {
                 let value = self.read(base, operands[0])?;
                 return self.throw_value(value, instruction_offset);
+            }
+            Opcode::EnterFinally => {
+                let (index, handler) = self
+                    .find_covering_finally(instruction_offset)?
+                    .ok_or(ExecutionError::MissingCompletionRecord)?;
+                self.enter_finalizer(index, handler, CompletionRecord::normal(None))?;
+            }
+            Opcode::ResumeCompletion => {
+                return self.resume_completion(instruction_offset);
+            }
+            Opcode::BreakThroughFinally => {
+                return self.dispatch_abrupt(
+                    CompletionRecord::break_target(None, WordOffset::new(operands[0])),
+                    instruction_offset,
+                );
+            }
+            Opcode::ContinueThroughFinally => {
+                return self.dispatch_abrupt(
+                    CompletionRecord::continue_target(None, WordOffset::new(operands[0])),
+                    instruction_offset,
+                );
             }
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
@@ -1476,6 +1517,7 @@ impl Isolate {
             },
             new_target: Value::from_immediate(Immediate::Undefined),
             strictness,
+            has_finally: layout.max_completion_depth != 0,
             argument_base: 0,
             argument_prefix: None,
             argument_prefix_offset: 0,
@@ -2118,6 +2160,27 @@ impl Isolate {
                 .try_reserve_exact(1)
                 .map_err(|_| ExecutionError::FrameAllocationFailed)?;
         }
+        if target.layout.max_handler_depth != 0 {
+            let handler_depth = usize::try_from(target.layout.max_handler_depth).map_err(|_| {
+                ExecutionError::HandlerStackTooLarge(target.layout.max_handler_depth)
+            })?;
+            if handler_depth > self.fiber.handlers.capacity() - self.fiber.handlers.len() {
+                self.fiber
+                    .handlers
+                    .try_reserve_exact(handler_depth)
+                    .map_err(|_| ExecutionError::HandlerAllocationFailed)?;
+            }
+        }
+        if target.layout.max_completion_depth != 0 {
+            let completion_depth =
+                usize::try_from(target.layout.max_completion_depth).map_err(|_| {
+                    ExecutionError::CompletionStackTooLarge(target.layout.max_completion_depth)
+                })?;
+            self.fiber
+                .completions
+                .reserve(completion_depth)
+                .map_err(Self::completion_stack_error)?;
+        }
         if additional > self.fiber.registers.capacity() - self.fiber.registers.len() {
             self.fiber
                 .registers
@@ -2148,6 +2211,7 @@ impl Isolate {
             new_target: site.new_target,
             construct_receiver: site.construct_receiver,
             strictness: target.strictness,
+            has_finally: target.layout.max_completion_depth != 0,
             argument_base: site.argument_base,
             argument_prefix: site.argument_prefix,
             argument_prefix_offset: site.argument_prefix_offset,
@@ -2185,11 +2249,6 @@ impl Isolate {
     /// Selects top-level completion or the hot ordinary-callee frame return path.
     #[inline(always)]
     fn finish_return(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
-        let completion = CompletionRecord::return_value(value);
-        debug_assert_eq!(completion.kind(), CompletionKind::Return);
-        let value = completion
-            .value()
-            .ok_or(ExecutionError::MissingCompletionRecord)?;
         if self.fiber.frames.len() == 1 {
             return Ok(Some(RunOutcome::Completed(value)));
         }
@@ -2284,36 +2343,72 @@ impl Isolate {
     fn throw_value(
         &mut self,
         value: Value,
-        mut instruction_offset: WordOffset,
+        instruction_offset: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let completion = CompletionRecord::throw(value);
         debug_assert_eq!(completion.kind(), CompletionKind::Throw);
-        let value = completion
-            .value()
-            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        self.dispatch_abrupt(completion, instruction_offset)
+    }
+
+    /// Iteratively routes one abrupt completion through handlers, finalizers, and explicit frames.
+    #[cold]
+    #[inline(never)]
+    fn dispatch_abrupt(
+        &mut self,
+        completion: CompletionRecord,
+        mut instruction_offset: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
             let frame = *self
                 .fiber
                 .frames
                 .last()
-                .expect("throw dispatch always has an active frame");
-            if let Some(handler) = self.find_exception_handler(frame, instruction_offset)? {
-                if handler.kind != HandlerKind::Catch {
-                    return Err(ExecutionError::UnsupportedExceptionHandler(handler.kind));
+                .expect("abrupt dispatch always has an active frame");
+            self.fiber
+                .completions
+                .discard_native_suffix(frame.completion_base);
+            let handler = self.find_abrupt_handler(frame, instruction_offset, completion)?;
+            self.discard_exited_finalizers(frame, instruction_offset, completion, handler)?;
+            if let Some((index, handler)) = handler {
+                if handler.kind == HandlerKind::Finally {
+                    self.enter_finalizer(index, handler, completion)?;
+                    return Ok(None);
                 }
+                debug_assert_eq!(completion.kind(), CompletionKind::Throw);
+                let value = completion
+                    .value()
+                    .ok_or(ExecutionError::MissingCompletionRecord)?;
                 let active = self
                     .fiber
                     .frames
                     .last_mut()
                     .expect("matched handler retains its frame");
                 active.pc = handler.handler;
-                self.fiber.handlers.truncate(frame.handler_base as usize);
-                self.fiber
-                    .completions
-                    .truncate(frame.completion_base as usize);
                 self.fiber.pending_exception = Some(value);
                 return Ok(None);
             }
+            match completion.kind() {
+                CompletionKind::Break | CompletionKind::Continue => {
+                    let target = completion
+                        .target()
+                        .ok_or(ExecutionError::MissingCompletionRecord)?;
+                    self.set_pc(target);
+                    return Ok(None);
+                }
+                CompletionKind::Return => {
+                    let value = completion
+                        .value()
+                        .ok_or(ExecutionError::MissingCompletionRecord)?;
+                    return self.finish_return(value);
+                }
+                CompletionKind::Throw => {}
+                CompletionKind::Normal => {
+                    return Err(ExecutionError::MissingCompletionRecord);
+                }
+            }
+            let value = completion
+                .value()
+                .ok_or(ExecutionError::MissingCompletionRecord)?;
             if self.fiber.frames.len() == 1 {
                 return Ok(self.unhandled_throw(value));
             }
@@ -2321,7 +2416,7 @@ impl Isolate {
                 .fiber
                 .frames
                 .pop()
-                .expect("non-entry throw retains a callee frame");
+                .expect("non-entry abrupt completion retains a callee frame");
             self.fiber.registers.truncate(frame.base as usize);
             self.fiber.handlers.truncate(frame.handler_base as usize);
             self.fiber
@@ -2333,22 +2428,209 @@ impl Isolate {
         }
     }
 
-    /// Selects the innermost half-open handler range for one verified function offset.
-    #[inline]
-    fn find_exception_handler(
+    /// Selects the innermost handler eligible for one completion kind and target.
+    fn find_abrupt_handler(
         &self,
         frame: Frame,
         instruction_offset: WordOffset,
-    ) -> Result<Option<HandlerEntry>, ExecutionError> {
+        completion: CompletionRecord,
+    ) -> Result<Option<(u32, HandlerEntry)>, ExecutionError> {
         let function = self
             .loaded_code(frame.code)?
             .module
             .function(frame.function)
             .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
-        Ok(function.handlers().iter().rev().copied().find(|handler| {
-            handler.protected_start.index() <= instruction_offset.index()
+        for (index, handler) in function.handlers().iter().copied().enumerate().rev() {
+            let covers_origin = handler.protected_start.index() <= instruction_offset.index()
+                && instruction_offset.index() < handler.protected_end.index();
+            if !covers_origin {
+                continue;
+            }
+            let eligible = match completion.kind() {
+                CompletionKind::Throw => true,
+                CompletionKind::Return => handler.kind == HandlerKind::Finally,
+                CompletionKind::Break | CompletionKind::Continue => {
+                    handler.kind == HandlerKind::Finally
+                        && completion.target().is_some_and(|target| {
+                            target.index() < handler.protected_start.index()
+                                || handler.protected_end.index() <= target.index()
+                        })
+                }
+                CompletionKind::Normal => false,
+            };
+            if eligible {
+                let index = u32::try_from(index)
+                    .map_err(|_| ExecutionError::HandlerStackTooLarge(u32::MAX))?;
+                return Ok(Some((index, handler)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Selects the innermost finalizer covering a compiler-emitted normal exit.
+    fn find_covering_finally(
+        &self,
+        instruction_offset: WordOffset,
+    ) -> Result<Option<(u32, HandlerEntry)>, ExecutionError> {
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .expect("normal finalizer entry retains its frame");
+        let function = self
+            .loaded_code(frame.code)?
+            .module
+            .function(frame.function)
+            .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
+        for (index, handler) in function.handlers().iter().copied().enumerate().rev() {
+            if handler.kind == HandlerKind::Finally
+                && handler.protected_start.index() <= instruction_offset.index()
                 && instruction_offset.index() < handler.protected_end.index()
-        }))
+            {
+                let index = u32::try_from(index)
+                    .map_err(|_| ExecutionError::HandlerStackTooLarge(u32::MAX))?;
+                return Ok(Some((index, handler)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Publishes one saved completion and its active finalizer before redirecting the PC.
+    fn enter_finalizer(
+        &mut self,
+        handler_index: u32,
+        handler: HandlerEntry,
+        completion: CompletionRecord,
+    ) -> Result<(), ExecutionError> {
+        if self.fiber.handlers.len() == self.fiber.handlers.capacity() {
+            self.fiber
+                .handlers
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::HandlerAllocationFailed)?;
+        }
+        self.fiber
+            .completions
+            .push_record(completion)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = u32::try_from(self.fiber.frames.len())
+            .map_err(|_| ExecutionError::HandlerStackTooLarge(u32::MAX))?;
+        self.fiber.handlers.push(ActiveHandler {
+            handler_index,
+            frame_depth,
+            environment_depth: handler.environment_depth,
+        });
+        self.set_pc(handler.handler);
+        Ok(())
+    }
+
+    /// Pops one verified active finalizer and replays its saved completion iteratively.
+    fn resume_completion(
+        &mut self,
+        instruction_offset: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .expect("completion replay retains its frame");
+        self.fiber
+            .completions
+            .discard_native_suffix(frame.completion_base);
+        let active = self
+            .fiber
+            .handlers
+            .pop()
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        if active.frame_depth as usize != self.fiber.frames.len() {
+            return Err(ExecutionError::MissingCompletionRecord);
+        }
+        let handler = self.active_handler_entry(frame, active.handler_index)?;
+        if !(handler.handler.index() <= instruction_offset.index()
+            && instruction_offset.index() < handler.handler_end.index())
+        {
+            return Err(ExecutionError::MissingCompletionRecord);
+        }
+        let completion = self
+            .fiber
+            .completions
+            .restore_record(frame.completion_base)
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        if completion.kind() == CompletionKind::Normal {
+            return Ok(None);
+        }
+        self.dispatch_abrupt(completion, instruction_offset)
+    }
+
+    /// Removes saved completions only when the new control transfer exits their finalizer body.
+    fn discard_exited_finalizers(
+        &mut self,
+        frame: Frame,
+        instruction_offset: WordOffset,
+        completion: CompletionRecord,
+        candidate: Option<(u32, HandlerEntry)>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            let Some(active) = self.fiber.handlers.last().copied() else {
+                return Ok(());
+            };
+            if active.frame_depth as usize != self.fiber.frames.len() {
+                return Ok(());
+            }
+            let handler = self.active_handler_entry(frame, active.handler_index)?;
+            let origin_inside = handler.handler.index() <= instruction_offset.index()
+                && instruction_offset.index() < handler.handler_end.index();
+            let preserves = if !origin_inside {
+                false
+            } else {
+                match completion.kind() {
+                    CompletionKind::Break | CompletionKind::Continue => {
+                        completion.target().is_some_and(|target| {
+                            handler.handler.index() <= target.index()
+                                && target.index() < handler.handler_end.index()
+                        })
+                    }
+                    CompletionKind::Throw | CompletionKind::Return => {
+                        candidate.is_some_and(|(_, nested)| {
+                            handler.handler.index() <= nested.protected_start.index()
+                                && nested.protected_end.index() <= handler.handler_end.index()
+                        })
+                    }
+                    CompletionKind::Normal => true,
+                }
+            };
+            if preserves {
+                return Ok(());
+            }
+            self.fiber.handlers.pop();
+            self.fiber
+                .completions
+                .restore_record(frame.completion_base)
+                .ok_or(ExecutionError::MissingCompletionRecord)?;
+        }
+    }
+
+    #[inline]
+    fn active_handler_entry(
+        &self,
+        frame: Frame,
+        handler_index: u32,
+    ) -> Result<HandlerEntry, ExecutionError> {
+        self.loaded_code(frame.code)?
+            .module
+            .function(frame.function)
+            .and_then(|function| function.handlers().get(handler_index as usize))
+            .copied()
+            .ok_or(ExecutionError::MissingCompletionRecord)
+    }
+
+    #[inline]
+    fn completion_stack_error(error: CompletionStackError) -> ExecutionError {
+        match error {
+            CompletionStackError::Limit { limit, requested } => {
+                ExecutionError::CompletionStackLimit { limit, requested }
+            }
+            CompletionStackError::AllocationFailed => ExecutionError::CompletionAllocationFailed,
+        }
     }
 
     /// Preserves the active fiber as the root owner until the host observes the unhandled value.

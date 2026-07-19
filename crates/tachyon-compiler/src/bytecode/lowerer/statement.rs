@@ -816,7 +816,11 @@ impl Lowerer<'_> {
         if let (Some(slot), Some(offset)) = (catch_slot, catch_offset) {
             self.publish_catch_handler(slot, protected_start, offset)?;
         }
-        Ok(finalizer_terminal || (try_terminal && catch_terminal))
+        let terminal = finalizer_terminal || (try_terminal && catch_terminal);
+        if terminal {
+            self.emit(Opcode::ReturnUndefined, &[], span)?;
+        }
+        Ok(terminal)
     }
 
     /// Lowers the established script try/catch shape without a completion record.

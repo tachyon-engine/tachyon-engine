@@ -254,7 +254,7 @@ fn assert_compound_accessor_order_batch<const N: usize>() {
 }
 
 /// Installs function 1 as one accessor and publishes the target through a global binding.
-fn install_bytecode_accessor(
+pub(super) fn install_bytecode_accessor(
     isolate: &mut Isolate,
     module: &CompiledModule,
     getter: bool,
@@ -292,6 +292,54 @@ fn install_bytecode_accessor(
         .define_property(owner, key.into(), PropertyDescriptor::Accessor(descriptor))
         .unwrap();
     target
+}
+
+/// Builds getter throw -> finally replay -> outer catch without native recursion.
+pub(super) fn accessor_finally_throw_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+    let outer_start = entry.emit(Opcode::Nop, &[], span).unwrap();
+    let inner_start = entry.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+    entry.emit(Opcode::EnterFinally, &[], span).unwrap();
+    let finalizer = entry.emit(Opcode::LoadImmediate, &[2, 1], span).unwrap();
+    entry.emit(Opcode::ResumeCompletion, &[], span).unwrap();
+    let finalizer_end = entry.current_offset().unwrap();
+    let catch = entry.emit(Opcode::LoadException, &[3], span).unwrap();
+    entry.emit(Opcode::Add, &[4, 2, 3], span).unwrap();
+    entry.emit(Opcode::Return, &[4], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::LoadImmediate, &[0, 4], span).unwrap();
+    getter.emit(Opcode::Throw, &[0], span).unwrap();
+    let (getter_bytecode, getter_map, getter_registers) = getter.finish().unwrap();
+    let handlers = vec![
+        HandlerEntry {
+            protected_start: outer_start,
+            protected_end: catch,
+            handler: catch,
+            handler_end: catch,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        },
+        HandlerEntry {
+            protected_start: inner_start,
+            protected_end: finalizer,
+            handler: finalizer,
+            handler_end: finalizer_end,
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+    ]
+    .into();
+    accessor_test_module(
+        "accessor getter throw through finally",
+        vec![Arc::from("target"), Arc::from("x")],
+        (entry_bytecode, entry_map, entry_registers),
+        Some((getter_bytecode, getter_map, getter_registers, 0)),
+        FunctionStrictness::Sloppy,
+        handlers,
+    )
 }
 
 /// Publishes an accessor with neither callback for strict/sloppy assignment tests.
@@ -658,7 +706,11 @@ fn accessor_test_module(
         strictness,
         layout: FunctionLayout {
             register_count,
-            max_handler_depth: u32::from(!handlers.is_empty()),
+            max_handler_depth: handlers.len() as u32,
+            max_completion_depth: handlers
+                .iter()
+                .filter(|handler| handler.kind == HandlerKind::Finally)
+                .count() as u32,
             ..FunctionLayout::default()
         },
         source_map,

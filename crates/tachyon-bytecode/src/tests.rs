@@ -1254,6 +1254,129 @@ fn compiled_module_counts_handlers_nested_in_finalizer_execution() {
 }
 
 #[test]
+/// Distinguishes sequential protected finalizers from simultaneously active execution ranges.
+fn compiled_module_counts_only_overlapping_finalizer_executions_as_completions() {
+    let protected_opcodes = [
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::EnterFinally,
+        Opcode::ResumeCompletion,
+        Opcode::Nop,
+        Opcode::EnterFinally,
+        Opcode::ResumeCompletion,
+        Opcode::ReturnUndefined,
+    ];
+    let protected_words = protected_opcodes
+        .into_iter()
+        .flat_map(|opcode| encode_instruction(opcode, &[]).unwrap())
+        .collect::<Vec<_>>();
+    let protected_handlers: Arc<[HandlerEntry]> = vec![
+        HandlerEntry {
+            protected_start: WordOffset::new(0),
+            protected_end: WordOffset::new(6),
+            handler: WordOffset::new(6),
+            handler_end: WordOffset::new(7),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+        HandlerEntry {
+            protected_start: WordOffset::new(1),
+            protected_end: WordOffset::new(3),
+            handler: WordOffset::new(3),
+            handler_end: WordOffset::new(4),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+    ]
+    .into();
+    let metadata = |handlers, completion_depth| {
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                max_handler_depth: 2,
+                max_completion_depth: completion_depth,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.handlers = handlers;
+        metadata
+    };
+    CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(protected_words),
+            metadata(protected_handlers, 1),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+
+    let execution_opcodes = [
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::EnterFinally,
+        Opcode::ResumeCompletion,
+        Opcode::Nop,
+        Opcode::ResumeCompletion,
+        Opcode::ReturnUndefined,
+    ];
+    let execution_words = execution_opcodes
+        .into_iter()
+        .flat_map(|opcode| encode_instruction(opcode, &[]).unwrap())
+        .collect::<Vec<_>>();
+    let execution_handlers: Arc<[HandlerEntry]> = vec![
+        HandlerEntry {
+            protected_start: WordOffset::new(0),
+            protected_end: WordOffset::new(1),
+            handler: WordOffset::new(1),
+            handler_end: WordOffset::new(6),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+        HandlerEntry {
+            protected_start: WordOffset::new(2),
+            protected_end: WordOffset::new(3),
+            handler: WordOffset::new(3),
+            handler_end: WordOffset::new(4),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+    ]
+    .into();
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(execution_words.clone()),
+            metadata(execution_handlers.clone(), 1),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidFunctionLayout { .. }
+    ));
+    CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(execution_words),
+            metadata(execution_handlers, 2),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+}
+
+#[test]
 fn compiled_module_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<CompiledModule>();
