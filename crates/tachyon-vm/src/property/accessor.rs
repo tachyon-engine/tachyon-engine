@@ -121,6 +121,9 @@ impl Isolate {
                             },
                         );
                     }
+                    None if current == receiver => {
+                        return self.write_data_property_boolean(receiver, key, value);
+                    }
                     None => {}
                 }
             } else if self.is_function_metadata_property(current, key)? {
