@@ -2145,3 +2145,155 @@ impl Isolate {
             .pc = pc;
     }
 }
+
+/// Executes allocation-free success branches while the verified cursor remains in local state.
+///
+/// # Safety
+///
+/// `instruction` must come from the verified function used to create `registers`; the register
+/// backing must remain exclusively owned and must not change allocation or length until this
+/// function returns. A `Slow` result ends that epoch before general isolate code runs.
+#[inline(always)]
+pub(crate) unsafe fn execute_verified_hot_instruction(
+    registers: &mut RegisterWindow,
+    instruction: DecodedInstruction,
+    next_pc: &mut WordOffset,
+) -> HotControl {
+    let operands = instruction.operands;
+    // SAFETY: The caller proves the verified operand and no-reallocation cursor invariants once for
+    // this operation. Reads return Copy values and writes never expose references beyond the epoch.
+    unsafe {
+        match instruction.opcode {
+            Opcode::Nop => HotControl::Continue,
+            Opcode::LoadUndefined => {
+                registers.write(operands[0], Value::from_immediate(Immediate::Undefined));
+                HotControl::Continue
+            }
+            Opcode::LoadNull => {
+                registers.write(operands[0], Value::from_immediate(Immediate::Null));
+                HotControl::Continue
+            }
+            Opcode::LoadFalse => {
+                registers.write(operands[0], Value::from_immediate(Immediate::False));
+                HotControl::Continue
+            }
+            Opcode::LoadTrue => {
+                registers.write(operands[0], Value::from_immediate(Immediate::True));
+                HotControl::Continue
+            }
+            Opcode::LoadImmediate => {
+                registers.write(operands[0], Value::from_i32(operands[1] as i32));
+                HotControl::Continue
+            }
+            Opcode::Move => {
+                let value = registers.read(operands[1]);
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Not => {
+                let input = registers.read(operands[1]);
+                if input.as_heap_ref().is_some() {
+                    return HotControl::Slow;
+                }
+                let value = if is_non_string_truthy(input) {
+                    Immediate::False
+                } else {
+                    Immediate::True
+                };
+                registers.write(operands[0], Value::from_immediate(value));
+                HotControl::Continue
+            }
+            Opcode::Negate | Opcode::BitwiseNot | Opcode::ToNumber => {
+                let input = registers.read(operands[1]);
+                if numeric_value(input).is_none() {
+                    return HotControl::Slow;
+                }
+                let value = match instruction.opcode {
+                    Opcode::Negate => numeric_negate(input),
+                    Opcode::BitwiseNot => numeric_bitwise_not(input),
+                    Opcode::ToNumber => input,
+                    _ => unreachable!("numeric unary hot dispatch is exhaustive"),
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Add => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_binary_hot(Opcode::Add, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Sub | Opcode::Mul | Opcode::Div => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_binary_hot(instruction.opcode, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::BitwiseAnd
+            | Opcode::BitwiseOr
+            | Opcode::BitwiseXor
+            | Opcode::ShiftLeft
+            | Opcode::ShiftRight
+            | Opcode::ShiftRightUnsigned
+            | Opcode::Remainder
+            | Opcode::Exponentiate => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                if numeric_value(left).is_none() || numeric_value(right).is_none() {
+                    return HotControl::Slow;
+                }
+                registers.write(
+                    operands[0],
+                    numeric_binary_operation(instruction.opcode, left, right),
+                );
+                HotControl::Continue
+            }
+            Opcode::LessThan | Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_relational_hot(instruction.opcode, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::StrictEqual => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(equal) = strict_equal_hot(left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], boolean_value(equal));
+                HotControl::Continue
+            }
+            Opcode::Jump => {
+                *next_pc = WordOffset::new(operands[0]);
+                HotControl::Continue
+            }
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
+                let condition = registers.read(operands[0]);
+                if condition.as_heap_ref().is_some() {
+                    return HotControl::Slow;
+                }
+                let truthy = is_non_string_truthy(condition);
+                if truthy == (instruction.opcode == Opcode::JumpIfTrue) {
+                    *next_pc = WordOffset::new(operands[1]);
+                }
+                HotControl::Continue
+            }
+            Opcode::JumpIfNotNullish => {
+                if !is_nullish(registers.read(operands[0])) {
+                    *next_pc = WordOffset::new(operands[1]);
+                }
+                HotControl::Continue
+            }
+            _ => HotControl::Slow,
+        }
+    }
+}
