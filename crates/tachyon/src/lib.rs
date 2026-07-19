@@ -1669,7 +1669,7 @@ mod tests {
     }
 
     #[test]
-    /// Covers the remaining numeric relational operators and NaN's unordered result.
+    /// Covers numeric/string relational semantics and callback-driven object conversion order.
     fn relational_operators_compare_supported_primitives() {
         assert_eq!(
             execute_source(104, "3 > 2;").as_immediate(),
@@ -1682,6 +1682,22 @@ mod tests {
         assert_eq!(
             execute_source(106, "3 >= 4;").as_immediate(),
             Some(tachyon_value::Immediate::False)
+        );
+        assert_eq!(
+            execute_source(
+                187,
+                "!('2' < '10') && '2' > '10' && 'a' <= 'a' && 'é' < 'Ā' && '2' < 10 && 2 <= '2';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                188,
+                "let order = 0; let right = { valueOf() { order = order * 10 + 2; return 2; } }; let left = { valueOf() { order = order * 10 + 1; right.valueOf = function() { order = order * 10 + 3; return 3; }; return 4; } }; let greater = left > right; let firstOrder = order; order = 0; let lessEqual = left <= right; let secondOrder = order; let rightCalls = 0; let stopped = false; try { ({ valueOf() { throw 42; } }) >= ({ valueOf() { rightCalls = rightCalls + 1; return 2; } }); } catch (error) { stopped = error === 42; } greater && !lessEqual && firstOrder === 13 && secondOrder === 13 && stopped && rightCalls === 0 && ({ valueOf() { return {}; }, toString() { return 'a'; } }) < ({ valueOf() { return 'b'; } });",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
         );
     }
 

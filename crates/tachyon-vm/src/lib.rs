@@ -1435,6 +1435,8 @@ enum ConversionConsumer {
     BinaryRight(Opcode),
     AddLeft,
     AddRight,
+    RelationalLeft(Opcode),
+    RelationalRight(Opcode),
 }
 
 impl ConversionConsumer {
@@ -1448,7 +1450,9 @@ impl ConversionConsumer {
             | Self::BinaryLeft(_)
             | Self::BinaryRight(_)
             | Self::AddLeft
-            | Self::AddRight => None,
+            | Self::AddRight
+            | Self::RelationalLeft(_)
+            | Self::RelationalRight(_) => None,
         }
     }
 
@@ -1468,6 +1472,8 @@ impl ConversionConsumer {
                 | Self::BinaryRight(_)
                 | Self::AddLeft
                 | Self::AddRight
+                | Self::RelationalLeft(_)
+                | Self::RelationalRight(_)
         )
     }
 }
@@ -3447,6 +3453,32 @@ impl Isolate {
                             result,
                         );
                     }
+                    if let ConversionConsumer::RelationalLeft(opcode) = continuation.consumer {
+                        let left = value;
+                        let right = continuation.receiver;
+                        if self.is_object_value(right) {
+                            continuation.consumer = ConversionConsumer::RelationalRight(opcode);
+                            continuation.receiver = left;
+                            continuation.object = right;
+                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continue;
+                        }
+                        let result = self.relational_primitive_values(opcode, left, right)?;
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
+                    if let ConversionConsumer::RelationalRight(opcode) = continuation.consumer {
+                        let result =
+                            self.relational_primitive_values(opcode, continuation.receiver, value)?;
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
                     if let ConversionConsumer::BinaryLeft(opcode) = continuation.consumer {
                         let left = self.convert_to_number(value)?;
                         let right = continuation.receiver;
@@ -3589,6 +3621,9 @@ impl Isolate {
                 }
                 ConversionConsumer::AddLeft | ConversionConsumer::AddRight => {
                     unreachable!("Add consumers finish inside the conversion state machine")
+                }
+                ConversionConsumer::RelationalLeft(_) | ConversionConsumer::RelationalRight(_) => {
+                    unreachable!("relational consumers finish inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
@@ -4535,6 +4570,68 @@ impl Isolate {
         let left = self.convert_to_number(left)?;
         let right = self.convert_to_number(right)?;
         Ok(numeric_binary(Opcode::Add, left, right))
+    }
+
+    /// Compares two primitive strings by exact ECMAScript UTF-16 code-unit ordering.
+    fn compare_string_values(
+        &mut self,
+        left: Value,
+        right: Value,
+    ) -> Result<core::cmp::Ordering, ExecutionError> {
+        let left = left
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(left))?;
+        let right = right
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(right))?;
+        let left = self
+            .heap
+            .checked_reference(left, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedStringValue(Value::from_heap_ref(left)))?;
+        let right = self
+            .heap
+            .checked_reference(right, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedStringValue(Value::from_heap_ref(right)))?;
+        self.heap.with_running_scope(|scope| {
+            let left = scope.root(left).map_err(ExecutionError::Root)?;
+            let right = scope.root(right).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let left = no_gc
+                    .borrow(left, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let right = no_gc
+                    .borrow(right, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok(left.as_view().cmp(&right.as_view()))
+            })
+        })
+    }
+
+    /// Implements relational comparison after both operands have completed number-hint ToPrimitive.
+    fn relational_primitive_values(
+        &mut self,
+        opcode: Opcode,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_string_value(left) && self.is_string_value(right) {
+            let ordering = self.compare_string_values(left, right)?;
+            let result = match opcode {
+                Opcode::LessThan => ordering.is_lt(),
+                Opcode::GreaterThan => ordering.is_gt(),
+                Opcode::LessEqual => ordering.is_le(),
+                Opcode::GreaterEqual => ordering.is_ge(),
+                _ => unreachable!("relational consumer received a non-relational opcode"),
+            };
+            return Ok(Value::from_immediate(if result {
+                Immediate::True
+            } else {
+                Immediate::False
+            }));
+        }
+        let left = self.convert_to_number(left)?;
+        let right = self.convert_to_number(right)?;
+        Ok(numeric_relational(opcode, left, right))
     }
 
     /// Publishes one runtime-created string through the ordinary managed external allocation path.
@@ -6954,10 +7051,33 @@ impl Isolate {
                     }
                 }
             }
-            Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
-                let left = self.convert_to_number(self.read(base, operands[1])?)?;
-                let right = self.convert_to_number(self.read(base, operands[2])?)?;
-                self.write(base, operands[0], numeric_relational(opcode, left, right))?;
+            Opcode::LessThan | Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
+                let left = self.read(base, operands[1])?;
+                let right = self.read(base, operands[2])?;
+                if numeric_value(left).is_some() && numeric_value(right).is_some() {
+                    self.write(base, operands[0], numeric_relational(opcode, left, right))?;
+                } else if self.is_object_value(left) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::RelationalLeft(opcode),
+                        base,
+                        operands[0],
+                        right,
+                        left,
+                        instruction_offset,
+                    )?;
+                } else if self.is_object_value(right) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::RelationalRight(opcode),
+                        base,
+                        operands[0],
+                        left,
+                        right,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let result = self.relational_primitive_values(opcode, left, right)?;
+                    self.write(base, operands[0], result)?;
+                }
             }
             Opcode::StrictEqual => {
                 let left = self.read(base, operands[1])?;
@@ -7040,16 +7160,6 @@ impl Isolate {
             }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;
-                self.write(base, operands[0], value)?;
-            }
-            Opcode::LessThan => {
-                let left = self.read(base, operands[1])?;
-                let right = self.read(base, operands[2])?;
-                let value = if numeric_less_than(left, right) {
-                    Value::from_immediate(Immediate::True)
-                } else {
-                    Value::from_immediate(Immediate::False)
-                };
                 self.write(base, operands[0], value)?;
             }
             Opcode::InstanceOf => {
@@ -8764,6 +8874,7 @@ fn numeric_relational(opcode: Opcode, left: Value, right: Value) -> Value {
         .or_else(|| right.as_f64())
         .unwrap_or(f64::NAN);
     let result = match opcode {
+        Opcode::LessThan => left < right,
         Opcode::GreaterThan => left > right,
         Opcode::LessEqual => left <= right,
         Opcode::GreaterEqual => left >= right,
@@ -8829,17 +8940,6 @@ fn parse_number_code_units(units: &[u16]) -> f64 {
 #[inline]
 fn is_ecmascript_whitespace(character: char) -> bool {
     character.is_whitespace() || character == '\u{feff}'
-}
-
-#[inline(always)]
-fn numeric_less_than(left: Value, right: Value) -> bool {
-    match (left.as_i32(), right.as_i32()) {
-        (Some(left), Some(right)) => left < right,
-        _ => match (numeric_value(left), numeric_value(right)) {
-            (Some(left), Some(right)) => left < right,
-            _ => false,
-        },
-    }
 }
 
 #[inline(always)]
@@ -9664,12 +9764,12 @@ mod tests {
     }
 
     #[test]
-    fn numeric_binary_continuations_resume_for_every_dispatch_batch_and_forced_major() {
-        assert_numeric_binary_continuation_batch::<1>();
-        assert_numeric_binary_continuation_batch::<2>();
-        assert_numeric_binary_continuation_batch::<4>();
-        assert_numeric_binary_continuation_batch::<8>();
-        assert_numeric_binary_continuation_batch::<16>();
+    fn primitive_binary_continuations_resume_for_every_dispatch_batch_and_forced_major() {
+        assert_primitive_binary_continuation_batch::<1>();
+        assert_primitive_binary_continuation_batch::<2>();
+        assert_primitive_binary_continuation_batch::<4>();
+        assert_primitive_binary_continuation_batch::<8>();
+        assert_primitive_binary_continuation_batch::<16>();
     }
 
     #[test]
@@ -10845,10 +10945,11 @@ mod tests {
     }
 
     /// Exercises left and right callback resume while the pending operand remains traced.
-    fn assert_numeric_binary_continuation_batch<const N: usize>() {
+    fn assert_primitive_binary_continuation_batch<const N: usize>() {
         for module in [
             numeric_binary_continuation_module(),
             add_continuation_module(),
+            relational_continuation_module(),
         ] {
             let mut isolate = test_isolate();
             isolate
@@ -11902,6 +12003,44 @@ mod tests {
                 CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
                 string_callback_template(FunctionId::new(1), 0, span),
                 numeric_callback_template(FunctionId::new(2), 2, span),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds two string-returning callbacks for an exact relational continuation result.
+    fn relational_continuation_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(8, 1);
+        entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[2], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[3, 2], span).unwrap();
+        entry.emit(Opcode::SetById, &[2, 3, 0], span).unwrap();
+        entry.emit(Opcode::GreaterThan, &[4, 0, 2], span).unwrap();
+        entry.emit(Opcode::Return, &[4], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("relational continuation"),
+            vec![
+                BytecodeConstant::string_from_utf16("x".encode_utf16().collect()),
+                BytecodeConstant::string_from_utf16("w".encode_utf16().collect()),
+            ],
+            vec![Arc::from("valueOf")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                string_callback_template(FunctionId::new(1), 0, span),
+                string_callback_template(FunctionId::new(2), 1, span),
             ],
             FunctionId::new(0),
         )
