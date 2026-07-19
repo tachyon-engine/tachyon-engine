@@ -165,6 +165,13 @@ impl BenchmarkAdapter for TachyonInProcessAdapter {
         if request.mode == MeasurementMode::ColdStart {
             return Err(AdapterError::UnsupportedMode(request.mode));
         }
+        if request.mode == MeasurementMode::SteadyState
+            && request.entry != ScriptEntry::MainFunction
+        {
+            return Err(AdapterError::Setup(
+                "Tachyon steady-state requires a main-function entry".into(),
+            ));
+        }
         if request.iterations == 0
             || (request.mode != MeasurementMode::SteadyState && request.iterations != 1)
         {

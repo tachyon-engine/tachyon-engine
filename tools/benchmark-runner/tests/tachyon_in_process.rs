@@ -96,6 +96,12 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
         Err(AdapterError::UnsupportedMode(MeasurementMode::ColdStart))
     );
 
+    let repeated_script = request(tachyon_script, MeasurementMode::SteadyState);
+    assert!(matches!(
+        adapter.prepare(&repeated_script),
+        Err(AdapterError::Setup(message)) if message.contains("main-function")
+    ));
+
     let mut unsupported = request(script, MeasurementMode::PrecompiledExecute);
     unsupported.source = Arc::from("class Unsupported {}");
     assert!(matches!(
