@@ -199,74 +199,87 @@ pub enum Opcode {
     LoadArgumentsLength = 69,
 }
 
+const OPCODE_COUNT: usize = 70;
+const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
+    0, // Nop
+    2, // LoadImmediate
+    2, // LoadConstant
+    2, // Move
+    3, // Add
+    3, // Sub
+    3, // Mul
+    3, // Div
+    3, // StrictEqual
+    1, // Jump
+    2, // JumpIfFalse
+    1, // Return
+    1, // Throw
+    3, // Call
+    2, // CreateClosure
+    2, // LoadScope
+    2, // StoreScope
+    3, // Await
+    3, // Yield
+    1, // LoadUndefined
+    1, // LoadNull
+    1, // LoadFalse
+    1, // LoadTrue
+    2, // Not
+    2, // JumpIfTrue
+    2, // JumpIfNotNullish
+    2, // Negate
+    1, // CreateObject
+    3, // GetById
+    3, // SetById
+    3, // CallWithReceiver
+    1, // LoadException
+    3, // Construct
+    1, // LoadThis
+    1, // LoadNewTarget
+    3, // LessThan
+    3, // GetByValue
+    3, // SetByValue
+    2, // Typeof
+    1, // DeclareScope
+    3, // InstanceOf
+    2, // StoreResolvedScope
+    3, // LoadEnvironment
+    3, // StoreEnvironment
+    2, // DeclareGlobalLexical
+    2, // InitializeGlobalLexical
+    0, // ReturnUndefined
+    2, // ToNumber
+    2, // BitwiseNot
+    3, // BitwiseAnd
+    3, // BitwiseOr
+    3, // BitwiseXor
+    3, // ShiftLeft
+    3, // ShiftRight
+    3, // ShiftRightUnsigned
+    3, // Remainder
+    3, // Exponentiate
+    3, // GreaterThan
+    3, // LessEqual
+    3, // GreaterEqual
+    3, // LooseEqual
+    3, // LooseNotEqual
+    3, // HasProperty
+    2, // TypeofScope
+    3, // DeleteById
+    3, // DeleteByValue
+    1, // CreateArray
+    2, // CreateForInIterator
+    2, // ForInNext
+    1, // LoadArgumentsLength
+];
+
+const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LoadArgumentsLength as usize + 1];
+
 impl Opcode {
     #[must_use]
     pub const fn operand_count(self) -> usize {
-        match self {
-            Self::Nop | Self::ReturnUndefined => 0,
-            Self::LoadUndefined
-            | Self::LoadNull
-            | Self::LoadFalse
-            | Self::LoadTrue
-            | Self::Jump
-            | Self::Return
-            | Self::Throw
-            | Self::DeclareScope => 1,
-            Self::LoadImmediate
-            | Self::LoadConstant
-            | Self::Move
-            | Self::Not
-            | Self::Negate
-            | Self::JumpIfFalse
-            | Self::JumpIfTrue
-            | Self::JumpIfNotNullish
-            | Self::CreateClosure
-            | Self::LoadScope
-            | Self::StoreScope
-            | Self::StoreResolvedScope
-            | Self::DeclareGlobalLexical
-            | Self::InitializeGlobalLexical => 2,
-            Self::Typeof
-            | Self::ToNumber
-            | Self::BitwiseNot
-            | Self::CreateForInIterator
-            | Self::ForInNext => 2,
-            Self::Add
-            | Self::Sub
-            | Self::Mul
-            | Self::Div
-            | Self::StrictEqual
-            | Self::LessThan
-            | Self::InstanceOf
-            | Self::GetByValue
-            | Self::SetByValue
-            | Self::LoadEnvironment
-            | Self::StoreEnvironment
-            | Self::Call
-            | Self::Await
-            | Self::Yield => 3,
-            Self::BitwiseAnd
-            | Self::BitwiseOr
-            | Self::BitwiseXor
-            | Self::ShiftLeft
-            | Self::ShiftRight
-            | Self::ShiftRightUnsigned
-            | Self::Remainder
-            | Self::Exponentiate
-            | Self::GreaterThan
-            | Self::LessEqual
-            | Self::GreaterEqual => 3,
-            Self::LooseEqual | Self::LooseNotEqual | Self::HasProperty => 3,
-            Self::TypeofScope => 2,
-            Self::DeleteById | Self::DeleteByValue => 3,
-            Self::CreateObject
-            | Self::CreateArray
-            | Self::LoadException
-            | Self::LoadThis
-            | Self::LoadNewTarget
-            | Self::LoadArgumentsLength => 1,
-            Self::GetById | Self::SetById | Self::CallWithReceiver | Self::Construct => 3,
-        }
+        OPCODE_OPERAND_COUNTS[self as usize] as usize
     }
 
     #[must_use]
@@ -2295,6 +2308,111 @@ mod tests {
             .width,
             OperandWidth::Wide
         );
+    }
+
+    #[test]
+    /// Preserves the former exhaustive match as an independent oracle for all 70 opcodes.
+    fn operand_count_table_covers_every_opcode_once() {
+        let groups: &[(usize, &[Opcode])] = &[
+            (0, &[Opcode::Nop, Opcode::ReturnUndefined]),
+            (
+                1,
+                &[
+                    Opcode::LoadUndefined,
+                    Opcode::LoadNull,
+                    Opcode::LoadFalse,
+                    Opcode::LoadTrue,
+                    Opcode::Jump,
+                    Opcode::Return,
+                    Opcode::Throw,
+                    Opcode::DeclareScope,
+                    Opcode::CreateObject,
+                    Opcode::CreateArray,
+                    Opcode::LoadException,
+                    Opcode::LoadThis,
+                    Opcode::LoadNewTarget,
+                    Opcode::LoadArgumentsLength,
+                ],
+            ),
+            (
+                2,
+                &[
+                    Opcode::LoadImmediate,
+                    Opcode::LoadConstant,
+                    Opcode::Move,
+                    Opcode::Not,
+                    Opcode::Negate,
+                    Opcode::JumpIfFalse,
+                    Opcode::JumpIfTrue,
+                    Opcode::JumpIfNotNullish,
+                    Opcode::CreateClosure,
+                    Opcode::LoadScope,
+                    Opcode::StoreScope,
+                    Opcode::StoreResolvedScope,
+                    Opcode::DeclareGlobalLexical,
+                    Opcode::InitializeGlobalLexical,
+                    Opcode::Typeof,
+                    Opcode::ToNumber,
+                    Opcode::BitwiseNot,
+                    Opcode::CreateForInIterator,
+                    Opcode::ForInNext,
+                    Opcode::TypeofScope,
+                ],
+            ),
+            (
+                3,
+                &[
+                    Opcode::Add,
+                    Opcode::Sub,
+                    Opcode::Mul,
+                    Opcode::Div,
+                    Opcode::StrictEqual,
+                    Opcode::LessThan,
+                    Opcode::InstanceOf,
+                    Opcode::GetByValue,
+                    Opcode::SetByValue,
+                    Opcode::LoadEnvironment,
+                    Opcode::StoreEnvironment,
+                    Opcode::Call,
+                    Opcode::Await,
+                    Opcode::Yield,
+                    Opcode::BitwiseAnd,
+                    Opcode::BitwiseOr,
+                    Opcode::BitwiseXor,
+                    Opcode::ShiftLeft,
+                    Opcode::ShiftRight,
+                    Opcode::ShiftRightUnsigned,
+                    Opcode::Remainder,
+                    Opcode::Exponentiate,
+                    Opcode::GreaterThan,
+                    Opcode::LessEqual,
+                    Opcode::GreaterEqual,
+                    Opcode::LooseEqual,
+                    Opcode::LooseNotEqual,
+                    Opcode::HasProperty,
+                    Opcode::DeleteById,
+                    Opcode::DeleteByValue,
+                    Opcode::GetById,
+                    Opcode::SetById,
+                    Opcode::CallWithReceiver,
+                    Opcode::Construct,
+                ],
+            ),
+        ];
+        let mut seen = [false; OPCODE_COUNT];
+        let mut visited = 0;
+        for &(expected_count, opcodes) in groups {
+            for &opcode in opcodes {
+                let index = opcode as usize;
+                assert!(index < OPCODE_COUNT);
+                assert!(!seen[index], "duplicate opcode {opcode:?}");
+                seen[index] = true;
+                visited += 1;
+                assert_eq!(opcode.operand_count(), expected_count, "{opcode:?}");
+            }
+        }
+        assert_eq!(visited, OPCODE_COUNT);
+        assert!(seen.into_iter().all(|entry| entry));
     }
 
     #[test]

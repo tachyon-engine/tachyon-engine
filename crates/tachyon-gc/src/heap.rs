@@ -15,7 +15,7 @@ use crate::{
     pause::GcPauses,
     persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
     roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
-    scope::{NoGcBorrowError, RootError, RunningScope},
+    scope::{NoGcBorrowError, NoGcScope, RootError, RunningScope},
     sweep::{SweepWorklist, sweep_full, sweep_young},
     trigger::{CollectionAction, CollectionRequest, GcTrigger},
     tuning::SMALL_SIZE_CLASSES,
@@ -620,6 +620,20 @@ impl Heap {
         let checkpoint = self.temporary_roots.len();
         let mut scope = RunningScope::new(self, checkpoint);
         callback(&mut scope)
+    }
+
+    /// Lends checked payload borrows without creating a temporary-root rollback checkpoint.
+    ///
+    /// The generative callback cannot accept or return a `Local`; it is intended for references
+    /// already retained by a traced runtime value. `NoGcScope` still removes every allocation and
+    /// collection operation while descriptor, liveness, and owner validation remain mandatory.
+    #[inline(always)]
+    pub fn with_no_gc_scope<R>(
+        &mut self,
+        callback: impl for<'scope, 'no_gc> FnOnce(&mut NoGcScope<'_, 'scope, 'no_gc>) -> R,
+    ) -> R {
+        let mut no_gc = NoGcScope::new(self);
+        callback(&mut no_gc)
     }
 
     /// Returns retained gray high-water evidence for tuning and quota tests.

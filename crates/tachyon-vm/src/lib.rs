@@ -31,9 +31,9 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, DecodeError, DecodedInstruction, FunctionId, FunctionKind,
-    FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, WordOffset,
-    decode_instruction,
+    BytecodeConstant, CompiledModule, DecodedInstruction, FunctionId, FunctionKind, FunctionLayout,
+    FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, VerifiedBytecode,
+    VerifiedInstructionDecoder, WordOffset,
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
@@ -710,34 +710,107 @@ struct LoadedCode {
 /// A batch-local view into verified immutable bytecode retained by the active `LoadedCode` module.
 #[derive(Clone, Copy)]
 struct BytecodeCursor {
-    words: NonNull<u32>,
-    word_count: usize,
+    decoder: VerifiedInstructionDecoder<'static>,
+    #[cfg(test)]
+    bytecode: NonNull<VerifiedBytecode>,
 }
 
 impl BytecodeCursor {
-    /// Captures stable `Arc<[u32]>` backing without incrementing its reference count per batch.
-    fn new(words: &[u32]) -> Self {
-        debug_assert!(
-            !words.is_empty(),
-            "verified functions contain a terminal opcode"
-        );
+    /// Captures one stable verified function without incrementing its backing reference counts.
+    ///
+    /// # Safety
+    ///
+    /// The owner of `bytecode` and its immutable word backing must outlive every use of the returned
+    /// cursor. Moving the owner is allowed only when its verified functions remain in stable Arc
+    /// storage; dropping or replacing that backing invalidates the cursor.
+    unsafe fn new(bytecode: &VerifiedBytecode) -> Self {
+        let decoder = VerifiedInstructionDecoder::new(bytecode);
+        // SAFETY: This erases only the type-level borrow so mutable isolate slow paths can run. The
+        // caller guarantees the backing owner outlives every use of the erased decoder.
+        let decoder = unsafe {
+            core::mem::transmute::<
+                VerifiedInstructionDecoder<'_>,
+                VerifiedInstructionDecoder<'static>,
+            >(decoder)
+        };
         Self {
-            words: NonNull::new(words.as_ptr().cast_mut())
-                .expect("slice pointers are non-null even for empty slices"),
-            word_count: words.len(),
+            decoder,
+            #[cfg(test)]
+            bytecode: NonNull::from(bytecode),
         }
     }
 
-    /// Decodes while the dispatch owner retains the immutable module which owns this allocation.
+    /// Decodes one verifier-proven instruction while the loaded module retains its immutable owner.
+    ///
+    /// # Safety
+    ///
+    /// `offset` must be an instruction start in the same verified bytecode passed to `new`, and that
+    /// bytecode's owner must still be alive.
     #[inline(always)]
-    fn decode(self, offset: WordOffset) -> Result<DecodedInstruction, DecodeError> {
-        // SAFETY: `execute_batch` creates the cursor from the active `LoadedCode` module. Loaded
-        // modules are append-only and `CompiledModule` owns the words through an immutable Arc, so
-        // dispatch may mutate isolate state or grow the loaded-code Vec without moving/freeing this
-        // backing. Frame identity is checked before every decode and the cursor never escapes a batch.
-        let words = unsafe { core::slice::from_raw_parts(self.words.as_ptr(), self.word_count) };
-        decode_instruction(words, offset)
+    unsafe fn decode(self, offset: WordOffset) -> DecodedInstruction {
+        #[cfg(test)]
+        {
+            // SAFETY: `BytecodeCursor::new` requires the verified owner to outlive this cursor use.
+            let bytecode = unsafe { self.bytecode.as_ref() };
+            assert!(bytecode.is_instruction_start(offset));
+        }
+        // SAFETY: active frame PCs originate from verified fallthrough/jump/handler targets. Slow
+        // exits publish one such PC before mutation; the caller carries that instruction-start proof.
+        unsafe { self.decoder.decode_unchecked(offset) }
     }
+}
+
+/// Raw view of one verified activation's register window during a no-reallocation kernel epoch.
+struct RegisterWindow {
+    start: NonNull<Value>,
+    len: usize,
+}
+
+impl RegisterWindow {
+    /// Checks the activation boundary once before verified operands use unchecked slot access.
+    fn new(registers: &mut [Value], base: usize, len: usize) -> Option<Self> {
+        let end = base.checked_add(len)?;
+        let window = registers.get_mut(base..end)?;
+        Some(Self {
+            start: NonNull::new(window.as_mut_ptr())
+                .expect("slice pointers are non-null even for empty slices"),
+            len,
+        })
+    }
+
+    /// Reads an operand already proven in range by module verification and cursor entry.
+    ///
+    /// # Safety
+    ///
+    /// `register` must be below this window's verified length, and the owning register storage must
+    /// not have been resized, reserved, truncated, or dropped since `RegisterWindow::new`.
+    #[inline(always)]
+    unsafe fn read(&self, register: u32) -> Value {
+        let index = register as usize;
+        debug_assert!(index < self.len);
+        // SAFETY: The caller upholds the verified operand and no-reallocation epoch invariants.
+        unsafe { *self.start.as_ptr().add(index) }
+    }
+
+    /// Writes an operand already proven in range without exposing a reference outside the cursor.
+    ///
+    /// # Safety
+    ///
+    /// `register` must be below this window's verified length, and this cursor must retain exclusive
+    /// write access to the owning register storage for the complete no-reallocation epoch.
+    #[inline(always)]
+    unsafe fn write(&mut self, register: u32, value: Value) {
+        let index = register as usize;
+        debug_assert!(index < self.len);
+        // SAFETY: The caller upholds the verified operand, exclusivity, and storage lifetime rules.
+        unsafe { self.start.as_ptr().add(index).write(value) };
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HotControl {
+    Continue,
+    Slow,
 }
 
 impl Trace for LoadedCode {
@@ -6790,89 +6863,152 @@ impl Isolate {
     fn execute_loaded_with_batch<const N: usize>(
         &mut self,
         code: CodeId,
-        mut budget: ExecutionBudget,
+        budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
         if N == 0 {
             return Err(ExecutionError::InvalidDispatchBatch { batch: N });
         }
+        if budget.fuel == u64::MAX && budget.quantum == u32::MAX {
+            self.execute_loaded_loop::<N, true>(code, budget)
+        } else {
+            self.execute_loaded_loop::<N, false>(code, budget)
+        }
+    }
+
+    /// Selects an exact bounded loop or a compile-time-elided effectively-unbounded loop.
+    fn execute_loaded_loop<const N: usize, const UNBOUNDED: bool>(
+        &mut self,
+        code: CodeId,
+        mut budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
         let entry_function = self.loaded_code(code)?.module.entry_function();
         self.enter(code, entry_function)?;
         loop {
-            if budget.fuel == 0 || budget.quantum == 0 {
+            if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
                 return Ok(RunOutcome::BudgetExhausted);
             }
-            if let Some(outcome) = self.execute_batch::<N>(&mut budget)? {
+            if let Some(outcome) = self.execute_batch::<N, UNBOUNDED>(&mut budget)? {
                 return Ok(outcome);
             }
         }
     }
 
-    /// The `N` parameter is an internal dispatch-tuning knob; every executed opcode still consumes exact fuel.
+    /// Executes one fixed-size batch while const-folding budget work only for the MAX/MAX sentinel.
     #[inline(always)]
-    fn execute_batch<const N: usize>(
+    fn execute_batch<const N: usize, const UNBOUNDED: bool>(
         &mut self,
         budget: &mut ExecutionBudget,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let cached_frame = *self
-            .fiber
-            .frames
-            .last()
-            .expect("entry frame exists while executing");
-        let bytecode = self
-            .loaded_code(cached_frame.code)?
-            .module
-            .function(cached_frame.function)
-            .ok_or(ExecutionError::MissingEntryFunction(cached_frame.function))?
-            .bytecode()
-            .bytecode();
-        let cursor = BytecodeCursor::new(bytecode.words());
-        for _ in 0..N {
-            if budget.fuel == 0 || budget.quantum == 0 {
-                return Ok(Some(RunOutcome::BudgetExhausted));
-            }
-            let frame = *self
+        let (mut code, mut function, mut pc, mut base) = {
+            let frame = self
                 .fiber
                 .frames
                 .last()
                 .expect("entry frame exists while executing");
-            if frame.code != cached_frame.code || frame.function != cached_frame.function {
-                return Ok(None);
+            (frame.code, frame.function, frame.pc, frame.base)
+        };
+        let (mut cursor, mut registers) = self.execution_cursor(code, function, base)?;
+        for _ in 0..N {
+            if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
+                self.flush_cursor_pc(pc);
+                return Ok(Some(RunOutcome::BudgetExhausted));
             }
-            let instruction = cursor
-                .decode(frame.pc)
-                .map_err(|_| ExecutionError::DecodeInvariant(frame.pc))?;
-            let next_pc = WordOffset::new(frame.pc.index() + u32::from(instruction.word_len));
-            self.fiber
-                .frames
-                .last_mut()
-                .expect("frame remains active")
-                .pc = next_pc;
-            budget.fuel -= 1;
-            budget.quantum -= 1;
+            let instruction_offset = pc;
+            // SAFETY: entry, fallthrough, branches, handlers, and saved return PCs are all verifier-
+            // approved instruction starts; every slow exit rebuilds the cursor before resuming.
+            let instruction = unsafe { cursor.decode(instruction_offset) };
+            let mut next_pc =
+                WordOffset::new(instruction_offset.index() + u32::from(instruction.word_len));
+            if !UNBOUNDED {
+                budget.fuel -= 1;
+                budget.quantum -= 1;
+            }
+            // SAFETY: `execution_cursor` checked this verified function's complete window, the
+            // decoder only returns verifier-approved operands, and no hot operation can resize or
+            // expose the register backing before a Slow result invalidates the cursor.
+            if unsafe {
+                execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
+            } == HotControl::Continue
+            {
+                pc = next_pc;
+                continue;
+            }
+
+            self.flush_cursor_pc(next_pc);
             let outcome = match self.dispatch(
-                frame.code,
-                frame.pc,
+                code,
+                instruction_offset,
                 instruction.opcode,
                 instruction.operands,
-                frame.base,
+                base,
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let Some(kind) = execution_error_kind(&error) else {
                         return Err(error);
                     };
-                    self.throw_native_error(kind, frame.pc)?
+                    self.throw_native_error(kind, instruction_offset)?
                 }
             };
             if let Some(outcome) = outcome {
                 return Ok(Some(outcome));
             }
+            (code, function, pc, base) = {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("continued execution retains an active frame");
+                (frame.code, frame.function, frame.pc, frame.base)
+            };
+            (cursor, registers) = self.execution_cursor(code, function, base)?;
         }
+        self.flush_cursor_pc(pc);
         Ok(None)
     }
 
-    /// Implements one verified opcode without conflating engine faults with language exceptions.
+    /// Resolves immutable code and checks its register window once per cursor epoch.
     #[inline(always)]
+    fn execution_cursor(
+        &mut self,
+        code: CodeId,
+        function: FunctionId,
+        base: u32,
+    ) -> Result<(BytecodeCursor, RegisterWindow), ExecutionError> {
+        let (bytecode, register_count) = {
+            let function = self
+                .loaded_code(code)?
+                .module
+                .function(function)
+                .ok_or(ExecutionError::MissingEntryFunction(function))?;
+            (
+                // SAFETY: append-only LoadedCode owns this CompiledModule and its immutable Arc
+                // function backing for the isolate lifetime; the cursor never leaves execution.
+                unsafe { BytecodeCursor::new(function.bytecode()) },
+                function.layout().register_count,
+            )
+        };
+        let registers = RegisterWindow::new(
+            &mut self.fiber.registers,
+            base as usize,
+            register_count as usize,
+        )
+        .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
+        Ok((bytecode, registers))
+    }
+
+    /// Publishes the local cursor before any slow operation can observe or mutate the active fiber.
+    #[inline(always)]
+    fn flush_cursor_pc(&mut self, pc: WordOffset) {
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("cursor flush retains an active frame")
+            .pc = pc;
+    }
+
+    /// Implements one verified opcode without conflating engine faults with language exceptions.
+    #[inline(never)]
     fn dispatch(
         &mut self,
         code: CodeId,
@@ -7840,8 +7976,7 @@ impl Isolate {
     #[inline(never)]
     fn call(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         loop {
-            let function_object = self.resolve_function_object(site.callee)?;
-            match function_object.executable {
+            match self.resolve_function_executable(site.callee)? {
                 FunctionExecutable::Bound(data) => {
                     if site.argument_prefix.is_some() {
                         return Err(ExecutionError::BoundArgumentCountOverflow);
@@ -8306,6 +8441,23 @@ impl Isolate {
         })
     }
 
+    /// Copies only callable dispatch metadata through a checked no-GC borrow on the hot path.
+    #[inline(always)]
+    fn resolve_function_executable(
+        &mut self,
+        callee: Value,
+    ) -> Result<FunctionExecutable, ExecutionError> {
+        let raw = callee
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(callee))?;
+        self.heap.with_no_gc_scope(|no_gc| {
+            no_gc
+                .borrow_raw_reference(raw, self.types.function)
+                .map(|function| function.executable)
+                .map_err(|_| ExecutionError::NonCallable(callee))
+        })
+    }
+
     #[inline(always)]
     fn call_argument(
         &mut self,
@@ -8364,14 +8516,18 @@ impl Isolate {
             });
         }
         let additional = register_count as usize;
-        self.fiber
-            .frames
-            .try_reserve_exact(1)
-            .map_err(|_| ExecutionError::FrameAllocationFailed)?;
-        self.fiber
-            .registers
-            .try_reserve_exact(additional)
-            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        if self.fiber.frames.len() == self.fiber.frames.capacity() {
+            self.fiber
+                .frames
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        }
+        if additional > self.fiber.registers.capacity() - self.fiber.registers.len() {
+            self.fiber
+                .registers
+                .try_reserve_exact(additional)
+                .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        }
         self.fiber.registers.resize(
             requested as usize,
             Value::from_immediate(Immediate::Undefined),
@@ -8698,6 +8854,208 @@ impl Int32PropertyKey {
     }
 }
 
+/// Executes allocation-free success branches while the verified cursor remains in local state.
+///
+/// # Safety
+///
+/// `instruction` must come from the verified function used to create `registers`; the register
+/// backing must remain exclusively owned and must not change allocation or length until this
+/// function returns. A `Slow` result ends that epoch before general isolate code runs.
+#[inline(always)]
+unsafe fn execute_verified_hot_instruction(
+    registers: &mut RegisterWindow,
+    instruction: DecodedInstruction,
+    next_pc: &mut WordOffset,
+) -> HotControl {
+    let operands = instruction.operands;
+    // SAFETY: The caller proves the verified operand and no-reallocation cursor invariants once for
+    // this operation. Reads return Copy values and writes never expose references beyond the epoch.
+    unsafe {
+        match instruction.opcode {
+            Opcode::Nop => HotControl::Continue,
+            Opcode::LoadUndefined => {
+                registers.write(operands[0], Value::from_immediate(Immediate::Undefined));
+                HotControl::Continue
+            }
+            Opcode::LoadNull => {
+                registers.write(operands[0], Value::from_immediate(Immediate::Null));
+                HotControl::Continue
+            }
+            Opcode::LoadFalse => {
+                registers.write(operands[0], Value::from_immediate(Immediate::False));
+                HotControl::Continue
+            }
+            Opcode::LoadTrue => {
+                registers.write(operands[0], Value::from_immediate(Immediate::True));
+                HotControl::Continue
+            }
+            Opcode::LoadImmediate => {
+                registers.write(operands[0], Value::from_i32(operands[1] as i32));
+                HotControl::Continue
+            }
+            Opcode::Move => {
+                let value = registers.read(operands[1]);
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Not => {
+                let input = registers.read(operands[1]);
+                if input.as_heap_ref().is_some() {
+                    return HotControl::Slow;
+                }
+                let value = if is_non_string_truthy(input) {
+                    Immediate::False
+                } else {
+                    Immediate::True
+                };
+                registers.write(operands[0], Value::from_immediate(value));
+                HotControl::Continue
+            }
+            Opcode::Negate | Opcode::BitwiseNot | Opcode::ToNumber => {
+                let input = registers.read(operands[1]);
+                if numeric_value(input).is_none() {
+                    return HotControl::Slow;
+                }
+                let value = match instruction.opcode {
+                    Opcode::Negate => numeric_negate(input),
+                    Opcode::BitwiseNot => numeric_bitwise_not(input),
+                    Opcode::ToNumber => input,
+                    _ => unreachable!("numeric unary hot dispatch is exhaustive"),
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Add => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_binary_hot(Opcode::Add, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::Sub | Opcode::Mul | Opcode::Div => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_binary_hot(instruction.opcode, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::BitwiseAnd
+            | Opcode::BitwiseOr
+            | Opcode::BitwiseXor
+            | Opcode::ShiftLeft
+            | Opcode::ShiftRight
+            | Opcode::ShiftRightUnsigned
+            | Opcode::Remainder
+            | Opcode::Exponentiate => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                if numeric_value(left).is_none() || numeric_value(right).is_none() {
+                    return HotControl::Slow;
+                }
+                registers.write(
+                    operands[0],
+                    numeric_binary_operation(instruction.opcode, left, right),
+                );
+                HotControl::Continue
+            }
+            Opcode::LessThan | Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(value) = numeric_relational_hot(instruction.opcode, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::StrictEqual => {
+                let left = registers.read(operands[1]);
+                let right = registers.read(operands[2]);
+                let Some(equal) = strict_equal_hot(left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], boolean_value(equal));
+                HotControl::Continue
+            }
+            Opcode::Jump => {
+                *next_pc = WordOffset::new(operands[0]);
+                HotControl::Continue
+            }
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
+                let condition = registers.read(operands[0]);
+                if condition.as_heap_ref().is_some() {
+                    return HotControl::Slow;
+                }
+                let truthy = is_non_string_truthy(condition);
+                if truthy == (instruction.opcode == Opcode::JumpIfTrue) {
+                    *next_pc = WordOffset::new(operands[1]);
+                }
+                HotControl::Continue
+            }
+            Opcode::JumpIfNotNullish => {
+                if !is_nullish(registers.read(operands[0])) {
+                    *next_pc = WordOffset::new(operands[1]);
+                }
+                HotControl::Continue
+            }
+            _ => HotControl::Slow,
+        }
+    }
+}
+
+/// Resolves strict equality without heap access, deferring distinct heap strings to the slow path.
+#[inline(always)]
+fn strict_equal_hot(left: Value, right: Value) -> Option<bool> {
+    match (numeric_value(left), numeric_value(right)) {
+        (Some(left), Some(right)) => return Some(left == right),
+        (Some(_), None) | (None, Some(_)) => return Some(false),
+        (None, None) => {}
+    }
+    if left == right {
+        return Some(true);
+    }
+    if left.as_heap_ref().is_some() && right.as_heap_ref().is_some() {
+        return None;
+    }
+    Some(false)
+}
+
+#[inline(always)]
+fn boolean_value(value: bool) -> Value {
+    Value::from_immediate(if value {
+        Immediate::True
+    } else {
+        Immediate::False
+    })
+}
+
+#[derive(Clone, Copy)]
+enum NumericInput {
+    Int32(i32),
+    Float(f64),
+}
+
+impl NumericInput {
+    #[inline(always)]
+    fn decode(value: Value) -> Option<Self> {
+        value
+            .as_i32()
+            .map(Self::Int32)
+            .or_else(|| value.as_f64().map(Self::Float))
+    }
+
+    #[inline(always)]
+    fn into_f64(self) -> f64 {
+        match self {
+            Self::Int32(value) => f64::from(value),
+            Self::Float(value) => value,
+        }
+    }
+}
+
 /// Applies one numeric-only binary opcode after both operands have completed ToNumber.
 #[inline(always)]
 fn numeric_binary_operation(opcode: Opcode, left: Value, right: Value) -> Value {
@@ -8716,24 +9074,35 @@ fn numeric_binary_operation(opcode: Opcode, left: Value, right: Value) -> Value 
 
 #[inline(always)]
 fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
-    if let (Some(left), Some(right)) = (left.as_i32(), right.as_i32()) {
+    let left = NumericInput::decode(left).unwrap_or(NumericInput::Float(f64::NAN));
+    let right = NumericInput::decode(right).unwrap_or(NumericInput::Float(f64::NAN));
+    numeric_binary_inputs(opcode, left, right)
+}
+
+#[inline(always)]
+fn numeric_binary_hot(opcode: Opcode, left: Value, right: Value) -> Option<Value> {
+    let left = NumericInput::decode(left)?;
+    let right = NumericInput::decode(right)?;
+    Some(numeric_binary_inputs(opcode, left, right))
+}
+
+/// Preserves int32 results when both already-classified operands fit the arithmetic operation.
+#[inline(always)]
+fn numeric_binary_inputs(opcode: Opcode, left: NumericInput, right: NumericInput) -> Value {
+    if let (NumericInput::Int32(left), NumericInput::Int32(right)) = (left, right) {
         let integer = match opcode {
             Opcode::Add => left.checked_add(right),
             Opcode::Sub => left.checked_sub(right),
             Opcode::Mul => left.checked_mul(right),
-            Opcode::Div if right != 0 && left % right == 0 => left.checked_div(right),
+            Opcode::Div if left.checked_rem(right) == Some(0) => left.checked_div(right),
             _ => None,
         };
         if let Some(integer) = integer {
             return Value::from_i32(integer);
         }
     }
-    let left_number = left
-        .as_i32()
-        .map_or_else(|| left.as_f64().unwrap_or(f64::NAN), f64::from);
-    let right_number = right
-        .as_i32()
-        .map_or_else(|| right.as_f64().unwrap_or(f64::NAN), f64::from);
+    let left_number = left.into_f64();
+    let right_number = right.into_f64();
     Value::from_f64(match opcode {
         Opcode::Add => left_number + right_number,
         Opcode::Sub => left_number - right_number,
@@ -8863,16 +9232,24 @@ fn numeric_remainder_or_power(opcode: Opcode, left: Value, right: Value) -> Valu
 /// Compares converted numeric operands while preserving false results for NaN.
 #[inline(always)]
 fn numeric_relational(opcode: Opcode, left: Value, right: Value) -> Value {
-    let left = left
-        .as_i32()
-        .map(f64::from)
-        .or_else(|| left.as_f64())
-        .unwrap_or(f64::NAN);
-    let right = right
-        .as_i32()
-        .map(f64::from)
-        .or_else(|| right.as_f64())
-        .unwrap_or(f64::NAN);
+    let left = NumericInput::decode(left)
+        .unwrap_or(NumericInput::Float(f64::NAN))
+        .into_f64();
+    let right = NumericInput::decode(right)
+        .unwrap_or(NumericInput::Float(f64::NAN))
+        .into_f64();
+    numeric_relational_numbers(opcode, left, right)
+}
+
+#[inline(always)]
+fn numeric_relational_hot(opcode: Opcode, left: Value, right: Value) -> Option<Value> {
+    let left = NumericInput::decode(left)?.into_f64();
+    let right = NumericInput::decode(right)?.into_f64();
+    Some(numeric_relational_numbers(opcode, left, right))
+}
+
+#[inline(always)]
+fn numeric_relational_numbers(opcode: Opcode, left: f64, right: f64) -> Value {
     let result = match opcode {
         Opcode::LessThan => left < right,
         Opcode::GreaterThan => left > right,
@@ -8971,7 +9348,7 @@ mod tests {
     use tachyon_bytecode::{
         BindingLocation, BindingPlanEntry, Bytecode, BytecodeBuilder, BytecodeConstant,
         CompiledFunctionTemplate, CompiledModule, FunctionId, FunctionKind, FunctionLayout,
-        FunctionMetadata, SourceSpan, encode_instruction,
+        FunctionMetadata, OperandWidth, SourceSpan, encode_instruction,
     };
     use tachyon_gc::{ForcedCollectionMode, GcRef, HeapLimit, SPAN_SIZE_BYTES, Tracer};
     use tachyon_value::RawHeapRef;
@@ -9683,6 +10060,13 @@ mod tests {
     }
 
     #[test]
+    fn int32_min_division_promotes_instead_of_overflowing_remainder() {
+        let value = numeric_binary_hot(Opcode::Div, Value::from_i32(i32::MIN), Value::from_i32(-1))
+            .unwrap();
+        assert_eq!(value.as_f64(), Some(2_147_483_648.0));
+    }
+
+    #[test]
     fn numeric_less_than_works_for_every_dispatch_batch() {
         assert_less_than_batch::<1>();
         assert_less_than_batch::<2>();
@@ -10259,20 +10643,166 @@ mod tests {
     /// Pins the cursor's unsafe backing invariant across owner moves and Vec reallocations.
     fn bytecode_cursor_survives_owner_and_container_moves() {
         let module = arithmetic_module();
-        let words = module
-            .function(module.entry_function())
-            .unwrap()
-            .bytecode()
-            .bytecode()
-            .words();
-        let cursor = BytecodeCursor::new(words);
+        let bytecode = module.function(module.entry_function()).unwrap().bytecode();
+        // SAFETY: `owners` retains the module's Arc-backed verified function through cursor use.
+        let cursor = unsafe { BytecodeCursor::new(bytecode) };
         let mut owners = Vec::with_capacity(1);
         owners.push(module);
         owners.extend((0..32).map(|_| arithmetic_module()));
 
-        let instruction = cursor.decode(WordOffset::new(0)).unwrap();
+        // SAFETY: zero is the verified entry instruction start for this arithmetic function.
+        let instruction = unsafe { cursor.decode(WordOffset::new(0)) };
         assert_eq!(instruction.opcode, Opcode::LoadImmediate);
         assert_eq!(owners.len(), 33);
+    }
+
+    #[test]
+    /// Pins the unchecked register cursor to one prevalidated, non-reallocating activation window.
+    fn register_window_checks_edges_before_unchecked_access() {
+        let mut registers = [
+            Value::from_i32(10),
+            Value::from_i32(20),
+            Value::from_i32(30),
+            Value::from_i32(40),
+        ];
+        {
+            let mut window = RegisterWindow::new(&mut registers, 1, 3).unwrap();
+            // SAFETY: indices zero and two are the exact first/last slots in the checked window,
+            // and the fixed array cannot move or change length while `window` is used.
+            unsafe {
+                assert_eq!(window.read(0).as_i32(), Some(20));
+                assert_eq!(window.read(2).as_i32(), Some(40));
+                window.write(2, Value::from_i32(99));
+            }
+        }
+        assert_eq!(registers[3].as_i32(), Some(99));
+        assert!(RegisterWindow::new(&mut registers, 2, 3).is_none());
+        assert!(RegisterWindow::new(&mut registers, 4, 0).is_some());
+        assert!(RegisterWindow::new(&mut registers, 5, 0).is_none());
+    }
+
+    #[test]
+    /// Differentials every allocation-free opcode against the checked dispatcher implementation.
+    fn verified_hot_kernel_matches_checked_dispatch() {
+        let i = Value::from_i32;
+        let immediate = Value::from_immediate;
+        let cases = [
+            (Opcode::Nop, [0, 0, 0], [i(1), i(2), i(3)]),
+            (Opcode::LoadUndefined, [0, 0, 0], [i(1), i(2), i(3)]),
+            (Opcode::LoadNull, [0, 0, 0], [i(1), i(2), i(3)]),
+            (Opcode::LoadFalse, [0, 0, 0], [i(1), i(2), i(3)]),
+            (Opcode::LoadTrue, [0, 0, 0], [i(1), i(2), i(3)]),
+            (
+                Opcode::LoadImmediate,
+                [0, i32::MIN as u32, 0],
+                [i(1), i(2), i(3)],
+            ),
+            (Opcode::Move, [0, 0, 0], [i(7), i(2), i(3)]),
+            (
+                Opcode::Not,
+                [0, 1, 0],
+                [i(7), immediate(Immediate::False), i(3)],
+            ),
+            (Opcode::Negate, [0, 1, 0], [i(7), i(i32::MIN), i(3)]),
+            (Opcode::BitwiseNot, [0, 1, 0], [i(7), i(12), i(3)]),
+            (Opcode::ToNumber, [0, 1, 0], [i(7), i(-0), i(3)]),
+            (Opcode::Add, [0, 0, 1], [i(i32::MAX), i(1), i(3)]),
+            (Opcode::Sub, [0, 0, 1], [i(i32::MIN), i(1), i(3)]),
+            (Opcode::Mul, [0, 0, 1], [i(100_000), i(100_000), i(3)]),
+            (Opcode::Div, [0, 0, 1], [i(i32::MIN), i(-1), i(3)]),
+            (Opcode::BitwiseAnd, [0, 0, 1], [i(0b1100), i(0b1010), i(3)]),
+            (Opcode::BitwiseOr, [0, 0, 1], [i(0b1100), i(0b1010), i(3)]),
+            (Opcode::BitwiseXor, [0, 0, 1], [i(0b1100), i(0b1010), i(3)]),
+            (Opcode::ShiftLeft, [0, 0, 1], [i(-1), i(3), i(3)]),
+            (Opcode::ShiftRight, [0, 0, 1], [i(-8), i(2), i(3)]),
+            (Opcode::ShiftRightUnsigned, [0, 0, 1], [i(-1), i(1), i(3)]),
+            (Opcode::Remainder, [0, 0, 1], [i(-7), i(4), i(3)]),
+            (Opcode::Exponentiate, [0, 0, 1], [i(3), i(4), i(3)]),
+            (Opcode::LessThan, [0, 0, 1], [i(-1), i(1), i(3)]),
+            (Opcode::GreaterThan, [0, 0, 1], [i(2), i(1), i(3)]),
+            (Opcode::LessEqual, [0, 0, 1], [i(1), i(1), i(3)]),
+            (Opcode::GreaterEqual, [0, 0, 1], [i(1), i(1), i(3)]),
+            (
+                Opcode::StrictEqual,
+                [0, 1, 2],
+                [i(7), immediate(Immediate::Null), immediate(Immediate::Null)],
+            ),
+            (Opcode::Jump, [9, 0, 0], [i(1), i(2), i(3)]),
+            (
+                Opcode::JumpIfFalse,
+                [0, 9, 0],
+                [immediate(Immediate::False), i(2), i(3)],
+            ),
+            (
+                Opcode::JumpIfTrue,
+                [0, 9, 0],
+                [immediate(Immediate::True), i(2), i(3)],
+            ),
+            (Opcode::JumpIfNotNullish, [0, 9, 0], [i(1), i(2), i(3)]),
+        ];
+        let module = arithmetic_module();
+
+        for (opcode, operands, initial) in cases {
+            let mut checked = test_isolate();
+            let code = checked.load_module(&module).unwrap();
+            checked.enter(code, module.entry_function()).unwrap();
+            checked.fiber.registers.copy_from_slice(&initial);
+            let fallthrough = WordOffset::new(1);
+            checked.flush_cursor_pc(fallthrough);
+            assert_eq!(
+                checked.dispatch(code, WordOffset::new(0), opcode, operands, 0),
+                Ok(None),
+                "{opcode:?}"
+            );
+            let checked_pc = checked.fiber.frames.last().unwrap().pc;
+
+            let mut fast_registers = initial;
+            let mut window = RegisterWindow::new(&mut fast_registers, 0, 3).unwrap();
+            let instruction = DecodedInstruction {
+                opcode,
+                width: OperandWidth::Compact,
+                operands,
+                operand_count: opcode.operand_count() as u8,
+                word_len: 1,
+            };
+            let mut fast_pc = fallthrough;
+            // SAFETY: the local three-slot array covers every operand in this explicit case table
+            // and cannot move or resize before the hot operation returns.
+            let control =
+                unsafe { execute_verified_hot_instruction(&mut window, instruction, &mut fast_pc) };
+            assert_eq!(control, HotControl::Continue, "{opcode:?}");
+            assert_eq!(
+                fast_registers,
+                checked.fiber.registers.as_slice(),
+                "{opcode:?}"
+            );
+            assert_eq!(fast_pc, checked_pc, "{opcode:?}");
+        }
+
+        let heap_value = Value::from_heap_ref(RawHeapRef::new(1).unwrap());
+        let mut registers = [heap_value, heap_value, Value::from_i32(0)];
+        let mut window = RegisterWindow::new(&mut registers, 0, 3).unwrap();
+        for opcode in [Opcode::Not, Opcode::JumpIfFalse, Opcode::JumpIfTrue] {
+            let instruction = DecodedInstruction {
+                opcode,
+                width: OperandWidth::Compact,
+                operands: [0, 1, 0],
+                operand_count: opcode.operand_count() as u8,
+                word_len: 1,
+            };
+            // SAFETY: the fixed window covers the operands; heap-tagged truthiness must return Slow
+            // before dereferencing the synthetic logical address.
+            assert_eq!(
+                unsafe {
+                    execute_verified_hot_instruction(
+                        &mut window,
+                        instruction,
+                        &mut WordOffset::new(1),
+                    )
+                },
+                HotControl::Slow
+            );
+        }
     }
 
     #[test]
@@ -10308,6 +10838,20 @@ mod tests {
                 ExecutionBudget {
                     fuel: 4,
                     quantum: 4,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
+
+    #[test]
+    fn max_budget_sentinel_uses_the_unbounded_loop_without_changing_results() {
+        let outcome = test_isolate()
+            .execute(
+                &arithmetic_module(),
+                ExecutionBudget {
+                    fuel: u64::MAX,
+                    quantum: u32::MAX,
                 },
             )
             .unwrap();

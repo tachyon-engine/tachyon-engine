@@ -365,7 +365,7 @@ pub struct NoGcScope<'heap, 'scope, 'no_gc> {
 }
 
 impl<'heap, 'scope, 'no_gc> NoGcScope<'heap, 'scope, 'no_gc> {
-    fn new(heap: &'heap mut Heap) -> Self {
+    pub(crate) fn new(heap: &'heap mut Heap) -> Self {
         Self {
             heap,
             scope: PhantomData,
@@ -722,6 +722,34 @@ mod tests {
             });
             assert_eq!(running.temporary_root_stats(), before);
         });
+    }
+
+    #[test]
+    /// Heap-direct no-GC borrowing avoids an otherwise empty running-scope rollback checkpoint.
+    fn heap_direct_no_gc_scope_preserves_temporary_root_state() {
+        let mut types = TypeRegistry::new();
+        let payload_type = types.try_register::<Payload>("Payload").unwrap();
+        let mut heap = Heap::new(HeapLimit::new(SPAN_SIZE_BYTES), types);
+        let reference = heap
+            .try_allocate(
+                payload_type,
+                0,
+                0,
+                Payload { value: 7 },
+                AllocationSpace::Old,
+            )
+            .unwrap();
+        let before = heap.temporary_root_stats();
+        heap.with_no_gc_scope(|no_gc| {
+            assert_eq!(
+                no_gc
+                    .borrow_raw_reference(reference.raw(), payload_type)
+                    .unwrap()
+                    .value,
+                7
+            );
+        });
+        assert_eq!(heap.temporary_root_stats(), before);
     }
 
     #[test]

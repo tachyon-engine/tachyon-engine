@@ -1009,7 +1009,7 @@ impl Lowerer<'_> {
             .bind_label(update_label)
             .map_err(CompileError::Builder)?;
         if let Some(update) = update {
-            self.expression(update)?;
+            self.discarded_expression(update)?;
         }
         self.emit_jump(condition, span)?;
         self.builder
@@ -1087,7 +1087,7 @@ impl Lowerer<'_> {
     fn function_statement(&mut self, statement: &HirStatement) -> Result<bool, CompileError> {
         match &statement.kind {
             HirStatementKind::Expression(expression) => {
-                self.expression(expression)?;
+                self.discarded_expression(expression)?;
                 Ok(false)
             }
             HirStatementKind::VariableDeclaration(declaration) => {
@@ -1230,7 +1230,7 @@ impl Lowerer<'_> {
             .bind_label(update_label)
             .map_err(CompileError::Builder)?;
         if let Some(update) = update {
-            self.expression(update)?;
+            self.discarded_expression(update)?;
         }
         self.emit_jump(condition, span)?;
         self.builder
@@ -2574,6 +2574,15 @@ impl Lowerer<'_> {
             return self.method_call_expression(object, property, arguments, span);
         }
         let callee_value = self.expression(callee)?;
+        if arguments.is_empty() {
+            let destination = self.register()?;
+            self.emit(
+                Opcode::Call,
+                &[destination.index(), callee_value.index(), 0],
+                span,
+            )?;
+            return Ok(destination);
+        }
         let call_base = self.register()?;
         self.emit(
             Opcode::Move,
@@ -2597,6 +2606,34 @@ impl Lowerer<'_> {
             span,
         )?;
         Ok(destination)
+    }
+
+    /// Uses an in-place local update when the surrounding statement discards its result.
+    fn discarded_expression(&mut self, expression: &HirExpression) -> Result<(), CompileError> {
+        if let HirExpressionKind::Update {
+            operator,
+            target: HirAssignmentTarget::Identifier(target),
+            ..
+        } = &expression.kind
+            && let Some(binding) = self.local_reference(target).cloned()
+            && let LocalStorage::Register(register) = binding.storage
+        {
+            if !binding.mutable {
+                return Err(self.unsupported(expression.span, "update of immutable local"));
+            }
+            let one = self.load_immediate(1, expression.span)?;
+            let opcode = match operator {
+                HirUpdateOperator::Increment => Opcode::Add,
+                HirUpdateOperator::Decrement => Opcode::Sub,
+            };
+            self.emit(
+                opcode,
+                &[register.index(), register.index(), one.index()],
+                expression.span,
+            )?;
+            return Ok(());
+        }
+        self.expression(expression).map(|_| ())
     }
 
     /// Evaluates constructor and arguments once before emitting one verified construct window.

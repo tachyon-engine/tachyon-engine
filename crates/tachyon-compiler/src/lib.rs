@@ -532,6 +532,28 @@ mod tests {
     }
 
     #[test]
+    fn compiler_compacts_zero_argument_call_loop_hot_path() {
+        let module = Compiler
+            .compile(
+                source(
+                    MediaType::JavaScript,
+                    "function f() {} function main() { for (let i = 0; i < 100_000; i++) { f(); } }",
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap();
+        let main = module
+            .functions()
+            .iter()
+            .find(|function| function.layout().name_scope == Some(1))
+            .unwrap();
+        let disassembly = tachyon_bytecode::disassemble(main).unwrap();
+        assert!(disassembly.contains("Call r4, callee=r3, argc=0"));
+        assert!(disassembly.contains("Add r0, r0,"));
+        assert!(!disassembly.contains("Move"));
+    }
+
+    #[test]
     /// Confirms script vars become deduplicated global declarations while function vars use frames.
     fn compiler_instantiates_var_bindings_at_their_scope_entry() {
         let module = Compiler
