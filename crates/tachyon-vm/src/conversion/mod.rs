@@ -789,11 +789,7 @@ impl Isolate {
         {
             return Ok(strings.function);
         }
-        if self
-            .heap
-            .checked_reference(raw, self.types.ordinary_object)
-            .is_ok()
-        {
+        if self.is_object_value(value) {
             return Ok(strings.object);
         }
         Err(ExecutionError::UnsupportedTypeof(value))

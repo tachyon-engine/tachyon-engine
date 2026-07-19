@@ -659,4 +659,12 @@ fn typeof_and_string_constants_follow_primitive_semantics() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            214,
+            "typeof [] === 'object' && typeof new Number(1) === 'object' && typeof function() {} === 'function';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
