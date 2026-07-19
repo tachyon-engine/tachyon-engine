@@ -21,8 +21,8 @@ pub struct OpcodeExecutionCounts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionProfile {
     opcodes: [OpcodeExecutionCounts; Opcode::COUNT],
-    kernel_cursor_binds: u64,
-    poll_groups: u64,
+    batch_cursor_binds: u64,
+    batch_flushes: u64,
     budget_flushes: u64,
     slow_flushes: u64,
     slow_rebinds: u64,
@@ -49,16 +49,16 @@ impl ExecutionProfile {
         })
     }
 
-    /// Returns cursor binds performed once at kernel entry before any slow rebind.
+    /// Returns the number of cursor binds performed at fixed-size batch entry.
     #[must_use]
-    pub const fn kernel_cursor_binds(&self) -> u64 {
-        self.kernel_cursor_binds
+    pub const fn batch_cursor_binds(&self) -> u64 {
+        self.batch_cursor_binds
     }
 
-    /// Returns complete N-instruction polling groups crossed without publishing the local PC.
+    /// Returns the number of PC publications caused only by reaching the batch boundary.
     #[must_use]
-    pub const fn poll_groups(&self) -> u64 {
-        self.poll_groups
+    pub const fn batch_flushes(&self) -> u64 {
+        self.batch_flushes
     }
 
     /// Returns the number of PC publications caused by an exhausted bounded budget.
@@ -126,12 +126,12 @@ impl ExecutionProfile {
         }
     }
 
-    pub(crate) fn record_kernel_cursor_bind(&mut self) {
-        self.kernel_cursor_binds = self.kernel_cursor_binds.saturating_add(1);
+    pub(crate) fn record_batch_cursor_bind(&mut self) {
+        self.batch_cursor_binds = self.batch_cursor_binds.saturating_add(1);
     }
 
-    pub(crate) fn record_poll_group(&mut self) {
-        self.poll_groups = self.poll_groups.saturating_add(1);
+    pub(crate) fn record_batch_flush(&mut self) {
+        self.batch_flushes = self.batch_flushes.saturating_add(1);
     }
 
     pub(crate) fn record_budget_flush(&mut self) {
@@ -164,8 +164,8 @@ impl Default for ExecutionProfile {
     fn default() -> Self {
         Self {
             opcodes: [OpcodeExecutionCounts::default(); Opcode::COUNT],
-            kernel_cursor_binds: 0,
-            poll_groups: 0,
+            batch_cursor_binds: 0,
+            batch_flushes: 0,
             budget_flushes: 0,
             slow_flushes: 0,
             slow_rebinds: 0,
