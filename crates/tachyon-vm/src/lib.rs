@@ -1431,6 +1431,8 @@ enum ConversionConsumer {
     ToNumber,
     Negate,
     BitwiseNot,
+    BinaryLeft(Opcode),
+    BinaryRight(Opcode),
 }
 
 impl ConversionConsumer {
@@ -1438,13 +1440,29 @@ impl ConversionConsumer {
     const fn native(self) -> Option<NativeFunction> {
         match self {
             Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native),
-            Self::ToNumber | Self::Negate | Self::BitwiseNot => None,
+            Self::ToNumber
+            | Self::Negate
+            | Self::BitwiseNot
+            | Self::BinaryLeft(_)
+            | Self::BinaryRight(_) => None,
         }
     }
 
     #[inline]
     const fn uses_string_hint(self) -> bool {
         matches!(self, Self::NativeCall(NativeFunction::StringConstructor))
+    }
+
+    #[inline]
+    const fn is_numeric_operation(self) -> bool {
+        matches!(
+            self,
+            Self::ToNumber
+                | Self::Negate
+                | Self::BitwiseNot
+                | Self::BinaryLeft(_)
+                | Self::BinaryRight(_)
+        )
     }
 }
 
@@ -3352,24 +3370,20 @@ impl Isolate {
         self.write(site.caller_base, site.destination, value)
     }
 
-    /// Starts a cold object conversion without burdening primitive unary-op traffic.
+    /// Starts a cold object conversion while tracing one optional pending operand.
     #[cold]
     #[inline(never)]
-    fn dispatch_object_numeric_unary(
+    fn dispatch_object_numeric_conversion(
         &mut self,
         consumer: ConversionConsumer,
         caller_base: u32,
         destination: u32,
+        pending: Value,
         object: Value,
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         debug_assert!(self.is_object_value(object));
-        debug_assert!(matches!(
-            consumer,
-            ConversionConsumer::ToNumber
-                | ConversionConsumer::Negate
-                | ConversionConsumer::BitwiseNot
-        ));
+        debug_assert!(consumer.is_numeric_operation());
         self.advance_native_conversion(
             NativeContinuation {
                 site: NativeContinuationSite {
@@ -3378,7 +3392,7 @@ impl Isolate {
                     call_site,
                 },
                 consumer,
-                receiver: Value::from_immediate(Immediate::Undefined),
+                receiver: pending,
                 object,
                 stage: ToPrimitiveStage::ValueOf,
             },
@@ -3395,6 +3409,33 @@ impl Isolate {
         loop {
             if let Some(value) = returned.take() {
                 if !self.is_object_value(value) {
+                    if let ConversionConsumer::BinaryLeft(opcode) = continuation.consumer {
+                        let left = self.convert_to_number(value)?;
+                        let right = continuation.receiver;
+                        if self.is_object_value(right) {
+                            continuation.consumer = ConversionConsumer::BinaryRight(opcode);
+                            continuation.receiver = left;
+                            continuation.object = right;
+                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continue;
+                        }
+                        let right = self.convert_to_number(right)?;
+                        let result = numeric_binary_operation(opcode, left, right);
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
+                    if let ConversionConsumer::BinaryRight(opcode) = continuation.consumer {
+                        let right = self.convert_to_number(value)?;
+                        let result = numeric_binary_operation(opcode, continuation.receiver, right);
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -3497,6 +3538,9 @@ impl Isolate {
                 ConversionConsumer::Negate => numeric_negate(self.convert_to_number(argument)?),
                 ConversionConsumer::BitwiseNot => {
                     numeric_bitwise_not(self.convert_to_number(argument)?)
+                }
+                ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
+                    unreachable!("binary consumers finish inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
@@ -6689,10 +6733,11 @@ impl Isolate {
             Opcode::Negate => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_unary(
+                    self.dispatch_object_numeric_conversion(
                         ConversionConsumer::Negate,
                         base,
                         operands[0],
+                        Value::from_immediate(Immediate::Undefined),
                         input,
                         instruction_offset,
                     )?;
@@ -6704,10 +6749,11 @@ impl Isolate {
             Opcode::ToNumber => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_unary(
+                    self.dispatch_object_numeric_conversion(
                         ConversionConsumer::ToNumber,
                         base,
                         operands[0],
+                        Value::from_immediate(Immediate::Undefined),
                         input,
                         instruction_offset,
                     )?;
@@ -6719,10 +6765,11 @@ impl Isolate {
             Opcode::BitwiseNot => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_unary(
+                    self.dispatch_object_numeric_conversion(
                         ConversionConsumer::BitwiseNot,
                         base,
                         operands[0],
+                        Value::from_immediate(Immediate::Undefined),
                         input,
                         instruction_offset,
                     )?;
@@ -6731,33 +6778,53 @@ impl Isolate {
                     self.write(base, operands[0], numeric_bitwise_not(number))?;
                 }
             }
-            Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+            Opcode::Add => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
                 self.write(base, operands[0], numeric_binary(opcode, left, right))?;
             }
-            Opcode::BitwiseAnd | Opcode::BitwiseOr | Opcode::BitwiseXor => {
-                let left = self.convert_to_number(self.read(base, operands[1])?)?;
-                let right = self.convert_to_number(self.read(base, operands[2])?)?;
-                self.write(
-                    base,
-                    operands[0],
-                    numeric_bitwise_binary(opcode, left, right),
-                )?;
-            }
-            Opcode::ShiftLeft | Opcode::ShiftRight | Opcode::ShiftRightUnsigned => {
-                let left = self.convert_to_number(self.read(base, operands[1])?)?;
-                let right = self.convert_to_number(self.read(base, operands[2])?)?;
-                self.write(base, operands[0], numeric_shift(opcode, left, right))?;
-            }
-            Opcode::Remainder | Opcode::Exponentiate => {
-                let left = self.convert_to_number(self.read(base, operands[1])?)?;
-                let right = self.convert_to_number(self.read(base, operands[2])?)?;
-                self.write(
-                    base,
-                    operands[0],
-                    numeric_remainder_or_power(opcode, left, right),
-                )?;
+            Opcode::Sub
+            | Opcode::Mul
+            | Opcode::Div
+            | Opcode::BitwiseAnd
+            | Opcode::BitwiseOr
+            | Opcode::BitwiseXor
+            | Opcode::ShiftLeft
+            | Opcode::ShiftRight
+            | Opcode::ShiftRightUnsigned
+            | Opcode::Remainder
+            | Opcode::Exponentiate => {
+                let left = self.read(base, operands[1])?;
+                let right = self.read(base, operands[2])?;
+                if self.is_object_value(left) {
+                    self.dispatch_object_numeric_conversion(
+                        ConversionConsumer::BinaryLeft(opcode),
+                        base,
+                        operands[0],
+                        right,
+                        left,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let left = self.convert_to_number(left)?;
+                    if self.is_object_value(right) {
+                        self.dispatch_object_numeric_conversion(
+                            ConversionConsumer::BinaryRight(opcode),
+                            base,
+                            operands[0],
+                            left,
+                            right,
+                            instruction_offset,
+                        )?;
+                    } else {
+                        let right = self.convert_to_number(right)?;
+                        self.write(
+                            base,
+                            operands[0],
+                            numeric_binary_operation(opcode, left, right),
+                        )?;
+                    }
+                }
             }
             Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {
                 let left = self.convert_to_number(self.read(base, operands[1])?)?;
@@ -8393,6 +8460,22 @@ impl Int32PropertyKey {
     }
 }
 
+/// Applies one numeric-only binary opcode after both operands have completed ToNumber.
+#[inline(always)]
+fn numeric_binary_operation(opcode: Opcode, left: Value, right: Value) -> Value {
+    match opcode {
+        Opcode::Sub | Opcode::Mul | Opcode::Div => numeric_binary(opcode, left, right),
+        Opcode::BitwiseAnd | Opcode::BitwiseOr | Opcode::BitwiseXor => {
+            numeric_bitwise_binary(opcode, left, right)
+        }
+        Opcode::ShiftLeft | Opcode::ShiftRight | Opcode::ShiftRightUnsigned => {
+            numeric_shift(opcode, left, right)
+        }
+        Opcode::Remainder | Opcode::Exponentiate => numeric_remainder_or_power(opcode, left, right),
+        _ => unreachable!("numeric binary continuation received a non-numeric opcode"),
+    }
+}
+
 #[inline(always)]
 fn numeric_binary(opcode: Opcode, left: Value, right: Value) -> Value {
     if let (Some(left), Some(right)) = (left.as_i32(), right.as_i32()) {
@@ -9450,6 +9533,15 @@ mod tests {
         assert_numeric_unary_continuation_batch::<4>();
         assert_numeric_unary_continuation_batch::<8>();
         assert_numeric_unary_continuation_batch::<16>();
+    }
+
+    #[test]
+    fn numeric_binary_continuations_resume_for_every_dispatch_batch_and_forced_major() {
+        assert_numeric_binary_continuation_batch::<1>();
+        assert_numeric_binary_continuation_batch::<2>();
+        assert_numeric_binary_continuation_batch::<4>();
+        assert_numeric_binary_continuation_batch::<8>();
+        assert_numeric_binary_continuation_batch::<16>();
     }
 
     #[test]
@@ -10624,6 +10716,28 @@ mod tests {
         }
     }
 
+    /// Exercises left and right callback resume while the pending operand remains traced.
+    fn assert_numeric_binary_continuation_batch<const N: usize>() {
+        let mut isolate = test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &numeric_binary_continuation_module(),
+                ExecutionBudget {
+                    fuel: 40,
+                    quantum: 40,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
+    }
+
     fn assert_bound_function_batch<const N: usize>() {
         let outcome = test_isolate()
             .execute_with_batch::<N>(
@@ -11582,6 +11696,79 @@ mod tests {
             FunctionId::new(0),
         )
         .unwrap()
+    }
+
+    /// Builds two callback-driven operands for an exact subtraction continuation result.
+    fn numeric_binary_continuation_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(10, 1);
+        entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[2], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[3, 2], span).unwrap();
+        entry.emit(Opcode::SetById, &[2, 3, 0], span).unwrap();
+        entry.emit(Opcode::Sub, &[4, 0, 2], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[5, 6], span).unwrap();
+        entry.emit(Opcode::StrictEqual, &[6, 4, 5], span).unwrap();
+        entry.emit(Opcode::Return, &[6], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("numeric binary continuation"),
+            Vec::new(),
+            vec![Arc::from("valueOf")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                numeric_callback_template(FunctionId::new(1), 8, span),
+                numeric_callback_template(FunctionId::new(2), 2, span),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
+    /// Builds a callback with an internal throw/catch before returning one numeric primitive.
+    fn numeric_callback_template(
+        function: FunctionId,
+        returned: i32,
+        span: SourceSpan,
+    ) -> CompiledFunctionTemplate {
+        let mut callback = BytecodeBuilder::with_capacity(6, 1);
+        let protected_start = callback.emit(Opcode::Nop, &[], span).unwrap();
+        callback.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
+        callback.emit(Opcode::Throw, &[0], span).unwrap();
+        let handler = callback.emit(Opcode::LoadException, &[1], span).unwrap();
+        callback
+            .emit(Opcode::LoadImmediate, &[2, returned as u32], span)
+            .unwrap();
+        callback.emit(Opcode::Return, &[2], span).unwrap();
+        let (bytecode, source_map, register_count) = callback.finish().unwrap();
+        let mut metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        CompiledFunctionTemplate::new(function, bytecode, metadata)
     }
 
     /// Builds `add.bind(undefined, 20)(22)` with one immutable bound-argument prefix.

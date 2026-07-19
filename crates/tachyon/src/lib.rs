@@ -1580,11 +1580,32 @@ mod tests {
     }
 
     #[test]
+    /// Preserves left-to-right object conversion, mutation visibility, and abrupt completion.
+    fn numeric_binary_objects_resume_in_spec_order() {
+        assert_eq!(
+            execute_source(
+                180,
+                "let order = 0; let right = { valueOf() { order = order * 10 + 2; return 2; } }; let left = { valueOf() { order = order * 10 + 1; right.valueOf = function() { order = order * 10 + 3; return 3; }; return 8; } }; let difference = left - right; let rightCalls = 0; let stopped = false; try { ({ valueOf() { throw 42; } }) * ({ valueOf() { rightCalls = rightCalls + 1; return 2; } }); } catch (error) { stopped = error === 42; } difference === 5 && order === 13 && stopped && rightCalls === 0 && ({ valueOf() { return 8; } }) / ({ valueOf() { return 2; } }) === 4;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
+    #[test]
     /// Covers numeric/string coercion and integer results for all bitwise binary operators.
     fn bitwise_binary_converts_supported_primitives() {
         assert_eq!(execute_source(96, "5 & 3;").as_i32(), Some(1));
         assert_eq!(execute_source(97, "'5' | 2;").as_i32(), Some(7));
         assert_eq!(execute_source(98, "5 ^ 3;").as_i32(), Some(6));
+        assert_eq!(
+            execute_source(
+                181,
+                "(({ valueOf() { return 5; } }) & ({ valueOf() { return 3; } })) === 1 && (({ valueOf() { return 5; } }) | ({ valueOf() { return 2; } })) === 7 && (({ valueOf() { return 5; } }) ^ ({ valueOf() { return 3; } })) === 6;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
@@ -1593,6 +1614,14 @@ mod tests {
         assert_eq!(execute_source(99, "5 << 1;").as_i32(), Some(10));
         assert_eq!(execute_source(100, "'8' >> 1;").as_i32(), Some(4));
         assert_eq!(execute_source(101, "-1 >>> 30;").as_f64(), Some(3.0));
+        assert_eq!(
+            execute_source(
+                182,
+                "(({ valueOf() { return 5; } }) << ({ valueOf() { return 1; } })) === 10 && (({ valueOf() { return 8; } }) >> ({ valueOf() { return 1; } })) === 4 && (({ valueOf() { return -1; } }) >>> ({ valueOf() { return 30; } })) === 3;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
@@ -1600,6 +1629,14 @@ mod tests {
     fn remainder_and_exponentiation_convert_supported_primitives() {
         assert_eq!(execute_source(102, "'5' % 2;").as_f64(), Some(1.0));
         assert_eq!(execute_source(103, "2 ** '3';").as_f64(), Some(8.0));
+        assert_eq!(
+            execute_source(
+                183,
+                "(({ valueOf() { return 5; } }) % ({ valueOf() { return 2; } })) === 1 && (({ valueOf() { return 2; } }) ** ({ valueOf() { return 3; } })) === 8;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
     }
 
     #[test]
