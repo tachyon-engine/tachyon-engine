@@ -333,6 +333,480 @@ fn readding_a_live_deleted_symbol_restores_its_gc_edge() {
     );
 }
 
+#[test]
+/// Exercises every closed descriptor class and rejects structurally invalid descriptor objects.
+fn property_descriptor_parser_closes_field_combinations() {
+    let mut isolate = test_isolate();
+    let generic = descriptor_object(&mut isolate, &[]);
+    assert!(matches!(
+        isolate.parse_property_descriptor(generic).unwrap(),
+        PropertyDescriptor::Generic(GenericPropertyDescriptor {
+            enumerable: None,
+            configurable: None,
+        })
+    ));
+
+    let data = descriptor_object(&mut isolate, &[(b"value", Value::from_i32(7))]);
+    assert!(matches!(
+        isolate.parse_property_descriptor(data).unwrap(),
+        PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(value),
+            writable: None,
+            enumerable: None,
+            configurable: None,
+        }) if value.as_i32() == Some(7)
+    ));
+
+    let undefined = Value::from_immediate(Immediate::Undefined);
+    let accessor = descriptor_object(&mut isolate, &[(b"get", undefined)]);
+    assert!(matches!(
+        isolate.parse_property_descriptor(accessor).unwrap(),
+        PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            getter: Some(value),
+            setter: None,
+            enumerable: None,
+            configurable: None,
+        }) if value == undefined
+    ));
+
+    let mixed = descriptor_object(
+        &mut isolate,
+        &[(b"value", Value::from_i32(1)), (b"get", undefined)],
+    );
+    assert!(matches!(
+        isolate.parse_property_descriptor(mixed),
+        Err(ExecutionError::InvalidPropertyDescriptor(value)) if value == mixed
+    ));
+
+    for field in [b"get".as_slice(), b"set".as_slice()] {
+        let invalid = descriptor_object(&mut isolate, &[(field, Value::from_i32(1))]);
+        assert!(matches!(
+            isolate.parse_property_descriptor(invalid),
+            Err(ExecutionError::NonCallable(value)) if value.as_i32() == Some(1)
+        ));
+    }
+}
+
+#[test]
+/// Kind conversions retain one logical slot while replacing only its compact payload form.
+fn data_accessor_data_conversion_preserves_slot_and_count() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let key = isolate.intern_intrinsic_name(b"answer").unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(Value::from_i32(7)),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    let (_, data_snapshot) = isolate.object_snapshot(object).unwrap();
+    let data_lookup = isolate.shapes.lookup(data_snapshot.shape, key).unwrap();
+
+    let getter = isolate.realm.object_constructor.unwrap();
+    let undefined = Value::from_immediate(Immediate::Undefined);
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: None,
+                enumerable: None,
+                configurable: None,
+            }),
+        )
+        .unwrap();
+    let (_, accessor_snapshot) = isolate.object_snapshot(object).unwrap();
+    let accessor_lookup = isolate.shapes.lookup(accessor_snapshot.shape, key).unwrap();
+    assert_eq!(accessor_lookup.kind, PropertyKind::Accessor);
+    assert_eq!(accessor_lookup.slot, data_lookup.slot);
+    assert_eq!(
+        isolate.shapes.property_count(accessor_snapshot.shape),
+        isolate.shapes.property_count(data_snapshot.shape)
+    );
+    assert!(matches!(
+        isolate.complete_own_property_descriptor(object, key).unwrap(),
+        Some(PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            getter: Some(stored_getter),
+            setter: Some(stored_setter),
+            enumerable: Some(true),
+            configurable: Some(true),
+        })) if stored_getter == getter && stored_setter == undefined
+    ));
+
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(Value::from_i32(9)),
+                writable: Some(false),
+                enumerable: None,
+                configurable: None,
+            }),
+        )
+        .unwrap();
+    let (_, final_snapshot) = isolate.object_snapshot(object).unwrap();
+    let final_lookup = isolate.shapes.lookup(final_snapshot.shape, key).unwrap();
+    assert_eq!(final_lookup.kind, PropertyKind::Data);
+    assert_eq!(final_lookup.slot, data_lookup.slot);
+    assert_eq!(
+        isolate.shapes.property_count(final_snapshot.shape),
+        isolate.shapes.property_count(data_snapshot.shape)
+    );
+    assert!(matches!(
+        isolate.complete_own_property_descriptor(object, key).unwrap(),
+        Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(value),
+            writable: Some(false),
+            enumerable: Some(true),
+            configurable: Some(true),
+        })) if value.as_i32() == Some(9)
+    ));
+}
+
+#[test]
+/// Non-configurable, non-writable data properties permit only SameValue payload repetition.
+fn non_configurable_data_descriptor_rejects_forbidden_changes() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let key = isolate.intern_intrinsic_name(b"fixed").unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(Value::from_i32(7)),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(false),
+            }),
+        )
+        .unwrap();
+
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(Value::from_i32(7)),
+                ..DataPropertyDescriptor::default()
+            }),
+        )
+        .unwrap();
+    for descriptor in [
+        PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(Value::from_i32(8)),
+            ..DataPropertyDescriptor::default()
+        }),
+        PropertyDescriptor::Data(DataPropertyDescriptor {
+            writable: Some(true),
+            ..DataPropertyDescriptor::default()
+        }),
+        PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            getter: Some(Value::from_immediate(Immediate::Undefined)),
+            ..AccessorPropertyDescriptor::default()
+        }),
+    ] {
+        assert!(matches!(
+            isolate.define_property(object, key.into(), descriptor),
+            Err(ExecutionError::InvalidPropertyRedefinition(value)) if value == object
+        ));
+    }
+}
+
+#[test]
+/// Non-configurable accessors accept identical pairs and reject pair or descriptor-kind changes.
+fn non_configurable_accessor_descriptor_rejects_forbidden_changes() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let key = isolate.intern_intrinsic_name(b"fixedAccessor").unwrap();
+    let getter = isolate.realm.object_constructor.unwrap();
+    let setter = isolate.realm.array_constructor.unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: Some(setter),
+                enumerable: Some(false),
+                configurable: Some(false),
+            }),
+        )
+        .unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: Some(setter),
+                ..AccessorPropertyDescriptor::default()
+            }),
+        )
+        .unwrap();
+
+    let different_getter = isolate.realm.string_constructor.unwrap();
+    for descriptor in [
+        PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            getter: Some(different_getter),
+            ..AccessorPropertyDescriptor::default()
+        }),
+        PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            setter: Some(different_getter),
+            ..AccessorPropertyDescriptor::default()
+        }),
+        PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(Value::from_i32(1)),
+            ..DataPropertyDescriptor::default()
+        }),
+    ] {
+        assert!(matches!(
+            isolate.define_property(object, key.into(), descriptor),
+            Err(ExecutionError::InvalidPropertyRedefinition(value)) if value == object
+        ));
+    }
+}
+
+#[test]
+/// First publication keeps every unpublished edge alive across both forced-major allocations.
+fn accessor_publication_roots_receiver_pair_getter_and_setter() {
+    let mut isolate = test_isolate();
+    let key = isolate.intern_intrinsic_name(b"accessor").unwrap();
+    let getter = allocate_young_test_function(&mut isolate);
+    isolate.fiber.registers.push(getter);
+    let setter = allocate_young_test_function(&mut isolate);
+    isolate.fiber.registers.push(setter);
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.clear();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: Some(setter),
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    isolate.fiber.registers.push(object);
+    let pair_raw = accessor_pair_raw(&mut isolate, object, key);
+
+    assert!(
+        isolate
+            .heap
+            .checked_reference(getter.as_heap_ref().unwrap(), isolate.types.function)
+            .is_ok()
+    );
+    assert!(
+        isolate
+            .heap
+            .checked_reference(setter.as_heap_ref().unwrap(), isolate.types.function)
+            .is_ok()
+    );
+    assert!(
+        isolate
+            .heap
+            .checked_reference(pair_raw, isolate.types.accessor_pair)
+            .is_ok()
+    );
+    assert!(matches!(
+        isolate.complete_own_property_descriptor(object, key).unwrap(),
+        Some(PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+            getter: Some(stored_getter),
+            setter: Some(stored_setter),
+            enumerable: Some(true),
+            configurable: Some(true),
+        })) if stored_getter == getter && stored_setter == setter
+    ));
+}
+
+#[test]
+/// Accessor-to-data conversion removes both the pair edge and its sole callable edge.
+fn accessor_to_data_conversion_releases_pair_and_callable() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let key = isolate.intern_intrinsic_name(b"temporaryAccessor").unwrap();
+    let getter = allocate_young_test_function(&mut isolate);
+    let getter_raw = getter.as_heap_ref().unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: None,
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    let pair_raw = accessor_pair_raw(&mut isolate, object, key);
+    collect_major(&mut isolate);
+    assert!(
+        isolate
+            .heap
+            .checked_reference(getter_raw, isolate.types.function)
+            .is_ok()
+    );
+
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(Value::from_i32(42)),
+                writable: Some(true),
+                enumerable: None,
+                configurable: None,
+            }),
+        )
+        .unwrap();
+    collect_major(&mut isolate);
+
+    assert!(
+        isolate
+            .heap
+            .checked_reference(pair_raw, isolate.types.accessor_pair)
+            .is_err()
+    );
+    assert!(
+        isolate
+            .heap
+            .checked_reference(getter_raw, isolate.types.function)
+            .is_err()
+    );
+}
+
+#[test]
+/// An old accessor pair remembers a newly installed young callable through the pair owner card.
+fn accessor_pair_update_records_old_to_young_callable_edge() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let key = isolate
+        .intern_intrinsic_name(b"rememberedAccessor")
+        .unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(isolate.realm.object_constructor.unwrap()),
+                setter: None,
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    collect_minor(&mut isolate);
+    collect_minor(&mut isolate);
+
+    let young_getter = allocate_young_test_function(&mut isolate);
+    let young_getter_raw = young_getter.as_heap_ref().unwrap();
+    isolate
+        .define_property(
+            object,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(young_getter),
+                ..AccessorPropertyDescriptor::default()
+            }),
+        )
+        .unwrap();
+    isolate.heap.verify_generational_barriers().unwrap();
+    collect_minor(&mut isolate);
+
+    assert!(
+        isolate
+            .heap
+            .checked_reference(young_getter_raw, isolate.types.function)
+            .is_ok()
+    );
+}
+
+/// Creates and roots one ordinary descriptor object with caller-selected own data fields.
+fn descriptor_object(isolate: &mut Isolate, fields: &[(&[u8], Value)]) -> Value {
+    let descriptor = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(descriptor);
+    for (name, value) in fields {
+        let atom = isolate.intern_intrinsic_name(name).unwrap();
+        isolate
+            .set_own_data_property(descriptor, atom, *value)
+            .unwrap();
+    }
+    descriptor
+}
+
+/// Allocates an otherwise ordinary callable in Young for liveness and barrier tests.
+fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
+    let function_type = isolate.types.function;
+    let prototype = isolate.realm.function_prototype.unwrap();
+    let roots = &mut VmRoots {
+        fiber: &mut isolate.fiber,
+        finalization_jobs: &mut isolate.finalization_jobs,
+        realm: &mut isolate.realm,
+        loaded_code: &mut isolate.loaded_code,
+    };
+    isolate
+        .heap
+        .try_allocate_with_gc(
+            function_type,
+            0,
+            0,
+            FunctionObject {
+                executable: FunctionExecutable::Native(NativeFunction::ObjectConstructor),
+                function_prototype: None,
+                ordinary: OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype,
+                },
+            },
+            AllocationSpace::Young,
+            roots,
+        )
+        .map(|function| Value::from_heap_ref(function.raw()))
+        .unwrap()
+}
+
+/// Recovers the raw accessor-pair edge from the compact shared property backing.
+fn accessor_pair_raw(isolate: &mut Isolate, object: Value, key: AtomId) -> RawHeapRef {
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    let property = isolate.shapes.lookup(snapshot.shape, key).unwrap();
+    assert_eq!(property.kind, PropertyKind::Accessor);
+    let storage = snapshot.storage.unwrap();
+    isolate.heap.with_running_scope(|scope| {
+        let storage = scope.root(storage).unwrap();
+        scope.with_no_gc_scope(|no_gc| {
+            no_gc
+                .borrow(storage, isolate.types.property_storage)
+                .unwrap()
+                .slots[property.slot as usize]
+                .as_heap_ref()
+                .unwrap()
+        })
+    })
+}
+
 fn collect_major(isolate: &mut Isolate) {
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
@@ -341,4 +815,14 @@ fn collect_major(isolate: &mut Isolate) {
         loaded_code: &mut isolate.loaded_code,
     };
     isolate.heap.collect_major(&mut roots).unwrap();
+}
+
+fn collect_minor(isolate: &mut Isolate) {
+    let mut roots = VmRoots {
+        fiber: &mut isolate.fiber,
+        finalization_jobs: &mut isolate.finalization_jobs,
+        realm: &mut isolate.realm,
+        loaded_code: &mut isolate.loaded_code,
+    };
+    isolate.heap.collect_minor(&mut roots).unwrap();
 }

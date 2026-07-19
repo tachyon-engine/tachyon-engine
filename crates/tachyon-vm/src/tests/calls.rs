@@ -154,6 +154,20 @@ fn callee_throw_exits_every_dispatch_batch_without_native_unwind() {
 }
 
 #[test]
+fn completion_records_preserve_return_and_throw_for_every_dispatch_batch() {
+    assert_call_batch::<1>();
+    assert_call_batch::<2>();
+    assert_call_batch::<4>();
+    assert_call_batch::<8>();
+    assert_call_batch::<16>();
+    assert_throw_batch::<1>();
+    assert_throw_batch::<2>();
+    assert_throw_batch::<4>();
+    assert_throw_batch::<8>();
+    assert_throw_batch::<16>();
+}
+
+#[test]
 fn cross_module_call_switches_code_for_every_dispatch_batch() {
     assert_cross_code_batch::<1>();
     assert_cross_code_batch::<2>();

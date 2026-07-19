@@ -516,6 +516,27 @@ fn entry_reserves_verified_execution_windows() {
 }
 
 #[test]
+fn entry_completion_depth_respects_the_host_stack_limit() {
+    let layout = FunctionLayout {
+        register_count: 1,
+        max_completion_depth: 2,
+        ..FunctionLayout::default()
+    };
+    let mut isolate = test_isolate();
+    isolate.stack_limits = StackLimits::new(64, 4_096).with_max_completions(1);
+    let module = state_module(FunctionKind::Script, layout);
+    let code = isolate.load_module(&module).unwrap();
+
+    assert_eq!(
+        isolate.enter(code, FunctionId::new(0)),
+        Err(ExecutionError::CompletionStackLimit {
+            limit: 1,
+            requested: 2,
+        })
+    );
+}
+
+#[test]
 /// Exercises every fiber-owned GC edge with a tracer that simulates object relocation.
 fn fiber_trace_roots_visits_execution_state_without_native_stack_scanning() {
     let layout = FunctionLayout {
@@ -550,10 +571,16 @@ fn fiber_trace_roots_visits_execution_state_without_native_stack_scanning() {
         frame_depth: 1,
         environment_depth: 1,
     });
-    isolate.fiber.completions.extend([
-        Completion::Return(Value::from_heap_ref(raw)),
-        Completion::Throw(Value::from_heap_ref(raw)),
-    ]);
+    isolate
+        .fiber
+        .completions
+        .push_record(CompletionRecord::return_value(Value::from_heap_ref(raw)))
+        .unwrap();
+    isolate
+        .fiber
+        .completions
+        .push_record(CompletionRecord::throw(Value::from_heap_ref(raw)))
+        .unwrap();
     isolate.fiber.pending_exception = Some(Value::from_heap_ref(raw));
     let mut tracer = RewritingTracer;
 
@@ -566,16 +593,20 @@ fn fiber_trace_roots_visits_execution_state_without_native_stack_scanning() {
     assert_eq!(frame.this_value.as_heap_ref(), Some(rewritten));
     assert_eq!(frame.new_target.as_heap_ref(), Some(rewritten));
     assert!(matches!(
-        isolate.fiber.completions[0],
-        Completion::Return(value) if value.as_heap_ref() == Some(rewritten)
+        isolate.fiber.completions.record(0),
+        Some(record)
+            if record.kind() == CompletionKind::Return
+                && record.value().and_then(Value::as_heap_ref) == Some(rewritten)
     ));
     assert_eq!(
         isolate.fiber.pending_exception.and_then(Value::as_heap_ref),
         Some(rewritten)
     );
     assert!(matches!(
-        isolate.fiber.completions[1],
-        Completion::Throw(value) if value.as_heap_ref() == Some(rewritten)
+        isolate.fiber.completions.record(1),
+        Some(record)
+            if record.kind() == CompletionKind::Throw
+                && record.value().and_then(Value::as_heap_ref) == Some(rewritten)
     ));
     assert_eq!(
         isolate

@@ -105,6 +105,10 @@ impl PropertyAttributes {
         )
     }
 
+    pub(crate) const fn accessor(enumerable: bool, configurable: bool) -> Self {
+        Self::data(false, enumerable, configurable)
+    }
+
     pub(crate) const fn writable(self) -> bool {
         self.0 & Self::WRITABLE != 0
     }
@@ -118,12 +122,21 @@ impl PropertyAttributes {
     }
 }
 
+/// Stored ordinary-property payload kind; generic descriptors never enter shape metadata.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PropertyKind {
+    Data,
+    Accessor,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     parent: Option<ShapeId>,
     key: Option<PropertyKey>,
     slot: u32,
     property_count: u32,
+    kind: PropertyKind,
     attributes: PropertyAttributes,
     version: u32,
 }
@@ -132,6 +145,7 @@ struct Shape {
 struct ShapeTransition {
     from: ShapeId,
     key: PropertyKey,
+    kind: PropertyKind,
     attributes: PropertyAttributes,
     to: ShapeId,
 }
@@ -139,6 +153,7 @@ struct ShapeTransition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PropertyLookup {
     pub(crate) slot: u32,
+    pub(crate) kind: PropertyKind,
     pub(crate) attributes: PropertyAttributes,
 }
 
@@ -214,6 +229,7 @@ impl ShapeTable {
             key: None,
             slot: 0,
             property_count: 0,
+            kind: PropertyKind::Data,
             attributes: PropertyAttributes::DEFAULT_DATA,
             version: 0,
         });
@@ -270,6 +286,7 @@ impl ShapeTable {
             if entry.key == Some(key) {
                 return Some(PropertyLookup {
                     slot: entry.slot,
+                    kind: entry.kind,
                     attributes: entry.attributes,
                 });
             }
@@ -285,24 +302,36 @@ impl ShapeTable {
         key: impl Into<PropertyKey>,
         attributes: PropertyAttributes,
     ) -> Result<ShapeId, ShapeError> {
-        let key = key.into();
-        let slot = self.property_count(from);
-        let property_count = slot.checked_add(1).ok_or(ShapeError::IdOverflow)?;
-        self.transition(from, key, slot, property_count, attributes)
+        self.transition_add_kind(from, key, PropertyKind::Data, attributes)
     }
 
-    /// Overlays new flags for one existing slot without changing insertion order or storage size.
-    pub(crate) fn transition_reconfigure(
+    /// Adds one payload-kind-specific transition without widening existing data-property callers.
+    pub(crate) fn transition_add_kind(
         &mut self,
         from: ShapeId,
         key: impl Into<PropertyKey>,
+        kind: PropertyKind,
+        attributes: PropertyAttributes,
+    ) -> Result<ShapeId, ShapeError> {
+        let key = key.into();
+        let slot = self.property_count(from);
+        let property_count = slot.checked_add(1).ok_or(ShapeError::IdOverflow)?;
+        self.transition(from, key, slot, property_count, kind, attributes)
+    }
+
+    /// Overlays payload kind and flags while retaining the property's original logical slot.
+    pub(crate) fn transition_reconfigure_kind(
+        &mut self,
+        from: ShapeId,
+        key: impl Into<PropertyKey>,
+        kind: PropertyKind,
         attributes: PropertyAttributes,
     ) -> Result<ShapeId, ShapeError> {
         let key = key.into();
         let current = self
             .lookup(from, key)
             .expect("reconfiguration requires an own property");
-        if current.attributes == attributes {
+        if current.kind == kind && current.attributes == attributes {
             return Ok(from);
         }
         self.transition(
@@ -310,6 +339,7 @@ impl ShapeTable {
             key,
             current.slot,
             self.property_count(from),
+            kind,
             attributes,
         )
     }
@@ -321,13 +351,15 @@ impl ShapeTable {
         key: PropertyKey,
         slot: u32,
         property_count: u32,
+        kind: PropertyKind,
         attributes: PropertyAttributes,
     ) -> Result<ShapeId, ShapeError> {
-        if let Some(transition) = self
-            .transitions
-            .iter()
-            .find(|edge| edge.from == from && edge.key == key && edge.attributes == attributes)
-        {
+        if let Some(transition) = self.transitions.iter().find(|edge| {
+            edge.from == from
+                && edge.key == key
+                && edge.kind == kind
+                && edge.attributes == attributes
+        }) {
             return Ok(transition.to);
         }
         if self.shapes.len() >= self.limit as usize {
@@ -353,12 +385,14 @@ impl ShapeTable {
             key: Some(key),
             slot,
             property_count,
+            kind,
             attributes,
             version,
         });
         self.transitions.push(ShapeTransition {
             from,
             key,
+            kind,
             attributes,
             to: id,
         });
@@ -502,7 +536,10 @@ impl Trace for NumberObject {
 mod tests {
     use core::mem::size_of;
 
-    use super::{OrdinaryObject, PropertyAttributes, PropertyKey, ShapeId, ShapeTable, SymbolId};
+    use super::{
+        OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, ShapeId, ShapeTable,
+        SymbolId,
+    };
     use crate::AtomId;
 
     #[test]
@@ -528,6 +565,26 @@ mod tests {
     }
 
     #[test]
+    fn data_and_accessor_edges_do_not_share_a_shape_transition() {
+        let mut table = ShapeTable::new(16).unwrap();
+        let key = AtomId::from_test_index(0);
+        let attributes = PropertyAttributes::data(false, true, true);
+        let data = table
+            .transition_add_kind(ShapeId::EMPTY, key, PropertyKind::Data, attributes)
+            .unwrap();
+        let accessor = table
+            .transition_add_kind(ShapeId::EMPTY, key, PropertyKind::Accessor, attributes)
+            .unwrap();
+
+        assert_ne!(data, accessor);
+        assert_eq!(table.lookup(data, key).unwrap().kind, PropertyKind::Data);
+        assert_eq!(
+            table.lookup(accessor, key).unwrap().kind,
+            PropertyKind::Accessor
+        );
+    }
+
+    #[test]
     fn reconfiguration_preserves_slots_count_and_insertion_order() {
         let mut table = ShapeTable::new(16).unwrap();
         let first = AtomId::from_test_index(0);
@@ -539,7 +596,12 @@ mod tests {
             .transition_add(one, second, PropertyAttributes::DEFAULT_DATA)
             .unwrap();
         let reconfigured = table
-            .transition_reconfigure(two, first, PropertyAttributes::data(false, false, false))
+            .transition_reconfigure_kind(
+                two,
+                first,
+                PropertyKind::Data,
+                PropertyAttributes::data(false, false, false),
+            )
             .unwrap();
 
         assert_eq!(table.property_count(reconfigured), 2);

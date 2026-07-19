@@ -1,6 +1,7 @@
 //! Explicit fiber, frame, continuation, and GC root state.
 
 use super::super::*;
+use super::completion::CompletionStack;
 
 pub(crate) struct VmRoots<'a> {
     pub(crate) fiber: &'a mut Fiber,
@@ -226,21 +227,12 @@ pub(crate) struct ActiveHandler {
     pub(crate) environment_depth: u32,
 }
 
-/// Abrupt completions are data, so throw/finally never need Rust stack unwinding.
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // Populated by Throw/finally lowering after handler dispatch is implemented.
-pub(crate) enum Completion {
-    Return(Value),
-    Throw(Value),
-    Native(NativeContinuation),
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
-    pub(crate) completions: Vec<Completion>,
+    pub(crate) completions: CompletionStack,
     pub(crate) pending_exception: Option<Value>,
 }
 
@@ -287,12 +279,7 @@ impl Fiber {
             );
             let _ = handler.handler_index;
         }
-        for completion in &mut self.completions {
-            match completion {
-                Completion::Return(value) | Completion::Throw(value) => value.trace(tracer),
-                Completion::Native(continuation) => continuation.trace(tracer),
-            }
-        }
+        self.completions.trace(tracer);
         self.pending_exception.trace(tracer);
     }
 }

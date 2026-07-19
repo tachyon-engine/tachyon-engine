@@ -67,8 +67,8 @@ use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;
 use object::{
-    NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyLookup, PropertyStorage,
-    ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
+    NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
+    PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
 };
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
@@ -76,17 +76,19 @@ use runtime::code::is_conditional_branch;
 use runtime::fiber::ActiveHandler;
 use runtime::{
     callable::{
-        BoundFunctionSnapshot, CallSite, DataPropertyDescriptor, ErrorIntrinsics, FlatWork,
-        FunctionExecutable, FunctionObject, IntrinsicPropertyAtoms, NativeFunction, ObjectReceiver,
-        RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
+        AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
+        DataPropertyDescriptor, ErrorIntrinsics, FlatWork, FunctionExecutable, FunctionObject,
+        GenericPropertyDescriptor, IntrinsicPropertyAtoms, NativeFunction, ObjectReceiver,
+        PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
+        execution_error_kind,
     },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
+    completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
-        ArrayAllocationRoots, CodeLoadRoots, Completion, ConversionConsumer, Fiber, Frame,
-        NativeContinuation, NativeContinuationSite, PropertyMutationRoots,
-        PrototypeInitializationRoots, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
-        next_to_primitive_stage,
+        ArrayAllocationRoots, CodeLoadRoots, ConversionConsumer, Fiber, Frame, NativeContinuation,
+        NativeContinuationSite, PropertyMutationRoots, PrototypeInitializationRoots,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, Realm, TypeofStrings},
 };
@@ -153,6 +155,7 @@ impl RealmLimits {
 pub struct StackLimits {
     max_frames: u32,
     max_registers: u32,
+    max_completions: u32,
 }
 
 impl StackLimits {
@@ -161,7 +164,15 @@ impl StackLimits {
         Self {
             max_frames,
             max_registers,
+            max_completions: max_registers,
         }
+    }
+
+    /// Overrides completion storage independently when finally/native nesting needs a tighter cap.
+    #[must_use]
+    pub const fn with_max_completions(mut self, max_completions: u32) -> Self {
+        self.max_completions = max_completions;
+        self
     }
 }
 
@@ -191,6 +202,7 @@ pub enum ExecutionError {
     EnvironmentStorageAllocationFailed,
     HandlerAllocationFailed,
     CompletionAllocationFailed,
+    CompletionStackLimit { limit: u32, requested: u32 },
     DecodeInvariant(WordOffset),
     UnsupportedOpcode(Opcode),
     UnsupportedConstant(u32),
@@ -204,6 +216,7 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     MissingNativeContinuation,
+    MissingCompletionRecord,
     UnsupportedExceptionHandler(HandlerKind),
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
@@ -258,6 +271,7 @@ pub enum ExecutionError {
     UnsupportedDynamicFunctionConstructor,
     NonExtensibleObject(Value),
     ReadOnlyProperty(Value),
+    InvalidPropertyDescriptor(Value),
     InvalidPropertyRedefinition(Value),
     UnsupportedAccessorDescriptor,
     NotObject(Value),

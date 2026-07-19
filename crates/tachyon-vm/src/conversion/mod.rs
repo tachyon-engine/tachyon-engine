@@ -298,11 +298,15 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.fiber
                 .completions
-                .try_reserve_exact(1)
-                .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
-            self.fiber
-                .completions
-                .push(Completion::Native(continuation));
+                .push_native(continuation)
+                .map_err(|error| match error {
+                    CompletionStackError::Limit { limit, requested } => {
+                        ExecutionError::CompletionStackLimit { limit, requested }
+                    }
+                    CompletionStackError::AllocationFailed => {
+                        ExecutionError::CompletionAllocationFailed
+                    }
+                })?;
             let method = match self.get_data_property(continuation.object, atom) {
                 Ok(method) => method,
                 Err(error) => {
@@ -360,10 +364,10 @@ impl Isolate {
     /// Removes the exact native sentinel published before a callback call attempt.
     #[inline]
     pub(crate) fn pop_native_continuation(&mut self) -> Result<NativeContinuation, ExecutionError> {
-        match self.fiber.completions.pop() {
-            Some(Completion::Native(continuation)) => Ok(continuation),
-            _ => Err(ExecutionError::MissingNativeContinuation),
-        }
+        self.fiber
+            .completions
+            .pop_native()
+            .ok_or(ExecutionError::MissingNativeContinuation)
     }
 
     /// Completes one native consumer after its optional argument has become the required primitive.

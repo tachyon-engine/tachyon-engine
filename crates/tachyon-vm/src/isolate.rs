@@ -25,6 +25,9 @@ impl Isolate {
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
+            accessor_pair: registry
+                .try_register("AccessorPair")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             array: registry
                 .try_register("ArrayObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

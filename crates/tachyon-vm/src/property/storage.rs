@@ -1,6 +1,6 @@
 //! Ordinary object slots, shapes, storage publication, and write barriers.
 
-use super::super::*;
+use super::{super::*, accessor::StoredProperty};
 
 impl Isolate {
     /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
@@ -17,6 +17,21 @@ impl Isolate {
 
     /// Reads one resolved fixed slot and maps the retained deletion sentinel back to absence.
     pub(crate) fn property_value_from_snapshot(
+        &mut self,
+        snapshot: OrdinaryObject,
+        property: PropertyLookup,
+    ) -> Result<Option<Value>, ExecutionError> {
+        match self.stored_property_from_snapshot(snapshot, property)? {
+            Some(StoredProperty::Data(value)) => Ok(Some(value)),
+            Some(StoredProperty::Accessor { .. }) => {
+                Err(ExecutionError::UnsupportedAccessorDescriptor)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Copies one raw fixed slot and maps its retained deletion sentinel back to absence.
+    pub(super) fn raw_property_value_from_snapshot(
         &mut self,
         snapshot: OrdinaryObject,
         property: PropertyLookup,
@@ -51,24 +66,32 @@ impl Isolate {
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
-            if self
-                .property_value_from_snapshot(snapshot, property)?
-                .is_some()
-            {
-                if !property.attributes.writable() {
-                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+            match self.stored_property_from_snapshot(snapshot, property)? {
+                Some(StoredProperty::Data(_)) => {
+                    if !property.attributes.writable() {
+                        return Err(ExecutionError::ReadOnlyProperty(receiver));
+                    }
+                    return self.update_property_slot(snapshot, key, property.slot, value);
                 }
-                return self.update_property_slot(snapshot, key, property.slot, value);
+                Some(StoredProperty::Accessor { .. }) => {
+                    return Err(ExecutionError::UnsupportedAccessorDescriptor);
+                }
+                None => {}
             }
             if !snapshot.extensible {
                 return Err(ExecutionError::NonExtensibleObject(receiver));
             }
             let shape = self
                 .shapes
-                .transition_reconfigure(snapshot.shape, key, PropertyAttributes::DEFAULT_DATA)
+                .transition_reconfigure_kind(
+                    snapshot.shape,
+                    key,
+                    PropertyKind::Data,
+                    PropertyAttributes::DEFAULT_DATA,
+                )
                 .map_err(ExecutionError::Shape)?;
-            self.set_object_shape(object, shape)?;
-            return self.update_property_slot(snapshot, key, property.slot, value);
+            self.update_property_slot(snapshot, key, property.slot, value)?;
+            return self.set_object_shape(object, shape);
         }
         if self.is_function_metadata_property(receiver, key)? {
             return Err(ExecutionError::ReadOnlyProperty(receiver));
@@ -211,9 +234,29 @@ impl Isolate {
         value: Value,
         attributes: PropertyAttributes,
     ) -> Result<(), ExecutionError> {
+        self.add_property_slot_with_kind(
+            object,
+            snapshot,
+            key,
+            PropertyKind::Data,
+            value,
+            attributes,
+        )
+    }
+
+    /// Publishes one kind-aware slot while preserving the compact shared Value backing.
+    pub(super) fn add_property_slot_with_kind(
+        &mut self,
+        object: ObjectReceiver,
+        snapshot: OrdinaryObject,
+        key: PropertyKey,
+        kind: PropertyKind,
+        value: Value,
+        attributes: PropertyAttributes,
+    ) -> Result<(), ExecutionError> {
         let new_shape = self
             .shapes
-            .transition_add(snapshot.shape, key, attributes)
+            .transition_add_kind(snapshot.shape, key, kind, attributes)
             .map_err(ExecutionError::Shape)?;
         let new_length = self.shapes.property_count(new_shape) as usize;
         let mut slots = Vec::new();

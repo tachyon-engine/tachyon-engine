@@ -1268,6 +1268,9 @@ impl Isolate {
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
+        self.fiber
+            .completions
+            .set_limit(self.stack_limits.max_completions);
         self.fiber.pending_exception = None;
         self.reserve_entry_state(layout, register_count)?;
         self.fiber
@@ -1999,6 +2002,11 @@ impl Isolate {
     /// Selects top-level completion or the hot ordinary-callee frame return path.
     #[inline(always)]
     fn finish_return(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion = CompletionRecord::return_value(value);
+        debug_assert_eq!(completion.kind(), CompletionKind::Return);
+        let value = completion
+            .value()
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
         if self.fiber.frames.len() == 1 {
             return Ok(Some(RunOutcome::Completed(value)));
         }
@@ -2068,6 +2076,11 @@ impl Isolate {
         value: Value,
         mut instruction_offset: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion = CompletionRecord::throw(value);
+        debug_assert_eq!(completion.kind(), CompletionKind::Throw);
+        let value = completion
+            .value()
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
         loop {
             let frame = *self
                 .fiber
@@ -2163,8 +2176,15 @@ impl Isolate {
             .map_err(|_| ExecutionError::HandlerAllocationFailed)?;
         self.fiber
             .completions
-            .try_reserve_exact(completion_depth)
-            .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
+            .reserve(completion_depth)
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
         Ok(())
     }
 

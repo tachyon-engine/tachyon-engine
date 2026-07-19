@@ -310,6 +310,21 @@ impl Trace for SymbolValue {
     }
 }
 
+/// GC-managed accessor payload stored behind one ordinary property slot.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccessorPair {
+    pub(crate) getter: Value,
+    pub(crate) setter: Value,
+}
+
+impl Trace for AccessorPair {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.getter.trace(tracer);
+        self.setter.trace(tracer);
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
@@ -346,6 +361,47 @@ pub(crate) struct DataPropertyDescriptor {
     pub(crate) writable: Option<bool>,
     pub(crate) enumerable: Option<bool>,
     pub(crate) configurable: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GenericPropertyDescriptor {
+    pub(crate) enumerable: Option<bool>,
+    pub(crate) configurable: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AccessorPropertyDescriptor {
+    pub(crate) getter: Option<Value>,
+    pub(crate) setter: Option<Value>,
+    pub(crate) enumerable: Option<bool>,
+    pub(crate) configurable: Option<bool>,
+}
+
+/// Closed ToPropertyDescriptor result; data and accessor fields cannot coexist in one variant.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PropertyDescriptor {
+    Generic(GenericPropertyDescriptor),
+    Data(DataPropertyDescriptor),
+    Accessor(AccessorPropertyDescriptor),
+}
+
+impl Default for PropertyDescriptor {
+    fn default() -> Self {
+        Self::Generic(GenericPropertyDescriptor::default())
+    }
+}
+
+impl From<DataPropertyDescriptor> for PropertyDescriptor {
+    fn from(descriptor: DataPropertyDescriptor) -> Self {
+        if descriptor.value.is_none() && descriptor.writable.is_none() {
+            Self::Generic(GenericPropertyDescriptor {
+                enumerable: descriptor.enumerable,
+                configurable: descriptor.configurable,
+            })
+        } else {
+            Self::Data(descriptor)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -390,6 +446,7 @@ impl Trace for FunctionObject {
 
 #[derive(Clone, Copy)]
 pub(crate) struct VmTypes {
+    pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) environment: GcType<Environment>,
@@ -452,6 +509,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ImmutableEnvironmentBinding { .. }
         | ExecutionError::NonExtensibleObject(_)
         | ExecutionError::ReadOnlyProperty(_)
+        | ExecutionError::InvalidPropertyDescriptor(_)
         | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
