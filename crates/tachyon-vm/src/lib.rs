@@ -766,51 +766,6 @@ struct RegisterWindow {
     len: usize,
 }
 
-/// Direct views of the shallow captured-environment chain for one no-GC cursor epoch.
-struct EnvironmentCursor {
-    entries: [Option<NonNull<Environment>>; tuning::environments::CURSOR_CACHED_DEPTH],
-}
-
-impl EnvironmentCursor {
-    #[inline(always)]
-    const fn empty() -> Self {
-        Self {
-            entries: [None; tuning::environments::CURSOR_CACHED_DEPTH],
-        }
-    }
-
-    /// Reads one dynamically-sized slot after cursor entry validated every cached environment.
-    ///
-    /// # Safety
-    ///
-    /// The traced frame environment chain must remain alive and non-moving, and no collection may
-    /// run between cursor construction and this access. `depth` may exceed the cache and `slot` may
-    /// exceed the selected environment; both cases safely return `None`.
-    #[inline(always)]
-    unsafe fn read(&self, depth: u32, slot: u32) -> Option<Value> {
-        let environment = self.entries.get(depth as usize).copied().flatten()?;
-        // SAFETY: The caller preserves the checked environment owner for this no-GC epoch.
-        let environment = unsafe { environment.as_ref() };
-        environment.slots.get(slot as usize).copied()
-    }
-
-    /// Writes a primitive slot value; heap references must use the barrier-aware slow path.
-    ///
-    /// # Safety
-    ///
-    /// The same owner/no-GC rules as `read` apply, this cursor must have exclusive isolate access,
-    /// and `value` must not contain a heap reference requiring a generational write barrier.
-    #[inline(always)]
-    unsafe fn write_primitive(&mut self, depth: u32, slot: u32, value: Value) -> Option<()> {
-        debug_assert!(value.as_heap_ref().is_none());
-        let mut environment = self.entries.get(depth as usize).copied().flatten()?;
-        // SAFETY: The caller preserves exclusive isolate access and the environment owner.
-        let environment = unsafe { environment.as_mut() };
-        *environment.slots.get_mut(slot as usize)? = value;
-        Some(())
-    }
-}
-
 impl RegisterWindow {
     /// Checks the activation boundary once before verified operands use unchecked slot access.
     fn new(registers: &mut [Value], base: usize, len: usize) -> Option<Self> {
@@ -6944,22 +6899,15 @@ impl Isolate {
         &mut self,
         budget: &mut ExecutionBudget,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let (mut code, mut function, mut pc, mut base, mut environment) = {
+        let (mut code, mut function, mut pc, mut base) = {
             let frame = self
                 .fiber
                 .frames
                 .last()
                 .expect("entry frame exists while executing");
-            (
-                frame.code,
-                frame.function,
-                frame.pc,
-                frame.base,
-                frame.environment,
-            )
+            (frame.code, frame.function, frame.pc, frame.base)
         };
-        let (mut cursor, mut registers, mut environments) =
-            self.execution_cursor(code, function, base, environment)?;
+        let (mut cursor, mut registers) = self.execution_cursor(code, function, base)?;
         for _ in 0..N {
             if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
                 self.flush_cursor_pc(pc);
@@ -6979,12 +6927,7 @@ impl Isolate {
             // decoder only returns verifier-approved operands, and no hot operation can resize or
             // expose the register backing before a Slow result invalidates the cursor.
             if unsafe {
-                execute_verified_hot_instruction(
-                    &mut registers,
-                    &mut environments,
-                    instruction,
-                    &mut next_pc,
-                )
+                execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
             } == HotControl::Continue
             {
                 pc = next_pc;
@@ -7010,22 +6953,15 @@ impl Isolate {
             if let Some(outcome) = outcome {
                 return Ok(Some(outcome));
             }
-            (code, function, pc, base, environment) = {
+            (code, function, pc, base) = {
                 let frame = self
                     .fiber
                     .frames
                     .last()
                     .expect("continued execution retains an active frame");
-                (
-                    frame.code,
-                    frame.function,
-                    frame.pc,
-                    frame.base,
-                    frame.environment,
-                )
+                (frame.code, frame.function, frame.pc, frame.base)
             };
-            (cursor, registers, environments) =
-                self.execution_cursor(code, function, base, environment)?;
+            (cursor, registers) = self.execution_cursor(code, function, base)?;
         }
         self.flush_cursor_pc(pc);
         Ok(None)
@@ -7038,8 +6974,7 @@ impl Isolate {
         code: CodeId,
         function: FunctionId,
         base: u32,
-        environment: Option<GcRef<Environment>>,
-    ) -> Result<(BytecodeCursor, RegisterWindow, EnvironmentCursor), ExecutionError> {
+    ) -> Result<(BytecodeCursor, RegisterWindow), ExecutionError> {
         let (bytecode, register_count) = {
             let function = self
                 .loaded_code(code)?
@@ -7053,41 +6988,13 @@ impl Isolate {
                 function.layout().register_count,
             )
         };
-        let environments = self.resolve_environment_cursor(environment)?;
         let registers = RegisterWindow::new(
             &mut self.fiber.registers,
             base as usize,
             register_count as usize,
         )
         .ok_or(ExecutionError::RegisterWindowTooLarge(register_count))?;
-        Ok((bytecode, registers, environments))
-    }
-
-    /// Validates a shallow traced environment chain once before the no-GC hot cursor uses it.
-    fn resolve_environment_cursor(
-        &mut self,
-        environment: Option<GcRef<Environment>>,
-    ) -> Result<EnvironmentCursor, ExecutionError> {
-        let mut cursor = EnvironmentCursor::empty();
-        let Some(mut current) = environment else {
-            return Ok(cursor);
-        };
-        let environment_type = self.types.environment;
-        self.heap.with_no_gc_scope(|no_gc| {
-            for entry in &mut cursor.entries {
-                let environment = no_gc
-                    .borrow_reference_mut(current, environment_type)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let parent = environment.parent;
-                *entry = Some(NonNull::from(&mut *environment));
-                let Some(parent) = parent else {
-                    break;
-                };
-                current = parent;
-            }
-            Ok::<(), ExecutionError>(())
-        })?;
-        Ok(cursor)
+        Ok((bytecode, registers))
     }
 
     /// Publishes the local cursor before any slow operation can observe or mutate the active fiber.
@@ -8952,13 +8859,11 @@ impl Int32PropertyKey {
 /// # Safety
 ///
 /// `instruction` must come from the verified function used to create `registers`; the register
-/// backing and cached environment chain must remain exclusively owned and alive without collection,
-/// and register allocation/length must not change until this function returns. A `Slow` result ends
-/// that epoch before general isolate code runs.
+/// backing must remain exclusively owned and must not change allocation or length until this
+/// function returns. A `Slow` result ends that epoch before general isolate code runs.
 #[inline(always)]
 unsafe fn execute_verified_hot_instruction(
     registers: &mut RegisterWindow,
-    environments: &mut EnvironmentCursor,
     instruction: DecodedInstruction,
     next_pc: &mut WordOffset,
 ) -> HotControl {
@@ -9073,24 +8978,6 @@ unsafe fn execute_verified_hot_instruction(
                     return HotControl::Slow;
                 };
                 registers.write(operands[0], boolean_value(equal));
-                HotControl::Continue
-            }
-            Opcode::LoadEnvironment => {
-                let Some(value) = environments.read(operands[1], operands[2]) else {
-                    return HotControl::Slow;
-                };
-                registers.write(operands[0], value);
-                HotControl::Continue
-            }
-            Opcode::StoreEnvironment => {
-                let value = registers.read(operands[0]);
-                if value.as_heap_ref().is_some()
-                    || environments
-                        .write_primitive(operands[1], operands[2], value)
-                        .is_none()
-                {
-                    return HotControl::Slow;
-                }
                 HotControl::Continue
             }
             Opcode::Jump => {
@@ -10795,66 +10682,6 @@ mod tests {
     }
 
     #[test]
-    /// Pins primitive environment load/store to one validated no-GC cursor epoch.
-    fn environment_cursor_reads_and_writes_checked_slots() {
-        let module = captured_environment_module();
-        let mut isolate = test_isolate();
-        let code = isolate.load_module(&module).unwrap();
-        isolate.enter(code, module.entry_function()).unwrap();
-        isolate
-            .store_environment(0, 0, Value::from_i32(41))
-            .unwrap();
-        let environment = isolate.fiber.frames.last().unwrap().environment;
-        {
-            let mut environments = isolate.resolve_environment_cursor(environment).unwrap();
-            let mut registers = [
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_i32(0),
-                Value::from_i32(0),
-            ];
-            let mut window = RegisterWindow::new(&mut registers, 0, 3).unwrap();
-            let instruction = |opcode| DecodedInstruction {
-                opcode,
-                width: OperandWidth::Compact,
-                operands: [0, 0, 0],
-                operand_count: opcode.operand_count() as u8,
-                word_len: 1,
-            };
-            // SAFETY: the active frame roots this non-moving environment, the fixed register array
-            // does not reallocate, and no isolate/heap operation occurs while either cursor is used.
-            unsafe {
-                assert_eq!(
-                    execute_verified_hot_instruction(
-                        &mut window,
-                        &mut environments,
-                        instruction(Opcode::LoadEnvironment),
-                        &mut WordOffset::new(1),
-                    ),
-                    HotControl::Continue
-                );
-                assert_eq!(window.read(0).as_i32(), Some(41));
-                window.write(0, Value::from_i32(42));
-                assert_eq!(
-                    execute_verified_hot_instruction(
-                        &mut window,
-                        &mut environments,
-                        instruction(Opcode::StoreEnvironment),
-                        &mut WordOffset::new(1),
-                    ),
-                    HotControl::Continue
-                );
-                assert!(environments.read(0, 1).is_none());
-                assert!(
-                    environments
-                        .read(tuning::environments::CURSOR_CACHED_DEPTH as u32, 0)
-                        .is_none()
-                );
-            }
-        }
-        assert_eq!(isolate.load_environment(0, 0).unwrap().as_i32(), Some(42));
-    }
-
-    #[test]
     /// Differentials every allocation-free opcode against the checked dispatcher implementation.
     fn verified_hot_kernel_matches_checked_dispatch() {
         let i = Value::from_i32;
@@ -10939,17 +10766,10 @@ mod tests {
                 word_len: 1,
             };
             let mut fast_pc = fallthrough;
-            let mut environments = EnvironmentCursor::empty();
             // SAFETY: the local three-slot array covers every operand in this explicit case table
             // and cannot move or resize before the hot operation returns.
-            let control = unsafe {
-                execute_verified_hot_instruction(
-                    &mut window,
-                    &mut environments,
-                    instruction,
-                    &mut fast_pc,
-                )
-            };
+            let control =
+                unsafe { execute_verified_hot_instruction(&mut window, instruction, &mut fast_pc) };
             assert_eq!(control, HotControl::Continue, "{opcode:?}");
             assert_eq!(
                 fast_registers,
@@ -10962,7 +10782,6 @@ mod tests {
         let heap_value = Value::from_heap_ref(RawHeapRef::new(1).unwrap());
         let mut registers = [heap_value, heap_value, Value::from_i32(0)];
         let mut window = RegisterWindow::new(&mut registers, 0, 3).unwrap();
-        let mut environments = EnvironmentCursor::empty();
         for opcode in [Opcode::Not, Opcode::JumpIfFalse, Opcode::JumpIfTrue] {
             let instruction = DecodedInstruction {
                 opcode,
@@ -10977,7 +10796,6 @@ mod tests {
                 unsafe {
                     execute_verified_hot_instruction(
                         &mut window,
-                        &mut environments,
                         instruction,
                         &mut WordOffset::new(1),
                     )
