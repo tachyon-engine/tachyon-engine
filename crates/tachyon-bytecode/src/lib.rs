@@ -1035,6 +1035,149 @@ impl VerifiedBytecode {
     }
 }
 
+/// A zero-allocation decoder for instruction boundaries proven by `VerifiedBytecode`.
+///
+/// Construction retains the verified bytecode lifetime, so its immutable word backing cannot be
+/// replaced or released while this decoder is in use. Decoding is unsafe because an arbitrary word
+/// offset does not carry the instruction-boundary proof stored in `VerifiedBytecode::starts`.
+#[derive(Clone, Copy)]
+pub struct VerifiedInstructionDecoder<'bytecode> {
+    words: &'bytecode [u32],
+}
+
+impl<'bytecode> VerifiedInstructionDecoder<'bytecode> {
+    /// Borrows the immutable words of one completely verified bytecode stream.
+    #[must_use]
+    pub fn new(bytecode: &'bytecode VerifiedBytecode) -> Self {
+        Self {
+            words: bytecode.bytecode().words(),
+        }
+    }
+
+    /// Decodes one verifier-proven instruction without repeating format or bounds validation.
+    ///
+    /// # Safety
+    ///
+    /// `offset` must be an instruction start in the same `VerifiedBytecode` used to construct this
+    /// decoder. In particular, `VerifiedBytecode::is_instruction_start(offset)` must return `true`.
+    /// Verification guarantees that the header contains a valid opcode and encoding format, every
+    /// encoded operand word is present, and reserved bits satisfy the encoding contract.
+    #[must_use]
+    #[inline(always)]
+    pub unsafe fn decode_unchecked(&self, offset: WordOffset) -> DecodedInstruction {
+        let start = offset.index() as usize;
+        // SAFETY: the caller guarantees `start` is a verified instruction boundary.
+        let header = unsafe { *self.words.get_unchecked(start) };
+        let raw = header as u8;
+        let format = raw & FORMAT_MASK;
+        let semantic_opcode = (raw & OPCODE_MASK) + if format == ESCAPE_FORMAT { 64 } else { 0 };
+        // SAFETY: verification rejected every base or extended opcode outside `Opcode`.
+        let opcode = unsafe { core::mem::transmute::<u8, Opcode>(semantic_opcode) };
+        let operand_count = opcode.operand_count();
+        let mut operands = [0; 3];
+
+        if format == 0 {
+            decode_compact_operands(header, operand_count, &mut operands);
+            return decoded_instruction(opcode, OperandWidth::Compact, operands, operand_count, 1);
+        }
+        if format == NORMAL_FORMAT {
+            // SAFETY: verification proved the packed operand words are present at this boundary.
+            unsafe { self.decode_normal_operands(start, operand_count, &mut operands) };
+            return decoded_instruction(
+                opcode,
+                OperandWidth::Normal,
+                operands,
+                operand_count,
+                1 + operand_count.div_ceil(2),
+            );
+        }
+        // Wide base instructions and escaped extended instructions both store full `u32` operands.
+        // SAFETY: verification proved all `operand_count` words are present at this boundary.
+        unsafe { self.decode_full_width_operands(start, operand_count, &mut operands) };
+        decoded_instruction(
+            opcode,
+            OperandWidth::Wide,
+            operands,
+            operand_count,
+            1 + operand_count,
+        )
+    }
+
+    /// Restores up to three packed `u16` operands from verifier-proven backing words.
+    #[inline(always)]
+    unsafe fn decode_normal_operands(
+        &self,
+        start: usize,
+        operand_count: usize,
+        operands: &mut [u32; 3],
+    ) {
+        if operand_count != 0 {
+            // SAFETY: the caller guarantees the complete normal instruction is in `self.words`.
+            let first = unsafe { *self.words.get_unchecked(start + 1) };
+            operands[0] = first & 0xffff;
+            if operand_count > 1 {
+                operands[1] = first >> 16;
+            }
+        }
+        if operand_count > 2 {
+            // SAFETY: three-operand normal instructions contain a second packed operand word.
+            operands[2] = unsafe { *self.words.get_unchecked(start + 2) } & 0xffff;
+        }
+    }
+
+    /// Restores up to three full-width operands from verifier-proven backing words.
+    #[inline(always)]
+    unsafe fn decode_full_width_operands(
+        &self,
+        start: usize,
+        operand_count: usize,
+        operands: &mut [u32; 3],
+    ) {
+        if operand_count > 0 {
+            // SAFETY: the caller guarantees the complete wide/escape instruction is in `self.words`.
+            operands[0] = unsafe { *self.words.get_unchecked(start + 1) };
+        }
+        if operand_count > 1 {
+            // SAFETY: two-operand wide/escape instructions contain this word.
+            operands[1] = unsafe { *self.words.get_unchecked(start + 2) };
+        }
+        if operand_count > 2 {
+            // SAFETY: three-operand wide/escape instructions contain this word.
+            operands[2] = unsafe { *self.words.get_unchecked(start + 3) };
+        }
+    }
+}
+
+#[inline(always)]
+fn decode_compact_operands(header: u32, operand_count: usize, operands: &mut [u32; 3]) {
+    if operand_count > 0 {
+        operands[0] = (header >> 8) & 0xff;
+    }
+    if operand_count > 1 {
+        operands[1] = (header >> 16) & 0xff;
+    }
+    if operand_count > 2 {
+        operands[2] = header >> 24;
+    }
+}
+
+#[inline(always)]
+fn decoded_instruction(
+    opcode: Opcode,
+    width: OperandWidth,
+    operands: [u32; 3],
+    operand_count: usize,
+    word_len: usize,
+) -> DecodedInstruction {
+    DecodedInstruction {
+        opcode,
+        width,
+        operands,
+        operand_count: operand_count as u8,
+        word_len: word_len as u8,
+    }
+}
+
 /// An immutable constant-pool entry that is independent from every isolate and runtime heap.
 ///
 /// Strings use owned UTF-16 code units so literals containing lone surrogate code points retain
@@ -2152,6 +2295,117 @@ mod tests {
             .width,
             OperandWidth::Wide
         );
+    }
+
+    #[test]
+    /// Cross-checks every base width and operand count plus all extended operand counts.
+    fn verified_decoder_matches_checked_decoder_at_stream_boundaries() {
+        let mut words = Vec::new();
+        let mut cases = Vec::new();
+        let base_cases = [
+            (
+                Opcode::Nop,
+                [
+                    encode_instruction(Opcode::Nop, &[]).unwrap(),
+                    vec![u32::from(Opcode::Nop as u8 | NORMAL_FORMAT)],
+                    vec![u32::from(Opcode::Nop as u8 | WIDE_FORMAT)],
+                ],
+            ),
+            (
+                Opcode::LoadUndefined,
+                [
+                    encode_instruction(Opcode::LoadUndefined, &[1]).unwrap(),
+                    encode_instruction(Opcode::LoadUndefined, &[256]).unwrap(),
+                    encode_instruction(Opcode::LoadUndefined, &[65_536]).unwrap(),
+                ],
+            ),
+            (
+                Opcode::LoadImmediate,
+                [
+                    encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap(),
+                    encode_instruction(Opcode::LoadImmediate, &[0, 256]).unwrap(),
+                    encode_instruction(Opcode::LoadImmediate, &[0, 65_536]).unwrap(),
+                ],
+            ),
+            (
+                Opcode::Add,
+                [
+                    encode_instruction(Opcode::Add, &[0, 1, 2]).unwrap(),
+                    encode_instruction(Opcode::Add, &[0, 1, 256]).unwrap(),
+                    encode_instruction(Opcode::Add, &[0, 1, 65_536]).unwrap(),
+                ],
+            ),
+        ];
+        for (opcode, encodings) in base_cases {
+            for (encoding, width) in encodings.into_iter().zip([
+                OperandWidth::Compact,
+                OperandWidth::Normal,
+                OperandWidth::Wide,
+            ]) {
+                append_decoder_case(&mut words, &mut cases, encoding, opcode, width);
+            }
+        }
+        for (opcode, operands) in [
+            (Opcode::CreateArray, &[1][..]),
+            (Opcode::CreateForInIterator, &[2, 1][..]),
+            (Opcode::DeleteById, &[2, 1, 0][..]),
+        ] {
+            append_decoder_case(
+                &mut words,
+                &mut cases,
+                encode_instruction(opcode, operands).unwrap(),
+                opcode,
+                OperandWidth::Wide,
+            );
+        }
+        append_decoder_case(
+            &mut words,
+            &mut cases,
+            encode_instruction(Opcode::Return, &[65_536]).unwrap(),
+            Opcode::Return,
+            OperandWidth::Wide,
+        );
+
+        let verified = Bytecode::from_words(words)
+            .verify(VerifyContext {
+                register_count: 65_537,
+                ..context()
+            })
+            .unwrap();
+        let decoder = VerifiedInstructionDecoder::new(&verified);
+        let checked_words = verified.bytecode().words();
+        assert_eq!(cases.first().unwrap().0, WordOffset::new(0));
+
+        for &(offset, expected_opcode, expected_width) in &cases {
+            assert!(verified.is_instruction_start(offset));
+            let checked = decode_instruction(checked_words, offset).unwrap();
+            // SAFETY: every recorded offset was appended as one complete instruction and the whole
+            // stream was accepted by the exact `VerifiedBytecode` borrowed by `decoder`.
+            let fast = unsafe { decoder.decode_unchecked(offset) };
+            assert_eq!(fast, checked);
+            assert_eq!(fast.opcode, expected_opcode);
+            assert_eq!(fast.width, expected_width);
+        }
+
+        let last_offset = cases.last().unwrap().0;
+        let last = decode_instruction(checked_words, last_offset).unwrap();
+        assert_eq!(last.opcode, Opcode::Return);
+        assert_eq!(last.width, OperandWidth::Wide);
+        assert_eq!(
+            last_offset.index() as usize + usize::from(last.word_len),
+            checked_words.len()
+        );
+    }
+
+    fn append_decoder_case(
+        words: &mut Vec<u32>,
+        cases: &mut Vec<(WordOffset, Opcode, OperandWidth)>,
+        encoding: Vec<u32>,
+        opcode: Opcode,
+        width: OperandWidth,
+    ) {
+        cases.push((WordOffset::new(words.len() as u32), opcode, width));
+        words.extend(encoding);
     }
 
     #[test]
