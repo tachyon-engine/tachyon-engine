@@ -1,0 +1,275 @@
+//! Function virtual properties, lazy prototypes, and ordinary instanceof.
+
+use super::super::*;
+
+impl Isolate {
+    /// Exposes callable metadata as non-enumerable own virtual data properties.
+    pub(super) fn function_metadata_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let Ok(function) = self.resolve_function_object(receiver) else {
+            return Ok(None);
+        };
+        match function.executable {
+            FunctionExecutable::Bound(data) => {
+                let metadata = self.bound_function_snapshot(data)?;
+                if key == self.length_atom()? {
+                    return Ok(Some(metadata.length));
+                }
+                if key == self.name_atom()? {
+                    return Ok(Some(metadata.name));
+                }
+                Ok(None)
+            }
+            FunctionExecutable::Native(native) => {
+                if key == self.length_atom()? {
+                    return Ok(Some(Value::from_i32(native.length())));
+                }
+                if key != self.name_atom()? {
+                    return Ok(None);
+                }
+                let name = JsString::try_from_latin1(native.name().as_bytes())
+                    .map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
+            FunctionExecutable::Bytecode { code, function, .. } => {
+                let is_length = key == self.length_atom()?;
+                let is_name = !is_length && key == self.name_atom()?;
+                if !is_length && !is_name {
+                    return Ok(None);
+                }
+                let template = self
+                    .loaded_code(code)?
+                    .module
+                    .function(function)
+                    .ok_or(ExecutionError::MissingEntryFunction(function))?;
+                if is_length {
+                    return Ok(Some(Value::from_i32(
+                        i32::try_from(template.layout().function_length).unwrap_or(i32::MAX),
+                    )));
+                }
+                let name = template
+                    .layout()
+                    .name_scope
+                    .and_then(|scope| {
+                        self.loaded_code(code)
+                            .ok()?
+                            .module
+                            .scope_names()
+                            .get(scope as usize)
+                    })
+                    .map_or("", AsRef::as_ref);
+                let name =
+                    JsString::try_from_str(name).map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
+        }
+    }
+
+    /// Tests the virtual metadata key without materializing a runtime name string.
+    pub(super) fn is_function_metadata_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+    ) -> Result<bool, ExecutionError> {
+        if self.resolve_function_object(receiver).is_err() {
+            return Ok(false);
+        }
+        Ok(key == self.length_atom()? || key == self.name_atom()?)
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_function_prototype_property(&mut self, receiver: Value, key: AtomId) -> bool {
+        let is_prototype_name = self.intrinsic_property_atoms.prototype == Some(key)
+            || self
+                .atoms
+                .get(key)
+                .is_some_and(|name| name.equals_latin1(b"prototype"));
+        if !is_prototype_name {
+            return false;
+        }
+        self.resolve_function_object(receiver)
+            .is_ok_and(|function| match function.executable {
+                FunctionExecutable::Bytecode { .. } => true,
+                FunctionExecutable::Native(native) => native.is_constructor(),
+                FunctionExecutable::Bound(_) => false,
+            })
+    }
+
+    /// Materializes the spec-visible function prototype only on first observation or construction.
+    pub(super) fn ensure_function_prototype(
+        &mut self,
+        function: Value,
+    ) -> Result<Value, ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        let existing = self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(function, self.types.function)
+                    .map(|function| function.function_prototype)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if let Some(prototype) = existing {
+            return Ok(prototype);
+        }
+        self.materialize_function_prototype(function)
+    }
+
+    /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
+    fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
+        let constructor_atom = self.constructor_atom()?;
+        let shape = self
+            .shapes
+            .transition_add(
+                ShapeId::EMPTY,
+                constructor_atom,
+                PropertyAttributes::DEFAULT_DATA,
+            )
+            .map_err(ExecutionError::Shape)?;
+        let mut roots = PrototypeInitializationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            function,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.property_storage,
+                0,
+                PropertyStorage {
+                    slots: Box::new([roots.function]),
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let prototype = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                OrdinaryObject {
+                    shape,
+                    extensible: true,
+                    storage: Some(storage),
+                    prototype: Value::from_immediate(Immediate::Null),
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let function = roots.function;
+        self.set_function_prototype(function, Value::from_heap_ref(prototype.raw()))?;
+        Ok(Value::from_heap_ref(prototype.raw()))
+    }
+
+    /// Replaces the inline function prototype slot and records its possible young edge.
+    pub(crate) fn set_function_prototype(
+        &mut self,
+        function: Value,
+        prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(function, self.types.function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.function_prototype = Some(prototype);
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(function, prototype)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Replaces one callable's ordinary `[[Prototype]]` edge and publishes the GC barrier.
+    pub(crate) fn set_function_internal_prototype(
+        &mut self,
+        function: Value,
+        prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(function, self.types.function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.ordinary.prototype = prototype;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(function, prototype)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Implements ordinary HasInstance over the current constructor prototype and object chain.
+    pub(crate) fn ordinary_instance_of(
+        &mut self,
+        value: Value,
+        mut constructor: Value,
+    ) -> Result<bool, ExecutionError> {
+        loop {
+            let function = self.resolve_function_object(constructor)?;
+            let FunctionExecutable::Bound(data) = function.executable else {
+                break;
+            };
+            constructor = self.bound_function_snapshot(data)?.call_target;
+        }
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self.get_data_property(constructor, prototype_atom)?.ok_or(
+            ExecutionError::InvalidInstanceofPrototype(Value::from_immediate(Immediate::Undefined)),
+        )?;
+        if !self.is_object_value(prototype) {
+            return Err(ExecutionError::InvalidInstanceofPrototype(prototype));
+        }
+        if !self.is_object_value(value) {
+            return Ok(false);
+        }
+        let (_, mut snapshot) = self.object_snapshot(value)?;
+        loop {
+            let candidate = snapshot.prototype;
+            if candidate.as_immediate() == Some(Immediate::Null) {
+                return Ok(false);
+            }
+            if candidate == prototype {
+                return Ok(true);
+            }
+            let (_, next) = self.object_snapshot(candidate)?;
+            snapshot = next;
+        }
+    }
+}
