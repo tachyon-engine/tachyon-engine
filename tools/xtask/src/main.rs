@@ -585,8 +585,8 @@ fn run_tachyon_opcode_profile(script_id: &str) -> Result<(), String> {
         "diagnostic_elapsed_ns": metrics.elapsed_ns,
         "executed_instructions": executed,
         "cursor": {
-            "batch_cursor_binds": profile.batch_cursor_binds(),
-            "batch_flushes": profile.batch_flushes(),
+            "kernel_cursor_binds": profile.kernel_cursor_binds(),
+            "poll_groups": profile.poll_groups(),
             "budget_flushes": profile.budget_flushes(),
             "slow_flushes": profile.slow_flushes(),
             "slow_rebinds": profile.slow_rebinds(),

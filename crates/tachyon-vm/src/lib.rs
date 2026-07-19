@@ -6914,22 +6914,18 @@ impl Isolate {
     ) -> Result<RunOutcome, ExecutionError> {
         let entry_function = self.loaded_code(code)?.module.entry_function();
         self.enter(code, entry_function)?;
-        loop {
-            if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
-                return Ok(RunOutcome::BudgetExhausted);
-            }
-            if let Some(outcome) = self.execute_batch::<N, UNBOUNDED>(&mut budget)? {
-                return Ok(outcome);
-            }
+        if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
+            return Ok(RunOutcome::BudgetExhausted);
         }
+        self.execute_kernel::<N, UNBOUNDED>(&mut budget)
     }
 
-    /// Executes one fixed-size batch while const-folding budget work only for the MAX/MAX sentinel.
+    /// Retains one verified cursor across fixed-size polling groups and exact slow boundaries.
     #[inline(always)]
-    fn execute_batch<const N: usize, const UNBOUNDED: bool>(
+    fn execute_kernel<const N: usize, const UNBOUNDED: bool>(
         &mut self,
         budget: &mut ExecutionBudget,
-    ) -> Result<Option<RunOutcome>, ExecutionError> {
+    ) -> Result<RunOutcome, ExecutionError> {
         let (mut code, mut function, mut pc, mut base) = {
             let frame = self
                 .fiber
@@ -6940,108 +6936,108 @@ impl Isolate {
         };
         let (mut cursor, mut registers) = self.execution_cursor(code, function, base)?;
         #[cfg(feature = "opcode-profile")]
-        self.execution_profile.record_batch_cursor_bind();
-        for _ in 0..N {
-            if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
-                #[cfg(feature = "opcode-profile")]
-                self.execution_profile.record_budget_flush();
-                self.flush_cursor_pc(pc);
-                return Ok(Some(RunOutcome::BudgetExhausted));
-            }
-            let instruction_offset = pc;
-            // SAFETY: entry, fallthrough, branches, handlers, and saved return PCs are all verifier-
-            // approved instruction starts; every slow exit rebuilds the cursor before resuming.
-            let instruction = unsafe { cursor.decode(instruction_offset) };
-            let mut next_pc =
-                WordOffset::new(instruction_offset.index() + u32::from(instruction.word_len));
-            #[cfg(feature = "opcode-profile")]
-            let fallthrough_pc = next_pc;
-            if !UNBOUNDED {
-                budget.fuel -= 1;
-                budget.quantum -= 1;
-            }
-            // SAFETY: `execution_cursor` checked this verified function's complete window, the
-            // decoder only returns verifier-approved operands, and no hot operation can resize or
-            // expose the register backing before a Slow result invalidates the cursor.
-            let hot_control = unsafe {
-                execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
-            };
-            #[cfg(feature = "opcode-profile")]
-            self.execution_profile
-                .record_instruction(instruction.opcode, hot_control == HotControl::Continue);
-            if hot_control == HotControl::Continue {
-                #[cfg(feature = "opcode-profile")]
-                if is_conditional_branch(instruction.opcode) {
-                    self.execution_profile
-                        .record_branch(instruction.opcode, next_pc != fallthrough_pc);
+        self.execution_profile.record_kernel_cursor_bind();
+        loop {
+            for _ in 0..N {
+                if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
+                    #[cfg(feature = "opcode-profile")]
+                    self.execution_profile.record_budget_flush();
+                    self.flush_cursor_pc(pc);
+                    return Ok(RunOutcome::BudgetExhausted);
                 }
-                pc = next_pc;
-                continue;
-            }
+                let instruction_offset = pc;
+                // SAFETY: entry, fallthrough, branches, handlers, and saved return PCs are all verifier-
+                // approved instruction starts; every slow exit rebuilds the cursor before resuming.
+                let instruction = unsafe { cursor.decode(instruction_offset) };
+                let mut next_pc =
+                    WordOffset::new(instruction_offset.index() + u32::from(instruction.word_len));
+                #[cfg(feature = "opcode-profile")]
+                let fallthrough_pc = next_pc;
+                if !UNBOUNDED {
+                    budget.fuel -= 1;
+                    budget.quantum -= 1;
+                }
+                // SAFETY: `execution_cursor` checked this verified function's complete window, the
+                // decoder only returns verifier-approved operands, and no hot operation can resize or
+                // expose the register backing before a Slow result invalidates the cursor.
+                let hot_control = unsafe {
+                    execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
+                };
+                #[cfg(feature = "opcode-profile")]
+                self.execution_profile
+                    .record_instruction(instruction.opcode, hot_control == HotControl::Continue);
+                if hot_control == HotControl::Continue {
+                    #[cfg(feature = "opcode-profile")]
+                    if is_conditional_branch(instruction.opcode) {
+                        self.execution_profile
+                            .record_branch(instruction.opcode, next_pc != fallthrough_pc);
+                    }
+                    pc = next_pc;
+                    continue;
+                }
 
-            #[cfg(feature = "opcode-profile")]
-            self.execution_profile.record_slow_flush();
-            self.flush_cursor_pc(next_pc);
-            let outcome = match self.dispatch(
-                code,
-                instruction_offset,
-                instruction.opcode,
-                instruction.operands,
-                base,
-            ) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    let Some(kind) = execution_error_kind(&error) else {
-                        #[cfg(feature = "opcode-profile")]
-                        self.execution_profile.record_fault_slow_exit();
-                        return Err(error);
-                    };
-                    match self.throw_native_error(kind, instruction_offset) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
+                #[cfg(feature = "opcode-profile")]
+                self.execution_profile.record_slow_flush();
+                self.flush_cursor_pc(next_pc);
+                let outcome = match self.dispatch(
+                    code,
+                    instruction_offset,
+                    instruction.opcode,
+                    instruction.operands,
+                    base,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        let Some(kind) = execution_error_kind(&error) else {
                             #[cfg(feature = "opcode-profile")]
                             self.execution_profile.record_fault_slow_exit();
                             return Err(error);
+                        };
+                        match self.throw_native_error(kind, instruction_offset) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                #[cfg(feature = "opcode-profile")]
+                                self.execution_profile.record_fault_slow_exit();
+                                return Err(error);
+                            }
                         }
                     }
-                }
-            };
-            if let Some(outcome) = outcome {
-                #[cfg(feature = "opcode-profile")]
-                self.execution_profile.record_terminal_slow_exit();
-                return Ok(Some(outcome));
-            }
-            #[cfg(feature = "opcode-profile")]
-            let previous_activation = (code, function, base);
-            (code, function, pc, base) = {
-                let frame = self
-                    .fiber
-                    .frames
-                    .last()
-                    .expect("continued execution retains an active frame");
-                (frame.code, frame.function, frame.pc, frame.base)
-            };
-            #[cfg(feature = "opcode-profile")]
-            if is_conditional_branch(instruction.opcode) {
-                self.execution_profile
-                    .record_branch(instruction.opcode, pc != fallthrough_pc);
-            }
-            (cursor, registers) = match self.execution_cursor(code, function, base) {
-                Ok(cursor) => cursor,
-                Err(error) => {
+                };
+                if let Some(outcome) = outcome {
                     #[cfg(feature = "opcode-profile")]
-                    self.execution_profile.record_fault_slow_exit();
-                    return Err(error);
+                    self.execution_profile.record_terminal_slow_exit();
+                    return Ok(outcome);
                 }
-            };
+                #[cfg(feature = "opcode-profile")]
+                let previous_activation = (code, function, base);
+                (code, function, pc, base) = {
+                    let frame = self
+                        .fiber
+                        .frames
+                        .last()
+                        .expect("continued execution retains an active frame");
+                    (frame.code, frame.function, frame.pc, frame.base)
+                };
+                #[cfg(feature = "opcode-profile")]
+                if is_conditional_branch(instruction.opcode) {
+                    self.execution_profile
+                        .record_branch(instruction.opcode, pc != fallthrough_pc);
+                }
+                (cursor, registers) = match self.execution_cursor(code, function, base) {
+                    Ok(cursor) => cursor,
+                    Err(error) => {
+                        #[cfg(feature = "opcode-profile")]
+                        self.execution_profile.record_fault_slow_exit();
+                        return Err(error);
+                    }
+                };
+                #[cfg(feature = "opcode-profile")]
+                self.execution_profile
+                    .record_slow_rebind(previous_activation != (code, function, base));
+            }
             #[cfg(feature = "opcode-profile")]
-            self.execution_profile
-                .record_slow_rebind(previous_activation != (code, function, base));
+            self.execution_profile.record_poll_group();
         }
-        #[cfg(feature = "opcode-profile")]
-        self.execution_profile.record_batch_flush();
-        self.flush_cursor_pc(pc);
-        Ok(None)
     }
 
     /// Resolves immutable code and checks its register window once per cursor epoch.
@@ -10751,10 +10747,10 @@ mod tests {
                 .sum::<u64>(),
             4
         );
-        assert_eq!(profile.batch_cursor_binds(), 1);
+        assert_eq!(profile.kernel_cursor_binds(), 1);
         assert_eq!(profile.slow_flushes(), 1);
         assert_eq!(profile.terminal_slow_exits(), 1);
-        assert_eq!(profile.batch_flushes(), 0);
+        assert_eq!(profile.poll_groups(), 0);
         assert_eq!(profile.slow_rebinds(), 0);
 
         isolate.reset_execution_profile();
@@ -10764,11 +10760,11 @@ mod tests {
     #[cfg(feature = "opcode-profile")]
     #[test]
     fn opcode_profile_counts_every_supported_dispatch_batch_exactly() {
-        assert_arithmetic_profile_batch::<1>(4, 3);
-        assert_arithmetic_profile_batch::<2>(2, 1);
-        assert_arithmetic_profile_batch::<4>(1, 0);
-        assert_arithmetic_profile_batch::<8>(1, 0);
-        assert_arithmetic_profile_batch::<16>(1, 0);
+        assert_arithmetic_profile_poll_group::<1>(3);
+        assert_arithmetic_profile_poll_group::<2>(1);
+        assert_arithmetic_profile_poll_group::<4>(0);
+        assert_arithmetic_profile_poll_group::<8>(0);
+        assert_arithmetic_profile_poll_group::<16>(0);
     }
 
     #[cfg(feature = "opcode-profile")]
@@ -11535,7 +11531,7 @@ mod tests {
 
     /// Checks exact cursor boundaries for one arithmetic program under a selected batch size.
     #[cfg(feature = "opcode-profile")]
-    fn assert_arithmetic_profile_batch<const N: usize>(expected_binds: u64, expected_flushes: u64) {
+    fn assert_arithmetic_profile_poll_group<const N: usize>(expected_groups: u64) {
         let mut isolate = test_isolate();
         let outcome = isolate
             .execute_with_batch::<N>(
@@ -11548,8 +11544,8 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
         let profile = isolate.execution_profile();
-        assert_eq!(profile.batch_cursor_binds(), expected_binds);
-        assert_eq!(profile.batch_flushes(), expected_flushes);
+        assert_eq!(profile.kernel_cursor_binds(), 1);
+        assert_eq!(profile.poll_groups(), expected_groups);
         assert_eq!(profile.slow_flushes(), 1);
         assert_eq!(profile.terminal_slow_exits(), 1);
         assert_eq!(profile.fault_slow_exits(), 0);
