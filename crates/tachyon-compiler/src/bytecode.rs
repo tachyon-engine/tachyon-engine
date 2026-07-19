@@ -6,9 +6,9 @@ mod lowerer;
 use lowerer::Lowerer;
 
 use tachyon_bytecode::{
-    BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule, FunctionId,
-    FunctionKind, FunctionLayout, FunctionMetadata, FunctionStrictness, HandlerEntry, Opcode,
-    RegisterId,
+    BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule,
+    EnvironmentRecordKind, EnvironmentSlotMetadata, FunctionId, FunctionKind, FunctionLayout,
+    FunctionMetadata, FunctionStrictness, HandlerEntry, Opcode, RegisterId,
 };
 
 use crate::hir::HirForInLeft;
@@ -218,6 +218,8 @@ fn lower_entry(
         suspend_points: Default::default(),
         feedback_sites: Default::default(),
         binding_plan,
+        environment_record_kind: EnvironmentRecordKind::for_function_kind(kind),
+        environment_slots: Default::default(),
     };
     Ok(CompiledFunctionTemplate::new(
         FunctionId::new(0),
@@ -232,6 +234,7 @@ struct CapturedSlot {
     slot: u32,
     name: std::sync::Arc<str>,
     mutable: bool,
+    initialized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -292,7 +295,7 @@ impl EnvironmentPlans {
                 })?;
             let mut slots = Vec::with_capacity(capacity);
             for parameter in function.parameters.iter() {
-                push_captured_slot(parameter, true, &mut slots)?;
+                push_captured_slot(parameter, true, true, &mut slots)?;
             }
             collect_captured_slots(&function.body, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
@@ -390,6 +393,7 @@ fn nearest_parent_function(
 fn push_captured_slot(
     binding: &crate::HirBinding,
     mutable: bool,
+    initialized: bool,
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
     if !binding.captured || slots.iter().any(|slot| slot.id == binding.id) {
@@ -401,6 +405,7 @@ fn push_captured_slot(
         slot,
         name: binding.name.clone(),
         mutable,
+        initialized,
     });
     Ok(())
 }
@@ -414,12 +419,13 @@ fn collect_captured_slots(
         match &statement.kind {
             HirStatementKind::VariableDeclaration(declaration) => {
                 let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
-                    push_captured_slot(&declarator.binding, mutable, slots)?;
+                    push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
-                push_captured_slot(&declaration.binding, true, slots)?;
+                push_captured_slot(&declaration.binding, true, true, slots)?;
             }
             HirStatementKind::Block(body) => collect_captured_slots(body, slots)?,
             HirStatementKind::If {
@@ -437,8 +443,9 @@ fn collect_captured_slots(
             } => {
                 if let Some(HirForInitializer::Variable(declaration)) = initializer {
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                    let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(&declarator.binding, mutable, slots)?;
+                        push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
                     }
                 }
                 collect_captured_slots(core::slice::from_ref(body), slots)?;
@@ -446,8 +453,9 @@ fn collect_captured_slots(
             HirStatementKind::ForIn { left, body, .. } => {
                 if let HirForInLeft::Variable(declaration) = left {
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                    let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(&declarator.binding, mutable, slots)?;
+                        push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
                     }
                 }
                 collect_captured_slots(core::slice::from_ref(body), slots)?;
@@ -468,7 +476,7 @@ fn collect_captured_slots(
                 collect_captured_slots(block, slots)?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
-                        push_captured_slot(parameter, true, slots)?;
+                        push_captured_slot(parameter, true, false, slots)?;
                     }
                     collect_captured_slots(&handler.body, slots)?;
                 }
@@ -507,6 +515,7 @@ fn lower_function(
                 .any(|parameter| parameter.id == binding.id)
         })
         .count();
+    let captured_slots = &environments.functions[function_index].slots;
     let function_capacity = capacity::estimate_function(function, var_initialization_count)?;
     let mut lowerer = Lowerer {
         builder: BytecodeBuilder::with_capacity(
@@ -577,6 +586,7 @@ fn lower_function(
         .iter()
         .position(Option::is_some)
         .unwrap_or(function.parameters.len());
+    let environment_slots = freeze_environment_slot_metadata(captured_slots);
     let handlers = freeze_handlers(lowerer.handlers)?;
     let binding_plan = lowerer.binding_plan.into();
     // Unused parameters own frame registers even when no instruction mentions them. The bytecode
@@ -620,8 +630,26 @@ fn lower_function(
             suspend_points: Default::default(),
             feedback_sites: Default::default(),
             binding_plan,
+            environment_record_kind: EnvironmentRecordKind::Function,
+            environment_slots,
         },
     ))
+}
+
+/// Freezes one exact-capacity owner metadata slice without changing bytecode or binding references.
+fn freeze_environment_slot_metadata(
+    slots: &[CapturedSlot],
+) -> std::sync::Arc<[EnvironmentSlotMetadata]> {
+    let mut metadata = Vec::with_capacity(slots.len());
+    for slot in slots {
+        metadata.push(EnvironmentSlotMetadata {
+            name: slot.name.clone(),
+            mutable: slot.mutable,
+            initialized: slot.initialized,
+        });
+    }
+    debug_assert_eq!(metadata.len(), slots.len());
+    metadata.into()
 }
 
 fn scope_strictness(

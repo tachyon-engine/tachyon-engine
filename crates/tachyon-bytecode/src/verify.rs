@@ -1,9 +1,10 @@
 //! Bytecode and compiled-module structural verification.
 
 use super::{
-    BindingLocation, BindingPlanEntry, Bytecode, DecodeError, DecodedInstruction, FeedbackSite,
-    FunctionId, FunctionKind, FunctionLayout, HandlerEntry, HandlerKind, ModuleBuildError, Opcode,
-    SourceMapEntry, SuspendPoint, SuspendPointId, VerifiedBytecode, WordOffset, decode_instruction,
+    BindingLocation, BindingPlanEntry, Bytecode, DecodeError, DecodedInstruction,
+    EnvironmentSlotMetadata, FeedbackSite, FunctionId, FunctionKind, FunctionLayout, HandlerEntry,
+    HandlerKind, ModuleBuildError, Opcode, SourceMapEntry, SuspendPoint, SuspendPointId,
+    VerifiedBytecode, WordOffset, decode_instruction,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,6 +232,7 @@ pub(super) fn validate_binding_plan(
     bindings: &[BindingPlanEntry],
     layout: FunctionLayout,
     max_environment_slot_count: u32,
+    environment_slots: &[EnvironmentSlotMetadata],
 ) -> Result<(), ModuleBuildError> {
     for binding in bindings {
         if binding.name.is_empty() {
@@ -257,6 +259,51 @@ pub(super) fn validate_binding_plan(
                 });
             }
             _ => {}
+        }
+    }
+    for binding in bindings {
+        let BindingLocation::Environment { depth: 0, slot } = binding.location else {
+            continue;
+        };
+        if layout.environment_slot_count == 0 {
+            continue;
+        }
+        let Some(owner) = environment_slots.get(slot as usize) else {
+            return Err(ModuleBuildError::EnvironmentSlotBindingMismatch {
+                function,
+                binding: binding.clone(),
+            });
+        };
+        if owner.name != binding.name || owner.mutable != binding.mutable {
+            return Err(ModuleBuildError::EnvironmentSlotBindingMismatch {
+                function,
+                binding: binding.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Environment owner metadata is an exact dense slice indexed by direct slot operands.
+pub(super) fn validate_environment_slots(
+    function: FunctionId,
+    slots: &[EnvironmentSlotMetadata],
+    layout: FunctionLayout,
+) -> Result<(), ModuleBuildError> {
+    let actual = u32::try_from(slots.len()).unwrap_or(u32::MAX);
+    if actual != layout.environment_slot_count {
+        return Err(ModuleBuildError::EnvironmentSlotMetadataCountMismatch {
+            function,
+            expected: layout.environment_slot_count,
+            actual,
+        });
+    }
+    for (index, slot) in slots.iter().enumerate() {
+        if slot.name.is_empty() {
+            return Err(ModuleBuildError::EmptyEnvironmentSlotName {
+                function,
+                slot: u32::try_from(index).expect("validated environment slot count fits u32"),
+            });
         }
     }
     Ok(())

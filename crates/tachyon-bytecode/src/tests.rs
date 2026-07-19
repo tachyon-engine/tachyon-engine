@@ -532,6 +532,13 @@ fn compiled_module_freezes_async_metadata_without_runtime_values() {
         mutable: true,
     }]
     .into();
+    metadata.environment_record_kind = EnvironmentRecordKind::Function;
+    metadata.environment_slots = vec![EnvironmentSlotMetadata {
+        name: Arc::from("captured"),
+        mutable: false,
+        initialized: false,
+    }]
+    .into();
 
     let module = CompiledModule::new(
         Arc::from("x"),
@@ -559,6 +566,14 @@ fn compiled_module_freezes_async_metadata_without_runtime_values() {
             name: Arc::from("value"),
             location: BindingLocation::FrameRegister(RegisterId::new(0)),
             mutable: true,
+        }]
+    );
+    assert_eq!(
+        function.environment_slots(),
+        &[EnvironmentSlotMetadata {
+            name: Arc::from("captured"),
+            mutable: false,
+            initialized: false,
         }]
     );
     assert_eq!(
@@ -616,6 +631,178 @@ fn binding_plan_module(
         )],
         FunctionId::new(0),
     )
+}
+
+/// Builds one terminal function around a complete caller-selected binding plan.
+fn binding_plan_entries_module(
+    kind: FunctionKind,
+    bindings: Vec<BindingPlanEntry>,
+    layout: FunctionLayout,
+    record_kind: EnvironmentRecordKind,
+    environment_slots: Vec<EnvironmentSlotMetadata>,
+) -> Result<CompiledModule, ModuleBuildError> {
+    let words = encode_instruction(Opcode::Return, &[0]).unwrap();
+    let mut metadata = FunctionMetadata::new(kind, layout);
+    metadata.binding_plan = bindings.into();
+    metadata.environment_record_kind = record_kind;
+    metadata.environment_slots = environment_slots.into();
+    CompiledModule::new(
+        Arc::from("x"),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(words),
+            metadata,
+        )],
+        FunctionId::new(0),
+    )
+}
+
+fn environment_slot(
+    name: &'static str,
+    mutable: bool,
+    initialized: bool,
+) -> EnvironmentSlotMetadata {
+    EnvironmentSlotMetadata {
+        name: Arc::from(name),
+        mutable,
+        initialized,
+    }
+}
+
+#[test]
+fn environment_record_kind_defaults_cover_every_function_kind() {
+    for (kind, expected) in [
+        (FunctionKind::Script, EnvironmentRecordKind::Global),
+        (FunctionKind::Module, EnvironmentRecordKind::Module),
+        (FunctionKind::Ordinary, EnvironmentRecordKind::Function),
+        (FunctionKind::Generator, EnvironmentRecordKind::Function),
+        (FunctionKind::Async, EnvironmentRecordKind::Function),
+        (
+            FunctionKind::AsyncGenerator,
+            EnvironmentRecordKind::Function,
+        ),
+    ] {
+        assert_eq!(EnvironmentRecordKind::for_function_kind(kind), expected);
+    }
+}
+
+#[test]
+/// Proves slot plans are exact, dense by slice index, and tied to owner binding identity.
+fn compiled_module_verifies_environment_slot_metadata() {
+    let layout = FunctionLayout {
+        register_count: 1,
+        environment_slot_count: 2,
+        ..FunctionLayout::default()
+    };
+    let valid = vec![
+        BindingPlanEntry {
+            name: Arc::from("mutable"),
+            location: BindingLocation::Environment { depth: 0, slot: 0 },
+            mutable: true,
+        },
+        BindingPlanEntry {
+            name: Arc::from("fixed"),
+            location: BindingLocation::Environment { depth: 0, slot: 1 },
+            mutable: false,
+        },
+    ];
+    let module = binding_plan_entries_module(
+        FunctionKind::Ordinary,
+        valid,
+        layout,
+        EnvironmentRecordKind::Declarative,
+        vec![
+            environment_slot("mutable", true, false),
+            environment_slot("fixed", false, false),
+        ],
+    )
+    .unwrap();
+    let function = module.function(FunctionId::new(0)).unwrap();
+    assert_eq!(
+        function.environment_record_kind(),
+        EnvironmentRecordKind::Declarative
+    );
+    assert_eq!(function.environment_slots()[1].name.as_ref(), "fixed");
+    assert!(
+        binding_plan_entries_module(
+            FunctionKind::Module,
+            Vec::new(),
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Module,
+            vec![environment_slot("module", false, false)],
+        )
+        .is_ok()
+    );
+
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            Vec::new(),
+            layout,
+            EnvironmentRecordKind::Function,
+            Vec::new(),
+        ),
+        Err(ModuleBuildError::EnvironmentSlotMetadataCountMismatch {
+            expected: 2,
+            actual: 0,
+            ..
+        })
+    ));
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            vec![BindingPlanEntry {
+                name: Arc::from("a"),
+                location: BindingLocation::Environment { depth: 0, slot: 2 },
+                mutable: true,
+            }],
+            layout,
+            EnvironmentRecordKind::Function,
+            vec![
+                environment_slot("a", true, true),
+                environment_slot("b", true, true),
+            ],
+        ),
+        Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange { .. })
+    ));
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            vec![BindingPlanEntry {
+                name: Arc::from("value"),
+                location: BindingLocation::Environment { depth: 0, slot: 0 },
+                mutable: false,
+            }],
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Function,
+            vec![environment_slot("value", true, true)],
+        ),
+        Err(ModuleBuildError::EnvironmentSlotBindingMismatch { .. })
+    ));
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            Vec::new(),
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Declarative,
+            vec![environment_slot("", true, false)],
+        ),
+        Err(ModuleBuildError::EmptyEnvironmentSlotName { slot: 0, .. })
+    ));
 }
 
 #[test]

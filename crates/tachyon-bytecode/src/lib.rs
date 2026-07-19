@@ -270,6 +270,30 @@ pub enum FunctionKind {
     AsyncGenerator,
 }
 
+/// The runtime record category owning one dense environment-slot plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EnvironmentRecordKind {
+    Declarative,
+    Function,
+    Global,
+    Module,
+}
+
+impl EnvironmentRecordKind {
+    #[must_use]
+    pub const fn for_function_kind(kind: FunctionKind) -> Self {
+        match kind {
+            FunctionKind::Script => Self::Global,
+            FunctionKind::Module => Self::Module,
+            FunctionKind::Ordinary
+            | FunctionKind::Generator
+            | FunctionKind::Async
+            | FunctionKind::AsyncGenerator => Self::Function,
+        }
+    }
+}
+
 /// Immutable source-level strictness used by call binding and strict-only runtime semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -330,6 +354,15 @@ pub struct BindingPlanEntry {
     pub mutable: bool,
 }
 
+/// Immutable owner metadata for one slot; its slice index is the dense runtime slot index.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnvironmentSlotMetadata {
+    pub name: Arc<str>,
+    pub mutable: bool,
+    /// Whether activation instantiation initializes this binding before bytecode begins.
+    pub initialized: bool,
+}
+
 /// Register and stack-reservation requirements known before a function begins execution.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FunctionLayout {
@@ -357,6 +390,8 @@ pub struct FunctionMetadata {
     pub suspend_points: Arc<[SuspendPoint]>,
     pub feedback_sites: Arc<[FeedbackSite]>,
     pub binding_plan: Arc<[BindingPlanEntry]>,
+    pub environment_record_kind: EnvironmentRecordKind,
+    pub environment_slots: Arc<[EnvironmentSlotMetadata]>,
 }
 
 impl FunctionMetadata {
@@ -376,6 +411,8 @@ impl FunctionMetadata {
             suspend_points: Arc::default(),
             feedback_sites: Arc::default(),
             binding_plan: Arc::default(),
+            environment_record_kind: EnvironmentRecordKind::for_function_kind(kind),
+            environment_slots: Arc::default(),
         }
     }
 }
@@ -457,6 +494,16 @@ impl CompiledFunction {
     #[must_use]
     pub fn binding_plan(&self) -> &[BindingPlanEntry] {
         &self.metadata.binding_plan
+    }
+
+    #[must_use]
+    pub const fn environment_record_kind(&self) -> EnvironmentRecordKind {
+        self.metadata.environment_record_kind
+    }
+
+    #[must_use]
+    pub fn environment_slots(&self) -> &[EnvironmentSlotMetadata] {
+        &self.metadata.environment_slots
     }
 }
 
@@ -555,6 +602,19 @@ pub enum ModuleBuildError {
         function: FunctionId,
         binding: BindingPlanEntry,
         environment_slot_count: u32,
+    },
+    EnvironmentSlotMetadataCountMismatch {
+        function: FunctionId,
+        expected: u32,
+        actual: u32,
+    },
+    EnvironmentSlotBindingMismatch {
+        function: FunctionId,
+        binding: BindingPlanEntry,
+    },
+    EmptyEnvironmentSlotName {
+        function: FunctionId,
+        slot: u32,
     },
     EmptyBindingName {
         function: FunctionId,
@@ -683,6 +743,12 @@ impl CompiledModule {
                 &template.metadata.binding_plan,
                 template.metadata.layout,
                 max_environment_slot_count,
+                &template.metadata.environment_slots,
+            )?;
+            verify::validate_environment_slots(
+                template.id,
+                &template.metadata.environment_slots,
+                template.metadata.layout,
             )?;
             verify::validate_suspend_points(
                 template.id,

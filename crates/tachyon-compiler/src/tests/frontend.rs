@@ -250,6 +250,52 @@ fn compiler_emits_owned_and_inherited_environment_binding_plans() {
 }
 
 #[test]
+/// Freezes exact owner states into storage reserved from the captured-slot count.
+fn compiler_freezes_captured_slot_state_and_record_metadata() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function outer(param) { var hoisted; let lexical = 1; const fixed = 2; function declared() {} return function() { declared(); return param + hoisted + lexical + fixed; }; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let owner = module
+        .functions()
+        .iter()
+        .find(|function| function.layout().environment_slot_count == 5)
+        .expect("outer owns every referenced capture");
+    assert_eq!(
+        owner.environment_record_kind(),
+        tachyon_bytecode::EnvironmentRecordKind::Function
+    );
+    let slots = owner
+        .environment_slots()
+        .iter()
+        .enumerate()
+        .map(|(slot, metadata)| {
+            (
+                slot,
+                metadata.name.as_ref(),
+                metadata.mutable,
+                metadata.initialized,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        slots,
+        vec![
+            (0_usize, "param", true, true),
+            (1, "hoisted", true, true),
+            (2, "lexical", true, false),
+            (3, "fixed", false, false),
+            (4, "declared", true, true),
+        ]
+    );
+}
+
+#[test]
 /// Confirms compressed environment chains remain explicit in direct opcode operands.
 fn compiler_emits_nonzero_environment_depth_without_runtime_plan_lookup() {
     let module = Compiler
