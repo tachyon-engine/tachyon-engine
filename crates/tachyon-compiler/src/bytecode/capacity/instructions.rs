@@ -1,0 +1,420 @@
+use super::{checked_count_add, try_children_count};
+use crate::hir::{HirAssignmentOperator, HirAssignmentTarget, HirForInLeft};
+use crate::{
+    CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirForInitializer,
+    HirObjectPropertyKey, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
+    HirVariableDeclaration, HirVariableDeclarationKind,
+};
+
+pub(super) fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
+    statements_instruction_count(hir.statements())
+}
+
+/// Computes a checked instruction upper bound across nested structured statements.
+pub(super) fn statements_instruction_count(
+    statements: &[HirStatement],
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let statement_count = match &statement.kind {
+            HirStatementKind::Expression(expression) => expression_instruction_count(expression)?,
+            HirStatementKind::VariableDeclaration(declaration) => {
+                declaration_instruction_count(declaration)?
+            }
+            HirStatementKind::FunctionDeclaration(_) => 2,
+            HirStatementKind::Return(argument) => argument
+                .as_ref()
+                .map(expression_instruction_count)
+                .transpose()?
+                .unwrap_or(1)
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "bytecode instructions",
+                })?,
+            HirStatementKind::Throw(argument) => checked_count_add(
+                expression_instruction_count(argument)?,
+                1,
+                "bytecode instructions",
+            )?,
+            HirStatementKind::Block(statements) => statements_instruction_count(statements)?,
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let mut count = expression_instruction_count(test)?;
+                count = checked_count_add(count, 2, "bytecode instructions")?;
+                count = checked_count_add(
+                    count,
+                    statements_instruction_count(core::slice::from_ref(consequent))?,
+                    "bytecode instructions",
+                )?;
+                if let Some(alternate) = alternate {
+                    count = checked_count_add(
+                        count,
+                        statements_instruction_count(core::slice::from_ref(alternate))?,
+                        "bytecode instructions",
+                    )?;
+                }
+                count
+            }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => for_instruction_count(initializer.as_ref(), test.as_ref(), update.as_ref(), body)?,
+            HirStatementKind::ForIn { left, right, body } => {
+                let mut nested = expression_instruction_count(right)?;
+                nested = checked_count_add(
+                    nested,
+                    for_in_left_instruction_count(left)?,
+                    "bytecode instructions",
+                )?;
+                nested = checked_count_add(
+                    nested,
+                    statements_instruction_count(core::slice::from_ref(body))?,
+                    "bytecode instructions",
+                )?;
+                checked_count_add(nested, 8, "bytecode instructions")?
+            }
+            HirStatementKind::Loop {
+                test,
+                body,
+                test_first,
+            } => {
+                let mut nested = expression_instruction_count(test)?;
+                nested = checked_count_add(
+                    nested,
+                    statements_instruction_count(core::slice::from_ref(body))?,
+                    "bytecode instructions",
+                )?;
+                checked_count_add(
+                    nested,
+                    1 + usize::from(*test_first),
+                    "bytecode instructions",
+                )?
+            }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => switch_instruction_count(discriminant, cases)?,
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let nested = try_children_count(
+                    block,
+                    handler.as_ref(),
+                    finalizer.as_deref(),
+                    "bytecode instructions",
+                    statements_instruction_count,
+                )?;
+                checked_count_add(
+                    nested,
+                    if handler.is_some() { 3 } else { 0 },
+                    "bytecode instructions",
+                )?
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => 1,
+            HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, statement_count, "bytecode instructions")?;
+    }
+    Ok(count)
+}
+
+/// Counts classic for-loop evaluation plus its conditional and back-edge instructions exactly.
+fn for_instruction_count(
+    initializer: Option<&HirForInitializer>,
+    test: Option<&HirExpression>,
+    update: Option<&HirExpression>,
+    body: &HirStatement,
+) -> Result<usize, CompileError> {
+    let mut count = match initializer {
+        Some(HirForInitializer::Variable(declaration)) => {
+            declaration_instruction_count(declaration)?
+        }
+        Some(HirForInitializer::Expression(expression)) => {
+            expression_instruction_count(expression)?
+        }
+        None => 0,
+    };
+    if let Some(test) = test {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(test)?,
+            "bytecode instructions",
+        )?;
+        count = checked_count_add(count, 1, "bytecode instructions")?;
+    }
+    if let Some(update) = update {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(update)?,
+            "bytecode instructions",
+        )?;
+    }
+    count = checked_count_add(
+        count,
+        statements_instruction_count(core::slice::from_ref(body))?,
+        "bytecode instructions",
+    )?;
+    checked_count_add(count, 1, "bytecode instructions")
+}
+
+fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileError> {
+    match left {
+        HirForInLeft::Variable(_) => Ok(1),
+        HirForInLeft::Assignment(HirAssignmentTarget::Identifier(_)) => Ok(1),
+        HirForInLeft::Assignment(HirAssignmentTarget::StaticMember { object, .. }) => {
+            checked_count_add(
+                expression_instruction_count(object)?,
+                1,
+                "bytecode instructions",
+            )
+        }
+        HirForInLeft::Assignment(HirAssignmentTarget::ComputedMember { object, property }) => {
+            let nested = checked_count_add(
+                expression_instruction_count(object)?,
+                expression_instruction_count(property)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(nested, 1, "bytecode instructions")
+        }
+    }
+}
+
+/// Includes dispatch comparisons, conditional branches, fallback jump, and every clause body.
+fn switch_instruction_count(
+    discriminant: &HirExpression,
+    cases: &[HirSwitchCase],
+) -> Result<usize, CompileError> {
+    let mut count = checked_count_add(
+        expression_instruction_count(discriminant)?,
+        2,
+        "bytecode instructions",
+    )?;
+    for case in cases {
+        if let Some(test) = case.test.as_ref() {
+            count = checked_count_add(
+                count,
+                expression_instruction_count(test)?,
+                "bytecode instructions",
+            )?;
+            count = checked_count_add(count, 2, "bytecode instructions")?;
+        }
+        count = checked_count_add(
+            count,
+            statements_instruction_count(&case.consequent)?,
+            "bytecode instructions",
+        )?;
+    }
+    Ok(count)
+}
+
+fn declaration_instruction_count(
+    declaration: &HirVariableDeclaration,
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for declarator in declaration.declarators.iter() {
+        let initializer_count = match declarator.initializer.as_ref() {
+            Some(initializer) => {
+                let count = expression_instruction_count(initializer)?;
+                if declaration.kind == HirVariableDeclarationKind::Var {
+                    checked_count_add(count, 1, "bytecode instructions")?
+                } else {
+                    count
+                }
+            }
+            None if declaration.kind == HirVariableDeclarationKind::Var => 0,
+            None => 1,
+        };
+        count = checked_count_add(count, initializer_count, "bytecode instructions")?;
+    }
+    Ok(count)
+}
+
+fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
+    match &expression.kind {
+        HirExpressionKind::Sequence(expressions) => {
+            let mut count = 0;
+            for expression in expressions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(expression)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
+            let mut count = 1;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(&property.value)?,
+                    "bytecode instructions",
+                )?;
+                if let HirObjectPropertyKey::Computed(key) = &property.key {
+                    count = checked_count_add(
+                        count,
+                        expression_instruction_count(key)?,
+                        "bytecode instructions",
+                    )?;
+                }
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let operands = checked_count_add(
+                expression_instruction_count(left)?,
+                expression_instruction_count(right)?,
+                "bytecode instructions",
+            )?;
+            let own = if matches!(
+                operator,
+                HirBinaryOperator::NotEqual | HirBinaryOperator::StrictNotEqual
+            ) {
+                2
+            } else {
+                1
+            };
+            checked_count_add(own, operands, "bytecode instructions")
+        }
+        HirExpressionKind::Logical { left, right, .. } => {
+            let operands = checked_count_add(
+                expression_instruction_count(left)?,
+                expression_instruction_count(right)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(operands, 3, "bytecode instructions")
+        }
+        HirExpressionKind::StaticMember { object, .. } => checked_count_add(
+            expression_instruction_count(object)?,
+            1,
+            "bytecode instructions",
+        ),
+        HirExpressionKind::ComputedMember { object, property } => {
+            let operands = checked_count_add(
+                expression_instruction_count(object)?,
+                expression_instruction_count(property)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(operands, 1, "bytecode instructions")
+        }
+        HirExpressionKind::Assignment {
+            operator,
+            target,
+            value,
+        } => {
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => {
+                    expression_instruction_count(object)?
+                }
+                HirAssignmentTarget::ComputedMember { object, property } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    expression_instruction_count(property)?,
+                    "bytecode instructions",
+                )?,
+            };
+            let operands = checked_count_add(
+                target,
+                expression_instruction_count(value)?,
+                "bytecode instructions",
+            )?;
+            let own_instructions = match (operator, target) {
+                (HirAssignmentOperator::Assign, _) => 1,
+                (HirAssignmentOperator::Binary(_), _) => 3,
+                (HirAssignmentOperator::Logical(_), _) => 5,
+            };
+            checked_count_add(operands, own_instructions, "bytecode instructions")
+        }
+        HirExpressionKind::Update { prefix, target, .. } => {
+            let identifier_target = matches!(target, HirAssignmentTarget::Identifier(_));
+            let target = match target {
+                HirAssignmentTarget::Identifier(_) => 0,
+                HirAssignmentTarget::StaticMember { object, .. } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    1,
+                    "bytecode instructions",
+                )?,
+                HirAssignmentTarget::ComputedMember { object, property } => {
+                    let operands = checked_count_add(
+                        expression_instruction_count(object)?,
+                        expression_instruction_count(property)?,
+                        "bytecode instructions",
+                    )?;
+                    checked_count_add(operands, 1, "bytecode instructions")?
+                }
+            };
+            let own = match (identifier_target, *prefix) {
+                (true, true) => 4,
+                (true, false) => 5,
+                (false, true) => 3,
+                (false, false) => 4,
+            };
+            checked_count_add(target, own, "bytecode instructions")
+        }
+        HirExpressionKind::Unary { argument, .. } => checked_count_add(
+            expression_instruction_count(argument)?,
+            1,
+            "bytecode instructions",
+        ),
+        HirExpressionKind::Conditional {
+            test,
+            consequent,
+            alternate,
+        } => {
+            let arms = checked_count_add(
+                expression_instruction_count(consequent)?,
+                expression_instruction_count(alternate)?,
+                "bytecode instructions",
+            )?;
+            let branches = checked_count_add(arms, 4, "bytecode instructions")?;
+            checked_count_add(
+                expression_instruction_count(test)?,
+                branches,
+                "bytecode instructions",
+            )
+        }
+        HirExpressionKind::Call { callee, arguments }
+        | HirExpressionKind::New { callee, arguments } => {
+            let mut count = expression_instruction_count(callee)?;
+            count = checked_count_add(count, 2, "bytecode instructions")?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(argument)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
+        _ => Ok(1),
+    }
+}
+
+/// Counts the prologue and expression instructions needed by default parameter initializers.
+pub(super) fn parameter_initializer_instruction_count(
+    initializers: &[Option<HirExpression>],
+) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for initializer in initializers.iter().flatten() {
+        count = checked_count_add(
+            count,
+            expression_instruction_count(initializer)?,
+            "function parameter instructions",
+        )?;
+        count = checked_count_add(count, 4, "function parameter instructions")?;
+    }
+    Ok(count)
+}
