@@ -70,6 +70,7 @@ use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
     PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
 };
+use property::{PropertyRead, PropertyWrite};
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 #[cfg(test)]
@@ -86,9 +87,10 @@ use runtime::{
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
-        ArrayAllocationRoots, CodeLoadRoots, ConversionConsumer, Fiber, Frame, NativeContinuation,
-        NativeContinuationSite, PropertyMutationRoots, PrototypeInitializationRoots,
-        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ArrayAllocationRoots, CodeLoadRoots, ConversionCallbackStage, ConversionConsumer,
+        ConversionContinuation, Fiber, Frame, NativeContinuation, NativeContinuationSite,
+        PropertyMutationRoots, PrototypeInitializationRoots, SymbolAllocationRoots,
+        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, Realm, TypeofStrings},
 };

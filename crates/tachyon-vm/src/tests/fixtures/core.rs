@@ -67,6 +67,11 @@ pub(in crate::tests) fn captured_environment_module() -> CompiledModule {
                     },
                     source_map: entry_source_map,
                     binding_plan: binding_plan.clone(),
+                    environment_slots: Arc::from([EnvironmentSlotMetadata {
+                        name: Arc::from("value"),
+                        mutable: true,
+                        initialized: true,
+                    }]),
                     ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
                 },
             ),

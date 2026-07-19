@@ -108,30 +108,6 @@ impl Isolate {
         )
     }
 
-    /// Applies assignment failure semantics without weakening throwing descriptor operations.
-    pub(crate) fn set_data_property_from_bytecode(
-        &mut self,
-        receiver: Value,
-        key: impl Into<PropertyKey>,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        let key = key.into();
-        let strictness = self
-            .fiber
-            .frames
-            .last()
-            .expect("property assignment always has an active frame")
-            .strictness;
-        match self.set_own_data_property(receiver, key, value) {
-            Err(ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_))
-                if strictness == FunctionStrictness::Sloppy =>
-            {
-                Ok(())
-            }
-            result => result,
-        }
-    }
-
     /// Marks one own data property as deleted while retaining append-only shape metadata.
     pub(crate) fn delete_own_data_property(
         &mut self,

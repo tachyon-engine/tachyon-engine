@@ -11,6 +11,19 @@ pub(super) enum StoredProperty {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PropertyRead {
+    Missing,
+    Data(Value),
+    Accessor(Value),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PropertyWrite {
+    Complete(bool),
+    Setter(Value),
+}
+
 struct AccessorAllocationRoots<'a> {
     vm: VmRoots<'a>,
     receiver: Value,
@@ -31,6 +44,119 @@ impl Trace for AccessorAllocationRoots<'_> {
 }
 
 impl Isolate {
+    /// Resolves an ordinary read while retaining the original receiver for accessor `this`.
+    pub(crate) fn resolve_property_read(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<PropertyRead, ExecutionError> {
+        let mut current = if numeric_value(receiver).is_some() {
+            self.realm
+                .number_prototype
+                .expect("Number prototype initializes before property access")
+        } else {
+            receiver
+        };
+        loop {
+            let (_, snapshot) = self.object_snapshot(current)?;
+            if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
+                match self.stored_property_from_snapshot(snapshot, property)? {
+                    Some(StoredProperty::Data(value)) => return Ok(PropertyRead::Data(value)),
+                    Some(StoredProperty::Accessor { pair, .. }) => {
+                        return Ok(PropertyRead::Accessor(pair.getter));
+                    }
+                    None => {}
+                }
+            } else {
+                if let Some(value) = self.function_metadata_property(current, key)? {
+                    return Ok(PropertyRead::Data(value));
+                }
+                if self.is_function_prototype_property(current, key) {
+                    self.intrinsic_property_atoms.prototype = key.atom();
+                    return self
+                        .ensure_function_prototype(current)
+                        .map(PropertyRead::Data);
+                }
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return Ok(PropertyRead::Missing);
+            }
+            if !self.is_object_value(snapshot.prototype) {
+                return Err(ExecutionError::NotObject(snapshot.prototype));
+            }
+            current = snapshot.prototype;
+        }
+    }
+
+    /// Resolves an ordinary assignment to either a completed boolean result or one setter call.
+    pub(crate) fn resolve_property_write(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWrite, ExecutionError> {
+        let mut current = if numeric_value(receiver).is_some() {
+            self.realm
+                .number_prototype
+                .expect("Number prototype initializes before property access")
+        } else {
+            receiver
+        };
+        loop {
+            let (_, snapshot) = self.object_snapshot(current)?;
+            if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
+                match self.stored_property_from_snapshot(snapshot, property)? {
+                    Some(StoredProperty::Data(_)) => {
+                        if !property.attributes.writable() {
+                            return Ok(PropertyWrite::Complete(false));
+                        }
+                        return self.write_data_property_boolean(receiver, key, value);
+                    }
+                    Some(StoredProperty::Accessor { pair, .. }) => {
+                        return Ok(
+                            if pair.setter.as_immediate() == Some(Immediate::Undefined) {
+                                PropertyWrite::Complete(false)
+                            } else {
+                                PropertyWrite::Setter(pair.setter)
+                            },
+                        );
+                    }
+                    None => {}
+                }
+            } else if self.is_function_metadata_property(current, key)? {
+                return Ok(PropertyWrite::Complete(false));
+            } else if self.is_function_prototype_property(current, key) {
+                return self.write_data_property_boolean(receiver, key, value);
+            }
+            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
+                return self.write_data_property_boolean(receiver, key, value);
+            }
+            if !self.is_object_value(snapshot.prototype) {
+                return Err(ExecutionError::NotObject(snapshot.prototype));
+            }
+            current = snapshot.prototype;
+        }
+    }
+
+    /// Converts ordinary assignment rejection into the boolean consumed at the bytecode boundary.
+    fn write_data_property_boolean(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWrite, ExecutionError> {
+        match self.set_own_data_property(receiver, key, value) {
+            Ok(()) => Ok(PropertyWrite::Complete(true)),
+            Err(ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_)) => {
+                Ok(PropertyWrite::Complete(false))
+            }
+            Err(ExecutionError::NotObject(_)) if numeric_value(receiver).is_some() => {
+                Ok(PropertyWrite::Complete(false))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Recovers a present data value or validates and copies one accessor-pair payload.
     pub(super) fn stored_property_from_snapshot(
         &mut self,

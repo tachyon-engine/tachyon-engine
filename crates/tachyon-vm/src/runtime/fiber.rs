@@ -97,6 +97,12 @@ pub(crate) enum ToPrimitiveStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConversionCallbackStage {
+    Getter,
+    MethodCall,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConversionConsumer {
     NativeCall(NativeFunction),
     NativeConstruct(NativeFunction),
@@ -168,21 +174,69 @@ pub(crate) fn next_to_primitive_stage(
     }
 }
 
-/// Resumable native work owned by a JS callback frame instead of the Rust call stack.
+/// Resumable ordinary conversion state retained while one JavaScript method callback executes.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct NativeContinuation {
+pub(crate) struct ConversionContinuation {
     pub(crate) site: NativeContinuationSite,
     pub(crate) consumer: ConversionConsumer,
     pub(crate) receiver: Value,
     pub(crate) object: Value,
     pub(crate) stage: ToPrimitiveStage,
+    pub(crate) callback_stage: ConversionCallbackStage,
+}
+
+/// Typed callback work owned by a JavaScript frame instead of the Rust call stack.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NativeContinuation {
+    Conversion(ConversionContinuation),
+    PropertyGet {
+        site: NativeContinuationSite,
+        receiver: Value,
+        callee: Value,
+    },
+    PropertySet {
+        site: NativeContinuationSite,
+        receiver: Value,
+        value: Value,
+        callee: Value,
+    },
+}
+
+impl NativeContinuation {
+    #[inline(always)]
+    pub(crate) const fn site(self) -> NativeContinuationSite {
+        match self {
+            Self::Conversion(continuation) => continuation.site,
+            Self::PropertyGet { site, .. } | Self::PropertySet { site, .. } => site,
+        }
+    }
 }
 
 impl Trace for NativeContinuation {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.receiver.trace(tracer);
-        self.object.trace(tracer);
+        match self {
+            Self::Conversion(continuation) => {
+                continuation.receiver.trace(tracer);
+                continuation.object.trace(tracer);
+            }
+            Self::PropertyGet {
+                receiver, callee, ..
+            } => {
+                receiver.trace(tracer);
+                callee.trace(tracer);
+            }
+            Self::PropertySet {
+                receiver,
+                value,
+                callee,
+                ..
+            } => {
+                receiver.trace(tracer);
+                value.trace(tracer);
+                callee.trace(tracer);
+            }
+        }
     }
 }
 

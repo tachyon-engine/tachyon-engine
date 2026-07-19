@@ -27,6 +27,11 @@ fn module_environment_module() -> CompiledModule {
             bytecode,
             FunctionMetadata {
                 source_map,
+                environment_slots: Arc::from([EnvironmentSlotMetadata {
+                    name: Arc::from("value"),
+                    mutable: true,
+                    initialized: true,
+                }]),
                 ..FunctionMetadata::new(FunctionKind::Module, layout)
             },
         )],

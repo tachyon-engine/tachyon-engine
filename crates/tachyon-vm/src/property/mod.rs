@@ -6,6 +6,7 @@ mod function;
 mod storage;
 
 use super::*;
+pub(crate) use accessor::{PropertyRead, PropertyWrite};
 
 impl Isolate {
     #[inline(always)]

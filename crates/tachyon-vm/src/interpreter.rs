@@ -735,7 +735,10 @@ impl Isolate {
             Opcode::HasProperty => {
                 let key = self.property_key(self.read(base, operands[1])?)?;
                 let receiver = self.read(base, operands[2])?;
-                let result = self.get_data_property(receiver, key)?.is_some();
+                let result = !matches!(
+                    self.resolve_property_read(receiver, key)?,
+                    PropertyRead::Missing
+                );
                 self.write(
                     base,
                     operands[0],
@@ -908,30 +911,50 @@ impl Isolate {
             Opcode::GetById => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
-                let value = self
-                    .get_data_property(receiver, key)?
-                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                self.write(base, operands[0], value)?;
+                return self.dispatch_property_read(
+                    base,
+                    operands[0],
+                    receiver,
+                    key.into(),
+                    instruction_offset,
+                );
             }
             Opcode::SetById => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
-                self.set_data_property_from_bytecode(receiver, key, value)?;
+                return self.dispatch_property_write(
+                    base,
+                    operands[1],
+                    receiver,
+                    key.into(),
+                    value,
+                    instruction_offset,
+                );
             }
             Opcode::GetByValue => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.property_key(self.read(base, operands[2])?)?;
-                let value = self
-                    .get_data_property(receiver, key)?
-                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                self.write(base, operands[0], value)?;
+                return self.dispatch_property_read(
+                    base,
+                    operands[0],
+                    receiver,
+                    key,
+                    instruction_offset,
+                );
             }
             Opcode::SetByValue => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let key = self.property_key(self.read(base, operands[2])?)?;
-                self.set_data_property_from_bytecode(receiver, key, value)?;
+                return self.dispatch_property_write(
+                    base,
+                    operands[1],
+                    receiver,
+                    key,
+                    value,
+                    instruction_offset,
+                );
             }
             Opcode::Call => {
                 let callee = self.read(base, operands[1])?;
@@ -996,6 +1019,166 @@ impl Isolate {
             _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
+    }
+
+    /// Completes a data read immediately or suspends on one getter callback frame.
+    fn dispatch_property_read(
+        &mut self,
+        caller_base: u32,
+        destination: u32,
+        receiver: Value,
+        key: PropertyKey,
+        call_site: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.resolve_property_read(receiver, key)? {
+            PropertyRead::Missing => {
+                self.write(
+                    caller_base,
+                    destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )?;
+                Ok(None)
+            }
+            PropertyRead::Data(value) => {
+                self.write(caller_base, destination, value)?;
+                Ok(None)
+            }
+            PropertyRead::Accessor(getter)
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.write(
+                    caller_base,
+                    destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )?;
+                Ok(None)
+            }
+            PropertyRead::Accessor(callee) => {
+                self.dispatch_property_callback(NativeContinuation::PropertyGet {
+                    site: NativeContinuationSite {
+                        caller_base,
+                        destination,
+                        call_site,
+                    },
+                    receiver,
+                    callee,
+                })
+            }
+        }
+    }
+
+    /// Applies assignment rejection at the strict boundary or suspends on one setter callback.
+    fn dispatch_property_write(
+        &mut self,
+        caller_base: u32,
+        value_register: u32,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+        call_site: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.resolve_property_write(receiver, key, value)? {
+            PropertyWrite::Complete(success) => {
+                self.finish_property_write(receiver, success)?;
+                Ok(None)
+            }
+            PropertyWrite::Setter(callee) => {
+                self.dispatch_property_callback(NativeContinuation::PropertySet {
+                    site: NativeContinuationSite {
+                        caller_base,
+                        destination: value_register,
+                        call_site,
+                    },
+                    receiver,
+                    value,
+                    callee,
+                })
+            }
+        }
+    }
+
+    /// Publishes callback state before using the existing iterative call/frame machinery.
+    fn dispatch_property_callback(
+        &mut self,
+        continuation: NativeContinuation,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let (receiver, callee, argument_base, argument_count) = match continuation {
+            NativeContinuation::PropertyGet {
+                receiver, callee, ..
+            } => (receiver, callee, 0, 0),
+            NativeContinuation::PropertySet {
+                receiver, callee, ..
+            } => (
+                receiver,
+                callee,
+                site.caller_base
+                    .checked_add(site.destination)
+                    .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
+                1,
+            ),
+            NativeContinuation::Conversion(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+        };
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let frame_depth = self.fiber.frames.len();
+        let call_result = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee,
+            argument_base,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count,
+            this_value: receiver,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        });
+        if let Err(error) = call_result {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("a suspended accessor callback publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(None);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let returned = self.read(site.caller_base, site.destination)?;
+        self.resume_native_continuation(continuation, returned)
+    }
+
+    /// Converts one ordinary [[Set]] false result into strict-mode TypeError semantics.
+    #[inline]
+    fn finish_property_write(&self, receiver: Value, success: bool) -> Result<(), ExecutionError> {
+        let strictness = self
+            .fiber
+            .frames
+            .last()
+            .expect("property assignment always has an active frame")
+            .strictness;
+        if !success && strictness == FunctionStrictness::Strict {
+            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        }
+        Ok(())
     }
 
     #[cold]
@@ -2051,20 +2234,47 @@ impl Isolate {
         Ok(None)
     }
 
-    /// Resumes native work after a callback return and maps language failures at the original call site.
+    /// Resumes typed native work and drains synchronous parent continuations without Rust recursion.
     fn resume_native_continuation(
         &mut self,
-        continuation: NativeContinuation,
-        value: Value,
+        mut continuation: NativeContinuation,
+        mut value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        match self.advance_native_conversion(continuation, Some(value)) {
-            Ok(()) => Ok(None),
-            Err(error) => {
+        loop {
+            let site = continuation.site();
+            let frame_depth = self.fiber.frames.len();
+            let result = match continuation {
+                NativeContinuation::Conversion(continuation) => {
+                    self.advance_native_conversion(continuation, Some(value))
+                }
+                NativeContinuation::PropertyGet { receiver, .. } => {
+                    let _ = receiver;
+                    self.write(site.caller_base, site.destination, value)
+                }
+                NativeContinuation::PropertySet {
+                    receiver,
+                    value: assigned,
+                    ..
+                } => {
+                    self.write(site.caller_base, site.destination, assigned)?;
+                    self.finish_property_write(receiver, true)
+                }
+            };
+            if let Err(error) = result {
                 let Some(kind) = execution_error_kind(&error) else {
                     return Err(error);
                 };
-                self.throw_native_error(kind, continuation.site.call_site)
+                return self.throw_native_error(kind, site.call_site);
             }
+            if self.fiber.frames.len() != frame_depth {
+                return Ok(None);
+            }
+            let Some(parent) = self.fiber.completions.pop_native() else {
+                return Ok(None);
+            };
+            let parent_site = parent.site();
+            value = self.read(parent_site.caller_base, parent_site.destination)?;
+            continuation = parent;
         }
     }
 

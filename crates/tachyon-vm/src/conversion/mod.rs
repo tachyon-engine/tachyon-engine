@@ -10,6 +10,11 @@ pub(crate) use numeric::{
     numeric_negate, numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
 };
 
+enum ConversionCallbackResult {
+    Suspended,
+    Returned(Value),
+}
+
 impl Isolate {
     /// Executes one primitive constructor using the exact call argument window.
     pub(crate) fn primitive_constructor_value(
@@ -134,7 +139,7 @@ impl Isolate {
                 ),
                 _ => unreachable!("only conversion consumers enter this dispatch path"),
             };
-            let continuation = NativeContinuation {
+            let continuation = ConversionContinuation {
                 site: NativeContinuationSite {
                     caller_base: site.caller_base,
                     destination: site.destination,
@@ -144,6 +149,7 @@ impl Isolate {
                 receiver,
                 object,
                 stage,
+                callback_stage: ConversionCallbackStage::MethodCall,
             };
             return self.advance_native_conversion(continuation, None);
         }
@@ -171,7 +177,7 @@ impl Isolate {
         debug_assert!(self.is_object_value(object));
         debug_assert!(consumer.is_opcode_conversion());
         self.advance_native_conversion(
-            NativeContinuation {
+            ConversionContinuation {
                 site: NativeContinuationSite {
                     caller_base,
                     destination,
@@ -181,6 +187,7 @@ impl Isolate {
                 receiver: pending,
                 object,
                 stage: ToPrimitiveStage::ValueOf,
+                callback_stage: ConversionCallbackStage::MethodCall,
             },
             None,
         )
@@ -189,12 +196,16 @@ impl Isolate {
     /// Advances ordinary ToPrimitive without recursively entering the interpreter.
     pub(crate) fn advance_native_conversion(
         &mut self,
-        mut continuation: NativeContinuation,
+        mut continuation: ConversionContinuation,
         mut returned: Option<Value>,
     ) -> Result<(), ExecutionError> {
+        let mut resolved_method = None;
         loop {
             if let Some(value) = returned.take() {
-                if !self.is_object_value(value) {
+                if continuation.callback_stage == ConversionCallbackStage::Getter {
+                    continuation.callback_stage = ConversionCallbackStage::MethodCall;
+                    resolved_method = Some(value);
+                } else if !self.is_object_value(value) {
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -283,41 +294,55 @@ impl Isolate {
                         continuation.site.destination,
                         result,
                     );
+                } else {
+                    let Some(stage) =
+                        next_to_primitive_stage(continuation.consumer, continuation.stage)
+                    else {
+                        return Err(ExecutionError::NotObject(continuation.object));
+                    };
+                    continuation.stage = stage;
                 }
-                let Some(stage) =
-                    next_to_primitive_stage(continuation.consumer, continuation.stage)
-                else {
-                    return Err(ExecutionError::NotObject(continuation.object));
-                };
-                continuation.stage = stage;
             }
-            let name = match continuation.stage {
-                ToPrimitiveStage::ValueOf => b"valueOf".as_slice(),
-                ToPrimitiveStage::ToString => b"toString".as_slice(),
-            };
-            let atom = self.intern_intrinsic_name(name)?;
-            self.fiber
-                .completions
-                .push_native(continuation)
-                .map_err(|error| match error {
-                    CompletionStackError::Limit { limit, requested } => {
-                        ExecutionError::CompletionStackLimit { limit, requested }
+            let method = if let Some(method) = resolved_method.take() {
+                Some(method)
+            } else {
+                let name = match continuation.stage {
+                    ToPrimitiveStage::ValueOf => b"valueOf".as_slice(),
+                    ToPrimitiveStage::ToString => b"toString".as_slice(),
+                };
+                let atom = self.intern_intrinsic_name(name)?;
+                self.push_native_conversion(continuation)?;
+                let property = match self.resolve_property_read(continuation.object, atom.into()) {
+                    Ok(property) => property,
+                    Err(error) => {
+                        self.pop_native_conversion()?;
+                        return Err(error);
                     }
-                    CompletionStackError::AllocationFailed => {
-                        ExecutionError::CompletionAllocationFailed
+                };
+                continuation = self.pop_native_conversion()?;
+                match property {
+                    PropertyRead::Missing => None,
+                    PropertyRead::Data(method) => Some(method),
+                    PropertyRead::Accessor(getter)
+                        if getter.as_immediate() == Some(Immediate::Undefined) =>
+                    {
+                        None
                     }
-                })?;
-            let method = match self.get_data_property(continuation.object, atom) {
-                Ok(method) => method,
-                Err(error) => {
-                    self.pop_native_continuation()?;
-                    return Err(error);
+                    PropertyRead::Accessor(getter) => {
+                        continuation.callback_stage = ConversionCallbackStage::Getter;
+                        match self.call_conversion_callback(continuation, getter)? {
+                            ConversionCallbackResult::Suspended => return Ok(()),
+                            ConversionCallbackResult::Returned(value) => {
+                                returned = Some(value);
+                                continue;
+                            }
+                        }
+                    }
                 }
             };
             let Some(method) =
                 method.filter(|method| self.resolve_function_object(*method).is_ok())
             else {
-                continuation = self.pop_native_continuation()?;
                 let Some(stage) =
                     next_to_primitive_stage(continuation.consumer, continuation.stage)
                 else {
@@ -326,39 +351,71 @@ impl Isolate {
                 continuation.stage = stage;
                 continue;
             };
-            let frame_depth = self.fiber.frames.len();
-            let call_result = self.call(CallSite {
-                caller_base: continuation.site.caller_base,
-                destination: continuation.site.destination,
-                callee: method,
-                argument_base: 0,
-                argument_prefix: None,
-                argument_prefix_offset: 0,
-                argument_prefix_count: 0,
-                argument_count: 0,
-                this_value: continuation.object,
-                new_target: Value::from_immediate(Immediate::Undefined),
-                construct_receiver: None,
-                call_site: continuation.site.call_site,
-            });
-            if let Err(error) = call_result {
-                self.pop_native_continuation()?;
-                return Err(error);
+            continuation.callback_stage = ConversionCallbackStage::MethodCall;
+            match self.call_conversion_callback(continuation, method)? {
+                ConversionCallbackResult::Suspended => return Ok(()),
+                ConversionCallbackResult::Returned(value) => returned = Some(value),
             }
-            if self.fiber.frames.len() != frame_depth {
-                let frame = self
-                    .fiber
-                    .frames
-                    .last_mut()
-                    .expect("a suspended callback publishes its callee frame");
-                frame.return_register = None;
-                frame.return_continuation = true;
-                return Ok(());
-            }
-            continuation = self.pop_native_continuation()?;
-            returned =
-                Some(self.read(continuation.site.caller_base, continuation.site.destination)?);
         }
+    }
+
+    /// Calls one getter or conversion method and reports whether it published a JavaScript frame.
+    fn call_conversion_callback(
+        &mut self,
+        continuation: ConversionContinuation,
+        callee: Value,
+    ) -> Result<ConversionCallbackResult, ExecutionError> {
+        self.push_native_conversion(continuation)?;
+        let frame_depth = self.fiber.frames.len();
+        let call_result = self.call(CallSite {
+            caller_base: continuation.site.caller_base,
+            destination: continuation.site.destination,
+            callee,
+            argument_base: 0,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: continuation.object,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: continuation.site.call_site,
+        });
+        if let Err(error) = call_result {
+            self.pop_native_conversion()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("a suspended conversion callback publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(ConversionCallbackResult::Suspended);
+        }
+        let continuation = self.pop_native_conversion()?;
+        self.read(continuation.site.caller_base, continuation.site.destination)
+            .map(ConversionCallbackResult::Returned)
+    }
+
+    /// Pushes one typed conversion sentinel with uniform completion-limit error mapping.
+    fn push_native_conversion(
+        &mut self,
+        continuation: ConversionContinuation,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::Conversion(continuation))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })
     }
 
     /// Removes the exact native sentinel published before a callback call attempt.
@@ -368,6 +425,17 @@ impl Isolate {
             .completions
             .pop_native()
             .ok_or(ExecutionError::MissingNativeContinuation)
+    }
+
+    /// Removes one conversion sentinel after its synchronous method call or failed lookup.
+    #[inline]
+    fn pop_native_conversion(&mut self) -> Result<ConversionContinuation, ExecutionError> {
+        match self.pop_native_continuation()? {
+            NativeContinuation::Conversion(continuation) => Ok(continuation),
+            NativeContinuation::PropertyGet { .. } | NativeContinuation::PropertySet { .. } => {
+                Err(ExecutionError::MissingNativeContinuation)
+            }
+        }
     }
 
     /// Completes one native consumer after its optional argument has become the required primitive.

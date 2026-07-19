@@ -323,8 +323,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ConversionConsumer, NativeContinuationSite, ToPrimitiveStage,
-        runtime::fiber::NativeContinuation,
+        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
+        NativeContinuationSite, ToPrimitiveStage, runtime::fiber::NativeContinuation,
     };
 
     const fn undefined() -> Value {
@@ -332,7 +332,7 @@ mod tests {
     }
 
     fn native_continuation() -> NativeContinuation {
-        NativeContinuation {
+        NativeContinuation::Conversion(ConversionContinuation {
             site: NativeContinuationSite {
                 caller_base: 0,
                 destination: 0,
@@ -342,7 +342,8 @@ mod tests {
             receiver: undefined(),
             object: undefined(),
             stage: ToPrimitiveStage::ValueOf,
-        }
+            callback_stage: ConversionCallbackStage::MethodCall,
+        })
     }
 
     #[test]
