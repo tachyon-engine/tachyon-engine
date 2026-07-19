@@ -7783,12 +7783,12 @@ impl Isolate {
         Ok(())
     }
 
-    /// Allocates the current activation's exact captured-slot backing after its frame is rooted.
-    fn allocate_current_environment(&mut self, slot_count: u32) -> Result<(), ExecutionError> {
-        if slot_count == 0 {
-            return Ok(());
-        }
-        let slot_count = usize::try_from(slot_count)
+    /// Allocates non-empty captured-slot backing after the current activation frame is rooted.
+    fn allocate_current_environment(
+        &mut self,
+        slot_count: NonZeroU32,
+    ) -> Result<(), ExecutionError> {
+        let slot_count = usize::try_from(slot_count.get())
             .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         let mut slots = Vec::new();
         slots
@@ -7879,7 +7879,10 @@ impl Isolate {
             construct_receiver: None,
             call_site: None,
         });
-        self.allocate_current_environment(layout.environment_slot_count)
+        let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
+            return Ok(());
+        };
+        self.allocate_current_environment(slot_count)
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
@@ -8638,7 +8641,8 @@ impl Isolate {
             completion_base: self.fiber.completions.len() as u32,
             call_site: Some(site.call_site),
         });
-        if let Err(error) = self.allocate_current_environment(target.layout.environment_slot_count)
+        if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
+            && let Err(error) = self.allocate_current_environment(slot_count)
         {
             self.fiber.frames.pop();
             self.fiber.registers.truncate(callee_base as usize);
