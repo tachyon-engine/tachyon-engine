@@ -183,9 +183,17 @@ pub enum Opcode {
     ForInNext = 68,
     /// Loads the active function's exact actual-argument count into one register.
     LoadArgumentsLength = 69,
+    /// Saves a normal completion and enters the innermost covering finalizer.
+    EnterFinally = 70,
+    /// Restores and redispatches the completion owned by the active finalizer.
+    ResumeCompletion = 71,
+    /// Transfers a break completion through finalizers crossed by its target.
+    BreakThroughFinally = 72,
+    /// Transfers a continue completion through finalizers crossed by its target.
+    ContinueThroughFinally = 73,
 }
 
-pub(super) const OPCODE_COUNT: usize = 70;
+pub(super) const OPCODE_COUNT: usize = 74;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -257,10 +265,14 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // CreateForInIterator
     2, // ForInNext
     1, // LoadArgumentsLength
+    0, // EnterFinally
+    0, // ResumeCompletion
+    1, // BreakThroughFinally
+    1, // ContinueThroughFinally
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::LoadArgumentsLength as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::ContinueThroughFinally as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -288,7 +300,13 @@ impl Opcode {
     pub const fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Jump | Self::Return | Self::ReturnUndefined | Self::Throw
+            Self::Jump
+                | Self::Return
+                | Self::ReturnUndefined
+                | Self::Throw
+                | Self::EnterFinally
+                | Self::BreakThroughFinally
+                | Self::ContinueThroughFinally
         )
     }
 
@@ -370,6 +388,10 @@ impl Opcode {
             3 => Some(Self::CreateForInIterator),
             4 => Some(Self::ForInNext),
             5 => Some(Self::LoadArgumentsLength),
+            6 => Some(Self::EnterFinally),
+            7 => Some(Self::ResumeCompletion),
+            8 => Some(Self::BreakThroughFinally),
+            9 => Some(Self::ContinueThroughFinally),
             _ => None,
         }
     }

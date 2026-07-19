@@ -54,7 +54,11 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
                     "exception handlers",
                     statements_handler_count,
                 )?;
-                checked_count_add(nested, usize::from(handler.is_some()), "exception handlers")?
+                checked_count_add(
+                    nested,
+                    usize::from(handler.is_some()) + usize::from(finalizer.is_some()),
+                    "exception handlers",
+                )?
             }
             HirStatementKind::Expression(_)
             | HirStatementKind::VariableDeclaration(_)
@@ -106,8 +110,9 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
                 handler,
                 finalizer,
             } => {
+                let outer_finally = u32::from(finalizer.is_some());
                 let block = statements_handler_depth(block)?
-                    .checked_add(u32::from(handler.is_some()))
+                    .checked_add(u32::from(handler.is_some()) + outer_finally)
                     .ok_or(CompileError::LoweringCapacityOverflow {
                         collection: "exception handler depth",
                     })?;
@@ -115,12 +120,20 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
                     .as_ref()
                     .map(|handler| statements_handler_depth(&handler.body))
                     .transpose()?
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    .checked_add(outer_finally)
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "exception handler depth",
+                    })?;
                 let finalizer = finalizer
                     .as_ref()
                     .map(|statements| statements_handler_depth(statements))
                     .transpose()?
-                    .unwrap_or(0);
+                    .unwrap_or(0)
+                    .checked_add(outer_finally)
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "exception handler depth",
+                    })?;
                 block.max(handler).max(finalizer)
             }
             HirStatementKind::Expression(_)
@@ -131,6 +144,66 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
+        };
+        depth = depth.max(nested);
+    }
+    Ok(depth)
+}
+
+/// Computes the maximum number of saved language completions active in nested finalizers.
+pub(super) fn statements_finally_depth(statements: &[HirStatement]) -> Result<u32, CompileError> {
+    let mut depth = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Block(statements) => statements_finally_depth(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let left = statements_finally_depth(core::slice::from_ref(consequent))?;
+                let right = alternate
+                    .as_ref()
+                    .map(|statement| statements_finally_depth(core::slice::from_ref(statement)))
+                    .transpose()?
+                    .unwrap_or(0);
+                left.max(right)
+            }
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::Loop { body, .. } => {
+                statements_finally_depth(core::slice::from_ref(body))?
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                let mut nested = 0;
+                for case in cases.iter() {
+                    nested = nested.max(statements_finally_depth(&case.consequent)?);
+                }
+                nested
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                let block = statements_finally_depth(block)?;
+                let handler = handler
+                    .as_ref()
+                    .map(|handler| statements_finally_depth(&handler.body))
+                    .transpose()?
+                    .unwrap_or(0);
+                let finalizer = finalizer
+                    .as_ref()
+                    .map(|statements| statements_finally_depth(statements))
+                    .transpose()?
+                    .unwrap_or(0)
+                    .checked_add(u32::from(finalizer.is_some()))
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "completion depth",
+                    })?;
+                block.max(handler).max(finalizer)
+            }
+            _ => 0,
         };
         depth = depth.max(nested);
     }
@@ -365,7 +438,7 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                     )?,
                     "bytecode labels",
                 )?;
-                if handler.is_some() {
+                if handler.is_some() && finalizer.is_none() {
                     count = checked_count_add(count, 1, "bytecode labels")?;
                 }
             }

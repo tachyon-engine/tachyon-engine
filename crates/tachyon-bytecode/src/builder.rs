@@ -118,6 +118,30 @@ impl BytecodeBuilder {
         Ok(offset)
     }
 
+    /// Emits a fixed-width abrupt target patched from one symbolic label.
+    pub fn emit_abrupt_jump(
+        &mut self,
+        opcode: Opcode,
+        label: Label,
+        span: SourceSpan,
+    ) -> Result<WordOffset, BuilderError> {
+        debug_assert!(matches!(
+            opcode,
+            Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally
+        ));
+        self.ensure_label(label)?;
+        self.ensure_word_capacity(2)?;
+        let offset = self.next_word_offset()?;
+        self.words
+            .extend([((opcode as u8) | WIDE_FORMAT) as u32, 0]);
+        self.patches.push(JumpPatch {
+            label,
+            operand_word: WordOffset::new(offset.index() + 1),
+        });
+        self.source_map.push(SourceMapEntry { offset, span });
+        Ok(offset)
+    }
+
     /// Emits a wide conditional jump placeholder with an immutable condition register and a patchable target word.
     pub fn emit_jump_if_false(
         &mut self,
@@ -218,6 +242,10 @@ impl BytecodeBuilder {
         let indexes: &[usize] = match opcode {
             Opcode::Nop
             | Opcode::Jump
+            | Opcode::EnterFinally
+            | Opcode::ResumeCompletion
+            | Opcode::BreakThroughFinally
+            | Opcode::ContinueThroughFinally
             | Opcode::ReturnUndefined
             | Opcode::DeclareScope
             | Opcode::DeclareGlobalLexical => &[],

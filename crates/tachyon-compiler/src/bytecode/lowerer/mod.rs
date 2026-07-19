@@ -23,15 +23,22 @@ pub(super) struct Lowerer<'a> {
     pub(super) scope_names: &'a mut Vec<std::sync::Arc<str>>,
     pub(super) locals: Vec<LocalBinding>,
     pub(super) binding_plan: Vec<BindingPlanEntry>,
-    pub(super) break_targets: Vec<Label>,
-    pub(super) continue_targets: Vec<Label>,
+    pub(super) break_targets: Vec<ControlTarget>,
+    pub(super) continue_targets: Vec<ControlTarget>,
     pub(super) handlers: Vec<Option<HandlerEntry>>,
+    pub(super) finally_depth: u32,
     pub(super) next_register: u32,
     pub(super) source_name: SourceName,
     pub(super) script_scope: bool,
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
     pub(super) environments: &'a EnvironmentPlans,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ControlTarget {
+    label: Label,
+    finally_depth: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -512,7 +519,34 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)
     }
 
-    pub(super) fn current_break_target(&self, span: SourceSpan) -> Result<Label, CompileError> {
+    /// Emits a direct branch or an explicit completion transfer when leaving a finalizer scope.
+    pub(super) fn emit_control_jump(
+        &mut self,
+        target: ControlTarget,
+        opcode: Opcode,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        if target.finally_depth == self.finally_depth {
+            return self.emit_jump(target.label, span);
+        }
+        debug_assert!(target.finally_depth < self.finally_depth);
+        self.builder
+            .emit_abrupt_jump(
+                opcode,
+                target.label,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map(|_| ())
+            .map_err(CompileError::Builder)
+    }
+
+    pub(super) fn current_break_target(
+        &self,
+        span: SourceSpan,
+    ) -> Result<ControlTarget, CompileError> {
         self.break_targets
             .last()
             .copied()
@@ -523,10 +557,21 @@ impl Lowerer<'_> {
             })
     }
 
-    pub(super) fn current_continue_target(&self, span: SourceSpan) -> Result<Label, CompileError> {
+    pub(super) fn current_continue_target(
+        &self,
+        span: SourceSpan,
+    ) -> Result<ControlTarget, CompileError> {
         self.continue_targets
             .last()
             .copied()
             .ok_or_else(|| self.unsupported(span, "continue outside loop"))
+    }
+
+    #[inline]
+    pub(super) const fn control_target(&self, label: Label) -> ControlTarget {
+        ControlTarget {
+            label,
+            finally_depth: self.finally_depth,
+        }
     }
 }

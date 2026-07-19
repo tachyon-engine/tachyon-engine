@@ -20,6 +20,7 @@ pub(super) struct LoweringCapacity {
     pub(super) continue_targets: usize,
     pub(super) handlers: usize,
     pub(super) max_handler_depth: u32,
+    pub(super) max_completion_depth: u32,
 }
 
 /// Estimates both module-owned pools before lowering allocates either collection.
@@ -71,6 +72,7 @@ pub(super) fn estimate_entry(
         })?;
     let handlers = control::statements_handler_count(hir.statements())?;
     let max_handler_depth = control::statements_handler_depth(hir.statements())?;
+    let max_completion_depth = control::statements_finally_depth(hir.statements())?;
     let binding_plan = control::hir_binding_count(hir)?
         .checked_add(names_literals::statements_scope_name_count(
             hir.statements(),
@@ -93,6 +95,7 @@ pub(super) fn estimate_entry(
         continue_targets,
         handlers,
         max_handler_depth,
+        max_completion_depth,
     })
 }
 
@@ -119,6 +122,7 @@ pub(super) fn estimate_function(
         })?;
     let handlers = control::statements_handler_count(&function.body)?;
     let max_handler_depth = control::statements_handler_depth(&function.body)?;
+    let max_completion_depth = control::statements_finally_depth(&function.body)?;
     let local_bindings = function
         .parameters
         .len()
@@ -151,6 +155,7 @@ pub(super) fn estimate_function(
         continue_targets,
         handlers,
         max_handler_depth,
+        max_completion_depth,
     })
 }
 

@@ -41,10 +41,18 @@ fn encoding_selects_all_widths() {
 }
 
 #[test]
-/// Preserves the former exhaustive match as an independent oracle for all 70 opcodes.
+/// Preserves the former exhaustive match as an independent oracle for all semantic opcodes.
 fn operand_count_table_covers_every_opcode_once() {
     let groups: &[(usize, &[Opcode])] = &[
-        (0, &[Opcode::Nop, Opcode::ReturnUndefined]),
+        (
+            0,
+            &[
+                Opcode::Nop,
+                Opcode::ReturnUndefined,
+                Opcode::EnterFinally,
+                Opcode::ResumeCompletion,
+            ],
+        ),
         (
             1,
             &[
@@ -62,6 +70,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::LoadThis,
                 Opcode::LoadNewTarget,
                 Opcode::LoadArgumentsLength,
+                Opcode::BreakThroughFinally,
+                Opcode::ContinueThroughFinally,
             ],
         ),
         (
@@ -509,7 +519,8 @@ fn compiled_module_freezes_async_metadata_without_runtime_values() {
         protected_start: WordOffset::new(0),
         protected_end: WordOffset::new(1),
         handler: WordOffset::new(1),
-        kind: HandlerKind::Finally,
+        handler_end: WordOffset::new(1),
+        kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
     .into();
@@ -929,6 +940,7 @@ fn compiled_module_rejects_crossing_and_underreserved_handler_tables() {
             protected_start: WordOffset::new(0),
             protected_end: WordOffset::new(2),
             handler: WordOffset::new(3),
+            handler_end: WordOffset::new(3),
             kind: HandlerKind::Catch,
             environment_depth: 0,
         },
@@ -936,6 +948,7 @@ fn compiled_module_rejects_crossing_and_underreserved_handler_tables() {
             protected_start: WordOffset::new(1),
             protected_end: WordOffset::new(3),
             handler: WordOffset::new(3),
+            handler_end: WordOffset::new(3),
             kind: HandlerKind::Catch,
             environment_depth: 0,
         },
@@ -978,10 +991,250 @@ fn compiled_module_rejects_crossing_and_underreserved_handler_tables() {
         protected_start: WordOffset::new(0),
         protected_end: WordOffset::new(1),
         handler: WordOffset::new(3),
+        handler_end: WordOffset::new(3),
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
     .into();
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(words),
+            metadata,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidFunctionLayout { .. }
+    ));
+}
+
+#[test]
+/// Accepts the minimal verified finalizer and rejects completion opcodes outside its ranges.
+fn compiled_module_cross_validates_finally_control_opcodes() {
+    let mut valid_words = encode_instruction(Opcode::Nop, &[]).unwrap();
+    valid_words.extend(encode_instruction(Opcode::EnterFinally, &[]).unwrap());
+    valid_words.extend(encode_instruction(Opcode::ResumeCompletion, &[]).unwrap());
+    valid_words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let handler = HandlerEntry {
+        protected_start: WordOffset::new(0),
+        protected_end: WordOffset::new(2),
+        handler: WordOffset::new(2),
+        handler_end: WordOffset::new(3),
+        kind: HandlerKind::Finally,
+        environment_depth: 0,
+    };
+    let metadata = |handler| {
+        let mut metadata = FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                max_handler_depth: 1,
+                max_completion_depth: 1,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.handlers = vec![handler].into();
+        metadata
+    };
+    CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(valid_words),
+            metadata(handler),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+
+    let mut outside_words = encode_instruction(Opcode::Nop, &[]).unwrap();
+    outside_words.extend(encode_instruction(Opcode::EnterFinally, &[]).unwrap());
+    outside_words.extend(encode_instruction(Opcode::ResumeCompletion, &[]).unwrap());
+    outside_words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let outside_handler = HandlerEntry {
+        protected_end: WordOffset::new(1),
+        ..handler
+    };
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(outside_words),
+            metadata(outside_handler),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidFinallyInstruction {
+            opcode: Opcode::EnterFinally,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn compiled_module_rejects_finalizer_without_terminal_resume() {
+    let mut words = encode_instruction(Opcode::Nop, &[]).unwrap();
+    words.extend(encode_instruction(Opcode::EnterFinally, &[]).unwrap());
+    words.extend(encode_instruction(Opcode::Nop, &[]).unwrap());
+    words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let mut metadata = FunctionMetadata::new(
+        FunctionKind::Script,
+        FunctionLayout {
+            max_handler_depth: 1,
+            max_completion_depth: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    metadata.handlers = vec![HandlerEntry {
+        protected_start: WordOffset::new(0),
+        protected_end: WordOffset::new(2),
+        handler: WordOffset::new(2),
+        handler_end: WordOffset::new(3),
+        kind: HandlerKind::Finally,
+        environment_depth: 0,
+    }]
+    .into();
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(words),
+            metadata,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidHandlerRange { .. }
+    ));
+}
+
+#[test]
+/// Rejects abrupt-finally opcodes that neither cross nor originate in a finalizer boundary.
+fn compiled_module_rejects_spurious_abrupt_finally_targets() {
+    let mut uncovered = encode_instruction(Opcode::BreakThroughFinally, &[2]).unwrap();
+    uncovered.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(uncovered),
+            FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default()),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidFinallyInstruction {
+            opcode: Opcode::BreakThroughFinally,
+            ..
+        }
+    ));
+
+    let mut retained = encode_instruction(Opcode::Nop, &[]).unwrap();
+    retained.extend(encode_instruction(Opcode::ContinueThroughFinally, &[0]).unwrap());
+    retained.extend(encode_instruction(Opcode::ResumeCompletion, &[]).unwrap());
+    retained.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let mut metadata = FunctionMetadata::new(
+        FunctionKind::Script,
+        FunctionLayout {
+            max_handler_depth: 1,
+            max_completion_depth: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    metadata.handlers = vec![HandlerEntry {
+        protected_start: WordOffset::new(0),
+        protected_end: WordOffset::new(3),
+        handler: WordOffset::new(3),
+        handler_end: WordOffset::new(4),
+        kind: HandlerKind::Finally,
+        environment_depth: 0,
+    }]
+    .into();
+    let error = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(retained),
+            metadata,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ModuleBuildError::InvalidFinallyInstruction {
+            opcode: Opcode::ContinueThroughFinally,
+            ..
+        }
+    ));
+}
+
+#[test]
+/// Counts an inner catch while its containing finalizer completion remains active.
+fn compiled_module_counts_handlers_nested_in_finalizer_execution() {
+    let opcodes = [
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::Nop,
+        Opcode::ResumeCompletion,
+        Opcode::ReturnUndefined,
+    ];
+    let words = opcodes
+        .into_iter()
+        .flat_map(|opcode| encode_instruction(opcode, &[]).unwrap())
+        .collect::<Vec<_>>();
+    let handlers: Arc<[HandlerEntry]> = vec![
+        HandlerEntry {
+            protected_start: WordOffset::new(0),
+            protected_end: WordOffset::new(1),
+            handler: WordOffset::new(1),
+            handler_end: WordOffset::new(6),
+            kind: HandlerKind::Finally,
+            environment_depth: 0,
+        },
+        HandlerEntry {
+            protected_start: WordOffset::new(2),
+            protected_end: WordOffset::new(3),
+            handler: WordOffset::new(3),
+            handler_end: WordOffset::new(3),
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        },
+    ]
+    .into();
+    let mut metadata = FunctionMetadata::new(
+        FunctionKind::Script,
+        FunctionLayout {
+            max_handler_depth: 1,
+            max_completion_depth: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    metadata.handlers = handlers;
     let error = CompiledModule::new(
         Arc::from(""),
         Vec::new(),

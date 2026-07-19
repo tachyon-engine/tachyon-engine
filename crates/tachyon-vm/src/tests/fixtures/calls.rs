@@ -97,6 +97,7 @@ pub(in crate::tests) fn number_continuation_module() -> CompiledModule {
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -167,6 +168,7 @@ pub(in crate::tests) fn number_continuation_throw_module() -> CompiledModule {
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -240,6 +242,7 @@ pub(in crate::tests) fn string_continuation_module() -> CompiledModule {
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -306,6 +309,7 @@ pub(in crate::tests) fn numeric_unary_continuation_module(
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -467,6 +471,7 @@ pub(in crate::tests) fn numeric_callback_template(
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -503,6 +508,7 @@ pub(in crate::tests) fn string_callback_template(
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -743,6 +749,7 @@ pub(in crate::tests) fn direct_catch_module() -> CompiledModule {
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]
@@ -793,6 +800,7 @@ pub(in crate::tests) fn cross_frame_catch_module() -> CompiledModule {
         protected_start,
         protected_end: handler,
         handler,
+        handler_end: handler,
         kind: HandlerKind::Catch,
         environment_depth: 0,
     }]

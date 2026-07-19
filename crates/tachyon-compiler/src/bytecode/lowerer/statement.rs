@@ -98,12 +98,12 @@ impl Lowerer<'_> {
             ),
             HirStatementKind::Break => {
                 let target = self.current_break_target(statement.span)?;
-                self.emit_jump(target, statement.span)?;
+                self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Continue => {
                 let target = self.current_continue_target(statement.span)?;
-                self.emit_jump(target, statement.span)?;
+                self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Return(_) => Err(CompileError::UnsupportedSyntax {
@@ -181,8 +181,9 @@ impl Lowerer<'_> {
                 )
                 .map_err(CompileError::Builder)?;
         }
-        self.break_targets.push(end);
-        self.continue_targets.push(update_label);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets
+            .push(self.control_target(update_label));
         self.entry_statement(body, result)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -211,8 +212,8 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (condition, end) = self.for_in_prelude(left, right, span)?;
-        self.break_targets.push(end);
-        self.continue_targets.push(condition);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets.push(self.control_target(condition));
         self.entry_statement(body, result)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -242,8 +243,8 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(body_label)
             .map_err(CompileError::Builder)?;
-        self.break_targets.push(end);
-        self.continue_targets.push(condition);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets.push(self.control_target(condition));
         self.entry_statement(body, result)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -358,12 +359,12 @@ impl Lowerer<'_> {
             ),
             HirStatementKind::Break => {
                 let target = self.current_break_target(statement.span)?;
-                self.emit_jump(target, statement.span)?;
+                self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Continue => {
                 let target = self.current_continue_target(statement.span)?;
-                self.emit_jump(target, statement.span)?;
+                self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Empty => Ok(false),
@@ -405,8 +406,9 @@ impl Lowerer<'_> {
                 )
                 .map_err(CompileError::Builder)?;
         }
-        self.break_targets.push(end);
-        self.continue_targets.push(update_label);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets
+            .push(self.control_target(update_label));
         self.function_statement(body)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -434,8 +436,8 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (condition, end) = self.for_in_prelude(left, right, span)?;
-        self.break_targets.push(end);
-        self.continue_targets.push(condition);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets.push(self.control_target(condition));
         self.function_statement(body)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -621,8 +623,8 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(body_label)
             .map_err(CompileError::Builder)?;
-        self.break_targets.push(end);
-        self.continue_targets.push(condition);
+        self.break_targets.push(self.control_target(end));
+        self.continue_targets.push(self.control_target(condition));
         self.function_statement(body)?;
         self.continue_targets.pop();
         self.break_targets.pop();
@@ -712,10 +714,119 @@ impl Lowerer<'_> {
         result: RegisterId,
         span: SourceSpan,
     ) -> Result<bool, CompileError> {
-        if finalizer.is_some() {
-            return Err(self.unsupported(span, "finally statement"));
+        if finalizer.is_none() {
+            let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
+            return self.entry_try_catch(block, handler, result, span);
         }
-        let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
+        let finalizer = finalizer.expect("checked above");
+        let finally_slot = self.reserve_handler();
+        let catch_slot = handler.map(|_| self.reserve_handler());
+        self.finally_depth =
+            self.finally_depth
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "finally nesting depth",
+                })?;
+        let protected_start = self.emit_marker(span)?;
+        let try_terminal = self.entry_statement_list(block, result)?;
+        if !try_terminal {
+            self.emit(Opcode::EnterFinally, &[], span)?;
+        }
+        let (catch_offset, catch_terminal) = if let Some(handler) = handler {
+            let checkpoint = self.locals.len();
+            let offset = self.emit_catch_binding(handler)?;
+            let terminal = self.entry_statement_list(&handler.body, result)?;
+            self.locals.truncate(checkpoint);
+            if !terminal {
+                self.emit(Opcode::EnterFinally, &[], span)?;
+            }
+            (Some(offset), terminal)
+        } else {
+            (None, true)
+        };
+        let finalizer_offset = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        let finalizer_result = self.register()?;
+        let finalizer_terminal = self.entry_statement_list(finalizer, finalizer_result)?;
+        self.emit(Opcode::ResumeCompletion, &[], span)?;
+        let handler_end = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.finally_depth -= 1;
+        self.publish_finally_handler(finally_slot, protected_start, finalizer_offset, handler_end)?;
+        if let (Some(slot), Some(offset)) = (catch_slot, catch_offset) {
+            self.publish_catch_handler(slot, protected_start, offset)?;
+        }
+        Ok(finalizer_terminal || (try_terminal && catch_terminal))
+    }
+
+    /// Lowers an ordinary-function try/catch with identical handler and lexical checkpoints.
+    pub(in crate::bytecode) fn function_try_statement(
+        &mut self,
+        block: &[HirStatement],
+        handler: Option<&HirCatchClause>,
+        finalizer: Option<&[HirStatement]>,
+        span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        if finalizer.is_none() {
+            let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
+            return self.function_try_catch(block, handler, span);
+        }
+        let finalizer = finalizer.expect("checked above");
+        let finally_slot = self.reserve_handler();
+        let catch_slot = handler.map(|_| self.reserve_handler());
+        self.finally_depth =
+            self.finally_depth
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "finally nesting depth",
+                })?;
+        let protected_start = self.emit_marker(span)?;
+        let try_terminal = self.function_statement_list(block)?;
+        if !try_terminal {
+            self.emit(Opcode::EnterFinally, &[], span)?;
+        }
+        let (catch_offset, catch_terminal) = if let Some(handler) = handler {
+            let checkpoint = self.locals.len();
+            let offset = self.emit_catch_binding(handler)?;
+            let terminal = self.function_statement_list(&handler.body)?;
+            self.locals.truncate(checkpoint);
+            if !terminal {
+                self.emit(Opcode::EnterFinally, &[], span)?;
+            }
+            (Some(offset), terminal)
+        } else {
+            (None, true)
+        };
+        let finalizer_offset = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        let finalizer_terminal = self.function_statement_list(finalizer)?;
+        self.emit(Opcode::ResumeCompletion, &[], span)?;
+        let handler_end = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.finally_depth -= 1;
+        self.publish_finally_handler(finally_slot, protected_start, finalizer_offset, handler_end)?;
+        if let (Some(slot), Some(offset)) = (catch_slot, catch_offset) {
+            self.publish_catch_handler(slot, protected_start, offset)?;
+        }
+        Ok(finalizer_terminal || (try_terminal && catch_terminal))
+    }
+
+    /// Lowers the established script try/catch shape without a completion record.
+    fn entry_try_catch(
+        &mut self,
+        block: &[HirStatement],
+        handler: &HirCatchClause,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<bool, CompileError> {
         let handler_slot = self.reserve_handler();
         let protected_start = self.emit_marker(span)?;
         let try_terminal = self.entry_statement_list(block, result)?;
@@ -734,18 +845,13 @@ impl Lowerer<'_> {
         Ok(try_terminal && catch_terminal)
     }
 
-    /// Lowers an ordinary-function try/catch with identical handler and lexical checkpoints.
-    pub(in crate::bytecode) fn function_try_statement(
+    /// Lowers the established function try/catch shape without a completion record.
+    fn function_try_catch(
         &mut self,
         block: &[HirStatement],
-        handler: Option<&HirCatchClause>,
-        finalizer: Option<&[HirStatement]>,
+        handler: &HirCatchClause,
         span: SourceSpan,
     ) -> Result<bool, CompileError> {
-        if finalizer.is_some() {
-            return Err(self.unsupported(span, "finally statement"));
-        }
-        let handler = handler.ok_or_else(|| self.unsupported(span, "try without catch"))?;
         let handler_slot = self.reserve_handler();
         let protected_start = self.emit_marker(span)?;
         let try_terminal = self.function_statement_list(block)?;
@@ -852,7 +958,31 @@ impl Lowerer<'_> {
             protected_start,
             protected_end: handler,
             handler,
+            handler_end: handler,
             kind: HandlerKind::Catch,
+            environment_depth: 0,
+        };
+        *self
+            .handlers
+            .get_mut(slot)
+            .ok_or(CompileError::UnboundExceptionHandler)? = Some(entry);
+        Ok(())
+    }
+
+    /// Publishes one finalizer's protected range and verified execution boundary.
+    pub(in crate::bytecode) fn publish_finally_handler(
+        &mut self,
+        slot: usize,
+        protected_start: tachyon_bytecode::WordOffset,
+        handler: tachyon_bytecode::WordOffset,
+        handler_end: tachyon_bytecode::WordOffset,
+    ) -> Result<(), CompileError> {
+        let entry = HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            handler_end,
+            kind: HandlerKind::Finally,
             environment_depth: 0,
         };
         *self
@@ -884,7 +1014,7 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (case_labels, end) = self.emit_switch_dispatch(discriminant, cases, span)?;
-        self.break_targets.push(end);
+        self.break_targets.push(self.control_target(end));
         for (case, label) in cases.iter().zip(case_labels) {
             self.builder
                 .bind_label(label)
@@ -912,7 +1042,7 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (case_labels, end) = self.emit_switch_dispatch(discriminant, cases, span)?;
-        self.break_targets.push(end);
+        self.break_targets.push(self.control_target(end));
         for (case, label) in cases.iter().zip(case_labels) {
             self.builder
                 .bind_label(label)

@@ -393,20 +393,56 @@ fn compiler_freezes_nested_try_catch_ranges_and_exact_depth() {
 }
 
 #[test]
-fn compiler_keeps_finally_explicitly_unsupported_until_completion_replay() {
-    let error = Compiler
+/// Locks the single-body finalizer shape and exact completion-depth metadata.
+fn compiler_lowers_finally_to_explicit_completion_replay() {
+    let module = Compiler
         .compile(
             source(MediaType::JavaScript, "try { 1; } finally { 2; }"),
             CompileOptions::default(),
         )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        CompileError::UnsupportedSyntax {
-            syntax: "finally statement",
-            ..
-        }
-    ));
+        .unwrap();
+    let function = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .unwrap();
+    assert_eq!(function.handlers().len(), 1);
+    assert_eq!(
+        function.handlers()[0].kind,
+        tachyon_bytecode::HandlerKind::Finally
+    );
+    assert_eq!(function.layout().max_handler_depth, 1);
+    assert_eq!(function.layout().max_completion_depth, 1);
+    let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+    assert_eq!(disassembly.matches("EnterFinally").count(), 1);
+    assert_eq!(disassembly.matches("ResumeCompletion").count(), 1);
+}
+
+#[test]
+/// Proves catch remains inner to finally and escaping loop control uses an abrupt target.
+fn compiler_lowers_catch_finally_and_break_without_copying_the_finalizer() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "while (true) { try { throw 1; } catch (error) { break; } finally { 2; } }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let function = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .unwrap();
+    assert_eq!(function.handlers().len(), 2);
+    assert_eq!(
+        function.handlers()[0].kind,
+        tachyon_bytecode::HandlerKind::Finally
+    );
+    assert_eq!(
+        function.handlers()[1].kind,
+        tachyon_bytecode::HandlerKind::Catch
+    );
+    let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+    assert_eq!(disassembly.matches("BreakThroughFinally").count(), 1);
+    assert_eq!(disassembly.matches("ResumeCompletion").count(), 1);
 }
 
 #[test]

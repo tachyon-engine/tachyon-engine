@@ -136,9 +136,20 @@ pub(super) fn validate_handlers(
         let start_is_valid = bytecode.is_instruction_start(handler.protected_start);
         let end_is_valid = handler.protected_end.index() == code_len
             || bytecode.is_instruction_start(handler.protected_end);
+        let handler_end_is_valid = handler.handler_end.index() == code_len
+            || bytecode.is_instruction_start(handler.handler_end);
+        let handler_kind_is_valid = match handler.kind {
+            HandlerKind::Catch => handler.handler_end == handler.handler,
+            HandlerKind::Finally => {
+                handler.handler.index() < handler.handler_end.index()
+                    && finalizer_ends_with_resume(bytecode, handler.handler_end)
+            }
+        };
         if !start_is_valid
             || !end_is_valid
             || !bytecode.is_instruction_start(handler.handler)
+            || !handler_end_is_valid
+            || !handler_kind_is_valid
             || handler.protected_start.index() >= handler.protected_end.index()
         {
             return Err(ModuleBuildError::InvalidHandlerRange { function, handler });
@@ -163,6 +174,13 @@ pub(super) fn validate_handlers(
                     current,
                 });
             }
+            if crosses_finalizer_ranges(previous, current) {
+                return Err(ModuleBuildError::HandlerTableNotProperlyNested {
+                    function,
+                    previous,
+                    current,
+                });
+            }
         }
         let mut depth = 0u32;
         let mut finally_depth = 0u32;
@@ -177,7 +195,59 @@ pub(super) fn validate_handlers(
         max_depth.handlers = max_depth.handlers.max(depth);
         max_depth.finally_handlers = max_depth.finally_handlers.max(finally_depth);
     }
+    for &current in handlers
+        .iter()
+        .filter(|handler| handler.kind == HandlerKind::Finally)
+    {
+        let active_depth = handlers
+            .iter()
+            .filter(|candidate| finalizer_contains(**candidate, current))
+            .count() as u32;
+        max_depth.handlers = max_depth.handlers.max(active_depth);
+        max_depth.finally_handlers = max_depth.finally_handlers.max(active_depth);
+    }
+    for &current in handlers {
+        let protected_depth = handlers
+            .iter()
+            .filter(|candidate| handler_contains(**candidate, current))
+            .count() as u32;
+        let active_outer_finalizers = handlers
+            .iter()
+            .filter(|candidate| finalizer_executes_around(**candidate, current))
+            .count() as u32;
+        max_depth.handlers = max_depth
+            .handlers
+            .max(protected_depth.saturating_add(active_outer_finalizers));
+        if current.kind == HandlerKind::Finally {
+            let protected_finally_depth = handlers
+                .iter()
+                .filter(|candidate| {
+                    candidate.kind == HandlerKind::Finally && handler_contains(**candidate, current)
+                })
+                .count() as u32;
+            max_depth.finally_handlers = max_depth
+                .finally_handlers
+                .max(protected_finally_depth.saturating_add(active_outer_finalizers));
+        }
+    }
     Ok(max_depth)
+}
+
+/// Confirms a finalizer's exclusive end is the fallthrough after `ResumeCompletion`.
+fn finalizer_ends_with_resume(bytecode: &VerifiedBytecode, end: WordOffset) -> bool {
+    let words = bytecode.bytecode().words();
+    let mut offset = 0u32;
+    while offset < end.index() {
+        let Ok(instruction) = super::decode_instruction(words, WordOffset::new(offset)) else {
+            return false;
+        };
+        let next = offset + u32::from(instruction.word_len);
+        if next == end.index() {
+            return instruction.opcode == Opcode::ResumeCompletion;
+        }
+        offset = next;
+    }
+    false
 }
 
 fn handler_contains(outer: HandlerEntry, inner: HandlerEntry) -> bool {
@@ -189,6 +259,83 @@ fn crosses_handler_ranges(left: HandlerEntry, right: HandlerEntry) -> bool {
     left.protected_start.index() < right.protected_start.index()
         && right.protected_start.index() < left.protected_end.index()
         && left.protected_end.index() < right.protected_end.index()
+}
+
+fn finalizer_contains(outer: HandlerEntry, inner: HandlerEntry) -> bool {
+    outer.kind == HandlerKind::Finally
+        && outer.handler.index() <= inner.handler.index()
+        && inner.handler_end.index() <= outer.handler_end.index()
+}
+
+fn finalizer_executes_around(outer: HandlerEntry, inner: HandlerEntry) -> bool {
+    outer.kind == HandlerKind::Finally
+        && outer.handler.index() <= inner.protected_start.index()
+        && inner.protected_end.index() <= outer.handler_end.index()
+}
+
+fn crosses_finalizer_ranges(left: HandlerEntry, right: HandlerEntry) -> bool {
+    if left.kind != HandlerKind::Finally || right.kind != HandlerKind::Finally {
+        return false;
+    }
+    let (first, second) = if left.handler.index() <= right.handler.index() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    first.handler.index() < second.handler.index()
+        && second.handler.index() < first.handler_end.index()
+        && first.handler_end.index() < second.handler_end.index()
+}
+
+/// Cross-validates completion opcodes against immutable finalizer metadata after decoding.
+pub(super) fn validate_finally_instructions(
+    function: FunctionId,
+    handlers: &[HandlerEntry],
+    bytecode: &VerifiedBytecode,
+) -> Result<(), ModuleBuildError> {
+    let words = bytecode.bytecode().words();
+    let mut offset = 0u32;
+    while (offset as usize) < words.len() {
+        let instruction = super::decode_instruction(words, WordOffset::new(offset))
+            .expect("verified bytecode remains decodable");
+        let next = offset + u32::from(instruction.word_len);
+        let valid = match instruction.opcode {
+            Opcode::EnterFinally => handlers.iter().any(|handler| {
+                handler.kind == HandlerKind::Finally
+                    && handler.protected_start.index() <= offset
+                    && offset < handler.protected_end.index()
+            }),
+            Opcode::ResumeCompletion => handlers.iter().any(|handler| {
+                handler.kind == HandlerKind::Finally
+                    && handler.handler.index() <= offset
+                    && handler.handler_end.index() == next
+            }),
+            Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
+                let target = instruction.operands[0];
+                handlers.iter().any(|handler| {
+                    handler.kind == HandlerKind::Finally
+                        && ((handler.protected_start.index() <= offset
+                            && offset < handler.protected_end.index()
+                            && !(handler.protected_start.index() <= target
+                                && target < handler.protected_end.index()))
+                            || (handler.handler.index() <= offset
+                                && offset < handler.handler_end.index()
+                                && !(handler.handler.index() <= target
+                                    && target < handler.handler_end.index())))
+                })
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(ModuleBuildError::InvalidFinallyInstruction {
+                function,
+                offset: WordOffset::new(offset),
+                opcode: instruction.opcode,
+            });
+        }
+        offset = next;
+    }
+    Ok(())
 }
 
 /// Feedback sites have stable ordering and bounds, while their mutable feedback stays isolate-local.
@@ -473,6 +620,10 @@ fn verify_instruction(
     match instruction.opcode {
         Opcode::Nop
         | Opcode::Jump
+        | Opcode::EnterFinally
+        | Opcode::ResumeCompletion
+        | Opcode::BreakThroughFinally
+        | Opcode::ContinueThroughFinally
         | Opcode::ReturnUndefined
         | Opcode::DeclareScope
         | Opcode::DeclareGlobalLexical => {}
@@ -631,9 +782,17 @@ fn verify_instruction(
     }
     if matches!(
         instruction.opcode,
-        Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish
+        Opcode::Jump
+            | Opcode::BreakThroughFinally
+            | Opcode::ContinueThroughFinally
+            | Opcode::JumpIfFalse
+            | Opcode::JumpIfTrue
+            | Opcode::JumpIfNotNullish
     ) && !starts
-        .get(if instruction.opcode == Opcode::Jump {
+        .get(if matches!(
+            instruction.opcode,
+            Opcode::Jump | Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally
+        ) {
             operands[0]
         } else {
             operands[1]

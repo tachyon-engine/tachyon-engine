@@ -248,6 +248,8 @@ pub struct HandlerEntry {
     pub protected_start: WordOffset,
     pub protected_end: WordOffset,
     pub handler: WordOffset,
+    /// Exclusive finalizer end; catch handlers use `handler` as the sentinel.
+    pub handler_end: WordOffset,
     pub kind: HandlerKind,
     pub environment_depth: u32,
 }
@@ -579,6 +581,11 @@ pub enum ModuleBuildError {
         previous: HandlerEntry,
         current: HandlerEntry,
     },
+    InvalidFinallyInstruction {
+        function: FunctionId,
+        offset: WordOffset,
+        opcode: Opcode,
+    },
     FeedbackSiteOffsetNotInstructionStart {
         function: FunctionId,
         offset: WordOffset,
@@ -726,6 +733,11 @@ impl CompiledModule {
             )?;
             let handler_depth =
                 verify::validate_handlers(template.id, &template.metadata.handlers, &bytecode)?;
+            verify::validate_finally_instructions(
+                template.id,
+                &template.metadata.handlers,
+                &bytecode,
+            )?;
             verify::validate_function_layout(
                 template.id,
                 template.metadata.layout,

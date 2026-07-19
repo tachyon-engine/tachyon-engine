@@ -107,6 +107,7 @@ fn lower_entry(
         break_targets: Vec::with_capacity(entry_capacity.break_targets),
         continue_targets: Vec::with_capacity(entry_capacity.continue_targets),
         handlers: Vec::with_capacity(entry_capacity.handlers),
+        finally_depth: 0,
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: true,
@@ -211,6 +212,7 @@ fn lower_entry(
         layout: FunctionLayout {
             register_count,
             max_handler_depth: entry_capacity.max_handler_depth,
+            max_completion_depth: entry_capacity.max_completion_depth,
             ..FunctionLayout::default()
         },
         source_map,
@@ -529,6 +531,7 @@ fn lower_function(
         break_targets: Vec::with_capacity(function_capacity.break_targets),
         continue_targets: Vec::with_capacity(function_capacity.continue_targets),
         handlers: Vec::with_capacity(function_capacity.handlers),
+        finally_depth: 0,
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: false,
@@ -619,6 +622,7 @@ fn lower_function(
                     .map_err(|_| CompileError::RegisterOverflow)?,
                 name_scope,
                 max_handler_depth: function_capacity.max_handler_depth,
+                max_completion_depth: function_capacity.max_completion_depth,
                 environment_slot_count: u32::try_from(
                     environments.functions[function_index].slots.len(),
                 )
