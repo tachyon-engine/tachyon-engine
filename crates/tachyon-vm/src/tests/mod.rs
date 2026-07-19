@@ -13,6 +13,7 @@ use super::*;
 mod calls;
 mod control;
 mod dispatch;
+mod environments;
 mod fixtures;
 mod properties;
 mod realm_gc;

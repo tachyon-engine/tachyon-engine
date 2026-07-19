@@ -1,25 +1,6 @@
-//! Callable payloads, native functions, environments, and VM descriptor identities.
+//! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
-
-#[derive(Debug)]
-pub(crate) struct Environment {
-    pub(crate) parent: Option<GcRef<Environment>>,
-    pub(crate) slots: Box<[Value]>,
-}
-
-impl Trace for Environment {
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.parent.trace(tracer);
-        self.slots.trace(tracer);
-    }
-}
-
-impl GcExternalMemory for Environment {
-    fn external_memory_bytes(&self) -> usize {
-        self.slots.len() * core::mem::size_of::<Value>()
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeFunction {
@@ -354,6 +335,7 @@ pub(crate) struct ResolvedCallTarget {
     pub(crate) code: CodeId,
     pub(crate) function: FunctionId,
     pub(crate) environment: Option<GcRef<Environment>>,
+    pub(crate) kind: FunctionKind,
     pub(crate) layout: FunctionLayout,
     pub(crate) strictness: FunctionStrictness,
 }
@@ -457,7 +439,9 @@ impl RealmIntrinsicAtoms {
 #[inline(always)]
 pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeErrorKind> {
     match error {
-        ExecutionError::UnresolvedBinding(_) | ExecutionError::UninitializedBinding(_) => {
+        ExecutionError::UnresolvedBinding(_)
+        | ExecutionError::UninitializedBinding(_)
+        | ExecutionError::UninitializedEnvironmentBinding { .. } => {
             Some(NativeErrorKind::Reference)
         }
         ExecutionError::NonCallable(_)
@@ -465,13 +449,17 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidInstanceofPrototype(_)
         | ExecutionError::ReadOnlyBinding(_)
         | ExecutionError::ImmutableBinding(_)
+        | ExecutionError::ImmutableEnvironmentBinding { .. }
         | ExecutionError::NonExtensibleObject(_)
         | ExecutionError::ReadOnlyProperty(_)
         | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
-        | ExecutionError::GlobalLexicalAlreadyInitialized(_) => Some(NativeErrorKind::Syntax),
+        | ExecutionError::GlobalLexicalAlreadyInitialized(_)
+        | ExecutionError::EnvironmentBindingAlreadyInitialized { .. } => {
+            Some(NativeErrorKind::Syntax)
+        }
         ExecutionError::InvalidNumberRadix(_) | ExecutionError::InvalidNumberPrecision(_) => {
             Some(NativeErrorKind::Range)
         }

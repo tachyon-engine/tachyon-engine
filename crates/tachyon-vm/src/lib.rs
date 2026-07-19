@@ -76,12 +76,12 @@ use runtime::code::is_conditional_branch;
 use runtime::fiber::ActiveHandler;
 use runtime::{
     callable::{
-        BoundFunctionSnapshot, CallSite, DataPropertyDescriptor, Environment, ErrorIntrinsics,
-        FlatWork, FunctionExecutable, FunctionObject, IntrinsicPropertyAtoms, NativeFunction,
-        ObjectReceiver, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
-        execution_error_kind,
+        BoundFunctionSnapshot, CallSite, DataPropertyDescriptor, ErrorIntrinsics, FlatWork,
+        FunctionExecutable, FunctionObject, IntrinsicPropertyAtoms, NativeFunction, ObjectReceiver,
+        RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
     },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
+    environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
         ArrayAllocationRoots, CodeLoadRoots, Completion, ConversionConsumer, Fiber, Frame,
         NativeContinuation, NativeContinuationSite, PropertyMutationRoots,
@@ -229,6 +229,9 @@ pub enum ExecutionError {
     InvalidScopeName { code: CodeId, scope_name: u32 },
     MissingEnvironment,
     InvalidEnvironmentSlot { depth: u32, slot: u32 },
+    UninitializedEnvironmentBinding { depth: u32, slot: u32 },
+    ImmutableEnvironmentBinding { depth: u32, slot: u32 },
+    EnvironmentBindingAlreadyInitialized { depth: u32, slot: u32 },
     UnresolvedBinding(AtomId),
     ReadOnlyBinding(AtomId),
     UninitializedBinding(AtomId),

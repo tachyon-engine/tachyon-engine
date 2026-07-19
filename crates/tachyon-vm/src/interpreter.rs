@@ -2,6 +2,28 @@
 
 use super::*;
 
+#[inline(always)]
+pub(crate) fn environment_access_error(
+    depth: u32,
+    slot: u32,
+    error: EnvironmentAccessError,
+) -> ExecutionError {
+    match error {
+        EnvironmentAccessError::InvalidSlot => {
+            ExecutionError::InvalidEnvironmentSlot { depth, slot }
+        }
+        EnvironmentAccessError::Uninitialized => {
+            ExecutionError::UninitializedEnvironmentBinding { depth, slot }
+        }
+        EnvironmentAccessError::Immutable => {
+            ExecutionError::ImmutableEnvironmentBinding { depth, slot }
+        }
+        EnvironmentAccessError::AlreadyInitialized => {
+            ExecutionError::EnvironmentBindingAlreadyInitialized { depth, slot }
+        }
+    }
+}
+
 impl Isolate {
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
@@ -1123,7 +1145,7 @@ impl Isolate {
                     no_gc
                         .borrow_reference(environment, self.types.environment)
                         .map_err(ExecutionError::NoGcBorrow)?
-                        .parent
+                        .parent()
                         .ok_or(ExecutionError::MissingEnvironment)
                 })
             })?;
@@ -1138,10 +1160,8 @@ impl Isolate {
                 no_gc
                     .borrow_reference(environment, self.types.environment)
                     .map_err(ExecutionError::NoGcBorrow)?
-                    .slots
-                    .get(slot as usize)
-                    .copied()
-                    .ok_or(ExecutionError::InvalidEnvironmentSlot { depth, slot })
+                    .load(slot)
+                    .map_err(|error| environment_access_error(depth, slot, error))
             })
         })
     }
@@ -1159,12 +1179,9 @@ impl Isolate {
                 let environment = no_gc
                     .borrow_reference_mut(environment, self.types.environment)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                let target = environment
-                    .slots
-                    .get_mut(slot as usize)
-                    .ok_or(ExecutionError::InvalidEnvironmentSlot { depth, slot })?;
-                *target = value;
-                Ok::<(), ExecutionError>(())
+                environment
+                    .store(slot, value)
+                    .map_err(|error| environment_access_error(depth, slot, error))
             })
         })?;
         if let Some(target) = value.as_heap_ref() {
@@ -1178,16 +1195,27 @@ impl Isolate {
     /// Allocates non-empty captured-slot backing after the current activation frame is rooted.
     fn allocate_current_environment(
         &mut self,
+        kind: FunctionKind,
         slot_count: NonZeroU32,
     ) -> Result<(), ExecutionError> {
-        let slot_count = usize::try_from(slot_count.get())
-            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
-        let mut slots = Vec::new();
-        slots
-            .try_reserve_exact(slot_count)
-            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
-        slots.resize(slot_count, Value::from_immediate(Immediate::Undefined));
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
+        let mut environment = if kind == FunctionKind::Module {
+            Environment::try_bindings(environment_kind, parent, slot_count, |_| {
+                BindingState::new(true, false)
+            })
+        } else {
+            Environment::try_captured(environment_kind, parent, slot_count)
+        }
+        .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        if kind == FunctionKind::Module {
+            for slot in 0..slot_count.get() {
+                environment
+                    .initialize(slot, Value::from_immediate(Immediate::Undefined))
+                    .expect("fresh module binding slots initialize exactly once");
+            }
+        }
+        debug_assert_eq!(environment.kind(), environment_kind);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -1199,10 +1227,7 @@ impl Isolate {
             .try_allocate_external_with_gc(
                 self.types.environment,
                 0,
-                Environment {
-                    parent,
-                    slots: slots.into_boxed_slice(),
-                },
+                environment,
                 AllocationSpace::Young,
                 roots,
             )
@@ -1278,7 +1303,7 @@ impl Isolate {
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
-        self.allocate_current_environment(slot_count)
+        self.allocate_current_environment(kind, slot_count)
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
@@ -1472,19 +1497,24 @@ impl Isolate {
                     function,
                     environment,
                 } => {
-                    let (layout, strictness) = {
+                    let (kind, layout, strictness) = {
                         let function_template =
                             self.loaded_code(code)?
                                 .module
                                 .function(function)
                                 .ok_or(ExecutionError::MissingEntryFunction(function))?;
-                        (function_template.layout(), function_template.strictness())
+                        (
+                            function_template.kind(),
+                            function_template.layout(),
+                            function_template.strictness(),
+                        )
                     };
                     return self.push_call_frame(
                         ResolvedCallTarget {
                             code,
                             function,
                             environment,
+                            kind,
                             layout,
                             strictness,
                         },
@@ -1942,7 +1972,7 @@ impl Isolate {
             call_site: Some(site.call_site),
         });
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
-            && let Err(error) = self.allocate_current_environment(slot_count)
+            && let Err(error) = self.allocate_current_environment(target.kind, slot_count)
         {
             self.fiber.frames.pop();
             self.fiber.registers.truncate(callee_base as usize);
