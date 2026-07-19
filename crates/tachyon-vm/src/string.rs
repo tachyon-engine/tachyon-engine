@@ -74,6 +74,28 @@ impl JsString {
         })
     }
 
+    /// Takes owned code units and compresses Latin-1 results without copying wide strings.
+    pub(crate) fn try_from_owned_code_units(
+        value: Vec<u16>,
+    ) -> Result<Self, StringAllocationError> {
+        check_code_unit_length(value.len())?;
+        if value.iter().all(|unit| *unit <= u16::from(u8::MAX)) {
+            let mut latin1 = Vec::new();
+            latin1
+                .try_reserve_exact(value.len())
+                .map_err(|_| StringAllocationError::AllocationFailed)?;
+            latin1.extend(value.into_iter().map(|unit| unit as u8));
+            return Ok(Self {
+                backing: StringBacking::Latin1(latin1.into_boxed_slice()),
+                cached_hash: Cell::new(None),
+            });
+        }
+        Ok(Self {
+            backing: StringBacking::Utf16(value.into_boxed_slice()),
+            cached_hash: Cell::new(None),
+        })
+    }
+
     /// Encodes valid Rust Unicode into ECMAScript code units, compressing Latin-1 when possible.
     pub fn try_from_str(value: &str) -> Result<Self, StringAllocationError> {
         if value
@@ -306,6 +328,17 @@ mod tests {
         let unpaired = JsString::try_from_utf16(&[0xd800, b'x' as u16]).unwrap();
         assert_eq!(unpaired.code_unit_at(0), Some(0xd800));
         assert_eq!(unpaired.code_unit_at(2), None);
+
+        let concatenated = JsString::try_from_owned_code_units(vec![b'a' as u16, 0x00e9]).unwrap();
+        assert_eq!(
+            concatenated.representation(),
+            StringRepresentationTag::OwnedLatin1
+        );
+        let concatenated = JsString::try_from_owned_code_units(vec![b'a' as u16, 0xd800]).unwrap();
+        assert_eq!(
+            concatenated.representation(),
+            StringRepresentationTag::OwnedUtf16
+        );
     }
 
     #[test]

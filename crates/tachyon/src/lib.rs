@@ -1580,6 +1580,35 @@ mod tests {
     }
 
     #[test]
+    /// Covers Add default-hint conversion, string concatenation, ordering, and abrupt completion.
+    fn addition_converts_primitives_and_objects_in_spec_order() {
+        assert_eq!(
+            execute_source(
+                184,
+                "'a' + 1 === 'a1' && 1 + 'a' === '1a' && null + 1 === 1 && true + false === 1 && 'x' + undefined === 'xundefined';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                185,
+                "let order = 0; let right = { valueOf() { order = order * 10 + 2; return 2; } }; let left = { valueOf() { order = order * 10 + 1; right.valueOf = function() { order = order * 10 + 3; return 3; }; return 'x'; } }; let stopped = false; let rightCalls = 0; try { ({ valueOf() { throw 42; } }) + ({ valueOf() { rightCalls = rightCalls + 1; return 2; } }); } catch (error) { stopped = error === 42; } left + right === 'x3' && order === 13 && stopped && rightCalls === 0 && ({ valueOf() { return {}; }, toString() { return 'a'; } }) + 1 === 'a1';",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+        assert_eq!(
+            execute_source(
+                186,
+                "let threw = false; try { '' + Symbol('value'); } catch (error) { threw = error instanceof TypeError; } threw;",
+            )
+            .as_immediate(),
+            Some(tachyon_value::Immediate::True),
+        );
+    }
+
+    #[test]
     /// Preserves left-to-right object conversion, mutation visibility, and abrupt completion.
     fn numeric_binary_objects_resume_in_spec_order() {
         assert_eq!(
@@ -2323,13 +2352,13 @@ mod tests {
             .as_i32(),
             Some(41)
         );
-        assert!(
+        assert_eq!(
             execute_source(
                 65,
                 "function add(value = 40, next = value + 1) { return next; } add(null);",
             )
-            .as_f64()
-            .is_some_and(f64::is_nan)
+            .as_i32(),
+            Some(1),
         );
         assert_eq!(
             execute_source(

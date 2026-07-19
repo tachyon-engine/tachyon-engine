@@ -1433,6 +1433,8 @@ enum ConversionConsumer {
     BitwiseNot,
     BinaryLeft(Opcode),
     BinaryRight(Opcode),
+    AddLeft,
+    AddRight,
 }
 
 impl ConversionConsumer {
@@ -1444,7 +1446,9 @@ impl ConversionConsumer {
             | Self::Negate
             | Self::BitwiseNot
             | Self::BinaryLeft(_)
-            | Self::BinaryRight(_) => None,
+            | Self::BinaryRight(_)
+            | Self::AddLeft
+            | Self::AddRight => None,
         }
     }
 
@@ -1454,7 +1458,7 @@ impl ConversionConsumer {
     }
 
     #[inline]
-    const fn is_numeric_operation(self) -> bool {
+    const fn is_opcode_conversion(self) -> bool {
         matches!(
             self,
             Self::ToNumber
@@ -1462,6 +1466,8 @@ impl ConversionConsumer {
                 | Self::BitwiseNot
                 | Self::BinaryLeft(_)
                 | Self::BinaryRight(_)
+                | Self::AddLeft
+                | Self::AddRight
         )
     }
 }
@@ -2826,6 +2832,13 @@ impl Isolate {
             .is_some_and(|raw| self.heap.checked_reference(raw, self.types.string).is_ok())
     }
 
+    #[inline(always)]
+    fn is_symbol_value(&self, value: Value) -> bool {
+        value
+            .as_heap_ref()
+            .is_some_and(|raw| self.heap.checked_reference(raw, self.types.symbol).is_ok())
+    }
+
     fn string_value_length(&mut self, value: Value) -> Result<usize, ExecutionError> {
         let raw = value
             .as_heap_ref()
@@ -3373,7 +3386,7 @@ impl Isolate {
     /// Starts a cold object conversion while tracing one optional pending operand.
     #[cold]
     #[inline(never)]
-    fn dispatch_object_numeric_conversion(
+    fn dispatch_object_primitive_conversion(
         &mut self,
         consumer: ConversionConsumer,
         caller_base: u32,
@@ -3383,7 +3396,7 @@ impl Isolate {
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         debug_assert!(self.is_object_value(object));
-        debug_assert!(consumer.is_numeric_operation());
+        debug_assert!(consumer.is_opcode_conversion());
         self.advance_native_conversion(
             NativeContinuation {
                 site: NativeContinuationSite {
@@ -3409,6 +3422,31 @@ impl Isolate {
         loop {
             if let Some(value) = returned.take() {
                 if !self.is_object_value(value) {
+                    if continuation.consumer == ConversionConsumer::AddLeft {
+                        let left = value;
+                        let right = continuation.receiver;
+                        if self.is_object_value(right) {
+                            continuation.consumer = ConversionConsumer::AddRight;
+                            continuation.receiver = left;
+                            continuation.object = right;
+                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continue;
+                        }
+                        let result = self.add_primitive_values(left, right)?;
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::AddRight {
+                        let result = self.add_primitive_values(continuation.receiver, value)?;
+                        return self.write(
+                            continuation.site.caller_base,
+                            continuation.site.destination,
+                            result,
+                        );
+                    }
                     if let ConversionConsumer::BinaryLeft(opcode) = continuation.consumer {
                         let left = self.convert_to_number(value)?;
                         let right = continuation.receiver;
@@ -3459,10 +3497,24 @@ impl Isolate {
                 ToPrimitiveStage::ToString => b"toString".as_slice(),
             };
             let atom = self.intern_intrinsic_name(name)?;
-            let method = self.get_data_property(continuation.object, atom)?;
+            self.fiber
+                .completions
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
+            self.fiber
+                .completions
+                .push(Completion::Native(continuation));
+            let method = match self.get_data_property(continuation.object, atom) {
+                Ok(method) => method,
+                Err(error) => {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+            };
             let Some(method) =
                 method.filter(|method| self.resolve_function_object(*method).is_ok())
             else {
+                continuation = self.pop_native_continuation()?;
                 let Some(stage) =
                     next_to_primitive_stage(continuation.consumer, continuation.stage)
                 else {
@@ -3471,13 +3523,6 @@ impl Isolate {
                 continuation.stage = stage;
                 continue;
             };
-            self.fiber
-                .completions
-                .try_reserve_exact(1)
-                .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
-            self.fiber
-                .completions
-                .push(Completion::Native(continuation));
             let frame_depth = self.fiber.frames.len();
             let call_result = self.call(CallSite {
                 caller_base: continuation.site.caller_base,
@@ -3541,6 +3586,9 @@ impl Isolate {
                 }
                 ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
                     unreachable!("binary consumers finish inside the conversion state machine")
+                }
+                ConversionConsumer::AddLeft | ConversionConsumer::AddRight => {
+                    unreachable!("Add consumers finish inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
@@ -4430,6 +4478,63 @@ impl Isolate {
                 Ok(())
             })
         })
+    }
+
+    /// Computes the exact code-unit count used by primitive string conversion without allocating.
+    fn primitive_string_unit_length(&mut self, value: Value) -> Result<usize, ExecutionError> {
+        if let Some(immediate) = value.as_immediate() {
+            return match immediate {
+                Immediate::True => Ok(4),
+                Immediate::False => Ok(5),
+                Immediate::Undefined => Ok(9),
+                Immediate::Null => Ok(4),
+                Immediate::Hole | Immediate::Uninitialized => {
+                    Err(ExecutionError::UnsupportedPrimitiveStringConversion(value))
+                }
+            };
+        }
+        if let Some(number) = numeric_value(value) {
+            let mut buffer = ryu_js::Buffer::new();
+            return Ok(if number == 0.0 {
+                1
+            } else {
+                buffer.format(number).len()
+            });
+        }
+        if self.is_string_value(value) {
+            return self.string_value_length(value);
+        }
+        Err(ExecutionError::UnsupportedPrimitiveStringConversion(value))
+    }
+
+    /// Implements primitive Add after both operands have completed default-hint ToPrimitive.
+    fn add_primitive_values(&mut self, left: Value, right: Value) -> Result<Value, ExecutionError> {
+        if self.is_string_value(left) || self.is_string_value(right) {
+            if self.is_symbol_value(left) || self.is_symbol_value(right) {
+                return Err(ExecutionError::NotObject(if self.is_symbol_value(left) {
+                    left
+                } else {
+                    right
+                }));
+            }
+            let capacity = self
+                .primitive_string_unit_length(left)?
+                .checked_add(self.primitive_string_unit_length(right)?)
+                .ok_or(ExecutionError::StringBufferAllocationFailed)?;
+            let mut units = Vec::new();
+            units
+                .try_reserve_exact(capacity)
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            self.append_primitive_string_units(left, &mut units)?;
+            self.append_primitive_string_units(right, &mut units)?;
+            debug_assert_eq!(units.len(), capacity);
+            let string = JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?;
+            return self.allocate_runtime_string(string);
+        }
+        let left = self.convert_to_number(left)?;
+        let right = self.convert_to_number(right)?;
+        Ok(numeric_binary(Opcode::Add, left, right))
     }
 
     /// Publishes one runtime-created string through the ordinary managed external allocation path.
@@ -6733,7 +6838,7 @@ impl Isolate {
             Opcode::Negate => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_conversion(
+                    self.dispatch_object_primitive_conversion(
                         ConversionConsumer::Negate,
                         base,
                         operands[0],
@@ -6749,7 +6854,7 @@ impl Isolate {
             Opcode::ToNumber => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_conversion(
+                    self.dispatch_object_primitive_conversion(
                         ConversionConsumer::ToNumber,
                         base,
                         operands[0],
@@ -6765,7 +6870,7 @@ impl Isolate {
             Opcode::BitwiseNot => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
-                    self.dispatch_object_numeric_conversion(
+                    self.dispatch_object_primitive_conversion(
                         ConversionConsumer::BitwiseNot,
                         base,
                         operands[0],
@@ -6781,7 +6886,30 @@ impl Isolate {
             Opcode::Add => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
-                self.write(base, operands[0], numeric_binary(opcode, left, right))?;
+                if numeric_value(left).is_some() && numeric_value(right).is_some() {
+                    self.write(base, operands[0], numeric_binary(opcode, left, right))?;
+                } else if self.is_object_value(left) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::AddLeft,
+                        base,
+                        operands[0],
+                        right,
+                        left,
+                        instruction_offset,
+                    )?;
+                } else if self.is_object_value(right) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::AddRight,
+                        base,
+                        operands[0],
+                        left,
+                        right,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let result = self.add_primitive_values(left, right)?;
+                    self.write(base, operands[0], result)?;
+                }
             }
             Opcode::Sub
             | Opcode::Mul
@@ -6797,7 +6925,7 @@ impl Isolate {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
                 if self.is_object_value(left) {
-                    self.dispatch_object_numeric_conversion(
+                    self.dispatch_object_primitive_conversion(
                         ConversionConsumer::BinaryLeft(opcode),
                         base,
                         operands[0],
@@ -6808,7 +6936,7 @@ impl Isolate {
                 } else {
                     let left = self.convert_to_number(left)?;
                     if self.is_object_value(right) {
-                        self.dispatch_object_numeric_conversion(
+                        self.dispatch_object_primitive_conversion(
                             ConversionConsumer::BinaryRight(opcode),
                             base,
                             operands[0],
@@ -10718,24 +10846,29 @@ mod tests {
 
     /// Exercises left and right callback resume while the pending operand remains traced.
     fn assert_numeric_binary_continuation_batch<const N: usize>() {
-        let mut isolate = test_isolate();
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
-        let outcome = isolate
-            .execute_with_batch::<N>(
-                &numeric_binary_continuation_module(),
-                ExecutionBudget {
-                    fuel: 40,
-                    quantum: 40,
-                },
-            )
-            .unwrap();
-        assert!(matches!(
-            outcome,
-            RunOutcome::Completed(value)
-                if value.as_immediate() == Some(Immediate::True)
-        ));
+        for module in [
+            numeric_binary_continuation_module(),
+            add_continuation_module(),
+        ] {
+            let mut isolate = test_isolate();
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+            let outcome = isolate
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 40,
+                        quantum: 40,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                outcome,
+                RunOutcome::Completed(value)
+                    if value.as_immediate() == Some(Immediate::True)
+            ));
+        }
     }
 
     fn assert_bound_function_batch<const N: usize>() {
@@ -11735,6 +11868,46 @@ mod tests {
         .unwrap()
     }
 
+    /// Builds `left.valueOf() + right.valueOf() === "x2"` with a GC String left result.
+    fn add_continuation_module() -> CompiledModule {
+        let span = SourceSpan { start: 0, end: 1 };
+        let mut entry = BytecodeBuilder::with_capacity(10, 1);
+        entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+        entry.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+        entry.emit(Opcode::CreateObject, &[2], span).unwrap();
+        entry.emit(Opcode::CreateClosure, &[3, 2], span).unwrap();
+        entry.emit(Opcode::SetById, &[2, 3, 0], span).unwrap();
+        entry.emit(Opcode::Add, &[4, 0, 2], span).unwrap();
+        entry.emit(Opcode::LoadConstant, &[5, 1], span).unwrap();
+        entry.emit(Opcode::StrictEqual, &[6, 4, 5], span).unwrap();
+        entry.emit(Opcode::Return, &[6], span).unwrap();
+        let (entry_bytecode, entry_source_map, entry_registers) = entry.finish().unwrap();
+        let entry_metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count: entry_registers,
+                ..FunctionLayout::default()
+            },
+            source_map: entry_source_map,
+            ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+        };
+        CompiledModule::new(
+            Arc::from("Add continuation"),
+            vec![
+                BytecodeConstant::string_from_utf16("x".encode_utf16().collect()),
+                BytecodeConstant::string_from_utf16("x2".encode_utf16().collect()),
+            ],
+            vec![Arc::from("valueOf")],
+            vec![
+                CompiledFunctionTemplate::new(FunctionId::new(0), entry_bytecode, entry_metadata),
+                string_callback_template(FunctionId::new(1), 0, span),
+                numeric_callback_template(FunctionId::new(2), 2, span),
+            ],
+            FunctionId::new(0),
+        )
+        .unwrap()
+    }
+
     /// Builds a callback with an internal throw/catch before returning one numeric primitive.
     fn numeric_callback_template(
         function: FunctionId,
@@ -11748,6 +11921,42 @@ mod tests {
         let handler = callback.emit(Opcode::LoadException, &[1], span).unwrap();
         callback
             .emit(Opcode::LoadImmediate, &[2, returned as u32], span)
+            .unwrap();
+        callback.emit(Opcode::Return, &[2], span).unwrap();
+        let (bytecode, source_map, register_count) = callback.finish().unwrap();
+        let mut metadata = FunctionMetadata {
+            layout: FunctionLayout {
+                register_count,
+                max_handler_depth: 1,
+                ..FunctionLayout::default()
+            },
+            source_map,
+            ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+        };
+        metadata.handlers = vec![HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            kind: HandlerKind::Catch,
+            environment_depth: 0,
+        }]
+        .into();
+        CompiledFunctionTemplate::new(function, bytecode, metadata)
+    }
+
+    /// Builds a callback with an internal catch before returning one string constant.
+    fn string_callback_template(
+        function: FunctionId,
+        constant: u32,
+        span: SourceSpan,
+    ) -> CompiledFunctionTemplate {
+        let mut callback = BytecodeBuilder::with_capacity(6, 1);
+        let protected_start = callback.emit(Opcode::Nop, &[], span).unwrap();
+        callback.emit(Opcode::LoadImmediate, &[0, 1], span).unwrap();
+        callback.emit(Opcode::Throw, &[0], span).unwrap();
+        let handler = callback.emit(Opcode::LoadException, &[1], span).unwrap();
+        callback
+            .emit(Opcode::LoadConstant, &[2, constant], span)
             .unwrap();
         callback.emit(Opcode::Return, &[2], span).unwrap();
         let (bytecode, source_map, register_count) = callback.finish().unwrap();
