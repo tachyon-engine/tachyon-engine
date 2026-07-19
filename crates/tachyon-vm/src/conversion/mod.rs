@@ -407,7 +407,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         self.fiber
             .completions
-            .push_native(NativeContinuation::Conversion(continuation))
+            .push_native(NativeContinuation::conversion(continuation))
             .map_err(|error| match error {
                 CompletionStackError::Limit { limit, requested } => {
                     ExecutionError::CompletionStackLimit { limit, requested }
@@ -430,12 +430,9 @@ impl Isolate {
     /// Removes one conversion sentinel after its synchronous method call or failed lookup.
     #[inline]
     fn pop_native_conversion(&mut self) -> Result<ConversionContinuation, ExecutionError> {
-        match self.pop_native_continuation()? {
-            NativeContinuation::Conversion(continuation) => Ok(continuation),
-            NativeContinuation::PropertyGet { .. } | NativeContinuation::PropertySet { .. } => {
-                Err(ExecutionError::MissingNativeContinuation)
-            }
-        }
+        self.pop_native_continuation()?
+            .as_conversion()
+            .ok_or(ExecutionError::MissingNativeContinuation)
     }
 
     /// Completes one native consumer after its optional argument has become the required primitive.

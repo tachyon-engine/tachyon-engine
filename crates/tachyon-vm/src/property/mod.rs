@@ -2,11 +2,13 @@
 
 mod accessor;
 mod descriptor;
+mod descriptor_parse;
 mod function;
 mod storage;
 
 use super::*;
 pub(crate) use accessor::{PropertyRead, PropertyWrite};
+pub(crate) use descriptor_parse::PendingPropertyDescriptor;
 
 impl Isolate {
     #[inline(always)]
@@ -61,13 +63,13 @@ impl Isolate {
     }
 
     /// Reads only an object's own data slot, excluding inherited prototype properties.
-    pub(crate) fn has_own_data_property(
+    pub(crate) fn has_own_property(
         &mut self,
         receiver: Value,
         key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         Ok(self
-            .own_data_property_with_attributes(receiver, key)?
+            .complete_own_property_descriptor(receiver, key)?
             .is_some())
     }
 

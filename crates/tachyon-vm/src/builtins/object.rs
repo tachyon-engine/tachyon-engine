@@ -18,11 +18,8 @@ impl Isolate {
         Ok(object)
     }
 
-    /// Implements Object.defineProperty while leaving ordinary descriptor mechanics in the VM core.
-    pub(crate) fn object_define_property(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
+    /// Starts Object.defineProperty and leaves any observable descriptor getters in the VM loop.
+    pub(crate) fn object_define_property(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let object = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -33,12 +30,19 @@ impl Isolate {
             .call_argument(site, 2)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.property_key(key)?;
-        let descriptor = self.parse_data_property_descriptor(descriptor)?;
-        self.define_data_property(object, key, descriptor)?;
-        Ok(object)
+        self.begin_property_descriptor(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            object,
+            key,
+            descriptor,
+        )
     }
 
-    /// Materializes one own data-property descriptor or returns undefined when the key is absent.
+    /// Materializes one own data or accessor descriptor, or undefined when the key is absent.
     pub(crate) fn object_get_own_property_descriptor(
         &mut self,
         site: &CallSite,
@@ -57,19 +61,17 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.property_key(key)?;
         let property = if self.is_object_value(object) {
-            self.own_data_property_with_attributes(object, key)?
+            self.complete_own_property_descriptor(object, key)?
         } else {
             None
         };
-        let Some((value, attributes)) = property else {
+        let Some(descriptor) = property else {
             return Ok(Value::from_immediate(Immediate::Undefined));
         };
 
-        // Publish both intermediate values through the caller window across managed allocations.
-        self.write(site.caller_base, site.destination, value)?;
         let result = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, result)?;
-        self.materialize_data_property_descriptor(result, value, attributes)?;
+        self.materialize_property_descriptor(result, descriptor)?;
         Ok(result)
     }
 
@@ -82,7 +84,7 @@ impl Isolate {
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.property_key(key)?;
-        self.has_own_data_property(site.this_value, key)
+        self.has_own_property(site.this_value, key)
     }
 
     /// Implements Object.prototype.propertyIsEnumerable for one ordinary own property.
@@ -95,8 +97,8 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.property_key(key)?;
         Ok(self
-            .own_data_property_with_attributes(site.this_value, key)?
-            .is_some_and(|(_, attributes)| attributes.enumerable()))
+            .complete_own_property_descriptor(site.this_value, key)?
+            .is_some_and(|descriptor| descriptor.enumerable().unwrap_or(false)))
     }
 
     /// Implements the static Object.hasOwn nullish boundary and ordinary own-property query.
@@ -114,7 +116,7 @@ impl Isolate {
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.property_key(key)?;
-        self.has_own_data_property(object, key)
+        self.has_own_property(object, key)
     }
 
     /// Implements Object.is with the VM's SameValue primitive.

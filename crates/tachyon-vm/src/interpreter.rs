@@ -1094,17 +1094,18 @@ impl Isolate {
                 )?;
                 Ok(None)
             }
-            PropertyRead::Accessor(callee) => {
-                self.dispatch_property_callback(NativeContinuation::PropertyGet {
-                    site: NativeContinuationSite {
+            PropertyRead::Accessor(callee) => self.dispatch_property_callback(
+                NativeContinuation::property_get(
+                    NativeContinuationSite {
                         caller_base,
                         destination,
                         call_site,
                     },
+                    PropertyCallbackMode::Ordinary,
                     receiver,
-                    callee,
-                })
-            }
+                ),
+                callee,
+            ),
         }
     }
 
@@ -1123,45 +1124,52 @@ impl Isolate {
                 self.finish_property_write(receiver, success)?;
                 Ok(None)
             }
-            PropertyWrite::Setter(callee) => {
-                self.dispatch_property_callback(NativeContinuation::PropertySet {
-                    site: NativeContinuationSite {
+            PropertyWrite::Setter(callee) => self.dispatch_property_callback(
+                NativeContinuation::property_set(
+                    NativeContinuationSite {
                         caller_base,
                         destination: value_register,
                         call_site,
                     },
                     receiver,
                     value,
-                    callee,
-                })
-            }
+                ),
+                callee,
+            ),
         }
     }
 
     /// Publishes callback state before using the existing iterative call/frame machinery.
-    fn dispatch_property_callback(
+    pub(crate) fn dispatch_property_callback(
         &mut self,
         continuation: NativeContinuation,
+        callee: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let site = continuation.site();
-        let (receiver, callee, argument_base, argument_count) = match continuation {
-            NativeContinuation::PropertyGet {
-                receiver, callee, ..
-            } => (receiver, callee, 0, 0),
-            NativeContinuation::PropertySet {
-                receiver, callee, ..
-            } => (
-                receiver,
-                callee,
+        let (receiver, argument_base, argument_count) = match continuation.kind() {
+            NativeContinuationKind::PropertyGet(mode) => {
+                let receiver = continuation.first();
+                let receiver = if mode == PropertyCallbackMode::Descriptor {
+                    let state = self.pending_property_descriptor_reference(receiver)?;
+                    self.pending_property_descriptor_source(state)?
+                } else {
+                    receiver
+                };
+                (receiver, 0, 0)
+            }
+            NativeContinuationKind::PropertySet => (
+                continuation.first(),
                 site.caller_base
                     .checked_add(site.destination)
                     .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
                 1,
             ),
-            NativeContinuation::Conversion(_) => {
+            NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
         };
+        // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
+        // reachable through the receiver's accessor pair (or descriptor state -> source chain).
         self.fiber
             .completions
             .push_native(continuation)
@@ -1205,6 +1213,76 @@ impl Isolate {
         let continuation = self.pop_native_continuation()?;
         let returned = self.read(site.caller_base, site.destination)?;
         self.resume_native_continuation(continuation, returned)
+    }
+
+    /// Calls one descriptor-field getter while keeping synchronous errors at the bytecode boundary.
+    pub(crate) fn call_property_descriptor_callback(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingPropertyDescriptor>,
+        callee: Value,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.pending_property_descriptor_source(state)?;
+        let continuation = NativeContinuation::property_get(
+            site,
+            PropertyCallbackMode::Descriptor,
+            Value::from_heap_ref(state.raw()),
+        );
+        // `state` traces the descriptor source whose accessor pair retains `callee` until call.
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee,
+            argument_base: 0,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: receiver,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("a suspended descriptor getter publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(());
+        }
+        let returned = self.read(site.caller_base, site.destination)?;
+        let continuation = self.pop_native_continuation()?;
+        if continuation.kind()
+            != NativeContinuationKind::PropertyGet(PropertyCallbackMode::Descriptor)
+        {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
+        let receiver = continuation.first();
+        let state = self.pending_property_descriptor_reference(receiver)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.resume_property_descriptor(site, state, returned)
     }
 
     /// Converts one ordinary [[Set]] false result into strict-mode TypeError semantics.
@@ -1812,8 +1890,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectDefineProperty) => {
-                    let object = self.object_define_property(&site)?;
-                    return self.write(site.caller_base, site.destination, object);
+                    return self.object_define_property(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
                     let result = self.object_get_own_property_descriptor(&site)?;
@@ -2302,19 +2379,30 @@ impl Isolate {
         loop {
             let site = continuation.site();
             let frame_depth = self.fiber.frames.len();
-            let result = match continuation {
-                NativeContinuation::Conversion(continuation) => {
-                    self.advance_native_conversion(continuation, Some(value))
+            let result = match continuation.kind() {
+                NativeContinuationKind::Conversion { .. } => self.advance_native_conversion(
+                    continuation
+                        .as_conversion()
+                        .expect("conversion kind reconstructs conversion continuation"),
+                    Some(value),
+                ),
+                NativeContinuationKind::PropertyGet(mode) => {
+                    if mode == PropertyCallbackMode::Descriptor {
+                        let state =
+                            self.pending_property_descriptor_reference(continuation.first())?;
+                        self.write(
+                            site.caller_base,
+                            site.destination,
+                            Value::from_heap_ref(state.raw()),
+                        )?;
+                        self.resume_property_descriptor(site, state, value)
+                    } else {
+                        self.write(site.caller_base, site.destination, value)
+                    }
                 }
-                NativeContinuation::PropertyGet { receiver, .. } => {
-                    let _ = receiver;
-                    self.write(site.caller_base, site.destination, value)
-                }
-                NativeContinuation::PropertySet {
-                    receiver,
-                    value: assigned,
-                    ..
-                } => {
+                NativeContinuationKind::PropertySet => {
+                    let receiver = continuation.first();
+                    let assigned = continuation.second();
                     self.write(site.caller_base, site.destination, assigned)?;
                     self.finish_property_write(receiver, true)
                 }

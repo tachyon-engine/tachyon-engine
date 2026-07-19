@@ -334,7 +334,8 @@ mod tests {
     use super::*;
     use crate::{
         ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        NativeContinuationSite, ToPrimitiveStage, runtime::fiber::NativeContinuation,
+        NativeContinuationKind, NativeContinuationSite, PropertyCallbackMode, ToPrimitiveStage,
+        runtime::fiber::NativeContinuation,
     };
 
     const fn undefined() -> Value {
@@ -342,7 +343,7 @@ mod tests {
     }
 
     fn native_continuation() -> NativeContinuation {
-        NativeContinuation::Conversion(ConversionContinuation {
+        NativeContinuation::conversion(ConversionContinuation {
             site: NativeContinuationSite {
                 caller_base: 0,
                 destination: 0,
@@ -388,6 +389,34 @@ mod tests {
                 requested: 2,
             })
         );
+    }
+
+    #[test]
+    /// Locks compact native constructors and conversion reconstruction to their two traced slots.
+    fn native_continuation_constructors_preserve_typed_state() {
+        let site = NativeContinuationSite {
+            caller_base: 1,
+            destination: 2,
+            call_site: WordOffset::new(3),
+        };
+        let receiver = Value::from_i32(7);
+        let assigned = Value::from_i32(9);
+        let get =
+            NativeContinuation::property_get(site, PropertyCallbackMode::Descriptor, receiver);
+        assert_eq!(
+            get.kind(),
+            NativeContinuationKind::PropertyGet(PropertyCallbackMode::Descriptor)
+        );
+        assert_eq!(get.first(), receiver);
+        assert_eq!(get.second(), undefined());
+
+        let set = NativeContinuation::property_set(site, receiver, assigned);
+        assert_eq!(set.kind(), NativeContinuationKind::PropertySet);
+        assert_eq!(set.first(), receiver);
+        assert_eq!(set.second(), assigned);
+        let conversion = native_continuation().as_conversion().unwrap();
+        assert_eq!(conversion.site.call_site, WordOffset::new(0));
+        assert_eq!(conversion.consumer, ConversionConsumer::ToNumber);
     }
 
     #[test]

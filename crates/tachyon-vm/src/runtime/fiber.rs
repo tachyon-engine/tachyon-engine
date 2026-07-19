@@ -186,59 +186,126 @@ pub(crate) struct ConversionContinuation {
 }
 
 /// Typed callback work owned by a JavaScript frame instead of the Rust call stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PropertyCallbackMode {
+    Ordinary,
+    Descriptor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeContinuationKind {
+    Conversion {
+        consumer: ConversionConsumer,
+        stage: ToPrimitiveStage,
+        callback_stage: ConversionCallbackStage,
+    },
+    PropertyGet(PropertyCallbackMode),
+    PropertySet,
+}
+
+/// Compact typed callback work owned by a JavaScript frame instead of the Rust call stack.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum NativeContinuation {
-    Conversion(ConversionContinuation),
-    PropertyGet {
-        site: NativeContinuationSite,
-        receiver: Value,
-        callee: Value,
-    },
-    PropertySet {
-        site: NativeContinuationSite,
-        receiver: Value,
-        value: Value,
-        callee: Value,
-    },
+pub(crate) struct NativeContinuation {
+    site: NativeContinuationSite,
+    kind: NativeContinuationKind,
+    first: Value,
+    second: Value,
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn conversion(continuation: ConversionContinuation) -> Self {
+        Self {
+            site: continuation.site,
+            kind: NativeContinuationKind::Conversion {
+                consumer: continuation.consumer,
+                stage: continuation.stage,
+                callback_stage: continuation.callback_stage,
+            },
+            first: continuation.receiver,
+            second: continuation.object,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn property_get(
+        site: NativeContinuationSite,
+        mode: PropertyCallbackMode,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(mode),
+            first: receiver,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn property_set(
+        site: NativeContinuationSite,
+        receiver: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertySet,
+            first: receiver,
+            second: value,
+        }
+    }
+
     #[inline(always)]
     pub(crate) const fn site(self) -> NativeContinuationSite {
-        match self {
-            Self::Conversion(continuation) => continuation.site,
-            Self::PropertyGet { site, .. } | Self::PropertySet { site, .. } => site,
-        }
+        self.site
+    }
+
+    #[inline]
+    pub(crate) const fn kind(self) -> NativeContinuationKind {
+        self.kind
+    }
+
+    #[inline]
+    pub(crate) const fn first(self) -> Value {
+        self.first
+    }
+
+    #[inline]
+    pub(crate) const fn second(self) -> Value {
+        self.second
+    }
+
+    #[inline]
+    pub(crate) const fn as_conversion(self) -> Option<ConversionContinuation> {
+        let NativeContinuationKind::Conversion {
+            consumer,
+            stage,
+            callback_stage,
+        } = self.kind
+        else {
+            return None;
+        };
+        Some(ConversionContinuation {
+            site: self.site,
+            consumer,
+            receiver: self.first,
+            object: self.second,
+            stage,
+            callback_stage,
+        })
     }
 }
 
 impl Trace for NativeContinuation {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
-        match self {
-            Self::Conversion(continuation) => {
-                continuation.receiver.trace(tracer);
-                continuation.object.trace(tracer);
-            }
-            Self::PropertyGet {
-                receiver, callee, ..
-            } => {
-                receiver.trace(tracer);
-                callee.trace(tracer);
-            }
-            Self::PropertySet {
-                receiver,
-                value,
-                callee,
-                ..
-            } => {
-                receiver.trace(tracer);
-                value.trace(tracer);
-                callee.trace(tracer);
-            }
-        }
+        self.first.trace(tracer);
+        self.second.trace(tracer);
     }
 }
+
+const _: [(); 4] = [(); core::mem::size_of::<NativeContinuationKind>()];
+const _: [(); 32] = [(); core::mem::size_of::<NativeContinuation>()];
 
 impl Trace for CodeLoadRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {

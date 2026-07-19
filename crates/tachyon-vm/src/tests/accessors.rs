@@ -54,6 +54,162 @@ fn compound_assignment_observes_getter_rhs_setter_order_for_every_dispatch_batch
     assert_compound_accessor_order_batch::<16>();
 }
 
+#[test]
+fn property_descriptor_getters_survive_forced_major_for_every_dispatch_batch() {
+    assert_property_descriptor_batches::<1>();
+    assert_property_descriptor_batches::<2>();
+    assert_property_descriptor_batches::<4>();
+    assert_property_descriptor_batches::<8>();
+    assert_property_descriptor_batches::<16>();
+}
+
+#[derive(Clone, Copy)]
+enum DescriptorGetterResult {
+    Truthy,
+    Object,
+    Callable,
+}
+
+/// Exercises every ToPropertyDescriptor field after a bytecode getter suspension and forced GC.
+fn assert_property_descriptor_batches<const N: usize>() {
+    for (field, result) in [
+        (b"enumerable".as_slice(), DescriptorGetterResult::Truthy),
+        (b"configurable".as_slice(), DescriptorGetterResult::Truthy),
+        (b"value".as_slice(), DescriptorGetterResult::Object),
+        (b"writable".as_slice(), DescriptorGetterResult::Truthy),
+        (b"get".as_slice(), DescriptorGetterResult::Callable),
+        (b"set".as_slice(), DescriptorGetterResult::Callable),
+    ] {
+        for inherited in [false, true] {
+            let module = property_descriptor_getter_module(result);
+            let mut isolate = test_isolate();
+            let target =
+                install_property_descriptor_getter(&mut isolate, &module, field, inherited);
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+            let outcome = isolate
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 64,
+                        quantum: 64,
+                    },
+                )
+                .unwrap();
+            assert_eq!(outcome, RunOutcome::Completed(target));
+            let key = isolate.intern_intrinsic_name(b"result").unwrap();
+            let descriptor = isolate
+                .complete_own_property_descriptor(target, key)
+                .unwrap()
+                .expect("defineProperty publishes the requested descriptor");
+            match (field, descriptor) {
+                (b"get" | b"set", PropertyDescriptor::Accessor(_)) => {}
+                (_, PropertyDescriptor::Data(_)) => {}
+                _ => panic!("getter field selected the wrong descriptor kind"),
+            }
+        }
+    }
+}
+
+/// Publishes one own or inherited descriptor-field getter and all call arguments as globals.
+fn install_property_descriptor_getter(
+    isolate: &mut Isolate,
+    module: &CompiledModule,
+    field: &[u8],
+    inherited: bool,
+) -> Value {
+    let code = isolate.load_module(module).unwrap();
+    let callback = allocate_bytecode_test_function(isolate, code, FunctionId::new(1));
+    let owner = isolate.create_ordinary_object().unwrap();
+    let descriptor = if inherited {
+        isolate
+            .create_ordinary_object_with_prototype(owner)
+            .unwrap()
+    } else {
+        owner
+    };
+    let field = isolate.intern_intrinsic_name(field).unwrap();
+    isolate
+        .define_property(
+            owner,
+            field.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(callback),
+                setter: None,
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    let target = isolate.create_ordinary_object().unwrap();
+    let key_atom = isolate.intern_intrinsic_name(b"result").unwrap();
+    let key = isolate.atom_string_value(key_atom).unwrap();
+    let values = [
+        (
+            b"define".as_slice(),
+            isolate.realm.object_define_property.unwrap(),
+        ),
+        (b"target".as_slice(), target),
+        (b"key".as_slice(), key),
+        (b"descriptor".as_slice(), descriptor),
+        (
+            b"callable".as_slice(),
+            isolate.realm.object_constructor.unwrap(),
+        ),
+    ];
+    for (name, value) in values {
+        let atom = isolate.intern_intrinsic_name(name).unwrap();
+        isolate.realm.set(atom, value).unwrap();
+    }
+    target
+}
+
+/// Builds one defineProperty call and a getter that allocates before returning its field value.
+fn property_descriptor_getter_module(result: DescriptorGetterResult) -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    for (register, scope) in (0..4).zip(0..4) {
+        entry
+            .emit(Opcode::LoadScope, &[register, scope], span)
+            .unwrap();
+    }
+    entry.emit(Opcode::Call, &[4, 0, 3], span).unwrap();
+    entry.emit(Opcode::Return, &[4], span).unwrap();
+    let entry = entry.finish().unwrap();
+
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::CreateObject, &[0], span).unwrap();
+    match result {
+        DescriptorGetterResult::Truthy => {
+            getter.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+            getter.emit(Opcode::Return, &[1], span).unwrap();
+        }
+        DescriptorGetterResult::Object => {
+            getter.emit(Opcode::Return, &[0], span).unwrap();
+        }
+        DescriptorGetterResult::Callable => {
+            getter.emit(Opcode::LoadScope, &[1, 4], span).unwrap();
+            getter.emit(Opcode::Return, &[1], span).unwrap();
+        }
+    }
+    let getter = getter.finish().unwrap();
+    accessor_test_module(
+        "resumable property descriptor getter",
+        vec![
+            Arc::from("define"),
+            Arc::from("target"),
+            Arc::from("key"),
+            Arc::from("descriptor"),
+            Arc::from("callable"),
+        ],
+        entry,
+        Some((getter.0, getter.1, getter.2, 0)),
+        FunctionStrictness::Sloppy,
+        Arc::default(),
+    )
+}
+
 /// Runs own and inherited getter callbacks through one forced-major suspension.
 fn assert_accessor_getter_batch<const N: usize>() {
     for inherited in [false, true] {

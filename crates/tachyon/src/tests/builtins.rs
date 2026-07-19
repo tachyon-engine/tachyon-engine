@@ -357,6 +357,48 @@ fn data_property_descriptors_preserve_flags_and_values() {
     );
 }
 
+/// Covers observable ToPropertyDescriptor getters and accessor-kind reflection end to end.
+#[test]
+fn accessor_property_descriptors_resume_and_reflect() {
+    assert_eq!(
+        execute_source(
+            220,
+            "let order = ''; let proto = {}; Object.defineProperty(proto, 'enumerable', { get() { order += 'e'; return true; } }); let desc = Object.create(proto); Object.defineProperty(desc, 'value', { get() { order += 'v'; return 42; } }); Object.defineProperty(desc, 'writable', { get() { order += 'w'; return true; } }); let target = {}; Object.defineProperty(target, 'answer', desc); let actual = Object.getOwnPropertyDescriptor(target, 'answer'); order === 'evw' && target.answer === 42 && actual.value === 42 && actual.writable && actual.enumerable && !actual.configurable;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            221,
+            "let getter = function() { return this.answer; }; let setter = function(value) { this.answer = value; }; let object = { answer: 7 }; Object.defineProperty(object, 'computed', { get: getter, set: setter, enumerable: true, configurable: true }); let desc = Object.getOwnPropertyDescriptor(object, 'computed'); let before = object.hasOwnProperty('computed') && object.propertyIsEnumerable('computed') && desc.get === getter && desc.set === setter && desc.enumerable && desc.configurable && !('value' in desc) && !('writable' in desc); object.computed = 9; before && object.computed === 9;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+/// Descriptor getter abrupt completions preserve identity and mixed descriptors fail after Get order.
+#[test]
+fn accessor_property_descriptor_abrupt_and_mixed_order() {
+    assert_eq!(
+        execute_source(
+            222,
+            "let marker = {}; let target = {}; let desc = {}; Object.defineProperty(desc, 'configurable', { get() { throw marker; } }); let caught = false; try { Object.defineProperty(target, 'x', desc); } catch (error) { caught = error === marker; } caught && !target.hasOwnProperty('x');",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            223,
+            "let order = ''; let desc = {}; Object.defineProperty(desc, 'value', { get() { order += 'v'; return 1; } }); Object.defineProperty(desc, 'get', { get() { order += 'g'; return function() {}; } }); Object.defineProperty(desc, 'set', { get() { order += 's'; return undefined; } }); let threw = false; try { Object.defineProperty({}, 'x', desc); } catch (error) { threw = error instanceof TypeError; } threw && order === 'vgs';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
 /// Verifies primitive constructors reuse the VM numeric, truthiness, and string contracts.
 #[test]
 fn primitive_constructors_convert_values() {

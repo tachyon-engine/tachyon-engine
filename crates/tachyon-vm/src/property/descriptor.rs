@@ -3,7 +3,7 @@
 use super::{super::*, accessor::StoredProperty};
 
 impl PropertyDescriptor {
-    fn enumerable(self) -> Option<bool> {
+    pub(crate) fn enumerable(self) -> Option<bool> {
         match self {
             Self::Generic(descriptor) => descriptor.enumerable,
             Self::Data(descriptor) => descriptor.enumerable,
@@ -539,56 +539,97 @@ impl Isolate {
         self.set_object_shape(object, shape)
     }
 
-    /// Populates a rooted fresh object with the four standard data descriptor fields.
-    pub(crate) fn materialize_data_property_descriptor(
+    /// Populates a rooted fresh object in FromPropertyDescriptor field order for either kind.
+    pub(crate) fn materialize_property_descriptor(
         &mut self,
         result: Value,
-        value: Value,
-        attributes: PropertyAttributes,
+        descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
-        let value_atom = self.intern_intrinsic_name(b"value")?;
-        self.set_own_data_property(result, value_atom, value)?;
-        let writable_atom = self.intern_intrinsic_name(b"writable")?;
-        self.set_own_data_property(
-            result,
-            writable_atom,
-            Value::from_immediate(if attributes.writable() {
-                Immediate::True
-            } else {
-                Immediate::False
-            }),
-        )?;
-        let enumerable_atom = self.intern_intrinsic_name(b"enumerable")?;
-        self.set_own_data_property(
-            result,
-            enumerable_atom,
-            Value::from_immediate(if attributes.enumerable() {
-                Immediate::True
-            } else {
-                Immediate::False
-            }),
-        )?;
-        let configurable_atom = self.intern_intrinsic_name(b"configurable")?;
-        self.set_own_data_property(
-            result,
-            configurable_atom,
-            Value::from_immediate(if attributes.configurable() {
-                Immediate::True
-            } else {
-                Immediate::False
-            }),
-        )
+        match descriptor {
+            PropertyDescriptor::Data(descriptor) => {
+                if let Some(value) = descriptor.value {
+                    let value_atom = self.intern_intrinsic_name(b"value")?;
+                    self.set_own_data_property(result, value_atom, value)?;
+                }
+                if let Some(writable) = descriptor.writable {
+                    let writable_atom = self.intern_intrinsic_name(b"writable")?;
+                    self.set_own_data_property(
+                        result,
+                        writable_atom,
+                        Value::from_immediate(if writable {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    )?;
+                }
+            }
+            PropertyDescriptor::Accessor(descriptor) => {
+                if let Some(getter) = descriptor.getter {
+                    let get_atom = self.intern_intrinsic_name(b"get")?;
+                    self.set_own_data_property(result, get_atom, getter)?;
+                }
+                if let Some(setter) = descriptor.setter {
+                    let set_atom = self.intern_intrinsic_name(b"set")?;
+                    self.set_own_data_property(result, set_atom, setter)?;
+                }
+            }
+            PropertyDescriptor::Generic(_) => {}
+        }
+        if let Some(enumerable) = descriptor.enumerable() {
+            let enumerable_atom = self.intern_intrinsic_name(b"enumerable")?;
+            self.set_own_data_property(
+                result,
+                enumerable_atom,
+                Value::from_immediate(if enumerable {
+                    Immediate::True
+                } else {
+                    Immediate::False
+                }),
+            )?;
+        }
+        if let Some(configurable) = descriptor.configurable() {
+            let configurable_atom = self.intern_intrinsic_name(b"configurable")?;
+            self.set_own_data_property(
+                result,
+                configurable_atom,
+                Value::from_immediate(if configurable {
+                    Immediate::True
+                } else {
+                    Immediate::False
+                }),
+            )?;
+        }
+        Ok(())
     }
 
     /// Returns one complete stored descriptor for targeted invariant tests.
-    #[cfg(test)]
     pub(crate) fn complete_own_property_descriptor(
         &mut self,
         receiver: Value,
         key: impl Into<PropertyKey>,
     ) -> Result<Option<PropertyDescriptor>, ExecutionError> {
+        let key = key.into();
         let (_, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            if let Some(value) = self.function_metadata_property(receiver, key)? {
+                return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(false),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                })));
+            }
+            if self.is_function_prototype_property(receiver, key) {
+                self.intrinsic_property_atoms.prototype = key.atom();
+                let value = self.ensure_function_prototype(receiver)?;
+                return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(true),
+                    enumerable: Some(false),
+                    configurable: Some(false),
+                })));
+            }
             return Ok(None);
         };
         let Some(stored) = self.stored_property_from_snapshot(snapshot, property)? else {

@@ -49,6 +49,9 @@ impl Isolate {
             ordinary_object: registry
                 .try_register("OrdinaryObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_property_descriptor: registry
+                .try_register("PendingPropertyDescriptor")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             property_storage: registry
                 .try_register("PropertyStorage")
                 .map_err(IsolateCreationError::TypeRegistration)?,
