@@ -6623,6 +6623,31 @@ impl Isolate {
         Ok(resolved)
     }
 
+    /// Reads an already-resolved stable realm slot without name lookup or generic dispatch.
+    #[inline(always)]
+    fn load_resolved_scope_fast(&self, code: CodeId, scope_name: u32) -> Option<Value> {
+        let resolution = self
+            .loaded_code
+            .get(code.index())?
+            .scope_resolutions
+            .get(scope_name as usize)?;
+        if let Some(slot) = resolution.lexical_slot {
+            let binding = self.realm.global_lexicals.get(slot.index())?;
+            return binding.initialized.then_some(binding.value);
+        }
+        if let Some(slot) = resolution.intrinsic_slot {
+            return self
+                .realm
+                .intrinsic_bindings
+                .get(slot.index())
+                .map(|binding| binding.value);
+        }
+        resolution
+            .global_slot
+            .and_then(|slot| self.realm.global_bindings.get(slot.index()))
+            .map(|binding| binding.value)
+    }
+
     #[inline(always)]
     fn scope_atom(&self, code: CodeId, scope_name: u32) -> Result<AtomId, ExecutionError> {
         self.loaded_code(code)?
@@ -6966,10 +6991,10 @@ impl Isolate {
             let hot_control = unsafe {
                 execute_verified_hot_instruction(&mut registers, instruction, &mut next_pc)
             };
-            #[cfg(feature = "opcode-profile")]
-            self.execution_profile
-                .record_instruction(instruction.opcode, hot_control == HotControl::Continue);
             if hot_control == HotControl::Continue {
+                #[cfg(feature = "opcode-profile")]
+                self.execution_profile
+                    .record_instruction(instruction.opcode, true);
                 #[cfg(feature = "opcode-profile")]
                 if is_conditional_branch(instruction.opcode) {
                     self.execution_profile
@@ -6978,7 +7003,23 @@ impl Isolate {
                 pc = next_pc;
                 continue;
             }
+            if instruction.opcode == Opcode::LoadScope
+                && let Some(value) = self.load_resolved_scope_fast(code, instruction.operands[1])
+            {
+                // SAFETY: the verified destination belongs to this checked register window. The
+                // sidecar lookup only reads stable realm slots and cannot allocate, collect, resize,
+                // or otherwise invalidate the exclusive register backing retained by this epoch.
+                unsafe { registers.write(instruction.operands[0], value) };
+                #[cfg(feature = "opcode-profile")]
+                self.execution_profile
+                    .record_instruction(instruction.opcode, true);
+                pc = next_pc;
+                continue;
+            }
 
+            #[cfg(feature = "opcode-profile")]
+            self.execution_profile
+                .record_instruction(instruction.opcode, false);
             #[cfg(feature = "opcode-profile")]
             self.execution_profile.record_slow_flush();
             self.flush_cursor_pc(next_pc);
@@ -10714,6 +10755,45 @@ mod tests {
             isolate.realm.get_slot(slot).and_then(Value::as_i32),
             Some(7)
         );
+    }
+
+    #[test]
+    /// Keeps an initialized guard on the fast path so a cached declarative slot cannot bypass TDZ.
+    fn resolved_scope_fast_load_preserves_global_lexical_tdz() {
+        let mut isolate = test_isolate();
+        let module = global_lexical_module();
+        let code = isolate.load_module(&module).unwrap();
+        let atom = isolate.scope_atom(code, 0).unwrap();
+        isolate.realm.declare_lexical(atom, true).unwrap();
+        let resolution = isolate.scope_resolution(code, 0).unwrap();
+        assert!(resolution.lexical_slot.is_some());
+        assert_eq!(isolate.load_resolved_scope_fast(code, 0), None);
+        assert!(matches!(
+            isolate.scope_value(resolution),
+            Err(ExecutionError::UninitializedBinding(name)) if name == atom
+        ));
+    }
+
+    #[cfg(feature = "opcode-profile")]
+    #[test]
+    /// Covers both mutable global-property and declarative-global sidecar variants.
+    fn resolved_global_storage_loads_complete_inside_the_kernel() {
+        for module in [scoped_var_module(), global_lexical_module()] {
+            let mut isolate = test_isolate();
+            isolate
+                .execute(
+                    &module,
+                    ExecutionBudget {
+                        fuel: u64::MAX,
+                        quantum: u32::MAX,
+                    },
+                )
+                .unwrap();
+            let counts = isolate.execution_profile().opcode(Opcode::LoadScope);
+            assert_eq!(counts.executed, 1);
+            assert_eq!(counts.hot, 1);
+            assert_eq!(counts.slow, 0);
+        }
     }
 
     #[cfg(feature = "opcode-profile")]
