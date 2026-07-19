@@ -471,10 +471,17 @@ pub(crate) fn safe_integer_value(value: u64) -> Value {
 
 /// Parses ECMAScript numeric string forms after the string has been detached from the heap.
 pub(super) fn parse_number_code_units(units: &[u16]) -> f64 {
-    let text = String::from_utf16_lossy(units);
+    let Ok(text) = String::from_utf16(units) else {
+        return f64::NAN;
+    };
     let text = text.trim_matches(is_ecmascript_whitespace);
     if text.is_empty() {
         return 0.0;
+    }
+    match text {
+        "Infinity" | "+Infinity" => return f64::INFINITY,
+        "-Infinity" => return f64::NEG_INFINITY,
+        _ => {}
     }
     let (radix, digits) = if let Some(digits) = text.strip_prefix("0x") {
         (16, digits)
@@ -489,17 +496,166 @@ pub(super) fn parse_number_code_units(units: &[u16]) -> f64 {
     } else if let Some(digits) = text.strip_prefix("0O") {
         (8, digits)
     } else {
-        return text.parse::<f64>().unwrap_or(f64::NAN);
+        return if is_decimal_string_numeric_literal(text.as_bytes()) {
+            text.parse::<f64>().unwrap_or(f64::NAN)
+        } else {
+            f64::NAN
+        };
     };
     if digits.is_empty() {
         return f64::NAN;
     }
-    u64::from_str_radix(digits, radix)
-        .map(|value| value as f64)
-        .unwrap_or(f64::NAN)
+    parse_power_of_two_integer(digits.as_bytes(), radix)
+}
+
+/// Rounds an arbitrary-length binary, octal, or hexadecimal integer exactly to binary64.
+fn parse_power_of_two_integer(digits: &[u8], radix: u32) -> f64 {
+    debug_assert!(matches!(radix, 2 | 8 | 16));
+    let bits_per_digit = radix.trailing_zeros();
+    let mut significant = 0_u32;
+    let mut top = 0_u64;
+    let mut guard = false;
+    let mut sticky = false;
+    for &byte in digits {
+        let Some(digit) = char::from(byte).to_digit(radix) else {
+            return f64::NAN;
+        };
+        for shift in (0..bits_per_digit).rev() {
+            let bit = (digit >> shift) & 1;
+            if significant == 0 && bit == 0 {
+                continue;
+            }
+            match significant {
+                0..=52 => top = (top << 1) | u64::from(bit),
+                53 => guard = bit != 0,
+                _ => sticky |= bit != 0,
+            }
+            significant = significant.saturating_add(1);
+        }
+    }
+    if significant <= 53 {
+        return top as f64;
+    }
+    if guard && (sticky || top & 1 != 0) {
+        top += 1;
+    }
+    let mut exponent = significant - 1;
+    if top == 1 << 53 {
+        top >>= 1;
+        exponent += 1;
+    }
+    if exponent > 1023 {
+        return f64::INFINITY;
+    }
+    let biased_exponent = u64::from(exponent + 1023) << 52;
+    f64::from_bits(biased_exponent | (top & ((1 << 52) - 1)))
 }
 
 #[inline]
 fn is_ecmascript_whitespace(character: char) -> bool {
-    character.is_whitespace() || character == '\u{feff}'
+    matches!(
+        character,
+        '\u{0009}' | '\u{000b}' | '\u{000c}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+                | '\u{000a}'
+                | '\u{000d}'
+                | '\u{2028}'
+                | '\u{2029}'
+    )
+}
+
+/// Recognizes the decimal subset of StringNumericLiteral before Rust parses the value.
+fn is_decimal_string_numeric_literal(bytes: &[u8]) -> bool {
+    let mut index = usize::from(
+        bytes
+            .first()
+            .is_some_and(|byte| matches!(byte, b'+' | b'-')),
+    );
+    let integer_start = index;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        index += 1;
+    }
+    let integer_digits = index - integer_start;
+    let mut fraction_digits = 0;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let fraction_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        fraction_digits = index - fraction_start;
+    }
+    if integer_digits == 0 && fraction_digits == 0 {
+        return false;
+    }
+    if bytes
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b'e' | b'E'))
+    {
+        index += 1;
+        index += usize::from(
+            bytes
+                .get(index)
+                .is_some_and(|byte| matches!(byte, b'+' | b'-')),
+        );
+        let exponent_start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == exponent_start {
+            return false;
+        }
+    }
+    index == bytes.len()
+}
+
+#[cfg(test)]
+mod string_to_number_tests {
+    use super::parse_number_code_units;
+
+    fn parse(text: &str) -> f64 {
+        parse_number_code_units(&text.encode_utf16().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn accepts_exact_string_numeric_literal_forms() {
+        assert_eq!(parse("\u{feff} +Infinity \u{2029}"), f64::INFINITY);
+        assert_eq!(parse("-Infinity"), f64::NEG_INFINITY);
+        assert_eq!(parse("+.5e2"), 50.0);
+        assert_eq!(parse("1."), 1.0);
+        assert_eq!(parse("0xffffffffffffffffffff"), 1.208_925_819_614_629_2e24);
+        assert_eq!(parse("0x20000000000001"), 9_007_199_254_740_992.0);
+        assert_eq!(parse("0x20000000000003"), 9_007_199_254_740_996.0);
+        assert_eq!(parse("0x40000000000003"), 18_014_398_509_481_988.0);
+        let max_finite = format!("0x{}8{}", "f".repeat(13), "0".repeat(242));
+        assert_eq!(parse(&max_finite), f64::MAX);
+        assert!(parse(&format!("0x1{}", "0".repeat(256))).is_infinite());
+        let rounds_to_max = format!("0b{}0{}", "1".repeat(53), "1".repeat(970));
+        assert_eq!(parse(&rounds_to_max), f64::MAX);
+        let overflow_midpoint = format!("0b{}{}", "1".repeat(54), "0".repeat(970));
+        assert!(parse(&overflow_midpoint).is_infinite());
+        let binary = format!("0b1{}", "0".repeat(100));
+        let octal = format!("0o2{}", "0".repeat(33));
+        let hexadecimal = format!("0x1{}", "0".repeat(25));
+        assert_eq!(parse(&binary), parse(&octal));
+        assert_eq!(parse(&binary), parse(&hexadecimal));
+        assert_eq!(parse("0b0000"), 0.0);
+        assert_eq!(parse("0o0001"), 1.0);
+        assert_eq!(parse("0X000F"), 15.0);
+    }
+
+    #[test]
+    fn rejects_rust_only_or_malformed_numeric_forms() {
+        for text in [
+            "inf", "-inf", "infinity", "0x", "1e", ".", "+", "0b2", "0o8", "0xg", "0x1_0",
+        ] {
+            assert!(parse(text).is_nan(), "{text}");
+        }
+        assert!(parse("\u{0085}1\u{0085}").is_nan());
+        assert!(parse_number_code_units(&[0xd800]).is_nan());
+    }
 }
