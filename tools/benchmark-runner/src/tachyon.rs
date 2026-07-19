@@ -76,6 +76,25 @@ impl TachyonInProcessAdapter {
         })
     }
 
+    /// Clears counters after setup so a diagnostic sample contains only the requested workload.
+    #[cfg(feature = "opcode-profile")]
+    pub fn reset_execution_profile(&mut self) -> Result<(), AdapterError> {
+        let prepared = self.prepared.as_mut().ok_or_else(|| {
+            AdapterError::Setup("Tachyon profile reset called before prepare".into())
+        })?;
+        prepared.isolate.reset_execution_profile();
+        Ok(())
+    }
+
+    /// Returns the opt-in counters for the currently prepared isolate.
+    #[cfg(feature = "opcode-profile")]
+    #[must_use]
+    pub fn execution_profile(&self) -> Option<&tachyon_vm::ExecutionProfile> {
+        self.prepared
+            .as_ref()
+            .map(|prepared| prepared.isolate.execution_profile())
+    }
+
     fn verify_prepared(&self, request: &BenchmarkRequest) -> Result<(), AdapterError> {
         let Some(prepared) = &self.prepared else {
             return Err(AdapterError::Setup(

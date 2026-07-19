@@ -30,3 +30,5 @@ pub use runner::{
 };
 pub use stats::{SampleSummary, StatisticsError, summarize_samples};
 pub use tachyon::{TachyonInProcessAdapter, TachyonInProcessConfig};
+#[cfg(feature = "opcode-profile")]
+pub use tachyon_vm::{ExecutionProfile, OpcodeExecutionCounts};

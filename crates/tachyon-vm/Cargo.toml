@@ -10,6 +10,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+opcode-profile = []
+
 [dependencies]
 tachyon-bytecode = { path = "../tachyon-bytecode" }
 tachyon-gc = { path = "../tachyon-gc" }

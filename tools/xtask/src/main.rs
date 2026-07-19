@@ -100,6 +100,14 @@ fn main() {
         {
             run_in_process_benchmark(engine, mode, script)
         }
+        [command, subcommand, script] if command == "bench" && subcommand == "profile-tachyon" => {
+            launch_release_tachyon_opcode_profile(script)
+        }
+        [command, subcommand, script]
+            if command == "bench" && subcommand == "profile-tachyon-internal" =>
+        {
+            run_tachyon_opcode_profile(script)
+        }
         _ => Err(USAGE.to_owned()),
     };
 
@@ -109,7 +117,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -457,6 +465,142 @@ fn launch_release_in_process_benchmark(
         ])
         .env("TACHYON_BENCH_RELEASE_CHILD", "1");
     run_streaming_command(&mut command)
+}
+
+/// Re-executes the opt-in profiler in release mode so its control-flow shape matches the hot build.
+fn launch_release_tachyon_opcode_profile(script: &str) -> Result<(), String> {
+    let workspace = workspace_root();
+    verify_clean_checkout(&workspace)?;
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(&workspace)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "xtask",
+            "--features",
+            "opcode-profile",
+            "--",
+            "bench",
+            "profile-tachyon-internal",
+            script,
+        ])
+        .env("TACHYON_BENCH_RELEASE_CHILD", "1");
+    run_streaming_command(&mut command)
+}
+
+#[cfg(not(feature = "opcode-profile"))]
+fn run_tachyon_opcode_profile(_script: &str) -> Result<(), String> {
+    Err("internal opcode profiler requires the xtask opcode-profile feature".to_owned())
+}
+
+/// Executes one setup-free workload sample and emits counters outside the engine dependency graph.
+#[cfg(feature = "opcode-profile")]
+fn run_tachyon_opcode_profile(script_id: &str) -> Result<(), String> {
+    if env::var_os("TACHYON_BENCH_RELEASE_CHILD").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return Err("internal opcode profiler must be launched through profile-tachyon".to_owned());
+    }
+    let workspace = workspace_root();
+    let commit = verify_clean_checkout(&workspace)?;
+    let (config, corpus) = benchmark_config_and_corpus()?;
+    let script = corpus
+        .iter()
+        .find(|script| script.config.id.as_ref() == script_id)
+        .ok_or_else(|| "opcode profile script selection matched nothing".to_owned())?;
+    if script.config.entry != benchmark_runner::ScriptEntry::MainFunction {
+        return Err("opcode profiling currently requires a main-function entry".to_owned());
+    }
+    let build_flags = format!(
+        "profile={}; panic={}; lto={}; codegen-units={}; target-cpu={}; diagnostics=opcode-profile",
+        config.build.profile,
+        config.build.panic,
+        config.build.lto,
+        config.build.codegen_units,
+        config.build.target_cpu
+    );
+    let identity = EngineIdentity {
+        name: "Tachyon".into(),
+        kind: EngineKind::TachyonInProcess,
+        version: env!("CARGO_PKG_VERSION").into(),
+        commit: commit.clone().into(),
+        features: "opcode-profile".into(),
+        build_flags: build_flags.clone().into(),
+        binary_size_bytes: None,
+    };
+    let mut adapter = TachyonInProcessAdapter::new(
+        identity,
+        TachyonInProcessConfig::from_benchmark(config.tachyon),
+    )
+    .map_err(|error| error.to_string())?;
+    let request = benchmark_runner::BenchmarkRequest {
+        script_id: script.config.id.clone(),
+        entry: script.config.entry,
+        source: script.source.clone(),
+        mode: MeasurementMode::SteadyState,
+        iterations: script.config.steady_state_iterations,
+    };
+    adapter
+        .prepare(&request)
+        .map_err(|error| error.to_string())?;
+    adapter
+        .reset_execution_profile()
+        .map_err(|error| error.to_string())?;
+    let metrics = adapter
+        .sample(&request)
+        .map_err(|error| error.to_string())?;
+    let profile = adapter
+        .execution_profile()
+        .expect("prepared profiled adapter retains its isolate");
+    let executed = profile
+        .opcodes()
+        .map(|(_, counts)| counts.executed)
+        .sum::<u64>();
+    let opcodes = profile
+        .opcodes()
+        .filter(|(_, counts)| counts.executed != 0)
+        .map(|(opcode, counts)| {
+            serde_json::json!({
+                "opcode": format!("{opcode:?}"),
+                "executed": counts.executed,
+                "hot": counts.hot,
+                "slow": counts.slow,
+                "branch_taken": counts.branch_taken,
+                "branch_not_taken": counts.branch_not_taken,
+            })
+        })
+        .collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "commit": commit,
+        "script_id": script.config.id,
+        "script_sha256": script.config.sha256,
+        "engine": {
+            "name": "Tachyon",
+            "version": env!("CARGO_PKG_VERSION"),
+            "features": "opcode-profile",
+            "build_flags": build_flags,
+        },
+        "iterations": metrics.iterations,
+        "diagnostic_elapsed_ns": metrics.elapsed_ns,
+        "executed_instructions": executed,
+        "cursor": {
+            "batch_cursor_binds": profile.batch_cursor_binds(),
+            "batch_flushes": profile.batch_flushes(),
+            "budget_flushes": profile.budget_flushes(),
+            "slow_flushes": profile.slow_flushes(),
+            "slow_rebinds": profile.slow_rebinds(),
+            "same_activation_rebinds": profile.same_activation_rebinds(),
+            "activation_rebinds": profile.activation_rebinds(),
+            "terminal_slow_exits": profile.terminal_slow_exits(),
+            "fault_slow_exits": profile.fault_slow_exits(),
+        },
+        "opcodes": opcodes,
+    });
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| error.to_string())?;
+    println!();
+    Ok(())
 }
 
 /// Runs one linked engine inside the release child under a common report and sampling contract.

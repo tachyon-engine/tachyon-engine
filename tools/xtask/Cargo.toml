@@ -11,6 +11,10 @@ publish = false
 name = "xtask"
 path = "src/main.rs"
 
+[features]
+default = []
+opcode-profile = ["benchmark-runner/opcode-profile"]
+
 [dependencies]
 benchmark-runner = { path = "../benchmark-runner" }
 serde_json = "1"

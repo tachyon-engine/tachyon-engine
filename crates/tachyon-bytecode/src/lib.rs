@@ -18,6 +18,7 @@ mod disassembler;
 pub use disassembler::{DisassemblyError, disassemble};
 
 const OPCODE_MASK: u8 = 0x3f;
+const BASE_OPCODE_COUNT: usize = OPCODE_MASK as usize + 1;
 const FORMAT_MASK: u8 = 0xc0;
 const ESCAPE_FORMAT: u8 = 0xc0;
 const NORMAL_FORMAT: u8 = 0x40;
@@ -277,6 +278,22 @@ const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
 const _: [(); OPCODE_COUNT] = [(); Opcode::LoadArgumentsLength as usize + 1];
 
 impl Opcode {
+    /// Number of semantic opcodes represented by this bytecode version.
+    pub const COUNT: usize = OPCODE_COUNT;
+
+    /// Recovers an opcode from its dense profiling/disassembly index.
+    #[must_use]
+    pub const fn from_index(index: usize) -> Option<Self> {
+        if index >= Self::COUNT {
+            return None;
+        }
+        if index < BASE_OPCODE_COUNT {
+            Self::from_base(index as u8)
+        } else {
+            Self::from_extended_base((index - BASE_OPCODE_COUNT) as u8)
+        }
+    }
+
     #[must_use]
     pub const fn operand_count(self) -> usize {
         OPCODE_OPERAND_COUNTS[self as usize] as usize
@@ -2413,6 +2430,16 @@ mod tests {
         }
         assert_eq!(visited, OPCODE_COUNT);
         assert!(seen.into_iter().all(|entry| entry));
+    }
+
+    #[test]
+    fn dense_opcode_indices_round_trip_without_holes() {
+        for index in 0..Opcode::COUNT {
+            let opcode = Opcode::from_index(index).expect("every dense index names an opcode");
+            assert_eq!(opcode as usize, index);
+        }
+        assert_eq!(Opcode::from_index(Opcode::COUNT), None);
+        assert_eq!(Opcode::from_index(usize::MAX), None);
     }
 
     #[test]
