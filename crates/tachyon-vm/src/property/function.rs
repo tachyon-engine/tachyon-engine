@@ -7,8 +7,11 @@ impl Isolate {
     pub(super) fn function_metadata_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: PropertyKey,
     ) -> Result<Option<Value>, ExecutionError> {
+        let Some(key) = key.atom() else {
+            return Ok(None);
+        };
         let Ok(function) = self.resolve_function_object(receiver) else {
             return Ok(None);
         };
@@ -72,8 +75,11 @@ impl Isolate {
     pub(super) fn is_function_metadata_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: PropertyKey,
     ) -> Result<bool, ExecutionError> {
+        let Some(key) = key.atom() else {
+            return Ok(false);
+        };
         if self.resolve_function_object(receiver).is_err() {
             return Ok(false);
         }
@@ -81,7 +87,14 @@ impl Isolate {
     }
 
     #[inline(always)]
-    pub(crate) fn is_function_prototype_property(&mut self, receiver: Value, key: AtomId) -> bool {
+    pub(crate) fn is_function_prototype_property(
+        &mut self,
+        receiver: Value,
+        key: impl Into<PropertyKey>,
+    ) -> bool {
+        let Some(key) = key.into().atom() else {
+            return false;
+        };
         let is_prototype_name = self.intrinsic_property_atoms.prototype == Some(key)
             || self
                 .atoms
@@ -150,9 +163,7 @@ impl Isolate {
             .try_allocate_external_with_gc(
                 self.types.property_storage,
                 0,
-                PropertyStorage {
-                    slots: Box::new([roots.function]),
-                },
+                PropertyStorage::new(Box::new([roots.function])),
                 AllocationSpace::Young,
                 &mut roots,
             )

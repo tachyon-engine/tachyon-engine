@@ -423,9 +423,7 @@ impl Isolate {
             .try_allocate_external_with_gc(
                 self.types.property_storage,
                 0,
-                PropertyStorage {
-                    slots: Box::new([call]),
-                },
+                PropertyStorage::new(Box::new([call])),
                 AllocationSpace::Old,
                 roots,
             )

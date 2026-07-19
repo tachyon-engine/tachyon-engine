@@ -32,7 +32,7 @@ impl Isolate {
         let descriptor = self
             .call_argument(site, 2)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key_atom_or_undefined(key)?;
+        let key = self.property_key(key)?;
         let descriptor = self.parse_data_property_descriptor(descriptor)?;
         self.define_data_property(object, key, descriptor)?;
         Ok(object)
@@ -55,7 +55,7 @@ impl Isolate {
         let key = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key_atom_or_undefined(key)?;
+        let key = self.property_key(key)?;
         let property = if self.is_object_value(object) {
             self.own_data_property_with_attributes(object, key)?
         } else {
@@ -81,7 +81,7 @@ impl Isolate {
         let key = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key_atom_or_undefined(key)?;
+        let key = self.property_key(key)?;
         self.has_own_data_property(site.this_value, key)
     }
 
@@ -93,7 +93,7 @@ impl Isolate {
         let key = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key_atom_or_undefined(key)?;
+        let key = self.property_key(key)?;
         Ok(self
             .own_data_property_with_attributes(site.this_value, key)?
             .is_some_and(|(_, attributes)| attributes.enumerable()))
@@ -113,7 +113,7 @@ impl Isolate {
         let key = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key_atom_or_undefined(key)?;
+        let key = self.property_key(key)?;
         self.has_own_data_property(object, key)
     }
 
@@ -260,15 +260,18 @@ impl Isolate {
             {
                 continue;
             }
+            let Some(key_atom) = key.atom() else {
+                continue;
+            };
             let Some(value) = self.data_property_from_snapshot(snapshot, key)? else {
                 continue;
             };
             match native {
                 NativeFunction::ObjectEntries => {
-                    self.append_object_entry(result, output_index, key, value)?;
+                    self.append_object_entry(result, output_index, key_atom, value)?;
                 }
                 NativeFunction::ObjectKeys => {
-                    let key_value = self.atom_string_value(key)?;
+                    let key_value = self.atom_string_value(key_atom)?;
                     self.append_object_enumeration_item(result, output_index, key_value, native)?;
                 }
                 NativeFunction::ObjectValues => {
@@ -313,6 +316,9 @@ impl Isolate {
             .map_err(ExecutionError::Shape)?;
         let mut output_index = 0_u64;
         for key in keys {
+            let Some(key) = key.atom() else {
+                continue;
+            };
             if self.data_property_from_snapshot(snapshot, key)?.is_none() {
                 continue;
             }

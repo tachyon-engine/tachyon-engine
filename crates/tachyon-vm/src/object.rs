@@ -1,12 +1,77 @@
 //! Ordinary-object shapes and exactly accounted contiguous property storage.
 
 use core::mem::size_of;
-use std::vec::IntoIter;
-
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
-use tachyon_value::Value;
+use tachyon_value::{RawHeapRef, Value};
 
 use crate::{AtomId, tuning::objects};
+
+/// Stable isolate-local identity for one Symbol property key.
+///
+/// The upper word is a never-reused isolate serial and the lower word retains the logical heap
+/// reference needed to publish the original Symbol value. Shapes do not trace this reference;
+/// live object storage owns the exact GC edge instead.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub(crate) struct SymbolId(core::num::NonZeroU64);
+
+impl SymbolId {
+    pub(crate) const fn new(serial: core::num::NonZeroU32, reference: RawHeapRef) -> Self {
+        let bits = ((serial.get() as u64) << 32) | reference.offset() as u64;
+        Self(core::num::NonZeroU64::new(bits).expect("a non-zero serial produces a Symbol ID"))
+    }
+
+    #[inline(always)]
+    pub(crate) const fn reference(self) -> RawHeapRef {
+        RawHeapRef::new(self.0.get() as u32)
+            .expect("a Symbol ID retains a non-zero logical heap reference")
+    }
+
+    #[inline(always)]
+    pub(crate) const fn value(self) -> Value {
+        Value::from_heap_ref(self.reference())
+    }
+
+    #[cfg(test)]
+    const fn from_test_parts(serial: u32, reference: u32) -> Self {
+        Self::new(
+            core::num::NonZeroU32::new(serial).expect("test Symbol serial is non-zero"),
+            RawHeapRef::new(reference).expect("test Symbol reference is valid"),
+        )
+    }
+}
+
+/// Closed ECMAScript property-key identity used by shapes and ordinary property operations.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum PropertyKey {
+    Atom(AtomId),
+    Symbol(SymbolId),
+}
+
+impl PropertyKey {
+    #[inline(always)]
+    pub(crate) const fn atom(self) -> Option<AtomId> {
+        match self {
+            Self::Atom(atom) => Some(atom),
+            Self::Symbol(_) => None,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn symbol(self) -> Option<SymbolId> {
+        match self {
+            Self::Atom(_) => None,
+            Self::Symbol(symbol) => Some(symbol),
+        }
+    }
+}
+
+impl From<AtomId> for PropertyKey {
+    #[inline(always)]
+    fn from(atom: AtomId) -> Self {
+        Self::Atom(atom)
+    }
+}
 
 /// Stable isolate-local hidden-class identifier; zero is the shared empty shape.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -56,7 +121,7 @@ impl PropertyAttributes {
 #[derive(Clone, Copy, Debug)]
 struct Shape {
     parent: Option<ShapeId>,
-    key: Option<AtomId>,
+    key: Option<PropertyKey>,
     slot: u32,
     property_count: u32,
     attributes: PropertyAttributes,
@@ -66,7 +131,7 @@ struct Shape {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ShapeTransition {
     from: ShapeId,
-    key: AtomId,
+    key: PropertyKey,
     attributes: PropertyAttributes,
     to: ShapeId,
 }
@@ -78,21 +143,35 @@ pub(crate) struct PropertyLookup {
 }
 
 pub(crate) struct OwnPropertyKeys {
-    slots: IntoIter<Option<AtomId>>,
+    slots: Box<[Option<PropertyKey>]>,
+    index: usize,
+    symbols: bool,
+    remaining: usize,
 }
 
 impl Iterator for OwnPropertyKeys {
-    type Item = AtomId;
+    type Item = PropertyKey;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.slots
-            .next()
-            .map(|key| key.expect("every property slot has one latest shape entry"))
+        loop {
+            while let Some(key) = self.slots.get(self.index).copied().flatten() {
+                self.index += 1;
+                if matches!(key, PropertyKey::Symbol(_)) == self.symbols {
+                    self.remaining -= 1;
+                    return Some(key);
+                }
+            }
+            if self.symbols {
+                return None;
+            }
+            self.symbols = true;
+            self.index = 0;
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.slots.size_hint()
+        (self.remaining, Some(self.remaining))
     }
 }
 
@@ -171,13 +250,21 @@ impl ShapeTable {
         }
         debug_assert!(keys.iter().all(Option::is_some));
         Ok(OwnPropertyKeys {
-            slots: keys.into_iter(),
+            slots: keys.into_boxed_slice(),
+            index: 0,
+            symbols: false,
+            remaining: count,
         })
     }
 
     /// Walks the immutable parent chain; M13 replaces this slow path with guarded caches.
     #[inline]
-    pub(crate) fn lookup(&self, mut shape: ShapeId, key: AtomId) -> Option<PropertyLookup> {
+    pub(crate) fn lookup(
+        &self,
+        mut shape: ShapeId,
+        key: impl Into<PropertyKey>,
+    ) -> Option<PropertyLookup> {
+        let key = key.into();
         while shape != ShapeId::EMPTY {
             let entry = &self.shapes[shape.index()];
             if entry.key == Some(key) {
@@ -195,9 +282,10 @@ impl ShapeTable {
     pub(crate) fn transition_add(
         &mut self,
         from: ShapeId,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
         attributes: PropertyAttributes,
     ) -> Result<ShapeId, ShapeError> {
+        let key = key.into();
         let slot = self.property_count(from);
         let property_count = slot.checked_add(1).ok_or(ShapeError::IdOverflow)?;
         self.transition(from, key, slot, property_count, attributes)
@@ -207,9 +295,10 @@ impl ShapeTable {
     pub(crate) fn transition_reconfigure(
         &mut self,
         from: ShapeId,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
         attributes: PropertyAttributes,
     ) -> Result<ShapeId, ShapeError> {
+        let key = key.into();
         let current = self
             .lookup(from, key)
             .expect("reconfiguration requires an own property");
@@ -229,7 +318,7 @@ impl ShapeTable {
     fn transition(
         &mut self,
         from: ShapeId,
-        key: AtomId,
+        key: PropertyKey,
         slot: u32,
         property_count: u32,
         attributes: PropertyAttributes,
@@ -292,12 +381,78 @@ fn reserve_chunked<T>(items: &mut Vec<T>, limit: usize, chunk: usize) -> Result<
 #[derive(Debug)]
 pub(crate) struct PropertyStorage {
     pub(crate) slots: Box<[Value]>,
+    symbol_keys: Box<[SymbolPropertyKey]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SymbolPropertyKey {
+    slot: u32,
+    id: SymbolId,
+    value: Value,
+}
+
+impl SymbolPropertyKey {
+    pub(crate) const fn new(slot: u32, id: SymbolId, value: Value) -> Self {
+        Self { slot, id, value }
+    }
+}
+
+impl PropertyStorage {
+    pub(crate) fn new(slots: Box<[Value]>) -> Self {
+        Self {
+            slots,
+            symbol_keys: Box::default(),
+        }
+    }
+
+    pub(crate) fn with_symbol_keys(
+        slots: Box<[Value]>,
+        symbol_keys: Box<[SymbolPropertyKey]>,
+    ) -> Self {
+        Self { slots, symbol_keys }
+    }
+
+    pub(crate) fn symbol_key_count(&self) -> usize {
+        self.symbol_keys.len()
+    }
+
+    pub(crate) fn append_symbol_keys(&self, output: &mut Vec<SymbolPropertyKey>) {
+        output.extend_from_slice(&self.symbol_keys);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn symbol_value(&self, slot: u32, id: SymbolId) -> Option<Value> {
+        self.symbol_keys
+            .iter()
+            .find(|key| key.slot == slot && key.id == id)
+            .map(|key| key.value)
+            .filter(|value| value.as_immediate() != Some(tachyon_value::Immediate::Hole))
+    }
+
+    pub(crate) fn set_symbol_presence(&mut self, slot: u32, key: PropertyKey, present: bool) {
+        let Some(id) = key.symbol() else {
+            return;
+        };
+        let entry = self
+            .symbol_keys
+            .iter_mut()
+            .find(|entry| entry.slot == slot && entry.id == id)
+            .expect("every Symbol shape slot retains one storage key edge");
+        entry.value = if present {
+            id.value()
+        } else {
+            Value::from_immediate(tachyon_value::Immediate::Hole)
+        };
+    }
 }
 
 impl Trace for PropertyStorage {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.slots.trace(tracer);
+        for key in &mut self.symbol_keys {
+            key.value.trace(tracer);
+        }
     }
 }
 
@@ -305,6 +460,7 @@ impl GcExternalMemory for PropertyStorage {
     #[inline(always)]
     fn external_memory_bytes(&self) -> usize {
         self.slots.len() * size_of::<Value>()
+            + self.symbol_keys.len() * size_of::<SymbolPropertyKey>()
     }
 }
 
@@ -346,7 +502,7 @@ impl Trace for NumberObject {
 mod tests {
     use core::mem::size_of;
 
-    use super::{OrdinaryObject, PropertyAttributes, ShapeId, ShapeTable};
+    use super::{OrdinaryObject, PropertyAttributes, PropertyKey, ShapeId, ShapeTable, SymbolId};
     use crate::AtomId;
 
     #[test]
@@ -394,7 +550,37 @@ mod tests {
         );
         assert_eq!(
             table.own_keys(reconfigured).unwrap().collect::<Vec<_>>(),
-            [first, second]
+            [PropertyKey::Atom(first), PropertyKey::Atom(second)]
+        );
+    }
+
+    #[test]
+    fn own_keys_keep_atoms_before_symbols_and_preserve_each_insertion_order() {
+        let mut table = ShapeTable::new(16).unwrap();
+        let first = AtomId::from_test_index(0);
+        let second = AtomId::from_test_index(1);
+        let symbol = SymbolId::from_test_parts(1, 16);
+        let one = table
+            .transition_add(ShapeId::EMPTY, first, PropertyAttributes::DEFAULT_DATA)
+            .unwrap();
+        let two = table
+            .transition_add(
+                one,
+                PropertyKey::Symbol(symbol),
+                PropertyAttributes::DEFAULT_DATA,
+            )
+            .unwrap();
+        let three = table
+            .transition_add(two, second, PropertyAttributes::DEFAULT_DATA)
+            .unwrap();
+
+        assert_eq!(
+            table.own_keys(three).unwrap().collect::<Vec<_>>(),
+            [
+                PropertyKey::Atom(first),
+                PropertyKey::Atom(second),
+                PropertyKey::Symbol(symbol),
+            ]
         );
     }
 

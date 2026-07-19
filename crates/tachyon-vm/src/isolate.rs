@@ -13,6 +13,7 @@ pub struct Isolate {
     pub(crate) heap: Heap,
     pub(crate) types: VmTypes,
     pub(crate) intrinsic_property_atoms: IntrinsicPropertyAtoms,
+    pub(crate) next_symbol_serial: NonZeroU32,
     pub(crate) stack_limits: StackLimits,
     #[cfg(feature = "opcode-profile")]
     pub(crate) execution_profile: ExecutionProfile,
@@ -69,6 +70,7 @@ impl Isolate {
             heap,
             types,
             intrinsic_property_atoms: IntrinsicPropertyAtoms::default(),
+            next_symbol_serial: NonZeroU32::MIN,
             stack_limits: config.stack_limits,
             #[cfg(feature = "opcode-profile")]
             execution_profile: ExecutionProfile::default(),
@@ -540,9 +542,7 @@ impl Isolate {
             .try_allocate_external_with_gc(
                 self.types.property_storage,
                 0,
-                PropertyStorage {
-                    slots: Box::new([Value::from_i32(0)]),
-                },
+                PropertyStorage::new(Box::new([Value::from_i32(0)])),
                 space,
                 &mut roots,
             )
@@ -620,6 +620,9 @@ impl Isolate {
                 .own_keys(snapshot.shape)
                 .map_err(ExecutionError::Shape)?
             {
+                let Some(key) = key.atom() else {
+                    continue;
+                };
                 let property = self
                     .shapes
                     .lookup(snapshot.shape, key)

@@ -7,7 +7,7 @@ impl Isolate {
     pub(crate) fn data_property_from_snapshot(
         &mut self,
         snapshot: OrdinaryObject,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<Option<Value>, ExecutionError> {
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             return Ok(None);
@@ -41,11 +41,12 @@ impl Isolate {
     pub(crate) fn set_own_data_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        let key = key.into();
         if self.is_function_prototype_property(receiver, key) {
-            self.intrinsic_property_atoms.prototype = Some(key);
+            self.intrinsic_property_atoms.prototype = key.atom();
             return self.set_function_prototype(receiver, value);
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
@@ -57,7 +58,7 @@ impl Isolate {
                 if !property.attributes.writable() {
                     return Err(ExecutionError::ReadOnlyProperty(receiver));
                 }
-                return self.update_property_slot(snapshot, property.slot, value);
+                return self.update_property_slot(snapshot, key, property.slot, value);
             }
             if !snapshot.extensible {
                 return Err(ExecutionError::NonExtensibleObject(receiver));
@@ -67,7 +68,7 @@ impl Isolate {
                 .transition_reconfigure(snapshot.shape, key, PropertyAttributes::DEFAULT_DATA)
                 .map_err(ExecutionError::Shape)?;
             self.set_object_shape(object, shape)?;
-            return self.update_property_slot(snapshot, property.slot, value);
+            return self.update_property_slot(snapshot, key, property.slot, value);
         }
         if self.is_function_metadata_property(receiver, key)? {
             return Err(ExecutionError::ReadOnlyProperty(receiver));
@@ -88,9 +89,10 @@ impl Isolate {
     pub(crate) fn set_data_property_from_bytecode(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        let key = key.into();
         let strictness = self
             .fiber
             .frames
@@ -111,8 +113,9 @@ impl Isolate {
     pub(crate) fn delete_own_data_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
+        let key = key.into();
         let (object, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             if self.is_function_prototype_property(receiver, key) {
@@ -134,6 +137,7 @@ impl Isolate {
         }
         self.update_property_slot(
             snapshot,
+            key,
             property.slot,
             Value::from_immediate(Immediate::Hole),
         )?;
@@ -144,7 +148,7 @@ impl Isolate {
     pub(crate) fn delete_data_property_from_bytecode(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         let deleted = self.delete_own_data_property(receiver, key)?;
         let strictness = self
@@ -163,6 +167,7 @@ impl Isolate {
     pub(super) fn update_property_slot(
         &mut self,
         snapshot: OrdinaryObject,
+        key: PropertyKey,
         slot: u32,
         value: Value,
     ) -> Result<(), ExecutionError> {
@@ -176,11 +181,23 @@ impl Isolate {
                     .borrow_mut(storage_local, self.types.property_storage)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 storage.slots[slot as usize] = value;
+                storage.set_symbol_presence(
+                    slot,
+                    key,
+                    value.as_immediate() != Some(Immediate::Hole),
+                );
                 Ok::<(), ExecutionError>(())
             })?;
             scope
                 .write_value_barrier(storage_local, value)
                 .map_err(ExecutionError::HeapReference)?;
+            if let Some(symbol) = key.symbol()
+                && value.as_immediate() != Some(Immediate::Hole)
+            {
+                scope
+                    .write_value_barrier(storage_local, symbol.value())
+                    .map_err(ExecutionError::HeapReference)?;
+            }
             Ok(())
         })
     }
@@ -190,7 +207,7 @@ impl Isolate {
         &mut self,
         object: ObjectReceiver,
         snapshot: OrdinaryObject,
-        key: AtomId,
+        key: PropertyKey,
         value: Value,
         attributes: PropertyAttributes,
     ) -> Result<(), ExecutionError> {
@@ -203,6 +220,7 @@ impl Isolate {
         slots
             .try_reserve_exact(new_length)
             .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        let mut symbol_keys = Vec::new();
         if let Some(storage) = snapshot.storage {
             self.heap.with_running_scope(|scope| {
                 let local = scope.root(storage).map_err(ExecutionError::Root)?;
@@ -210,12 +228,32 @@ impl Isolate {
                     let old = no_gc
                         .borrow(local, self.types.property_storage)
                         .map_err(ExecutionError::NoGcBorrow)?;
+                    let symbol_key_count = old
+                        .symbol_key_count()
+                        .checked_add(usize::from(key.symbol().is_some()))
+                        .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
+                    symbol_keys
+                        .try_reserve_exact(symbol_key_count)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                     slots.extend_from_slice(&old.slots);
+                    old.append_symbol_keys(&mut symbol_keys);
                     Ok::<(), ExecutionError>(())
                 })
             })?;
+        } else if key.symbol().is_some() {
+            symbol_keys
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
         }
         slots.push(value);
+        if let Some(symbol) = key.symbol() {
+            symbol_keys.push(SymbolPropertyKey::new(
+                u32::try_from(new_length - 1)
+                    .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?,
+                symbol,
+                symbol.value(),
+            ));
+        }
         debug_assert_eq!(slots.len(), new_length);
         let (storage, receiver) = {
             let mut roots = PropertyMutationRoots {
@@ -226,15 +264,18 @@ impl Isolate {
                     loaded_code: &mut self.loaded_code,
                 },
                 receiver: object.value(),
+                value,
+                symbol_key: key.symbol().map(SymbolId::value),
             };
             let storage = self
                 .heap
                 .try_allocate_external_with_gc(
                     self.types.property_storage,
                     0,
-                    PropertyStorage {
-                        slots: slots.into_boxed_slice(),
-                    },
+                    PropertyStorage::with_symbol_keys(
+                        slots.into_boxed_slice(),
+                        symbol_keys.into_boxed_slice(),
+                    ),
                     AllocationSpace::Young,
                     &mut roots,
                 )
@@ -243,6 +284,33 @@ impl Isolate {
         };
         let (object, _) = self.object_snapshot(receiver)?;
         self.attach_property_storage(object, new_shape, storage)
+    }
+
+    /// Recovers the original Symbol value retained by one live own-key storage edge.
+    #[cfg(test)]
+    pub(crate) fn symbol_property_key_value(
+        &mut self,
+        snapshot: OrdinaryObject,
+        symbol: SymbolId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let Some(property) = self
+            .shapes
+            .lookup(snapshot.shape, PropertyKey::Symbol(symbol))
+        else {
+            return Ok(None);
+        };
+        let Some(storage) = snapshot.storage else {
+            return Ok(None);
+        };
+        self.heap.with_running_scope(|scope| {
+            let storage = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(storage, self.types.property_storage)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(|storage| storage.symbol_value(property.slot, symbol))
+            })
+        })
     }
 
     /// Resolves either ordinary or callable payloads to their shared ordinary-property snapshot.

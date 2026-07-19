@@ -188,6 +188,33 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidScopeName { code, scope_name })
     }
 
+    /// Converts an ECMAScript primitive into a string or Symbol property-key identity.
+    #[cold]
+    pub(crate) fn property_key(&mut self, value: Value) -> Result<PropertyKey, ExecutionError> {
+        if let Some(raw) = value.as_heap_ref()
+            && let Ok(symbol) = self.heap.checked_reference(raw, self.types.symbol)
+        {
+            let serial = self.heap.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(symbol, self.types.symbol)
+                    .map(|symbol| symbol.serial)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            return Ok(PropertyKey::Symbol(SymbolId::new(serial, raw)));
+        }
+        let atom = match value.as_immediate() {
+            Some(Immediate::Undefined) => self.intern_intrinsic_name(b"undefined")?,
+            Some(Immediate::Null) => self.intern_intrinsic_name(b"null")?,
+            Some(Immediate::True) => self.intern_intrinsic_name(b"true")?,
+            Some(Immediate::False) => self.intern_intrinsic_name(b"false")?,
+            Some(Immediate::Hole | Immediate::Uninitialized) => {
+                return Err(ExecutionError::UnsupportedPropertyKey(value));
+            }
+            None => self.property_key_atom(value)?,
+        };
+        Ok(PropertyKey::Atom(atom))
+    }
+
     /// Converts supported primitive values to interned PropertyKeys.
     #[cold]
     pub(crate) fn property_key_atom(&mut self, value: Value) -> Result<AtomId, ExecutionError> {
@@ -684,7 +711,7 @@ impl Isolate {
                 )?;
             }
             Opcode::HasProperty => {
-                let key = self.property_key_atom(self.read(base, operands[1])?)?;
+                let key = self.property_key(self.read(base, operands[1])?)?;
                 let receiver = self.read(base, operands[2])?;
                 let result = self.get_data_property(receiver, key)?.is_some();
                 self.write(
@@ -721,7 +748,7 @@ impl Isolate {
             }
             Opcode::DeleteByValue => {
                 let receiver = self.read(base, operands[1])?;
-                let key = self.property_key_atom(self.read(base, operands[2])?)?;
+                let key = self.property_key(self.read(base, operands[2])?)?;
                 let result = self.delete_data_property_from_bytecode(receiver, key)?;
                 self.write(
                     base,
@@ -872,7 +899,7 @@ impl Isolate {
             }
             Opcode::GetByValue => {
                 let receiver = self.read(base, operands[1])?;
-                let key = self.property_key_atom(self.read(base, operands[2])?)?;
+                let key = self.property_key(self.read(base, operands[2])?)?;
                 let value = self
                     .get_data_property(receiver, key)?
                     .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -881,7 +908,7 @@ impl Isolate {
             Opcode::SetByValue => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
-                let key = self.property_key_atom(self.read(base, operands[2])?)?;
+                let key = self.property_key(self.read(base, operands[2])?)?;
                 self.set_data_property_from_bytecode(receiver, key, value)?;
             }
             Opcode::Call => {

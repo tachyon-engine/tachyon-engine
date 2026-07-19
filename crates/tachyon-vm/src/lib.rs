@@ -67,8 +67,8 @@ use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;
 use object::{
-    NumberObject, OrdinaryObject, PropertyAttributes, PropertyLookup, PropertyStorage, ShapeId,
-    ShapeTable,
+    NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyLookup, PropertyStorage,
+    ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
 };
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
@@ -85,7 +85,8 @@ use runtime::{
     fiber::{
         ArrayAllocationRoots, CodeLoadRoots, Completion, ConversionConsumer, Fiber, Frame,
         NativeContinuation, NativeContinuationSite, PropertyMutationRoots,
-        PrototypeInitializationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        PrototypeInitializationRoots, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
+        next_to_primitive_stage,
     },
     realm::{GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, Realm, TypeofStrings},
 };
@@ -244,6 +245,7 @@ pub enum ExecutionError {
     BoundArgumentAllocationFailed,
     BoundArgumentCountOverflow,
     BoundNameAllocationFailed,
+    SymbolIdExhausted,
     ArrayLengthOverflow,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),

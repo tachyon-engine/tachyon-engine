@@ -318,6 +318,7 @@ pub(crate) struct FunctionObject {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SymbolValue {
+    pub(crate) serial: NonZeroU32,
     pub(crate) description: Option<Value>,
 }
 

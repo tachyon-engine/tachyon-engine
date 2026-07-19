@@ -125,6 +125,49 @@ fn symbol_description_survives_forced_major_allocations() {
 }
 
 #[test]
+/// A live Symbol property edge preserves identity, while deletion releases that exact edge.
+fn symbol_property_key_identity_tracks_property_liveness_across_forced_major() {
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let symbol = isolate.allocate_symbol(None).unwrap();
+    let symbol_raw = symbol.as_heap_ref().unwrap();
+    let key = isolate.property_key(symbol).unwrap();
+
+    isolate
+        .set_own_data_property(object, key, Value::from_i32(42))
+        .unwrap();
+    isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"collect").unwrap())
+        .unwrap();
+    assert_eq!(
+        isolate.get_data_property(object, key).unwrap(),
+        Some(Value::from_i32(42))
+    );
+    let snapshot = isolate.object_snapshot(object).unwrap().1;
+    assert_eq!(
+        isolate
+            .symbol_property_key_value(snapshot, key.symbol().unwrap())
+            .unwrap(),
+        Some(symbol)
+    );
+
+    assert!(isolate.delete_own_data_property(object, key).unwrap());
+    isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"reclaim").unwrap())
+        .unwrap();
+    assert!(
+        isolate
+            .heap
+            .checked_reference(symbol_raw, isolate.types.symbol)
+            .is_err()
+    );
+}
+
+#[test]
 fn bound_function_payload_and_name_survive_forced_major_allocations() {
     let mut isolate = test_isolate();
     isolate

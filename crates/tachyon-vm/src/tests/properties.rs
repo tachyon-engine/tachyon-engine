@@ -186,3 +186,159 @@ fn property_publication_roots_receiver_and_heap_value_across_forced_major() {
         assert!(isolate.object_snapshot(child).is_ok());
     }
 }
+
+#[test]
+fn symbols_with_the_same_description_are_distinct_property_keys() {
+    let mut isolate = test_isolate();
+    let description = isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"same").unwrap())
+        .unwrap();
+    isolate.fiber.registers.push(description);
+    let first = isolate.allocate_symbol(Some(description)).unwrap();
+    isolate.fiber.registers.push(first);
+    let second = isolate.allocate_symbol(Some(description)).unwrap();
+    isolate.fiber.registers.push(second);
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+
+    let first_key = isolate.property_key(first).unwrap();
+    let second_key = isolate.property_key(second).unwrap();
+    assert_ne!(first_key, second_key);
+    isolate
+        .set_own_data_property(object, first_key, Value::from_i32(11))
+        .unwrap();
+    isolate
+        .set_own_data_property(object, second_key, Value::from_i32(22))
+        .unwrap();
+
+    assert_eq!(
+        isolate.get_data_property(object, first_key).unwrap(),
+        Some(Value::from_i32(11))
+    );
+    assert_eq!(
+        isolate.get_data_property(object, second_key).unwrap(),
+        Some(Value::from_i32(22))
+    );
+}
+
+#[test]
+fn first_symbol_property_publication_roots_receiver_key_and_value_across_forced_major() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let symbol = isolate.allocate_symbol(None).unwrap();
+    isolate.fiber.registers.push(symbol);
+    let value = isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"value").unwrap())
+        .unwrap();
+    isolate.fiber.registers.clear();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+
+    let key = isolate.property_key(symbol).unwrap();
+    isolate.set_own_data_property(object, key, value).unwrap();
+    isolate.fiber.registers.push(object);
+    isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"collect").unwrap())
+        .unwrap();
+
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    let stored_symbol = isolate
+        .symbol_property_key_value(snapshot, key.symbol().unwrap())
+        .unwrap();
+    assert_eq!(stored_symbol, Some(symbol));
+    let stored_value = isolate.get_data_property(object, key).unwrap().unwrap();
+    let mut units = Vec::new();
+    isolate
+        .append_primitive_string_units(stored_value, &mut units)
+        .unwrap();
+    assert_eq!(units, "value".encode_utf16().collect::<Vec<_>>());
+}
+
+#[test]
+fn deleting_the_last_symbol_property_releases_its_gc_edge() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let symbol = isolate.allocate_symbol(None).unwrap();
+    let symbol_raw = symbol.as_heap_ref().unwrap();
+    let key = isolate.property_key(symbol).unwrap();
+    isolate
+        .set_own_data_property(object, key, Value::from_i32(7))
+        .unwrap();
+
+    collect_major(&mut isolate);
+    assert!(
+        isolate
+            .heap
+            .checked_reference(symbol_raw, isolate.types.symbol)
+            .is_ok()
+    );
+    assert!(isolate.delete_own_data_property(object, key).unwrap());
+    collect_major(&mut isolate);
+
+    assert!(
+        isolate
+            .heap
+            .checked_reference(symbol_raw, isolate.types.symbol)
+            .is_err()
+    );
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    assert_eq!(
+        isolate
+            .symbol_property_key_value(snapshot, key.symbol().unwrap())
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn readding_a_live_deleted_symbol_restores_its_gc_edge() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let symbol = isolate.allocate_symbol(None).unwrap();
+    isolate.fiber.registers.push(symbol);
+    let symbol_raw = symbol.as_heap_ref().unwrap();
+    let key = isolate.property_key(symbol).unwrap();
+    isolate
+        .set_own_data_property(object, key, Value::from_i32(1))
+        .unwrap();
+    assert!(isolate.delete_own_data_property(object, key).unwrap());
+    collect_major(&mut isolate);
+
+    isolate
+        .set_own_data_property(object, key, Value::from_i32(2))
+        .unwrap();
+    assert_eq!(isolate.fiber.registers.pop(), Some(symbol));
+    collect_major(&mut isolate);
+
+    assert!(
+        isolate
+            .heap
+            .checked_reference(symbol_raw, isolate.types.symbol)
+            .is_ok()
+    );
+    assert_eq!(
+        isolate.get_data_property(object, key).unwrap(),
+        Some(Value::from_i32(2))
+    );
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    assert_eq!(
+        isolate
+            .symbol_property_key_value(snapshot, key.symbol().unwrap())
+            .unwrap(),
+        Some(symbol)
+    );
+}
+
+fn collect_major(isolate: &mut Isolate) {
+    let mut roots = VmRoots {
+        fiber: &mut isolate.fiber,
+        finalization_jobs: &mut isolate.finalization_jobs,
+        realm: &mut isolate.realm,
+        loaded_code: &mut isolate.loaded_code,
+    };
+    isolate.heap.collect_major(&mut roots).unwrap();
+}

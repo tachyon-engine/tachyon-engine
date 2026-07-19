@@ -63,23 +63,37 @@ impl Isolate {
         &mut self,
         description: Option<Value>,
     ) -> Result<Value, ExecutionError> {
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
+        let serial = self.next_symbol_serial;
+        let next_serial = serial
+            .get()
+            .checked_add(1)
+            .and_then(NonZeroU32::new)
+            .ok_or(ExecutionError::SymbolIdExhausted)?;
+        let roots = &mut SymbolAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            description,
         };
-        self.heap
+        let symbol = self
+            .heap
             .try_allocate_with_gc(
                 self.types.symbol,
                 0,
                 0,
-                SymbolValue { description },
+                SymbolValue {
+                    serial,
+                    description: roots.description,
+                },
                 AllocationSpace::Young,
                 roots,
             )
-            .map(|symbol| Value::from_heap_ref(symbol.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.next_symbol_serial = next_serial;
+        Ok(Value::from_heap_ref(symbol.raw()))
     }
 
     /// Starts one conversion consumer, suspending only when its argument requires a JS callback.

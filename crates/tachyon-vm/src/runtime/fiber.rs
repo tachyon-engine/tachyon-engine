@@ -12,6 +12,13 @@ pub(crate) struct VmRoots<'a> {
 pub(crate) struct PropertyMutationRoots<'a> {
     pub(crate) vm: VmRoots<'a>,
     pub(crate) receiver: Value,
+    pub(crate) value: Value,
+    pub(crate) symbol_key: Option<Value>,
+}
+
+pub(crate) struct SymbolAllocationRoots<'a> {
+    pub(crate) vm: VmRoots<'a>,
+    pub(crate) description: Option<Value>,
 }
 
 pub(crate) struct PrototypeInitializationRoots<'a> {
@@ -29,6 +36,16 @@ impl Trace for PropertyMutationRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.receiver.trace(tracer);
+        self.value.trace(tracer);
+        self.symbol_key.trace(tracer);
+    }
+}
+
+impl Trace for SymbolAllocationRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.description.trace(tracer);
     }
 }
 

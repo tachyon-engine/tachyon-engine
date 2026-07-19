@@ -6,20 +6,6 @@ mod storage;
 use super::*;
 
 impl Isolate {
-    /// Converts the non-numeric primitive PropertyKeys handled before the shared numeric path.
-    pub(crate) fn property_key_atom_or_undefined(
-        &mut self,
-        value: Value,
-    ) -> Result<AtomId, ExecutionError> {
-        match value.as_immediate() {
-            Some(Immediate::Undefined) => self.intern_intrinsic_name(b"undefined"),
-            Some(Immediate::Null) => self.intern_intrinsic_name(b"null"),
-            Some(Immediate::True) => self.intern_intrinsic_name(b"true"),
-            Some(Immediate::False) => self.intern_intrinsic_name(b"false"),
-            _ => self.property_key_atom(value),
-        }
-    }
-
     #[inline(always)]
     pub(crate) fn safe_integer_property_atom(
         &mut self,
@@ -36,8 +22,9 @@ impl Isolate {
     pub(crate) fn get_data_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<Option<Value>, ExecutionError> {
+        let key = key.into();
         let mut current = if numeric_value(receiver).is_some() {
             self.realm
                 .number_prototype
@@ -56,7 +43,7 @@ impl Isolate {
                     return Ok(Some(value));
                 }
                 if self.is_function_prototype_property(current, key) {
-                    self.intrinsic_property_atoms.prototype = Some(key);
+                    self.intrinsic_property_atoms.prototype = key.atom();
                     return self.ensure_function_prototype(current).map(Some);
                 }
             }
@@ -74,7 +61,7 @@ impl Isolate {
     pub(crate) fn has_own_data_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         Ok(self
             .own_data_property_with_attributes(receiver, key)?
@@ -85,8 +72,9 @@ impl Isolate {
     pub(crate) fn own_data_property_with_attributes(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
     ) -> Result<Option<(Value, PropertyAttributes)>, ExecutionError> {
+        let key = key.into();
         let (_, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             return Ok(self
@@ -97,7 +85,7 @@ impl Isolate {
             return Ok(Some((value, PropertyAttributes::data(false, false, true))));
         }
         if self.is_function_prototype_property(receiver, key) {
-            self.intrinsic_property_atoms.prototype = Some(key);
+            self.intrinsic_property_atoms.prototype = key.atom();
             let value = self.ensure_function_prototype(receiver)?;
             return Ok(Some((value, PropertyAttributes::data(true, false, false))));
         }
@@ -187,9 +175,10 @@ impl Isolate {
     pub(crate) fn define_data_property(
         &mut self,
         receiver: Value,
-        key: AtomId,
+        key: impl Into<PropertyKey>,
         descriptor: DataPropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        let key = key.into();
         if self.is_function_prototype_property(receiver, key) {
             return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
         }
@@ -239,7 +228,7 @@ impl Isolate {
                     .shapes
                     .transition_reconfigure(snapshot.shape, key, attributes)
                     .map_err(ExecutionError::Shape)?;
-                self.update_property_slot(snapshot, property.slot, value)?;
+                self.update_property_slot(snapshot, key, property.slot, value)?;
                 return self.set_object_shape(object, shape);
             }
             return self.add_property_slot(object, snapshot, key, value, attributes);
@@ -267,7 +256,7 @@ impl Isolate {
             .transition_reconfigure(snapshot.shape, key, attributes)
             .map_err(ExecutionError::Shape)?;
         if let Some(value) = descriptor.value {
-            self.update_property_slot(snapshot, property.slot, value)?;
+            self.update_property_slot(snapshot, key, property.slot, value)?;
         }
         self.set_object_shape(object, shape)
     }
