@@ -1665,6 +1665,7 @@ impl Isolate {
         self.realm.reflect_object = Some(object);
         for (name, native) in [
             (b"apply".as_slice(), NativeFunction::ReflectApply),
+            (b"construct".as_slice(), NativeFunction::ReflectConstruct),
             (b"ownKeys".as_slice(), NativeFunction::ReflectOwnKeys),
             (
                 b"defineProperty".as_slice(),

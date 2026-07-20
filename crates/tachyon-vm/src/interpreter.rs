@@ -1887,7 +1887,7 @@ impl Isolate {
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         let constructor = self.read(caller_base, callee_register)?;
-        let mut site = CallSite {
+        self.construct_site(CallSite {
             caller_base,
             destination,
             callee: constructor,
@@ -1903,7 +1903,11 @@ impl Isolate {
             new_target: constructor,
             construct_receiver: None,
             call_site,
-        };
+        })
+    }
+
+    /// Drives a pre-built construct call site through bound forwarding and receiver allocation.
+    fn construct_site(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         loop {
             let callable = self
                 .resolve_function_object(site.callee)
@@ -1942,25 +1946,25 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
-                    return self.write(caller_base, destination, regexp);
+                    return self.write(site.caller_base, site.destination, regexp);
                 }
                 FunctionExecutable::Native(NativeFunction::BooleanConstructor) => {
                     let native = NativeFunction::BooleanConstructor;
                     let value = self.primitive_constructor_value(native, &site)?;
-                    return self.write(caller_base, destination, value);
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
-                    return self.write(caller_base, destination, object);
+                    return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                     let message = self.call_argument(&site, 0)?;
                     let error = self.create_native_error(kind, message)?;
-                    return self.write(caller_base, destination, error);
+                    return self.write(site.caller_base, site.destination, error);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
-                    return self.write(caller_base, destination, array);
+                    return self.write(site.caller_base, site.destination, array);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
@@ -2440,6 +2444,40 @@ impl Isolate {
                     site.argument_prefix_count = argument_count;
                     site.argument_count = argument_count;
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectConstruct) => {
+                    let target = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let arguments = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let new_target = self.call_argument(&site, 2)?.unwrap_or(target);
+                    if !self.is_object_value(arguments) {
+                        return Err(ExecutionError::NotObject(arguments));
+                    }
+                    if !self.is_constructor_value(new_target)? {
+                        return Err(ExecutionError::NonConstructor(new_target));
+                    }
+                    let (prefix, count) = self.apply_argument_prefix(
+                        target,
+                        Value::from_immediate(Immediate::Undefined),
+                        Some(arguments),
+                    )?;
+                    return self.construct_site(CallSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        callee: target,
+                        argument_base: 0,
+                        argument_prefix: Some(prefix),
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: count,
+                        argument_count: count,
+                        this_value: Value::from_immediate(Immediate::Undefined),
+                        new_target,
+                        construct_receiver: None,
+                        call_site: site.call_site,
+                    });
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeBind) => {
                     let bound = self.create_bound_function(&site)?;
                     return self.write(site.caller_base, site.destination, bound);
@@ -2822,6 +2860,22 @@ impl Isolate {
                     .copied()
                     .map_err(|_| ExecutionError::NonCallable(callee))
             })
+        })
+    }
+
+    /// Reports whether the current staged callable set may be used as a construct newTarget.
+    fn is_constructor_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        let function = match self.resolve_function_object(value) {
+            Ok(function) => function,
+            Err(_) => return Ok(false),
+        };
+        Ok(match function.executable {
+            FunctionExecutable::Native(native) => native.is_constructor(),
+            FunctionExecutable::Bound(data) => {
+                let target = self.bound_function_snapshot(data)?.bound_target;
+                self.is_constructor_value(target)?
+            }
+            FunctionExecutable::Bytecode { .. } => true,
         })
     }
 
