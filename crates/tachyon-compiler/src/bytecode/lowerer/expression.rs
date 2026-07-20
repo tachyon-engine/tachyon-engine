@@ -189,7 +189,7 @@ impl Lowerer<'_> {
                 {
                     let destination = self.register()?;
                     self.emit(
-                        Opcode::LoadArgumentsObject,
+                        Opcode::LoadArgumentsLength,
                         &[destination.index()],
                         expression.span,
                     )?;
