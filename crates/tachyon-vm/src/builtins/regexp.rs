@@ -215,6 +215,25 @@ impl Isolate {
         ))
     }
 
+    /// Builds the canonical slash-delimited source and flag representation.
+    pub(crate) fn regexp_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let (source, flags) = self.regexp_data(receiver)?;
+        let source = self.regexp_string_units(source)?;
+        let flags = self.regexp_string_units(flags)?;
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(source.len() + flags.len() + 2)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        units.push(u16::from(b'/'));
+        units.extend(source);
+        units.push(u16::from(b'/'));
+        units.extend(flags);
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Reads the private source and flags slots after validating the receiver's exotic identity.
     pub(crate) fn regexp_data(
         &mut self,

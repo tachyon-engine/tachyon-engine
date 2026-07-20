@@ -58,6 +58,7 @@ pub(crate) enum NativeFunction {
     RegExpConstructor,
     RegExpExec,
     RegExpTest,
+    RegExpToString,
     SymbolConstructor,
     NumberConstructor,
     NumberIsNaN,
@@ -416,6 +417,7 @@ impl NativeFunction {
             | Self::RegExpConstructor
             | Self::RegExpExec
             | Self::RegExpTest
+            | Self::RegExpToString
             | Self::StringCharAt
             | Self::StringCharCodeAt
             | Self::StringAt
@@ -554,6 +556,7 @@ impl NativeFunction {
             Self::RegExpConstructor => "RegExp",
             Self::RegExpExec => "exec",
             Self::RegExpTest => "test",
+            Self::RegExpToString => "toString",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
             Self::StringAt => "at",

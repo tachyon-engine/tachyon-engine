@@ -2139,6 +2139,10 @@ impl Isolate {
                     let result = self.regexp_test(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::RegExpToString) => {
+                    let result = self.regexp_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);

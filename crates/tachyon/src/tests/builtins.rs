@@ -100,6 +100,15 @@ fn regexp_accepts_string_wrapper_pattern_flags_and_input() {
 }
 
 #[test]
+/// Formats the stored source and canonical flag string through RegExp.prototype.toString.
+fn regexp_to_string_uses_source_and_flags() {
+    assert_eq!(
+        execute_source(955, "new RegExp('a', 'gi').toString() === '/a/gi';").as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(

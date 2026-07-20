@@ -401,6 +401,7 @@ impl Isolate {
         for (native, name) in [
             (NativeFunction::RegExpExec, b"exec".as_slice()),
             (NativeFunction::RegExpTest, b"test".as_slice()),
+            (NativeFunction::RegExpToString, b"toString".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
