@@ -924,3 +924,15 @@ fn object_destructuring_preserves_nested_defaults_and_coercibility() {
         Some(tachyon_value::Immediate::True)
     );
 }
+
+#[test]
+fn array_destructuring_reads_values_in_iterator_order() {
+    assert_eq!(
+        execute_source(
+            910,
+            "let [first, second = 4] = [1, 2]; first * 10 + second;"
+        )
+        .as_i32(),
+        Some(12)
+    );
+}

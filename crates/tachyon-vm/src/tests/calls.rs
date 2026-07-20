@@ -73,6 +73,15 @@ fn array_push_method_call_is_stable_for_every_dispatch_batch() {
 }
 
 #[test]
+fn array_iterator_next_call_sequence_is_stable_for_every_dispatch_batch() {
+    assert_array_iterator_next_batch::<1>();
+    assert_array_iterator_next_batch::<2>();
+    assert_array_iterator_next_batch::<4>();
+    assert_array_iterator_next_batch::<8>();
+    assert_array_iterator_next_batch::<16>();
+}
+
+#[test]
 fn strict_and_sloppy_this_binding_work_for_every_dispatch_batch() {
     assert_this_binding_batch::<1>();
     assert_this_binding_batch::<2>();

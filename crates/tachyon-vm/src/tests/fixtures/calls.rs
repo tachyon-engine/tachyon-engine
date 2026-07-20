@@ -608,6 +608,53 @@ pub(in crate::tests) fn array_push_module() -> CompiledModule {
     .unwrap()
 }
 
+/// Builds `[42].values().next().value` through the ordinary iterator call protocol.
+pub(in crate::tests) fn array_iterator_next_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut builder = BytecodeBuilder::with_capacity(8, 0);
+    builder.emit(Opcode::CreateArray, &[0], span).unwrap();
+    builder.emit(Opcode::LoadImmediate, &[1, 42], span).unwrap();
+    builder.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+    builder.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+    builder.emit(Opcode::SetById, &[0, 1, 1], span).unwrap();
+    builder.emit(Opcode::GetById, &[1, 0, 2], span).unwrap();
+    builder
+        .emit(Opcode::CallWithReceiver, &[2, 0, 0], span)
+        .unwrap();
+    builder.emit(Opcode::GetById, &[3, 2, 3], span).unwrap();
+    builder
+        .emit(Opcode::CallWithReceiver, &[4, 2, 0], span)
+        .unwrap();
+    builder.emit(Opcode::GetById, &[5, 4, 4], span).unwrap();
+    builder.emit(Opcode::Return, &[5], span).unwrap();
+    let (bytecode, source_map, register_count) = builder.finish().unwrap();
+    CompiledModule::new(
+        Arc::from("[42].values().next().value"),
+        Vec::new(),
+        vec![
+            Arc::from("0"),
+            Arc::from("length"),
+            Arc::from("values"),
+            Arc::from("next"),
+            Arc::from("value"),
+        ],
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            bytecode,
+            FunctionMetadata {
+                layout: FunctionLayout {
+                    register_count,
+                    ..FunctionLayout::default()
+                },
+                source_map,
+                ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+            },
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
 /// Builds `readThis.call(undefined)` with caller-selected immutable function strictness.
 pub(in crate::tests) fn this_binding_module(strictness: FunctionStrictness) -> CompiledModule {
     let span = SourceSpan { start: 0, end: 1 };

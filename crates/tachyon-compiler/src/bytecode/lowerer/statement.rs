@@ -631,7 +631,53 @@ impl Lowerer<'_> {
                 }
                 Ok(())
             }
-            crate::HirPatternKind::Binding(_) | crate::HirPatternKind::Array { .. } => {
+            crate::HirPatternKind::Array { elements, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "array rest bytecode"));
+                }
+                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                for element in elements.iter() {
+                    let next = self.array_pattern_next(iterator, pattern.span)?;
+                    let done = self.pattern_property(
+                        next,
+                        &crate::HirObjectPropertyKey::Static("done".into()),
+                        pattern.span,
+                    )?;
+                    let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
+                    let end = self.builder.new_label().map_err(CompileError::Builder)?;
+                    self.builder
+                        .emit_jump_if_true(
+                            done,
+                            use_undefined,
+                            tachyon_bytecode::SourceSpan {
+                                start: pattern.span.start,
+                                end: pattern.span.end,
+                            },
+                        )
+                        .map_err(CompileError::Builder)?;
+                    let item = self.pattern_property(
+                        next,
+                        &crate::HirObjectPropertyKey::Static("value".into()),
+                        pattern.span,
+                    )?;
+                    if let Some(element) = element {
+                        self.assign_pattern(element, item, span)?;
+                    }
+                    self.emit_jump(end, span)?;
+                    self.builder
+                        .bind_label(use_undefined)
+                        .map_err(CompileError::Builder)?;
+                    if let Some(element) = element {
+                        let undefined = self.load_undefined(pattern.span)?;
+                        self.assign_pattern(element, undefined, span)?;
+                    }
+                    self.builder
+                        .bind_label(end)
+                        .map_err(CompileError::Builder)?;
+                }
+                Ok(())
+            }
+            crate::HirPatternKind::Binding(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
             }
         }

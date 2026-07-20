@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn compiler_lowers_array_binding_with_elision_and_default() {
+    Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "const [first, , third = 3] = source; first + third;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn compiler_lowers_array_assignment_pattern() {
+    Compiler
+        .compile(
+            source(MediaType::JavaScript, "let first; [first] = source; first;"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
 fn compiler_emits_verified_bytecode_for_one_plus_two() {
     let module = Compiler
         .compile(

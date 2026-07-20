@@ -85,10 +85,111 @@ impl Lowerer<'_> {
                 }
                 Ok(())
             }
-            HirPatternKind::Assignment(_) | HirPatternKind::Array { .. } => {
+            HirPatternKind::Array { elements, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "array rest bytecode"));
+                }
+                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                for element in elements.iter() {
+                    let next = self.array_pattern_next(iterator, pattern.span)?;
+                    let done = self.pattern_property(
+                        next,
+                        &HirObjectPropertyKey::Static("done".into()),
+                        pattern.span,
+                    )?;
+                    let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
+                    let end = self.builder.new_label().map_err(CompileError::Builder)?;
+                    let selected = element.as_ref().map(|_| self.register()).transpose()?;
+                    self.builder
+                        .emit_jump_if_true(
+                            done,
+                            use_undefined,
+                            tachyon_bytecode::SourceSpan {
+                                start: pattern.span.start,
+                                end: pattern.span.end,
+                            },
+                        )
+                        .map_err(CompileError::Builder)?;
+                    if let Some(selected) = selected {
+                        let item = self.pattern_property(
+                            next,
+                            &HirObjectPropertyKey::Static("value".into()),
+                            pattern.span,
+                        )?;
+                        self.emit(
+                            Opcode::Move,
+                            &[selected.index(), item.index()],
+                            pattern.span,
+                        )?;
+                    }
+                    self.emit_jump(end, pattern.span)?;
+                    self.builder
+                        .bind_label(use_undefined)
+                        .map_err(CompileError::Builder)?;
+                    if let Some(selected) = selected {
+                        let undefined = self.load_undefined(pattern.span)?;
+                        self.emit(
+                            Opcode::Move,
+                            &[selected.index(), undefined.index()],
+                            pattern.span,
+                        )?;
+                    }
+                    self.builder
+                        .bind_label(end)
+                        .map_err(CompileError::Builder)?;
+                    if let (Some(element), Some(selected)) = (element, selected) {
+                        self.bind_pattern(element, selected, mutable)?;
+                    }
+                }
+                Ok(())
+            }
+            HirPatternKind::Assignment(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
             }
         }
+    }
+
+    /// Calls an object's `values` method to obtain the iterator used by array binding patterns.
+    pub(super) fn array_pattern_iterator(
+        &mut self,
+        object: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        self.method_call_by_name(object, "values", span)
+    }
+
+    /// Calls an iterator's `next` method and returns its iterator-result record.
+    pub(super) fn array_pattern_next(
+        &mut self,
+        iterator: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        self.method_call_by_name(iterator, "next", span)
+    }
+
+    /// Emits a zero-argument receiver call after materializing a contiguous receiver/callee window.
+    fn method_call_by_name(
+        &mut self,
+        receiver: RegisterId,
+        name: &str,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let base = self.register()?;
+        self.emit(Opcode::Move, &[base.index(), receiver.index()], span)?;
+        let callee = self.register()?;
+        let property = self.scope_name(&std::sync::Arc::from(name))?;
+        self.emit(
+            Opcode::GetById,
+            &[callee.index(), base.index(), property],
+            span,
+        )?;
+        let destination = self.register()?;
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[destination.index(), base.index(), 0],
+            span,
+        )?;
+        Ok(destination)
     }
 
     /// Emits the existing base guard without performing an observable property lookup.
@@ -391,7 +492,53 @@ impl Lowerer<'_> {
                 }
                 Ok(())
             }
-            HirPatternKind::Assignment(_) | HirPatternKind::Array { .. } => {
+            HirPatternKind::Array { elements, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "array rest bytecode"));
+                }
+                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                for element in elements.iter() {
+                    let next = self.array_pattern_next(iterator, pattern.span)?;
+                    let done = self.pattern_property(
+                        next,
+                        &HirObjectPropertyKey::Static("done".into()),
+                        pattern.span,
+                    )?;
+                    let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
+                    let end = self.builder.new_label().map_err(CompileError::Builder)?;
+                    self.builder
+                        .emit_jump_if_true(
+                            done,
+                            use_undefined,
+                            tachyon_bytecode::SourceSpan {
+                                start: pattern.span.start,
+                                end: pattern.span.end,
+                            },
+                        )
+                        .map_err(CompileError::Builder)?;
+                    if let Some(element) = element {
+                        let item = self.pattern_property(
+                            next,
+                            &HirObjectPropertyKey::Static("value".into()),
+                            pattern.span,
+                        )?;
+                        self.initialize_var_pattern(element, item)?;
+                    }
+                    self.emit_jump(end, pattern.span)?;
+                    self.builder
+                        .bind_label(use_undefined)
+                        .map_err(CompileError::Builder)?;
+                    if let Some(element) = element {
+                        let undefined = self.load_undefined(pattern.span)?;
+                        self.initialize_var_pattern(element, undefined)?;
+                    }
+                    self.builder
+                        .bind_label(end)
+                        .map_err(CompileError::Builder)?;
+                }
+                Ok(())
+            }
+            HirPatternKind::Assignment(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
             }
         }

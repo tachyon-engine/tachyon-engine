@@ -319,7 +319,10 @@ impl Lowerer<'_> {
                 target,
                 value,
             } => {
-                if let HirPatternKind::Object { .. } = target.kind {
+                if matches!(
+                    target.kind,
+                    HirPatternKind::Object { .. } | HirPatternKind::Array { .. }
+                ) {
                     if *operator != HirAssignmentOperator::Assign {
                         return Err(
                             self.unsupported(target.span, "destructuring compound assignment")

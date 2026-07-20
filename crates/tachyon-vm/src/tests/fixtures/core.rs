@@ -704,6 +704,22 @@ pub(in crate::tests) fn assert_method_receiver_batch<const N: usize>() {
     assert_eq!(isolate.fiber.frames.last().unwrap().this_value, receiver);
 }
 
+pub(in crate::tests) fn assert_array_iterator_next_batch<const N: usize>() {
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &array_iterator_next_module(),
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)),
+        "{outcome:?}"
+    );
+}
+
 pub(in crate::tests) fn assert_catch_batch<const N: usize>() {
     for module in [direct_catch_module(), cross_frame_catch_module()] {
         let outcome = test_isolate()
