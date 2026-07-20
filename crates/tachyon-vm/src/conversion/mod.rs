@@ -622,7 +622,10 @@ impl Isolate {
     }
 
     /// Computes the exact code-unit count used by primitive string conversion without allocating.
-    fn primitive_string_unit_length(&mut self, value: Value) -> Result<usize, ExecutionError> {
+    pub(crate) fn primitive_string_unit_length(
+        &mut self,
+        value: Value,
+    ) -> Result<usize, ExecutionError> {
         if let Some(immediate) = value.as_immediate() {
             return match immediate {
                 Immediate::True => Ok(4),

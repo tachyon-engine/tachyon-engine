@@ -246,6 +246,8 @@ pub enum ExecutionError {
     NumberFormatInvalidDigit,
     NumberStringAllocationFailed,
     StringBufferAllocationFailed,
+    InvalidStringLength,
+    InvalidStringRepeatCount(Value),
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },

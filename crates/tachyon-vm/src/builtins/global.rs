@@ -67,7 +67,10 @@ impl Isolate {
     }
 
     /// Materializes primitive ToString code units for prefix numeric parsing.
-    fn primitive_string_units(&mut self, value: Value) -> Result<Vec<u16>, ExecutionError> {
+    pub(crate) fn primitive_string_units(
+        &mut self,
+        value: Value,
+    ) -> Result<Vec<u16>, ExecutionError> {
         if self.is_object_value(value) {
             return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
         }

@@ -99,6 +99,163 @@ impl Isolate {
         }))
     }
 
+    /// Finds the final UTF-16 code-unit occurrence at or before the normalized position.
+    pub(crate) fn string_last_index_of(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let haystack = self.string_receiver_units(site.this_value)?;
+        let needle = self.string_argument_units(site, 0)?;
+        let position_value = self.call_argument(site, 1)?;
+        let position = self.string_last_search_start(position_value, haystack.len())?;
+        if needle.len() > haystack.len() {
+            return Ok(Value::from_i32(-1));
+        }
+        let last = haystack.len().saturating_sub(needle.len()).min(position);
+        for index in (0..=last).rev() {
+            if haystack[index..index + needle.len()] == needle {
+                return Ok(safe_integer_value(index as u64));
+            }
+        }
+        Ok(Value::from_i32(-1))
+    }
+
+    /// Tests whether the UTF-16 needle occurs at the normalized start position.
+    pub(crate) fn string_starts_with(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let haystack = self.string_receiver_units(site.this_value)?;
+        let needle = self.string_argument_units(site, 0)?;
+        let position = self.call_argument(site, 1)?;
+        let start = self.string_search_start(position, haystack.len())?;
+        Ok(boolean_value(
+            needle.len() <= haystack.len().saturating_sub(start)
+                && haystack[start..start + needle.len()] == needle,
+        ))
+    }
+
+    /// Tests whether the UTF-16 needle ends at the normalized end position.
+    pub(crate) fn string_ends_with(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let haystack = self.string_receiver_units(site.this_value)?;
+        let needle = self.string_argument_units(site, 0)?;
+        let position = self.call_argument(site, 1)?;
+        let end = self.string_substring_index(position, haystack.len(), haystack.len())?;
+        let start = end.saturating_sub(needle.len());
+        Ok(boolean_value(
+            needle.len() <= end && haystack[start..end] == needle,
+        ))
+    }
+
+    /// Concatenates every primitive argument after calculating one exact output capacity.
+    pub(crate) fn string_concat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let mut capacity = self.string_value_length(site.this_value)?;
+        for index in 0..site.argument_count {
+            let argument = self
+                .call_argument(site, index)?
+                .expect("argument count is bounded");
+            capacity = capacity
+                .checked_add(self.primitive_string_unit_length(argument)?)
+                .filter(|length| *length <= u32::MAX as usize)
+                .ok_or(ExecutionError::InvalidStringLength)?;
+        }
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        self.append_primitive_string_units(site.this_value, &mut units)?;
+        for index in 0..site.argument_count {
+            let argument = self
+                .call_argument(site, index)?
+                .expect("argument count is bounded");
+            self.append_primitive_string_units(argument, &mut units)?;
+        }
+        debug_assert_eq!(units.len(), capacity);
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Repeats the receiver after rejecting negative, infinite, and overlong results.
+    pub(crate) fn string_repeat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(site.this_value)?;
+        let count_value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let number = numeric_value(self.convert_to_number(count_value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(count_value))?;
+        let count = if number.is_nan() || number == 0.0 {
+            0
+        } else if !number.is_finite() || number < 0.0 || number > u32::MAX as f64 {
+            return Err(ExecutionError::InvalidStringRepeatCount(count_value));
+        } else {
+            number.trunc() as usize
+        };
+        let capacity = units
+            .len()
+            .checked_mul(count)
+            .filter(|length| *length <= u32::MAX as usize)
+            .ok_or(ExecutionError::InvalidStringLength)?;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for _ in 0..count {
+            output.extend_from_slice(&units);
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Pads from either boundary by repeating and truncating the UTF-16 fill sequence.
+    pub(crate) fn string_pad(
+        &mut self,
+        site: &CallSite,
+        pad_end: bool,
+    ) -> Result<Value, ExecutionError> {
+        let receiver = self.string_receiver_units(site.this_value)?;
+        let target_value = self.call_argument(site, 0)?;
+        let target = self.string_target_length(target_value)?;
+        if target <= receiver.len() {
+            return self.allocate_runtime_string(
+                JsString::try_from_owned_code_units(receiver)
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            );
+        }
+        let fill = match self.call_argument(site, 1)? {
+            Some(value) if value.as_immediate() != Some(Immediate::Undefined) => {
+                self.primitive_string_units(value)?
+            }
+            _ => vec![u16::from(b' ')],
+        };
+        if fill.is_empty() {
+            return self.allocate_runtime_string(
+                JsString::try_from_owned_code_units(receiver)
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            );
+        }
+        if target > u32::MAX as usize {
+            return Err(ExecutionError::InvalidStringLength);
+        }
+        let fill_length = target - receiver.len();
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(target)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        if !pad_end {
+            append_repeated_prefix(&mut output, &fill, fill_length);
+        }
+        output.extend_from_slice(&receiver);
+        if pad_end {
+            append_repeated_prefix(&mut output, &fill, fill_length);
+        }
+        debug_assert_eq!(output.len(), target);
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Trims ECMAScript WhiteSpace and LineTerminator code units from either string boundary.
     pub(crate) fn string_trim(
         &mut self,
@@ -190,6 +347,18 @@ impl Isolate {
         })
     }
 
+    /// Converts one argument with String's current primitive conversion substrate.
+    fn string_argument_units(
+        &mut self,
+        site: &CallSite,
+        index: u32,
+    ) -> Result<Vec<u16>, ExecutionError> {
+        let value = self
+            .call_argument(site, index)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.primitive_string_units(value)
+    }
+
     /// Applies ToIntegerOrInfinity and clamps the result using String.prototype.slice rules.
     fn string_relative_index(
         &mut self,
@@ -273,6 +442,67 @@ impl Isolate {
         }
         Ok((integer as usize).min(length))
     }
+
+    /// Normalizes the optional lastIndexOf position, whose omitted value starts at the end.
+    fn string_last_search_start(
+        &mut self,
+        value: Option<Value>,
+        length: usize,
+    ) -> Result<usize, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(length);
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        let integer = if number.is_nan() || number == 0.0 {
+            0.0
+        } else {
+            number.trunc()
+        };
+        if integer <= 0.0 {
+            return Ok(0);
+        }
+        if integer.is_infinite() {
+            return Ok(length);
+        }
+        Ok((integer as usize).min(length))
+    }
+
+    /// Implements ToLength for pad targets within the engine's representable string limit.
+    fn string_target_length(&mut self, value: Option<Value>) -> Result<usize, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(0);
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        if number.is_nan() || number <= 0.0 {
+            return Ok(0);
+        }
+        if !number.is_finite() || number > u32::MAX as f64 {
+            return Err(ExecutionError::InvalidStringLength);
+        }
+        Ok(number.trunc() as usize)
+    }
+}
+
+#[inline(always)]
+fn boolean_value(value: bool) -> Value {
+    Value::from_immediate(if value {
+        Immediate::True
+    } else {
+        Immediate::False
+    })
+}
+
+/// Extends `output` with exactly `length` code units from a cyclic fill sequence.
+fn append_repeated_prefix(output: &mut Vec<u16>, fill: &[u16], length: usize) {
+    let full_repeats = length / fill.len();
+    for _ in 0..full_repeats {
+        output.extend_from_slice(fill);
+    }
+    output.extend_from_slice(&fill[..length % fill.len()]);
 }
 
 #[inline(always)]

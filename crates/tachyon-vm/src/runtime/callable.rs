@@ -37,6 +37,13 @@ pub(crate) enum NativeFunction {
     StringSubstring,
     StringIndexOf,
     StringIncludes,
+    StringLastIndexOf,
+    StringStartsWith,
+    StringEndsWith,
+    StringConcat,
+    StringRepeat,
+    StringPadStart,
+    StringPadEnd,
     StringTrim,
     StringTrimStart,
     StringTrimEnd,
@@ -400,6 +407,13 @@ impl NativeFunction {
             | Self::StringSubstring
             | Self::StringIndexOf
             | Self::StringIncludes
+            | Self::StringLastIndexOf
+            | Self::StringStartsWith
+            | Self::StringEndsWith
+            | Self::StringConcat
+            | Self::StringRepeat
+            | Self::StringPadStart
+            | Self::StringPadEnd
             | Self::StringTrim
             | Self::StringTrimStart
             | Self::StringTrimEnd
@@ -520,6 +534,13 @@ impl NativeFunction {
             Self::StringSubstring => "substring",
             Self::StringIndexOf => "indexOf",
             Self::StringIncludes => "includes",
+            Self::StringLastIndexOf => "lastIndexOf",
+            Self::StringStartsWith => "startsWith",
+            Self::StringEndsWith => "endsWith",
+            Self::StringConcat => "concat",
+            Self::StringRepeat => "repeat",
+            Self::StringPadStart => "padStart",
+            Self::StringPadEnd => "padEnd",
             Self::StringTrim => "trim",
             Self::StringTrimStart => "trimStart",
             Self::StringTrimEnd => "trimEnd",
@@ -994,9 +1015,10 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }
         | ExecutionError::InvalidJsonText => Some(NativeErrorKind::Syntax),
-        ExecutionError::InvalidNumberRadix(_) | ExecutionError::InvalidNumberPrecision(_) => {
-            Some(NativeErrorKind::Range)
-        }
+        ExecutionError::InvalidNumberRadix(_)
+        | ExecutionError::InvalidNumberPrecision(_)
+        | ExecutionError::InvalidStringLength
+        | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),
         _ => None,
     }
 }

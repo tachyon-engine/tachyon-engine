@@ -328,6 +328,13 @@ impl Isolate {
             (NativeFunction::StringSubstring, b"substring".as_slice()),
             (NativeFunction::StringIndexOf, b"indexOf".as_slice()),
             (NativeFunction::StringIncludes, b"includes".as_slice()),
+            (NativeFunction::StringLastIndexOf, b"lastIndexOf".as_slice()),
+            (NativeFunction::StringStartsWith, b"startsWith".as_slice()),
+            (NativeFunction::StringEndsWith, b"endsWith".as_slice()),
+            (NativeFunction::StringConcat, b"concat".as_slice()),
+            (NativeFunction::StringRepeat, b"repeat".as_slice()),
+            (NativeFunction::StringPadStart, b"padStart".as_slice()),
+            (NativeFunction::StringPadEnd, b"padEnd".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;

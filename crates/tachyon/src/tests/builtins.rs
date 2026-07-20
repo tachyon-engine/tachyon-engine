@@ -113,6 +113,19 @@ fn string_trim_methods_use_ecmascript_code_units() {
 }
 
 #[test]
+/// Covers the UTF-16 search and allocation-free capacity paths for the remaining String core.
+fn string_search_and_construction_methods_cover_code_unit_boundaries() {
+    assert_eq!(
+        execute_source(
+            933,
+            "'abca'.lastIndexOf('a') === 3 && 'abca'.lastIndexOf('a', 2) === 0 && 'tachyon'.startsWith('ch', 2) && 'tachyon'.endsWith('yon') && !'tachyon'.endsWith('yon', 6) && 'a'.concat('b', 3) === 'ab3' && 'ab'.repeat(3) === 'ababab' && 'x'.padStart(4, 'ab') === 'abax' && 'x'.padEnd(4, 'ab') === 'xaba';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(
