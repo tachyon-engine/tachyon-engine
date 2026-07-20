@@ -16,6 +16,48 @@ struct CompactPropertyStorage {
 }
 
 impl Isolate {
+    /// Applies OrdinarySetPrototypeOf for ordinary-object payloads without allocating or invoking JS.
+    pub(crate) fn ordinary_set_prototype_of(
+        &mut self,
+        target: Value,
+        prototype: Value,
+    ) -> Result<bool, ExecutionError> {
+        if prototype.as_immediate() != Some(Immediate::Null) && !self.is_object_value(prototype) {
+            return Err(ExecutionError::NotObject(prototype));
+        }
+        let (receiver, snapshot) = self.object_snapshot(target)?;
+        if snapshot.prototype == prototype {
+            return Ok(true);
+        }
+        if !snapshot.extensible {
+            return Ok(false);
+        }
+        let mut candidate = prototype;
+        while self.is_object_value(candidate) {
+            if candidate == target {
+                return Ok(false);
+            }
+            candidate = self.object_snapshot(candidate)?.1.prototype;
+        }
+        let ObjectReceiver::Ordinary(object) = receiver else {
+            return Err(ExecutionError::UnsupportedAccessorDescriptor);
+        };
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(object, self.types.ordinary_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .prototype = prototype;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(object, prototype)
+                .map_err(ExecutionError::HeapReference)
+        })?;
+        Ok(true)
+    }
+
     /// Checks one resolved slot's tombstone state without interpreting its data/accessor payload.
     pub(crate) fn property_is_present_from_snapshot(
         &mut self,

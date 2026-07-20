@@ -221,6 +221,23 @@ impl Isolate {
         )
     }
 
+    /// Implements Reflect.setPrototypeOf through the ordinary prototype mutation contract.
+    pub(crate) fn reflect_set_prototype_of(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<bool, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let prototype = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.ordinary_set_prototype_of(target, prototype)
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,

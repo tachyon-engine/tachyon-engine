@@ -40,6 +40,7 @@ pub(crate) enum NativeFunction {
     ReflectGetPrototypeOf,
     ReflectHas,
     ReflectSet,
+    ReflectSetPrototypeOf,
     ReflectIsExtensible,
     ReflectPreventExtensions,
     StringConstructor,
@@ -464,6 +465,7 @@ impl NativeFunction {
             | Self::ReflectHas => 2,
             Self::ReflectGet => 2,
             Self::ReflectSet => 3,
+            Self::ReflectSetPrototypeOf => 2,
             Self::ObjectConstructor
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
@@ -662,6 +664,7 @@ impl NativeFunction {
             Self::ReflectGetPrototypeOf => "getPrototypeOf",
             Self::ReflectHas => "has",
             Self::ReflectSet => "set",
+            Self::ReflectSetPrototypeOf => "setPrototypeOf",
             Self::ReflectIsExtensible => "isExtensible",
             Self::ReflectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",

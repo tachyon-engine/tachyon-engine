@@ -1693,6 +1693,10 @@ impl Isolate {
                 NativeFunction::ReflectPreventExtensions,
             ),
             (b"set".as_slice(), NativeFunction::ReflectSet),
+            (
+                b"setPrototypeOf".as_slice(),
+                NativeFunction::ReflectSetPrototypeOf,
+            ),
         ] {
             let method = self.allocate_native_function(
                 native,
