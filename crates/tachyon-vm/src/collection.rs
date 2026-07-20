@@ -52,6 +52,29 @@ pub(crate) struct PendingCollectionInitializer {
     pub(crate) kind: CollectionInitializerKind,
 }
 
+/// GC-owned callback state for live `Map.prototype.forEach` and `Set.prototype.forEach` scans.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingCollectionForEach {
+    pub(crate) collection: Value,
+    pub(crate) callback: Value,
+    pub(crate) this_argument: Value,
+    pub(crate) value: Value,
+    pub(crate) key: Value,
+    pub(crate) next_index: u32,
+    pub(crate) map: bool,
+}
+
+impl Trace for PendingCollectionForEach {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.collection.trace(tracer);
+        self.callback.trace(tracer);
+        self.this_argument.trace(tracer);
+        self.value.trace(tracer);
+        self.key.trace(tracer);
+    }
+}
+
 impl Trace for PendingCollectionInitializer {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {

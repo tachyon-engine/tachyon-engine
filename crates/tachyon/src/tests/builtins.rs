@@ -27,6 +27,19 @@ fn collection_constructors_resume_custom_iterators_and_adders() {
 }
 
 #[test]
+/// Keeps collection forEach scans live across callback frames and collection mutations.
+fn collection_for_each_uses_live_insertion_order_and_callback_contract() {
+    assert_eq!(
+        execute_source(
+            1_019,
+            "var map = new Map([[1, 10], [2, 20]]); var mapSeen = ''; var holder = { tag: 7 }; map.forEach(function(value, key, received) { mapSeen = mapSeen + key + value + this.tag + (received === map ? 1 : 0); if (key === 1) { map.delete(2); map.set(3, 30); } }, holder); var set = new Set([4, 5]); var setSeen = ''; set.forEach(function(value, entry, received) { setSeen = setSeen + value + entry + (received === set ? 1 : 0); if (value === 4) { set.delete(5); set.add(6); } }); mapSeen === '1107133071' && setSeen === '441661';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Publishes `%String.prototype%` and routes primitive string length through its exotic boundary.
 fn primitive_string_length_and_prototype_are_available() {
     assert_eq!(

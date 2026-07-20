@@ -1112,6 +1112,7 @@ impl Isolate {
             (b"has".as_slice(), NativeFunction::MapHas),
             (b"delete".as_slice(), NativeFunction::MapDelete),
             (b"clear".as_slice(), NativeFunction::MapClear),
+            (b"forEach".as_slice(), NativeFunction::MapForEach),
         ] {
             self.install_collection_method(map_prototype, function_prototype, name, native)?;
         }
@@ -1164,6 +1165,7 @@ impl Isolate {
             (b"has".as_slice(), NativeFunction::SetHas),
             (b"delete".as_slice(), NativeFunction::SetDelete),
             (b"clear".as_slice(), NativeFunction::SetClear),
+            (b"forEach".as_slice(), NativeFunction::SetForEach),
         ] {
             self.install_collection_method(set_prototype, function_prototype, name, native)?;
         }

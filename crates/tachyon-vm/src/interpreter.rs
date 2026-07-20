@@ -1301,6 +1301,9 @@ impl Isolate {
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::CollectionForEach => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -2357,6 +2360,9 @@ impl Isolate {
                     let value = self.map_entries(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::MapForEach) => {
+                    return self.begin_collection_for_each(&site, true);
+                }
                 FunctionExecutable::Native(NativeFunction::SetAdd) => {
                     let value = self.set_add(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -2404,6 +2410,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::SetEntries) => {
                     let value = self.set_entries(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SetForEach) => {
+                    return self.begin_collection_for_each(&site, false);
                 }
                 FunctionExecutable::Native(NativeFunction::CollectionIteratorNext) => {
                     let value = self.collection_iterator_next(site.this_value)?;
@@ -2956,6 +2965,10 @@ impl Isolate {
                     let state =
                         self.pending_collection_initializer_reference(continuation.first())?;
                     self.resume_collection_initializer(site, state, stage, value)
+                }
+                NativeContinuationKind::CollectionForEach => {
+                    let state = self.pending_collection_for_each_reference(continuation.first())?;
+                    self.resume_collection_for_each(site, state)
                 }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")

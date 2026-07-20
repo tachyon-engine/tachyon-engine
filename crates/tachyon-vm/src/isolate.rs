@@ -95,6 +95,9 @@ impl Isolate {
             pending_collection_initializer: registry
                 .try_register("PendingCollectionInitializer")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_collection_for_each: registry
+                .try_register("PendingCollectionForEach")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             regexp_object: registry
                 .try_register("RegExpObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

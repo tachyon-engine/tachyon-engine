@@ -326,6 +326,7 @@ pub(crate) enum NativeContinuationKind {
     PropertyGet(PropertyCallbackMode),
     PropertySet,
     CollectionInitializer(CollectionInitializerStage),
+    CollectionForEach,
     ConversionCallRoot,
 }
 
@@ -410,6 +411,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::CollectionInitializer(stage),
             first: state,
             second: callee,
+        }
+    }
+
+    /// Roots a live collection forEach scan while its callback executes in a JS frame.
+    #[inline]
+    pub(crate) const fn collection_for_each(
+        site: NativeContinuationSite,
+        state: Value,
+        callback: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::CollectionForEach,
+            first: state,
+            second: callback,
         }
     }
 

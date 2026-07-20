@@ -14,6 +14,7 @@ mod atom;
 mod bound_function;
 mod builtins;
 mod collection;
+mod collection_for_each;
 mod conversion;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
@@ -62,8 +63,8 @@ use tachyon_value::{Immediate, Value};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use collection::{
-    CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionInitializer,
-    SetObject,
+    CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
+    PendingCollectionInitializer, SetObject,
 };
 use conversion::{
     PendingNativePropertyKey, boolean_value, is_non_string_truthy, is_nullish, numeric_binary,

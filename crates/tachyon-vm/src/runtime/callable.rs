@@ -109,6 +109,7 @@ pub(crate) enum NativeFunction {
     MapKeys,
     MapValues,
     MapEntries,
+    MapForEach,
     CollectionIteratorNext,
     SetConstructor,
     SetAdd,
@@ -118,6 +119,7 @@ pub(crate) enum NativeFunction {
     SetSize,
     SetValues,
     SetEntries,
+    SetForEach,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -491,9 +493,11 @@ impl NativeFunction {
             | Self::MapSet
             | Self::MapHas
             | Self::MapDelete
+            | Self::MapForEach
             | Self::SetAdd
             | Self::SetHas
-            | Self::SetDelete => 1,
+            | Self::SetDelete
+            | Self::SetForEach => 1,
             Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
             Self::MapKeys
             | Self::MapValues
@@ -673,6 +677,7 @@ impl NativeFunction {
             Self::MapKeys => "keys",
             Self::MapValues => "values",
             Self::MapEntries => "entries",
+            Self::MapForEach => "forEach",
             Self::CollectionIteratorNext => "next",
             Self::SetConstructor => "Set",
             Self::SetAdd => "add",
@@ -682,6 +687,7 @@ impl NativeFunction {
             Self::SetSize => "get size",
             Self::SetValues => "values",
             Self::SetEntries => "entries",
+            Self::SetForEach => "forEach",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::MathAbs
@@ -1053,6 +1059,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
+    pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,
     pub(crate) regexp_object: GcType<RegExpObject>,
     pub(crate) set_object: GcType<SetObject>,
     pub(crate) property_storage: GcType<PropertyStorage>,
