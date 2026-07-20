@@ -87,11 +87,14 @@ use runtime::{
     fiber::{
         ActiveHandler, ArrayAllocationRoots, CodeLoadRoots, ConversionCallbackStage,
         ConversionConsumer, ConversionContinuation, Fiber, Frame, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, PropertyCallbackMode,
+        NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
         PropertyMutationRoots, PrototypeInitializationRoots, SymbolAllocationRoots,
         ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
-    realm::{GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, Realm, TypeofStrings},
+    realm::{
+        GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
+        TypeofStrings,
+    },
 };
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.

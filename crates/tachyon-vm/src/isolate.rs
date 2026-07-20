@@ -66,12 +66,13 @@ impl Isolate {
             ShapeTable::new(config.realm_limits.max_shapes).map_err(IsolateCreationError::Shape)?;
         let mut heap = Heap::new(config.heap_limit, registry);
         let typeof_strings = TypeofStrings::allocate(&mut heap, types.string)?;
+        let primitive_hint_strings = PrimitiveHintStrings::allocate(&mut heap, types.string)?;
         let mut isolate = Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
             atoms: AtomTable::new(config.atom_table),
             shapes,
-            realm: Realm::new(config.realm_limits, typeof_strings),
+            realm: Realm::new(config.realm_limits, typeof_strings, primitive_hint_strings),
             loaded_code: Vec::new(),
             heap,
             types,

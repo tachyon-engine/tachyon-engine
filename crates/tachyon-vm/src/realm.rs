@@ -301,7 +301,9 @@ impl Isolate {
             )
         };
         self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
-        self.realm.symbol_constructor = Some(allocate(self, NativeFunction::SymbolConstructor)?);
+        let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
+        self.realm.symbol_constructor = Some(symbol_constructor);
+        self.initialize_to_primitive_symbol(symbol_constructor)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
         let object_prototype = self
@@ -385,6 +387,21 @@ impl Isolate {
         }
         self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
         Ok(())
+    }
+
+    /// Allocates and publishes the realm-local well-known `Symbol.toPrimitive` identity.
+    fn initialize_to_primitive_symbol(
+        &mut self,
+        symbol_constructor: Value,
+    ) -> Result<(), ExecutionError> {
+        let description = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Symbol.toPrimitive")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let symbol = self.allocate_symbol(Some(description))?;
+        self.realm.well_known_symbols.to_primitive = Some(symbol);
+        let to_primitive = self.intern_intrinsic_name(b"toPrimitive")?;
+        self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)
     }
 
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.

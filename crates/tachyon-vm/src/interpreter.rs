@@ -1167,6 +1167,9 @@ impl Isolate {
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ConversionCallRoot => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
         };
         // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
         // reachable through the receiver's accessor pair (or descriptor state -> source chain).
@@ -2377,6 +2380,13 @@ impl Isolate {
         mut value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
+            if continuation.kind() == NativeContinuationKind::ConversionCallRoot {
+                continuation = self.pop_native_continuation()?;
+                if continuation.as_conversion().is_none() {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                continue;
+            }
             let site = continuation.site();
             let frame_depth = self.fiber.frames.len();
             let result = match continuation.kind() {
@@ -2405,6 +2415,9 @@ impl Isolate {
                     let assigned = continuation.second();
                     self.write(site.caller_base, site.destination, assigned)?;
                     self.finish_property_write(receiver, true)
+                }
+                NativeContinuationKind::ConversionCallRoot => {
+                    unreachable!("conversion call roots resume before native dispatch")
                 }
             };
             if let Err(error) = result {

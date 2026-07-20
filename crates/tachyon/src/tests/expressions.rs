@@ -166,6 +166,64 @@ fn addition_converts_primitives_and_objects_in_spec_order() {
 }
 
 #[test]
+/// Covers exact exotic hints, receiver identity, fallback, short-circuiting, and TypeError paths.
+fn symbol_to_primitive_observes_the_exotic_conversion_contract() {
+    assert_eq!(
+        execute_source(
+            189,
+            "let seen = ''; let calls = 0; let object = { [Symbol.toPrimitive](hint) { seen = hint; calls++; return this === object && arguments.length === 1 ? 41 : 0; }, valueOf() { calls = 99; return 0; }, toString() { calls = 99; return 'bad'; } }; object + 1 === 42 && seen === 'default' && calls === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            190,
+            "let hints = ''; let numeric = { [Symbol.toPrimitive](hint) { hints += hint; return 7; } }; let stringy = { [Symbol.toPrimitive](hint) { hints += hint; return 'ok'; } }; +numeric === 7 && String(stringy) === 'ok' && hints === 'numberstring';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            191,
+            "let proto = { [Symbol.toPrimitive](hint) { return this === object && hint === 'default' ? 41 : 0; } }; let object = Object.create(proto); let absent = { valueOf() { return 20; } }; let undef = { [Symbol.toPrimitive]: undefined, valueOf() { return 21; } }; let nil = { [Symbol.toPrimitive]: null, valueOf() { return 22; } }; object + 1 === 42 && absent + undef + nil === 63;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            192,
+            "let nonCallable = false; let objectResult = false; let fallbackCalls = 0; try { +({ [Symbol.toPrimitive]: 0 }); } catch (error) { nonCallable = error instanceof TypeError; } try { +({ [Symbol.toPrimitive]() { return {}; }, valueOf() { fallbackCalls++; return 1; } }); } catch (error) { objectResult = error instanceof TypeError; } nonCallable && objectResult && fallbackCalls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Preserves abrupt completion and observes right-hand mutation only after left conversion finishes.
+fn symbol_to_primitive_preserves_abrupt_and_left_to_right_order() {
+    assert_eq!(
+        execute_source(
+            193,
+            "let getterStopped = false; let getterRightCalls = 0; let getterObject = {}; Object.defineProperty(getterObject, Symbol.toPrimitive, { get() { throw 41; } }); try { getterObject + ({ [Symbol.toPrimitive]() { getterRightCalls++; return 1; } }); } catch (error) { getterStopped = error === 41; } let methodStopped = false; let methodRightCalls = 0; try { ({ [Symbol.toPrimitive]() { throw 42; } }) + ({ [Symbol.toPrimitive]() { methodRightCalls++; return 1; } }); } catch (error) { methodStopped = error === 42; } let resumed = ({ [Symbol.toPrimitive]() { return 1; } }) + 1; getterStopped && getterRightCalls === 0 && methodStopped && methodRightCalls === 0 && resumed === 2;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            194,
+            "let order = 0; let right = { [Symbol.toPrimitive]() { order = order * 10 + 2; return 2; } }; let left = { [Symbol.toPrimitive]() { order = order * 10 + 1; right[Symbol.toPrimitive] = function() { order = order * 10 + 3; return 3; }; return 1; } }; left + right === 4 && order === 13;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Preserves left-to-right object conversion, mutation visibility, and abrupt completion.
 fn numeric_binary_objects_resume_in_spec_order() {
     assert_eq!(

@@ -1,5 +1,6 @@
 //! Primitive conversion, ToPrimitive continuation, and equality semantics.
 
+mod exotic;
 mod numeric;
 
 use super::*;
@@ -10,7 +11,7 @@ pub(crate) use numeric::{
     numeric_negate, numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
 };
 
-enum ConversionCallbackResult {
+pub(super) enum ConversionCallbackResult {
     Suspended,
     Returned(Value),
 }
@@ -117,26 +118,19 @@ impl Isolate {
         if let Some(object) = argument
             && self.is_object_value(object)
         {
-            let (receiver, stage) = match native {
-                NativeFunction::StringConstructor => (
-                    Value::from_immediate(Immediate::Undefined),
-                    ToPrimitiveStage::ToString,
-                ),
+            let receiver = match native {
+                NativeFunction::StringConstructor => Value::from_immediate(Immediate::Undefined),
                 NativeFunction::NumberToExponential
                 | NativeFunction::NumberToFixed
                 | NativeFunction::NumberToPrecision
-                | NativeFunction::NumberToString => (
-                    self.this_number_value(site.this_value)?,
-                    ToPrimitiveStage::ValueOf,
-                ),
-                NativeFunction::NumberConstructor => (
+                | NativeFunction::NumberToString => self.this_number_value(site.this_value)?,
+                NativeFunction::NumberConstructor => {
                     if construct {
                         site.new_target
                     } else {
                         Value::from_immediate(Immediate::Undefined)
-                    },
-                    ToPrimitiveStage::ValueOf,
-                ),
+                    }
+                }
                 _ => unreachable!("only conversion consumers enter this dispatch path"),
             };
             let continuation = ConversionContinuation {
@@ -148,7 +142,7 @@ impl Isolate {
                 consumer,
                 receiver,
                 object,
-                stage,
+                stage: ToPrimitiveStage::Exotic,
                 callback_stage: ConversionCallbackStage::MethodCall,
             };
             return self.advance_native_conversion(continuation, None);
@@ -186,7 +180,7 @@ impl Isolate {
                 consumer,
                 receiver: pending,
                 object,
-                stage: ToPrimitiveStage::ValueOf,
+                stage: ToPrimitiveStage::Exotic,
                 callback_stage: ConversionCallbackStage::MethodCall,
             },
             None,
@@ -213,7 +207,7 @@ impl Isolate {
                             continuation.consumer = ConversionConsumer::AddRight;
                             continuation.receiver = left;
                             continuation.object = right;
-                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continuation.stage = ToPrimitiveStage::Exotic;
                             continue;
                         }
                         let result = self.add_primitive_values(left, right)?;
@@ -238,7 +232,7 @@ impl Isolate {
                             continuation.consumer = ConversionConsumer::RelationalRight(opcode);
                             continuation.receiver = left;
                             continuation.object = right;
-                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continuation.stage = ToPrimitiveStage::Exotic;
                             continue;
                         }
                         let result = self.relational_primitive_values(opcode, left, right)?;
@@ -264,7 +258,7 @@ impl Isolate {
                             continuation.consumer = ConversionConsumer::BinaryRight(opcode);
                             continuation.receiver = left;
                             continuation.object = right;
-                            continuation.stage = ToPrimitiveStage::ValueOf;
+                            continuation.stage = ToPrimitiveStage::Exotic;
                             continue;
                         }
                         let right = self.convert_to_number(right)?;
@@ -294,6 +288,8 @@ impl Isolate {
                         continuation.site.destination,
                         result,
                     );
+                } else if continuation.stage == ToPrimitiveStage::Exotic {
+                    return Err(ExecutionError::NotObject(continuation.object));
                 } else {
                     let Some(stage) =
                         next_to_primitive_stage(continuation.consumer, continuation.stage)
@@ -306,13 +302,20 @@ impl Isolate {
             let method = if let Some(method) = resolved_method.take() {
                 Some(method)
             } else {
-                let name = match continuation.stage {
-                    ToPrimitiveStage::ValueOf => b"valueOf".as_slice(),
-                    ToPrimitiveStage::ToString => b"toString".as_slice(),
+                let key = match continuation.stage {
+                    ToPrimitiveStage::Exotic => {
+                        let symbol = self
+                            .realm
+                            .well_known_symbols
+                            .to_primitive
+                            .expect("well-known symbols initialize before execution");
+                        self.property_key(symbol)?
+                    }
+                    ToPrimitiveStage::ValueOf => self.intern_intrinsic_name(b"valueOf")?.into(),
+                    ToPrimitiveStage::ToString => self.intern_intrinsic_name(b"toString")?.into(),
                 };
-                let atom = self.intern_intrinsic_name(name)?;
                 self.push_native_conversion(continuation)?;
-                let property = match self.resolve_property_read(continuation.object, atom.into()) {
+                let property = match self.resolve_property_read(continuation.object, key) {
                     Ok(property) => property,
                     Err(error) => {
                         self.pop_native_conversion()?;
@@ -330,7 +333,7 @@ impl Isolate {
                     }
                     PropertyRead::Accessor(getter) => {
                         continuation.callback_stage = ConversionCallbackStage::Getter;
-                        match self.call_conversion_callback(continuation, getter)? {
+                        match self.call_conversion_callback(continuation, getter, None)? {
                             ConversionCallbackResult::Suspended => return Ok(()),
                             ConversionCallbackResult::Returned(value) => {
                                 returned = Some(value);
@@ -340,9 +343,7 @@ impl Isolate {
                     }
                 }
             };
-            let Some(method) =
-                method.filter(|method| self.resolve_function_object(*method).is_ok())
-            else {
+            let Some(method) = method else {
                 let Some(stage) =
                     next_to_primitive_stage(continuation.consumer, continuation.stage)
                 else {
@@ -351,8 +352,31 @@ impl Isolate {
                 continuation.stage = stage;
                 continue;
             };
+            if is_nullish(method) && continuation.stage == ToPrimitiveStage::Exotic {
+                continuation.stage =
+                    next_to_primitive_stage(continuation.consumer, continuation.stage)
+                        .expect("the exotic stage always has an ordinary fallback");
+                continue;
+            }
+            if self.resolve_function_object(method).is_err() {
+                if continuation.stage == ToPrimitiveStage::Exotic {
+                    return Err(ExecutionError::NonCallable(method));
+                }
+                let Some(stage) =
+                    next_to_primitive_stage(continuation.consumer, continuation.stage)
+                else {
+                    return Err(ExecutionError::NotObject(continuation.object));
+                };
+                continuation.stage = stage;
+                continue;
+            }
             continuation.callback_stage = ConversionCallbackStage::MethodCall;
-            match self.call_conversion_callback(continuation, method)? {
+            let argument = (continuation.stage == ToPrimitiveStage::Exotic).then(|| {
+                self.realm
+                    .primitive_hint_strings
+                    .get(continuation.consumer.preferred_type())
+            });
+            match self.call_conversion_callback(continuation, method, argument)? {
                 ConversionCallbackResult::Suspended => return Ok(()),
                 ConversionCallbackResult::Returned(value) => returned = Some(value),
             }
@@ -364,7 +388,11 @@ impl Isolate {
         &mut self,
         continuation: ConversionContinuation,
         callee: Value,
+        argument: Option<Value>,
     ) -> Result<ConversionCallbackResult, ExecutionError> {
+        if let Some(argument) = argument {
+            return self.call_exotic_conversion_callback(continuation, callee, argument);
+        }
         self.push_native_conversion(continuation)?;
         let frame_depth = self.fiber.frames.len();
         let call_result = self.call(CallSite {

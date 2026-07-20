@@ -158,12 +158,18 @@ pub(crate) struct Realm {
     pub(crate) math_object: Option<Value>,
     pub(crate) math_pow: Option<Value>,
     pub(crate) error_intrinsics: ErrorIntrinsics,
+    pub(crate) well_known_symbols: WellKnownSymbols,
+    pub(crate) primitive_hint_strings: PrimitiveHintStrings,
     pub(crate) typeof_strings: TypeofStrings,
     pub(crate) limits: RealmLimits,
 }
 
 impl Realm {
-    pub(crate) fn new(limits: RealmLimits, typeof_strings: TypeofStrings) -> Self {
+    pub(crate) fn new(
+        limits: RealmLimits,
+        typeof_strings: TypeofStrings,
+        primitive_hint_strings: PrimitiveHintStrings,
+    ) -> Self {
         Self {
             intrinsic_bindings: Vec::new(),
             intrinsic_slots_by_atom: Vec::new(),
@@ -232,6 +238,8 @@ impl Realm {
             math_object: None,
             math_pow: None,
             error_intrinsics: ErrorIntrinsics::default(),
+            well_known_symbols: WellKnownSymbols::default(),
+            primitive_hint_strings,
             typeof_strings,
             limits,
         }
@@ -541,7 +549,60 @@ impl Trace for Realm {
         self.math_object.trace(tracer);
         self.math_pow.trace(tracer);
         self.error_intrinsics.trace(tracer);
+        self.well_known_symbols.trace(tracer);
+        self.primitive_hint_strings.trace(tracer);
         self.typeof_strings.trace(tracer);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WellKnownSymbols {
+    pub(crate) to_primitive: Option<Value>,
+}
+
+impl Trace for WellKnownSymbols {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.to_primitive.trace(tracer);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PrimitiveHintStrings {
+    pub(crate) default: Value,
+    pub(crate) string: Value,
+    pub(crate) number: Value,
+}
+
+impl PrimitiveHintStrings {
+    /// Allocates the complete ToPrimitive hint vocabulary before realm publication.
+    pub(crate) fn allocate(
+        heap: &mut Heap,
+        string_type: GcType<JsString>,
+    ) -> Result<Self, IsolateCreationError> {
+        Ok(Self {
+            default: allocate_initial_string(heap, string_type, b"default")?,
+            string: allocate_initial_string(heap, string_type, b"string")?,
+            number: allocate_initial_string(heap, string_type, b"number")?,
+        })
+    }
+
+    #[inline]
+    pub(crate) const fn get(self, preferred_type: PreferredType) -> Value {
+        match preferred_type {
+            PreferredType::Default => self.default,
+            PreferredType::String => self.string,
+            PreferredType::Number => self.number,
+        }
+    }
+}
+
+impl Trace for PrimitiveHintStrings {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.default.trace(tracer);
+        self.string.trace(tracer);
+        self.number.trace(tracer);
     }
 }
 

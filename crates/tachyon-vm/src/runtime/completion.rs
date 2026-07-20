@@ -414,6 +414,10 @@ mod tests {
         assert_eq!(set.kind(), NativeContinuationKind::PropertySet);
         assert_eq!(set.first(), receiver);
         assert_eq!(set.second(), assigned);
+        let call_root = NativeContinuation::conversion_call_root(site, receiver, assigned);
+        assert_eq!(call_root.kind(), NativeContinuationKind::ConversionCallRoot);
+        assert_eq!(call_root.first(), receiver);
+        assert_eq!(call_root.second(), assigned);
         let conversion = native_continuation().as_conversion().unwrap();
         assert_eq!(conversion.site.call_site, WordOffset::new(0));
         assert_eq!(conversion.consumer, ConversionConsumer::ToNumber);

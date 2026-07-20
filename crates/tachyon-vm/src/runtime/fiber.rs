@@ -92,8 +92,16 @@ pub(crate) struct NativeContinuationSite {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToPrimitiveStage {
+    Exotic,
     ValueOf,
     ToString,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreferredType {
+    Default,
+    String,
+    Number,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -140,6 +148,17 @@ impl ConversionConsumer {
     }
 
     #[inline]
+    pub(crate) const fn preferred_type(self) -> PreferredType {
+        if self.uses_string_hint() {
+            PreferredType::String
+        } else if matches!(self, Self::AddLeft | Self::AddRight) {
+            PreferredType::Default
+        } else {
+            PreferredType::Number
+        }
+    }
+
+    #[inline]
     pub(crate) const fn is_opcode_conversion(self) -> bool {
         matches!(
             self,
@@ -161,13 +180,22 @@ pub(crate) fn next_to_primitive_stage(
     consumer: ConversionConsumer,
     stage: ToPrimitiveStage,
 ) -> Option<ToPrimitiveStage> {
+    if stage == ToPrimitiveStage::Exotic {
+        return Some(if consumer.uses_string_hint() {
+            ToPrimitiveStage::ToString
+        } else {
+            ToPrimitiveStage::ValueOf
+        });
+    }
     if consumer.uses_string_hint() {
         match stage {
+            ToPrimitiveStage::Exotic => unreachable!("exotic stage returns before hint ordering"),
             ToPrimitiveStage::ToString => Some(ToPrimitiveStage::ValueOf),
             ToPrimitiveStage::ValueOf => None,
         }
     } else {
         match stage {
+            ToPrimitiveStage::Exotic => unreachable!("exotic stage returns before hint ordering"),
             ToPrimitiveStage::ValueOf => Some(ToPrimitiveStage::ToString),
             ToPrimitiveStage::ToString => None,
         }
@@ -201,6 +229,7 @@ pub(crate) enum NativeContinuationKind {
     },
     PropertyGet(PropertyCallbackMode),
     PropertySet,
+    ConversionCallRoot,
 }
 
 /// Compact typed callback work owned by a JavaScript frame instead of the Rust call stack.
@@ -252,6 +281,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertySet,
             first: receiver,
             second: value,
+        }
+    }
+
+    /// Roots the exact call pair while the parent conversion retains its full resumable state.
+    #[inline]
+    pub(crate) const fn conversion_call_root(
+        site: NativeContinuationSite,
+        receiver: Value,
+        callee: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ConversionCallRoot,
+            first: receiver,
+            second: callee,
         }
     }
 
