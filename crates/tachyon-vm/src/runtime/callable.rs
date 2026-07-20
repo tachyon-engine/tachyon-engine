@@ -908,6 +908,7 @@ pub(crate) struct IntrinsicPropertyAtoms {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RealmIntrinsicAtoms {
+    pub(crate) global_this: AtomId,
     pub(crate) undefined: AtomId,
     pub(crate) nan: AtomId,
     pub(crate) infinity: AtomId,
@@ -926,7 +927,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        11 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        12 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

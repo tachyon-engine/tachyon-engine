@@ -513,6 +513,7 @@ impl Isolate {
     /// Interns every mandatory global name before reserving the dense atom-indexed binding table.
     fn intern_realm_intrinsic_atoms(&mut self) -> Result<RealmIntrinsicAtoms, ExecutionError> {
         Ok(RealmIntrinsicAtoms {
+            global_this: self.intern_intrinsic_name(b"globalThis")?,
             undefined: self.intern_intrinsic_name(b"undefined")?,
             nan: self.intern_intrinsic_name(b"NaN")?,
             infinity: self.intern_intrinsic_name(b"Infinity")?,
@@ -973,6 +974,12 @@ impl Isolate {
             RealmIntrinsicAtoms::BINDING_COUNT,
             self.atoms.stats().entries,
         )?;
+        let global_object = self
+            .realm
+            .global_object
+            .expect("global object initializes before intrinsic publication");
+        self.realm
+            .publish_intrinsic(atoms.global_this, global_object, true)?;
         self.realm.publish_intrinsic(
             atoms.undefined,
             Value::from_immediate(Immediate::Undefined),
@@ -1057,6 +1064,25 @@ impl Isolate {
                 atom,
                 value.expect("numeric global initializes before publication"),
                 true,
+            )?;
+        }
+        let mut globals = Vec::new();
+        globals
+            .try_reserve_exact(self.realm.intrinsic_bindings.len())
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        for binding in &self.realm.intrinsic_bindings {
+            globals.push((binding.name, binding.value, binding.writable));
+        }
+        for (name, value, writable) in globals {
+            self.define_data_property(
+                global_object,
+                name,
+                DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(writable),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
             )?;
         }
         Ok(())
