@@ -2833,6 +2833,22 @@ impl Isolate {
             length,
             safe_integer_value(u64::from(site.argument_count)),
         )?;
+        if let (Some(iterator), Some(values)) = (
+            self.realm.well_known_symbols.iterator,
+            self.realm.array_values,
+        ) {
+            let key = self.property_key(iterator)?;
+            self.define_data_property(
+                arguments,
+                key,
+                DataPropertyDescriptor {
+                    value: Some(values),
+                    writable: Some(true),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
+            )?;
+        }
         *self
             .fiber
             .argument_objects
