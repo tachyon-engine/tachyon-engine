@@ -129,6 +129,7 @@ pub(crate) enum NativeFunction {
     WeakMapSet,
     WeakMapHas,
     WeakMapDelete,
+    WeakMapGetOrInsert,
     WeakSetConstructor,
     WeakSetAdd,
     WeakSetHas,
@@ -520,6 +521,7 @@ impl NativeFunction {
             | Self::WeakMapSet
             | Self::WeakMapHas
             | Self::WeakMapDelete
+            | Self::WeakMapGetOrInsert
             | Self::WeakSetAdd
             | Self::WeakSetHas
             | Self::WeakSetDelete => 1,
@@ -724,6 +726,7 @@ impl NativeFunction {
             Self::WeakMapSet => "set",
             Self::WeakMapHas => "has",
             Self::WeakMapDelete => "delete",
+            Self::WeakMapGetOrInsert => "getOrInsert",
             Self::WeakSetConstructor => "WeakSet",
             Self::WeakSetAdd => "add",
             Self::WeakSetHas => "has",

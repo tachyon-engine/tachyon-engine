@@ -2335,6 +2335,10 @@ impl Isolate {
                     let value = self.weak_map_set(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::WeakMapGetOrInsert) => {
+                    let value = self.weak_map_get_or_insert(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::WeakMapHas) => {
                     let value = self.weak_map_has(&site)?;
                     return self.write(

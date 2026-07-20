@@ -38,6 +38,31 @@ impl Isolate {
         Ok(site.this_value)
     }
 
+    /// Returns an existing weak-map value or inserts the supplied default through the ephemeron path.
+    pub(crate) fn weak_map_get_or_insert(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let key = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self.weak_key(key)?;
+        let default = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let storage = self.weak_map_storage(site.this_value)?.ok_or(
+            ExecutionError::IncompatibleCollectionReceiver(site.this_value),
+        )?;
+        if let Some(index) = self.weak_collection_find(storage, key)? {
+            return self
+                .weak_collection_entry(storage, index)?
+                .map(|entry| entry.value())
+                .ok_or(ExecutionError::CollectionStorageAllocationFailed);
+        }
+        self.weak_collection_set(site.this_value, storage, key, default, true)?;
+        Ok(default)
+    }
+
     pub(crate) fn weak_map_has(&mut self, site: &CallSite) -> Result<bool, ExecutionError> {
         let key = self
             .call_argument(site, 0)?

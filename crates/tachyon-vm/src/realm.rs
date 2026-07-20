@@ -1437,6 +1437,10 @@ impl Isolate {
             (b"get".as_slice(), NativeFunction::WeakMapGet),
             (b"has".as_slice(), NativeFunction::WeakMapHas),
             (b"set".as_slice(), NativeFunction::WeakMapSet),
+            (
+                b"getOrInsert".as_slice(),
+                NativeFunction::WeakMapGetOrInsert,
+            ),
         ] {
             self.install_collection_method(weak_map_prototype, function_prototype, name, native)?;
         }
