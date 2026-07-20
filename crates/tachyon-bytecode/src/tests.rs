@@ -98,6 +98,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::ForInNext,
                 Opcode::TypeofScope,
                 Opcode::SetFunctionName,
+                Opcode::CreateExclusionList,
+                Opcode::ExcludePropertyKey,
             ],
         ),
         (
@@ -144,6 +146,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineGetterByValue,
                 Opcode::DefineSetterByValue,
                 Opcode::SetAccessorFunctionName,
+                Opcode::CopyDataProperties,
             ],
         ),
     ];

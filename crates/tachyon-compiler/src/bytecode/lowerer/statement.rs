@@ -787,14 +787,32 @@ impl Lowerer<'_> {
                 self.assign_pattern(target, value, span)
             }
             crate::HirPatternKind::Object { properties, rest } => {
-                if rest.is_some() {
-                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
-                }
                 self.require_object_coercible(value, pattern.span)?;
+                let exclusions = rest
+                    .as_ref()
+                    .map(|_| self.create_exclusion_list(properties.len(), pattern.span))
+                    .transpose()?;
                 for property in properties.iter() {
-                    let property_value =
-                        self.pattern_property(value, &property.key, property.span)?;
+                    let (property_value, key) =
+                        self.pattern_property_with_key(value, &property.key, property.span)?;
+                    if let Some(exclusions) = exclusions {
+                        self.exclude_pattern_key(exclusions, key, property.span)?;
+                    }
                     self.assign_pattern(&property.target, property_value, span)?;
+                }
+                if let Some(rest) = rest {
+                    let target = self.register()?;
+                    self.emit(Opcode::CreateObject, &[target.index()], pattern.span)?;
+                    self.emit(
+                        Opcode::CopyDataProperties,
+                        &[
+                            target.index(),
+                            value.index(),
+                            exclusions.expect("rest allocates exclusions").index(),
+                        ],
+                        pattern.span,
+                    )?;
+                    self.assign_pattern(rest, target, span)?;
                 }
                 Ok(())
             }

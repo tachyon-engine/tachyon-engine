@@ -87,7 +87,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::ToNumber
         | Opcode::BitwiseNot
         | Opcode::CreateForInIterator
-        | Opcode::ForInNext => write!(output, " r{}, r{}", operands[0], operands[1])?,
+        | Opcode::ForInNext
+        | Opcode::ExcludePropertyKey => write!(output, " r{}, r{}", operands[0], operands[1])?,
+        Opcode::CreateExclusionList => {
+            write!(output, " r{}, capacity={}", operands[0], operands[1])?
+        }
         Opcode::SetFunctionName => write!(output, " r{}, name={}", operands[0], operands[1])?,
         Opcode::Add
         | Opcode::Sub
@@ -121,6 +125,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::DefineSetterById
         | Opcode::DefineGetterByValue
         | Opcode::DefineSetterByValue
+        | Opcode::CopyDataProperties
         | Opcode::SetAccessorFunctionName => write!(
             output,
             " r{}, r{}, r{}",

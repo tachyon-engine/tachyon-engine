@@ -84,14 +84,32 @@ impl Lowerer<'_> {
                 self.bind_pattern(target, value, mutable)
             }
             HirPatternKind::Object { properties, rest } => {
-                if rest.is_some() {
-                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
-                }
                 self.require_object_coercible(value, pattern.span)?;
+                let exclusions = rest
+                    .as_ref()
+                    .map(|_| self.create_exclusion_list(properties.len(), pattern.span))
+                    .transpose()?;
                 for property in properties.iter() {
-                    let property_value =
-                        self.pattern_property(value, &property.key, property.span)?;
+                    let (property_value, key) =
+                        self.pattern_property_with_key(value, &property.key, property.span)?;
+                    if let Some(exclusions) = exclusions {
+                        self.exclude_pattern_key(exclusions, key, property.span)?;
+                    }
                     self.bind_pattern(&property.target, property_value, mutable)?;
+                }
+                if let Some(rest) = rest {
+                    let target = self.register()?;
+                    self.emit(Opcode::CreateObject, &[target.index()], pattern.span)?;
+                    self.emit(
+                        Opcode::CopyDataProperties,
+                        &[
+                            target.index(),
+                            value.index(),
+                            exclusions.expect("rest allocates exclusions").index(),
+                        ],
+                        pattern.span,
+                    )?;
+                    self.bind_pattern(rest, target, mutable)?;
                 }
                 Ok(())
             }
@@ -358,26 +376,91 @@ impl Lowerer<'_> {
         key: &HirObjectPropertyKey,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
+        self.pattern_property_with_key(object, key, span)
+            .map(|(value, _)| value)
+    }
+
+    /// Reads one pattern property and preserves the exact normalized key for object-rest exclusion.
+    pub(super) fn pattern_property_with_key(
+        &mut self,
+        object: RegisterId,
+        key: &HirObjectPropertyKey,
+        span: SourceSpan,
+    ) -> Result<(RegisterId, RegisterId), CompileError> {
         let destination = self.register()?;
         match key {
             HirObjectPropertyKey::Static(property) => {
-                let property = self.scope_name(property)?;
+                let scope_name = self.scope_name(property)?;
                 self.emit(
                     Opcode::GetById,
-                    &[destination.index(), object.index(), property],
+                    &[destination.index(), object.index(), scope_name],
                     span,
                 )?;
+                let key = self.load_pattern_static_key(property, span)?;
+                Ok((destination, key))
             }
             HirObjectPropertyKey::Computed(expression) => {
                 let property = self.expression(expression)?;
+                self.prepare_property_key(property, object, false, span)?;
                 self.emit(
                     Opcode::GetByValue,
                     &[destination.index(), object.index(), property.index()],
                     span,
                 )?;
+                Ok((destination, property))
             }
         }
+    }
+
+    /// Creates the string Value needed only by VM-private object-rest exclusion storage.
+    fn load_pattern_static_key(
+        &mut self,
+        key: &std::sync::Arc<str>,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let unit_count = key.encode_utf16().count();
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(unit_count)
+            .map_err(|_| CompileError::ConstantAllocationFailed)?;
+        units.extend(key.encode_utf16());
+        let constant =
+            u32::try_from(self.constants.len()).map_err(|_| CompileError::ConstantOverflow)?;
+        self.constants
+            .push(BytecodeConstant::string_from_utf16(units));
+        let destination = self.register()?;
+        self.emit(Opcode::LoadConstant, &[destination.index(), constant], span)?;
         Ok(destination)
+    }
+
+    /// Emits the non-observable exclusion-list instructions used only by object-rest patterns.
+    pub(super) fn create_exclusion_list(
+        &mut self,
+        property_count: usize,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let count = u32::try_from(property_count).map_err(|_| CompileError::RegisterOverflow)?;
+        let destination = self.register()?;
+        self.emit(
+            Opcode::CreateExclusionList,
+            &[destination.index(), count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Adds one already-normalized object-pattern key without re-evaluating computed expressions.
+    pub(super) fn exclude_pattern_key(
+        &mut self,
+        exclusions: RegisterId,
+        key: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.emit(
+            Opcode::ExcludePropertyKey,
+            &[exclusions.index(), key.index()],
+            span,
+        )
     }
 
     /// Selects an object default initializer without changing the destination register identity.
@@ -637,14 +720,32 @@ impl Lowerer<'_> {
                 self.initialize_var_pattern(target, value)
             }
             HirPatternKind::Object { properties, rest } => {
-                if rest.is_some() {
-                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
-                }
                 self.require_object_coercible(value, pattern.span)?;
+                let exclusions = rest
+                    .as_ref()
+                    .map(|_| self.create_exclusion_list(properties.len(), pattern.span))
+                    .transpose()?;
                 for property in properties.iter() {
-                    let property_value =
-                        self.pattern_property(value, &property.key, property.span)?;
+                    let (property_value, key) =
+                        self.pattern_property_with_key(value, &property.key, property.span)?;
+                    if let Some(exclusions) = exclusions {
+                        self.exclude_pattern_key(exclusions, key, property.span)?;
+                    }
                     self.initialize_var_pattern(&property.target, property_value)?;
+                }
+                if let Some(rest) = rest {
+                    let target = self.register()?;
+                    self.emit(Opcode::CreateObject, &[target.index()], pattern.span)?;
+                    self.emit(
+                        Opcode::CopyDataProperties,
+                        &[
+                            target.index(),
+                            value.index(),
+                            exclusions.expect("rest allocates exclusions").index(),
+                        ],
+                        pattern.span,
+                    )?;
+                    self.initialize_var_pattern(rest, target)?;
                 }
                 Ok(())
             }

@@ -41,6 +41,9 @@ impl Isolate {
             environment: registry
                 .try_register("Environment")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            exclusion_list: registry
+                .try_register("ExclusionList")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             for_in_iterator: registry
                 .try_register("ForInIterator")
                 .map_err(IsolateCreationError::TypeRegistration)?,

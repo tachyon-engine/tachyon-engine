@@ -207,9 +207,15 @@ pub enum Opcode {
     DefineSetterByValue = 80,
     /// Assigns an accessor's `get` or `set` name from an already-normalized PropertyKey value.
     SetAccessorFunctionName = 81,
+    /// Allocates one VM-private exact-capacity object-rest exclusion list.
+    CreateExclusionList = 82,
+    /// Appends one normalized PropertyKey to a VM-private exclusion list.
+    ExcludePropertyKey = 83,
+    /// Copies enumerable own properties while omitting keys held by a VM-private exclusion list.
+    CopyDataProperties = 84,
 }
 
-pub(super) const OPCODE_COUNT: usize = 82;
+pub(super) const OPCODE_COUNT: usize = 85;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -293,10 +299,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DefineGetterByValue
     3, // DefineSetterByValue
     3, // SetAccessorFunctionName
+    2, // CreateExclusionList
+    2, // ExcludePropertyKey
+    3, // CopyDataProperties
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::SetAccessorFunctionName as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CopyDataProperties as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -424,6 +433,9 @@ impl Opcode {
             15 => Some(Self::DefineGetterByValue),
             16 => Some(Self::DefineSetterByValue),
             17 => Some(Self::SetAccessorFunctionName),
+            18 => Some(Self::CreateExclusionList),
+            19 => Some(Self::ExcludePropertyKey),
+            20 => Some(Self::CopyDataProperties),
             _ => None,
         }
     }

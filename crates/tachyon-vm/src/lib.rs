@@ -73,6 +73,7 @@ use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
     PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
 };
+use property::copy::ExclusionList;
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
@@ -267,6 +268,10 @@ pub enum ExecutionError {
     IntrinsicBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
+    ExclusionListAllocationFailed,
+    ExclusionListCapacityExceeded,
+    InvalidExclusionList(Value),
+    CopyDataPropertiesNeedsContinuation,
     BoundArgumentAllocationFailed,
     BoundArgumentCountOverflow,
     BoundNameAllocationFailed,

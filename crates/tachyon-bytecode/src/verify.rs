@@ -643,10 +643,12 @@ fn verify_instruction(
         | Opcode::BitwiseNot
         | Opcode::TypeofScope
         | Opcode::CreateForInIterator
-        | Opcode::ForInNext => {
+        | Opcode::ForInNext
+        | Opcode::ExcludePropertyKey => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
+        Opcode::CreateExclusionList => check_register(operands[0])?,
         Opcode::SetFunctionName => check_register(operands[0])?,
         Opcode::Add
         | Opcode::Sub
@@ -678,7 +680,8 @@ fn verify_instruction(
         | Opcode::DefineGetterById
         | Opcode::DefineSetterById
         | Opcode::DefineGetterByValue
-        | Opcode::DefineSetterByValue => {
+        | Opcode::DefineSetterByValue
+        | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;

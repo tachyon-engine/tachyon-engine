@@ -1,6 +1,7 @@
 //! Ordinary property lookup, data descriptors, and intrinsic property atoms.
 
 mod accessor;
+pub(crate) mod copy;
 mod descriptor;
 mod descriptor_parse;
 mod function;

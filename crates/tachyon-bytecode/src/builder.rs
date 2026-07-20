@@ -276,7 +276,9 @@ impl BytecodeBuilder {
             | Opcode::BitwiseNot
             | Opcode::TypeofScope
             | Opcode::CreateForInIterator
-            | Opcode::ForInNext => &[0, 1],
+            | Opcode::ForInNext
+            | Opcode::CreateExclusionList
+            | Opcode::ExcludePropertyKey => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub
@@ -308,7 +310,8 @@ impl BytecodeBuilder {
             | Opcode::DefineGetterById
             | Opcode::DefineSetterById
             | Opcode::DefineGetterByValue
-            | Opcode::DefineSetterByValue => &[0, 1, 2],
+            | Opcode::DefineSetterByValue
+            | Opcode::CopyDataProperties => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],

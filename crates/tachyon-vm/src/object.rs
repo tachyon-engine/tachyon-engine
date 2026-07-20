@@ -32,6 +32,15 @@ impl SymbolId {
         Value::from_heap_ref(self.reference())
     }
 
+    #[inline(always)]
+    const fn with_reference(self, reference: RawHeapRef) -> Self {
+        let serial = (self.0.get() >> 32) as u32;
+        Self::new(
+            core::num::NonZeroU32::new(serial).expect("Symbol IDs always retain a serial"),
+            reference,
+        )
+    }
+
     #[cfg(test)]
     const fn from_test_parts(serial: u32, reference: u32) -> Self {
         Self::new(
@@ -70,6 +79,17 @@ impl From<AtomId> for PropertyKey {
     #[inline(always)]
     fn from(atom: AtomId) -> Self {
         Self::Atom(atom)
+    }
+}
+
+impl Trace for PropertyKey {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        if let Self::Symbol(symbol) = self {
+            let mut reference = symbol.reference();
+            tracer.trace_raw_heap_ref(&mut reference);
+            *symbol = symbol.with_reference(reference);
+        }
     }
 }
 

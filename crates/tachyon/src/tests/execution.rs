@@ -947,6 +947,35 @@ fn object_destructuring_preserves_nested_defaults_and_coercibility() {
 }
 
 #[test]
+/// Covers object-rest declaration, var initialization, assignment, and computed exclusion keys.
+fn object_destructuring_rest_copies_only_non_excluded_own_properties() {
+    assert_eq!(
+        execute_source(
+            913,
+            "let key = 'a'; let { [key]: first, ...tail } = { a: 1, b: 2, c: 3 }; first + tail.b + tail.c;",
+        )
+        .as_i32(),
+        Some(6)
+    );
+    assert_eq!(
+        execute_source(
+            914,
+            "var rest; var { a, ...rest } = { a: 1, b: 4 }; a + rest.b;",
+        )
+        .as_i32(),
+        Some(5)
+    );
+    assert_eq!(
+        execute_source(
+            915,
+            "let a = 0; let rest = {}; ({ a, ...rest } = { a: 2, b: 5 }); a + rest.b;",
+        )
+        .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
 /// Covers a custom `Symbol.iterator` record and the normal early-close branch.
 fn array_destructuring_uses_symbol_iterator_and_closes_early() {
     assert_eq!(

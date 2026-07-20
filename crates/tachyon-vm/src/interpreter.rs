@@ -904,6 +904,21 @@ impl Isolate {
                 let object = self.create_array_object_with_prototype(prototype)?;
                 self.write(base, operands[0], object)?;
             }
+            Opcode::CreateExclusionList => {
+                let list = self.create_exclusion_list(operands[1])?;
+                self.write(base, operands[0], list)?;
+            }
+            Opcode::ExcludePropertyKey => {
+                let list = self.read(base, operands[0])?;
+                let key = self.read(base, operands[1])?;
+                self.exclude_property_key(list, key)?;
+            }
+            Opcode::CopyDataProperties => {
+                let target = self.read(base, operands[0])?;
+                let source = self.read(base, operands[1])?;
+                let exclusions = self.read(base, operands[2])?;
+                self.copy_data_properties(target, source, exclusions)?;
+            }
             Opcode::CreateForInIterator => {
                 let source = self.read(base, operands[1])?;
                 let iterator = self.create_for_in_iterator(source)?;

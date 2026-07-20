@@ -881,6 +881,7 @@ pub(crate) struct VmTypes {
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) environment: GcType<Environment>,
+    pub(crate) exclusion_list: GcType<ExclusionList>,
     pub(crate) for_in_iterator: GcType<ForInIterator>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) number_object: GcType<NumberObject>,
