@@ -973,6 +973,10 @@ impl Isolate {
                     .argument_count;
                 self.write(base, operands[0], safe_integer_value(u64::from(length)))?;
             }
+            Opcode::CollectRestArguments => {
+                let rest = self.collect_rest_arguments(operands[1])?;
+                self.write(base, operands[0], rest)?;
+            }
             Opcode::GetById => {
                 let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
@@ -2349,6 +2353,48 @@ impl Isolate {
             .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
                 suffix_index,
             )))
+    }
+
+    /// Materializes the active frame's trailing positional arguments as one packed ordinary Array.
+    fn collect_rest_arguments(&mut self, start: u32) -> Result<Value, ExecutionError> {
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before rest parameter collection");
+        let result = self.create_array_object_with_prototype(prototype)?;
+        let site = CallSite {
+            caller_base: frame.base,
+            destination: 0,
+            callee: Value::from_immediate(Immediate::Undefined),
+            argument_base: frame.argument_base,
+            argument_prefix: frame.argument_prefix,
+            argument_prefix_offset: frame.argument_prefix_offset,
+            argument_prefix_count: frame.argument_prefix_count,
+            argument_count: frame.argument_count,
+            this_value: frame.this_value,
+            new_target: frame.new_target,
+            construct_receiver: frame.construct_receiver,
+            call_site: frame.call_site.unwrap_or(WordOffset::new(0)),
+        };
+        let mut output_index = 0_u32;
+        for input_index in start..site.argument_count {
+            let value = self
+                .call_argument(&site, input_index)?
+                .expect("rest argument index stays below the exact argument count");
+            let key = self.safe_integer_property_atom(u64::from(output_index))?;
+            self.set_own_data_property(result, key, value)?;
+            output_index = output_index
+                .checked_add(1)
+                .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        }
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(result, length, safe_integer_value(u64::from(output_index)))?;
+        Ok(result)
     }
 
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.

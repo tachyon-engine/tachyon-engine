@@ -100,6 +100,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::SetFunctionName,
                 Opcode::CreateExclusionList,
                 Opcode::ExcludePropertyKey,
+                Opcode::CollectRestArguments,
             ],
         ),
         (

@@ -72,6 +72,43 @@ fn arrow_function_expression_can_be_called() {
 }
 
 #[test]
+/// Collects actual positional arguments after fixed parameters for ordinary and arrow functions.
+fn rest_parameters_collect_exact_argument_tails() {
+    assert_eq!(
+        execute_source(
+            162,
+            "function collect(head, ...tail) { return head + tail.length + tail[0] + tail[1]; } collect(1, 2, 3);",
+        )
+        .as_i32(),
+        Some(8)
+    );
+    assert_eq!(
+        execute_source(
+            163,
+            "let collect = (...tail) => tail.length + tail[0] + tail[1]; collect(2, 3);",
+        )
+        .as_i32(),
+        Some(7)
+    );
+    assert_eq!(
+        execute_source(
+            164,
+            "function collect(...tail) { return tail.length; } collect();"
+        )
+        .as_i32(),
+        Some(0)
+    );
+    assert_eq!(
+        execute_source(
+            165,
+            "function collect(...tail) { return tail.length + tail[0] + tail[1]; } collect.bind(null, 2)(3);",
+        )
+        .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
 /// Covers computed accessor key coercion, property publication, and the accessor naming contract.
 fn computed_object_accessors_preserve_runtime_key_order_and_names() {
     assert_eq!(

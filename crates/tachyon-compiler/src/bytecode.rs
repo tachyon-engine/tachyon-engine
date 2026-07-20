@@ -293,9 +293,24 @@ impl EnvironmentPlans {
         }
         let mut functions = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
-            let capacity = function
+            let parameter_binding_count = function
                 .parameters
-                .len()
+                .iter()
+                .try_fold(0_usize, |count, parameter| {
+                    count.checked_add(pattern_bindings(parameter).len())
+                })
+                .and_then(|count| {
+                    function
+                        .rest_parameter
+                        .as_ref()
+                        .map_or(Some(count), |rest| {
+                            count.checked_add(pattern_bindings(rest).len())
+                        })
+                })
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "captured environment slots",
+                })?;
+            let capacity = parameter_binding_count
                 .checked_add(capacity::estimate_var_bindings(&function.body)?)
                 .ok_or(CompileError::LoweringCapacityOverflow {
                     collection: "captured environment slots",
@@ -310,7 +325,9 @@ impl EnvironmentPlans {
                 }
             }
             if let Some(rest) = &function.rest_parameter {
-                let _ = pattern_bindings(rest);
+                for binding in pattern_bindings(rest) {
+                    push_captured_slot(&binding, true, true, &mut slots)?;
+                }
             }
             collect_captured_slots(source, &function.body, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
@@ -643,6 +660,17 @@ fn lower_function(
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
         lowerer.bind_pattern(parameter, register, true)?;
+    }
+    if let Some(rest) = &function.rest_parameter {
+        let rest_value = lowerer.register()?;
+        let start =
+            u32::try_from(function.parameters.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        lowerer.emit(
+            Opcode::CollectRestArguments,
+            &[rest_value.index(), start],
+            rest.span,
+        )?;
+        lowerer.bind_pattern(rest, rest_value, true)?;
     }
     for (index, initializer) in function.parameter_initializers.iter().enumerate() {
         if let Some(initializer) = initializer {

@@ -278,7 +278,8 @@ impl BytecodeBuilder {
             | Opcode::CreateForInIterator
             | Opcode::ForInNext
             | Opcode::CreateExclusionList
-            | Opcode::ExcludePropertyKey => &[0, 1],
+            | Opcode::ExcludePropertyKey
+            | Opcode::CollectRestArguments => &[0, 1],
             Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => &[0],
             Opcode::Add
             | Opcode::Sub

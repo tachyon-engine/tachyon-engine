@@ -644,7 +644,8 @@ fn verify_instruction(
         | Opcode::TypeofScope
         | Opcode::CreateForInIterator
         | Opcode::ForInNext
-        | Opcode::ExcludePropertyKey => {
+        | Opcode::ExcludePropertyKey
+        | Opcode::CollectRestArguments => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }

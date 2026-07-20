@@ -213,9 +213,11 @@ pub enum Opcode {
     ExcludePropertyKey = 83,
     /// Copies enumerable own properties while omitting keys held by a VM-private exclusion list.
     CopyDataProperties = 84,
+    /// Collects the active function's positional arguments starting at one fixed parameter index.
+    CollectRestArguments = 85,
 }
 
-pub(super) const OPCODE_COUNT: usize = 85;
+pub(super) const OPCODE_COUNT: usize = 86;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -302,10 +304,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // CreateExclusionList
     2, // ExcludePropertyKey
     3, // CopyDataProperties
+    2, // CollectRestArguments
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CopyDataProperties as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CollectRestArguments as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -436,6 +439,7 @@ impl Opcode {
             18 => Some(Self::CreateExclusionList),
             19 => Some(Self::ExcludePropertyKey),
             20 => Some(Self::CopyDataProperties),
+            21 => Some(Self::CollectRestArguments),
             _ => None,
         }
     }

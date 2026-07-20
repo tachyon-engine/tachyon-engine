@@ -88,7 +88,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::BitwiseNot
         | Opcode::CreateForInIterator
         | Opcode::ForInNext
-        | Opcode::ExcludePropertyKey => write!(output, " r{}, r{}", operands[0], operands[1])?,
+        | Opcode::ExcludePropertyKey
+        | Opcode::CollectRestArguments => write!(output, " r{}, r{}", operands[0], operands[1])?,
         Opcode::CreateExclusionList => {
             write!(output, " r{}, capacity={}", operands[0], operands[1])?
         }

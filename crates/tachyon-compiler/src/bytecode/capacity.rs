@@ -4,7 +4,9 @@ mod names_literals;
 
 use tachyon_bytecode::MAX_ENCODED_INSTRUCTION_WORDS;
 
-use crate::{CompileError, HirCatchClause, HirFunction, HirProgram, HirStatement};
+use crate::{
+    CompileError, HirCatchClause, HirFunction, HirPattern, HirPatternKind, HirProgram, HirStatement,
+};
 
 pub(super) struct ModuleCapacity {
     pub(super) constants: usize,
@@ -104,6 +106,18 @@ pub(super) fn estimate_function(
     function: &HirFunction,
     var_initialization_count: usize,
 ) -> Result<LoweringCapacity, CompileError> {
+    let parameter_binding_count = function
+        .parameters
+        .iter()
+        .try_fold(0_usize, |count, parameter| {
+            checked_pattern_binding_count_add(count, parameter)
+        })?;
+    let rest_binding_count = function
+        .rest_parameter
+        .as_ref()
+        .map(pattern_binding_count)
+        .transpose()?
+        .unwrap_or(0);
     let parameter_initializer_count = function
         .parameter_initializers
         .iter()
@@ -113,7 +127,9 @@ pub(super) fn estimate_function(
         instructions::parameter_initializer_instruction_count(&function.parameter_initializers)?;
     let bytecode_words = instructions::statements_instruction_count(&function.body)?
         .checked_add(var_initialization_count)
-        .and_then(|count| count.checked_add(function.parameters.len()))
+        .and_then(|count| count.checked_add(parameter_binding_count))
+        .and_then(|count| count.checked_add(usize::from(function.rest_parameter.is_some())))
+        .and_then(|count| count.checked_add(rest_binding_count))
         .and_then(|count| count.checked_add(parameter_initializer_instructions))
         .and_then(|count| count.checked_add(2))
         .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
@@ -126,8 +142,12 @@ pub(super) fn estimate_function(
     let statement_bindings = control::statements_binding_count(&function.body)?;
     let local_bindings = function
         .parameters
-        .len()
-        .checked_add(usize::from(function.self_binding.is_some()))
+        .iter()
+        .try_fold(0_usize, |count, parameter| {
+            checked_pattern_binding_count_add(count, parameter)
+        })?
+        .checked_add(rest_binding_count)
+        .and_then(|count| count.checked_add(usize::from(function.self_binding.is_some())))
         .and_then(|count| count.checked_add(statement_bindings))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function local bindings",
@@ -159,6 +179,46 @@ pub(super) fn estimate_function(
         max_handler_depth,
         max_completion_depth,
     })
+}
+
+/// Counts every declaration leaf in a parameter pattern for exact lowering storage estimates.
+fn pattern_binding_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) => Ok(1),
+        HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default { target, .. } => pattern_binding_count(target),
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 0;
+            for element in elements.iter().flatten() {
+                count = checked_pattern_binding_count_add(count, element)?;
+            }
+            if let Some(rest) = rest {
+                count = checked_pattern_binding_count_add(count, rest)?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 0;
+            for property in properties.iter() {
+                count = checked_pattern_binding_count_add(count, &property.target)?;
+            }
+            if let Some(rest) = rest {
+                count = checked_pattern_binding_count_add(count, rest)?;
+            }
+            Ok(count)
+        }
+    }
+}
+
+fn checked_pattern_binding_count_add(
+    count: usize,
+    pattern: &HirPattern,
+) -> Result<usize, CompileError> {
+    count.checked_add(pattern_binding_count(pattern)?).ok_or(
+        CompileError::LoweringCapacityOverflow {
+            collection: "function parameter bindings",
+        },
+    )
 }
 
 /// Adds every owned try child with the same checked collection-specific counter.
