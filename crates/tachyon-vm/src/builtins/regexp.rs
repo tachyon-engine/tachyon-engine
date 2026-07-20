@@ -173,6 +173,16 @@ impl Isolate {
         })
     }
 
+    /// Reads one standard RegExp flag getter from the validated private flag string.
+    pub(crate) fn regexp_flag_enabled(
+        &mut self,
+        receiver: Value,
+        flag: u16,
+    ) -> Result<bool, ExecutionError> {
+        let (_, flags) = self.regexp_data(receiver)?;
+        Ok(self.regexp_string_units(flags)?.contains(&flag))
+    }
+
     /// Converts the currently supported primitive inputs while rejecting observable object conversion.
     fn regexp_string_argument(&mut self, value: Option<Value>) -> Result<Value, ExecutionError> {
         let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
