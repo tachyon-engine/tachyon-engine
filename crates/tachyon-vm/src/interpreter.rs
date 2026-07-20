@@ -2411,6 +2411,31 @@ impl Isolate {
                     site.argument_prefix_count = argument_count;
                     site.argument_count = argument_count;
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectApply) => {
+                    let target = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let this_value = self
+                        .call_argument(&site, 1)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let argument_list =
+                        self.call_argument(&site, 2)?
+                            .ok_or(ExecutionError::NotObject(Value::from_immediate(
+                                Immediate::Undefined,
+                            )))?;
+                    if !self.is_object_value(argument_list) {
+                        return Err(ExecutionError::NotObject(argument_list));
+                    }
+                    let (prefix, argument_count) =
+                        self.apply_argument_prefix(target, this_value, Some(argument_list))?;
+                    site.callee = target;
+                    site.this_value = this_value;
+                    site.argument_base = 0;
+                    site.argument_prefix = Some(prefix);
+                    site.argument_prefix_offset = 0;
+                    site.argument_prefix_count = argument_count;
+                    site.argument_count = argument_count;
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeBind) => {
                     let bound = self.create_bound_function(&site)?;
                     return self.write(site.caller_base, site.destination, bound);

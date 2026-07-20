@@ -31,6 +31,7 @@ pub(crate) enum NativeFunction {
     ObjectIsPrototypeOf,
     ObjectIsExtensible,
     ObjectPreventExtensions,
+    ReflectApply,
     ReflectOwnKeys,
     ReflectDefineProperty,
     ReflectDeleteProperty,
@@ -452,6 +453,7 @@ impl NativeFunction {
         }
         match self {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
+            Self::ReflectApply => 3,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
@@ -652,6 +654,7 @@ impl NativeFunction {
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::ReflectOwnKeys => "ownKeys",
+            Self::ReflectApply => "apply",
             Self::ReflectDefineProperty => "defineProperty",
             Self::ReflectDeleteProperty => "deleteProperty",
             Self::ReflectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
