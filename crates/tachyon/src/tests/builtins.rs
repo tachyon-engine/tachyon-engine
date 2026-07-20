@@ -152,6 +152,27 @@ fn string_identity_methods_return_the_primitive_receiver() {
 }
 
 #[test]
+/// Preserves valid UTF-16 pairs while replacing exactly the unpaired surrogate code units.
+fn string_well_formed_methods_handle_unpaired_surrogates() {
+    assert_eq!(
+        execute_source(
+            936,
+            "String.fromCharCode(0xD800, 120, 0xDC00).isWellFormed() === false;"
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            936,
+            "let malformed = String.fromCharCode(0xD800, 120, 0xDC00); malformed.isWellFormed() === false && String.fromCodePoint(0x1F600).isWellFormed() && malformed.toWellFormed() === String.fromCharCode(0xFFFD, 120, 0xFFFD);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

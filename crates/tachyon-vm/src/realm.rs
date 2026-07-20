@@ -328,6 +328,14 @@ impl Isolate {
             (NativeFunction::StringCodePointAt, b"codePointAt".as_slice()),
             (NativeFunction::StringToString, b"toString".as_slice()),
             (NativeFunction::StringValueOf, b"valueOf".as_slice()),
+            (
+                NativeFunction::StringIsWellFormed,
+                b"isWellFormed".as_slice(),
+            ),
+            (
+                NativeFunction::StringToWellFormed,
+                b"toWellFormed".as_slice(),
+            ),
             (NativeFunction::StringSlice, b"slice".as_slice()),
             (NativeFunction::StringSubstring, b"substring".as_slice()),
             (NativeFunction::StringIndexOf, b"indexOf".as_slice()),

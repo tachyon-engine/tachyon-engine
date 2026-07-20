@@ -39,6 +39,8 @@ pub(crate) enum NativeFunction {
     StringFromCodePoint,
     StringToString,
     StringValueOf,
+    StringIsWellFormed,
+    StringToWellFormed,
     StringSlice,
     StringSubstring,
     StringIndexOf,
@@ -415,6 +417,8 @@ impl NativeFunction {
             | Self::StringFromCodePoint
             | Self::StringToString
             | Self::StringValueOf
+            | Self::StringIsWellFormed
+            | Self::StringToWellFormed
             | Self::StringSlice
             | Self::StringSubstring
             | Self::StringIndexOf
@@ -548,6 +552,8 @@ impl NativeFunction {
             Self::StringFromCodePoint => "fromCodePoint",
             Self::StringToString => "toString",
             Self::StringValueOf => "valueOf",
+            Self::StringIsWellFormed => "isWellFormed",
+            Self::StringToWellFormed => "toWellFormed",
             Self::StringSlice => "slice",
             Self::StringSubstring => "substring",
             Self::StringIndexOf => "indexOf",

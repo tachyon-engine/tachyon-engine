@@ -15,6 +15,52 @@ impl Isolate {
         }
     }
 
+    /// Checks whether every UTF-16 surrogate belongs to a valid adjacent pair.
+    pub(crate) fn string_is_well_formed(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(receiver)?;
+        Ok(boolean_value(utf16_is_well_formed(&units)))
+    }
+
+    /// Replaces every unpaired UTF-16 surrogate with U+FFFD, preserving valid pairs verbatim.
+    pub(crate) fn string_to_well_formed(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(receiver)?;
+        if utf16_is_well_formed(&units) {
+            return Ok(receiver);
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(units.len())
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        let mut index = 0;
+        while let Some(&unit) = units.get(index) {
+            if (0xd800..=0xdbff).contains(&unit)
+                && units
+                    .get(index + 1)
+                    .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+            {
+                output.extend_from_slice(&units[index..index + 2]);
+                index += 2;
+            } else {
+                output.push(if (0xd800..=0xdfff).contains(&unit) {
+                    0xfffd
+                } else {
+                    unit
+                });
+                index += 1;
+            }
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Implements String.prototype.charAt over the engine's UTF-16 code-unit representation.
     pub(crate) fn string_char_at(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let Some(unit) = self.string_code_unit_at(site)? else {
@@ -640,6 +686,27 @@ fn append_repeated_prefix(output: &mut Vec<u16>, fill: &[u16], length: usize) {
         output.extend_from_slice(fill);
     }
     output.extend_from_slice(&fill[..length % fill.len()]);
+}
+
+#[inline(always)]
+fn utf16_is_well_formed(units: &[u16]) -> bool {
+    let mut index = 0;
+    while let Some(&unit) = units.get(index) {
+        if (0xd800..=0xdbff).contains(&unit) {
+            if !units
+                .get(index + 1)
+                .is_some_and(|next| (0xdc00..=0xdfff).contains(next))
+            {
+                return false;
+            }
+            index += 2;
+        } else if (0xdc00..=0xdfff).contains(&unit) {
+            return false;
+        } else {
+            index += 1;
+        }
+    }
+    true
 }
 
 #[inline(always)]

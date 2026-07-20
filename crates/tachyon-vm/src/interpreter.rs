@@ -2041,6 +2041,14 @@ impl Isolate {
                     let value = self.string_primitive_value(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringIsWellFormed) => {
+                    let value = self.string_is_well_formed(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringToWellFormed) => {
+                    let value = self.string_to_well_formed(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::StringSlice) => {
                     let value = self.string_slice(&site)?;
                     return self.write(site.caller_base, site.destination, value);
