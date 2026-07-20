@@ -2172,6 +2172,14 @@ impl Isolate {
                     let value = self.primitive_constructor_value(native, &site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::SymbolFor) => {
+                    let value = self.symbol_for(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SymbolKeyFor) => {
+                    let value = self.symbol_key_for(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectDefineProperty) => {
                     return self.object_define_property(&site);
                 }

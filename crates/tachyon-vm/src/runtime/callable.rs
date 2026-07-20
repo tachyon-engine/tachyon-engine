@@ -60,6 +60,8 @@ pub(crate) enum NativeFunction {
     RegExpTest,
     RegExpToString,
     SymbolConstructor,
+    SymbolFor,
+    SymbolKeyFor,
     NumberConstructor,
     NumberIsNaN,
     NumberIsFinite,
@@ -583,6 +585,7 @@ impl NativeFunction {
             | Self::FunctionPrototype
             | Self::ArrayToString => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
+            Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::JsonParse => 1,
             Self::JsonStringify => 3,
         }
@@ -645,6 +648,8 @@ impl NativeFunction {
             Self::StringTrimStart => "trimStart",
             Self::StringTrimEnd => "trimEnd",
             Self::SymbolConstructor => "Symbol",
+            Self::SymbolFor => "for",
+            Self::SymbolKeyFor => "keyFor",
             Self::NumberConstructor => "Number",
             Self::NumberIsNaN => "isNaN",
             Self::NumberIsFinite => "isFinite",
@@ -917,6 +922,7 @@ pub(crate) struct FunctionObject {
 pub(crate) struct SymbolValue {
     pub(crate) serial: NonZeroU32,
     pub(crate) description: Option<Value>,
+    pub(crate) registered: bool,
 }
 
 impl Trace for SymbolValue {

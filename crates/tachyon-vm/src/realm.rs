@@ -413,6 +413,7 @@ impl Isolate {
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
         self.initialize_remaining_well_known_symbols(symbol_constructor)?;
+        self.initialize_symbol_registry_functions(symbol_constructor, function_prototype)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
         let object_prototype = self
@@ -564,6 +565,31 @@ impl Isolate {
             let symbol = self.allocate_symbol(Some(description))?;
             let property = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
+        }
+        Ok(())
+    }
+
+    /// Installs the non-constructor Symbol registry functions on the intrinsic Symbol function.
+    fn initialize_symbol_registry_functions(
+        &mut self,
+        symbol_constructor: Value,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        for (name, native) in [
+            (b"for".as_slice(), NativeFunction::SymbolFor),
+            (b"keyFor".as_slice(), NativeFunction::SymbolKeyFor),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let name = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(symbol_constructor, name, function, true)?;
         }
         Ok(())
     }

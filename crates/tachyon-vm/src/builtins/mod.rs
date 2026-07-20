@@ -8,4 +8,5 @@ mod math;
 mod object;
 mod regexp;
 mod string;
+mod symbol;
 mod weak_collections;

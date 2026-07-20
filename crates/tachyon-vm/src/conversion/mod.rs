@@ -77,6 +77,22 @@ impl Isolate {
         &mut self,
         description: Option<Value>,
     ) -> Result<Value, ExecutionError> {
+        self.allocate_symbol_with_registration(description, false)
+    }
+
+    /// Allocates one Symbol while recording whether the ECMAScript global registry owns it.
+    pub(crate) fn allocate_registered_symbol(
+        &mut self,
+        description: Value,
+    ) -> Result<Value, ExecutionError> {
+        self.allocate_symbol_with_registration(Some(description), true)
+    }
+
+    fn allocate_symbol_with_registration(
+        &mut self,
+        description: Option<Value>,
+        registered: bool,
+    ) -> Result<Value, ExecutionError> {
         let serial = self.next_symbol_serial;
         let next_serial = serial
             .get()
@@ -101,6 +117,7 @@ impl Isolate {
                 SymbolValue {
                     serial,
                     description: roots.description,
+                    registered,
                 },
                 AllocationSpace::Young,
                 roots,

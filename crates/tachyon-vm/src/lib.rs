@@ -293,6 +293,7 @@ pub enum ExecutionError {
     BoundArgumentCountOverflow,
     BoundNameAllocationFailed,
     SymbolIdExhausted,
+    SymbolRegistryAllocationFailed,
     ArrayLengthOverflow,
     OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,

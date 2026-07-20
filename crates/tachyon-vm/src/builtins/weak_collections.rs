@@ -103,8 +103,8 @@ impl Isolate {
         Ok(true)
     }
 
-    fn weak_key(&self, value: Value) -> Result<Value, ExecutionError> {
-        if self.is_weak_key(value) {
+    fn weak_key(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if self.is_weak_key(value)? {
             Ok(value)
         } else {
             Err(ExecutionError::NotObject(value))
@@ -112,11 +112,15 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn is_weak_key(&self, value: Value) -> bool {
-        value.as_heap_ref().is_some_and(|raw| {
-            self.is_object_value(value)
-                || self.heap.checked_reference(raw, self.types.symbol).is_ok()
-        })
+    fn is_weak_key(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        if self.is_object_value(value) {
+            return Ok(true);
+        }
+        if !self.is_symbol_value(value) {
+            return Ok(false);
+        }
+        self.is_registered_symbol(value)
+            .map(|registered| !registered)
     }
 
     fn weak_map_storage(
@@ -165,7 +169,7 @@ impl Isolate {
         storage: GcRef<WeakCollection>,
         key: Value,
     ) -> Result<Option<usize>, ExecutionError> {
-        if !self.is_weak_key(key) {
+        if !self.is_weak_key(key)? {
             return Ok(None);
         }
         let raw = key.as_heap_ref().expect("weak key was checked above");

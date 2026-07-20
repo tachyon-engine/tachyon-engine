@@ -15,6 +15,20 @@ pub(crate) struct IntrinsicBinding {
     pub(crate) writable: bool,
 }
 
+/// One realm-local entry in the ECMAScript global Symbol registry.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RegisteredSymbol {
+    pub(crate) key: AtomId,
+    pub(crate) symbol: Value,
+}
+
+impl Trace for RegisteredSymbol {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.symbol.trace(tracer);
+    }
+}
+
 /// Stable isolate-local index into mandatory bindings excluded from the host user-binding quota.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -92,6 +106,7 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalLexicalSlotId>>()];
 #[derive(Debug)]
 pub(crate) struct Realm {
     pub(crate) intrinsic_bindings: Vec<IntrinsicBinding>,
+    pub(crate) registered_symbols: Vec<RegisteredSymbol>,
     pub(crate) intrinsic_slots_by_atom: Vec<Option<IntrinsicSlotId>>,
     pub(crate) global_lexicals: Vec<GlobalLexicalBinding>,
     pub(crate) global_lexical_slots_by_atom: Vec<Option<GlobalLexicalSlotId>>,
@@ -194,6 +209,7 @@ impl Realm {
     ) -> Self {
         Self {
             intrinsic_bindings: Vec::new(),
+            registered_symbols: Vec::new(),
             intrinsic_slots_by_atom: Vec::new(),
             global_lexicals: Vec::new(),
             global_lexical_slots_by_atom: Vec::new(),
@@ -526,6 +542,7 @@ impl Trace for Realm {
         for binding in &mut self.intrinsic_bindings {
             binding.value.trace(tracer);
         }
+        self.registered_symbols.trace(tracer);
         for binding in &mut self.global_lexicals {
             binding.value.trace(tracer);
         }
