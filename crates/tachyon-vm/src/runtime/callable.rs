@@ -31,6 +31,7 @@ pub(crate) enum NativeFunction {
     ObjectIsPrototypeOf,
     ObjectIsExtensible,
     ObjectPreventExtensions,
+    ReflectOwnKeys,
     StringConstructor,
     StringCharAt,
     StringCharCodeAt,
@@ -459,6 +460,7 @@ impl NativeFunction {
             | Self::ObjectIsPrototypeOf
             | Self::ObjectIsExtensible
             | Self::ObjectPreventExtensions
+            | Self::ReflectOwnKeys
             | Self::StringConstructor
             | Self::RegExpConstructor
             | Self::RegExpExec
@@ -632,6 +634,7 @@ impl NativeFunction {
             Self::ObjectIsPrototypeOf => "isPrototypeOf",
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
+            Self::ReflectOwnKeys => "ownKeys",
             Self::StringConstructor => "String",
             Self::RegExpConstructor => "RegExp",
             Self::RegExpExec => "exec",
@@ -1171,13 +1174,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) function: AtomId,
     pub(crate) math: AtomId,
     pub(crate) json: AtomId,
+    pub(crate) reflect: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        18 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        19 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

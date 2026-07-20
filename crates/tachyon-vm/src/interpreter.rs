@@ -2272,6 +2272,10 @@ impl Isolate {
                     let value = self.object_prevent_extensions(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectOwnKeys) => {
+                    let keys = self.reflect_own_keys(&site)?;
+                    return self.write(site.caller_base, site.destination, keys);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);

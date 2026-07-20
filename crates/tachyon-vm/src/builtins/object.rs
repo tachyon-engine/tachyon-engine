@@ -3,6 +3,37 @@
 use super::super::*;
 
 impl Isolate {
+    /// Materializes every own String and Symbol key in the specified ordinary order.
+    pub(crate) fn reflect_own_keys(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        let (_, snapshot) = self.object_snapshot(target)?;
+        let keys = self.ordinary_own_property_keys(target, snapshot)?;
+        let mut index = 0_u64;
+        for key in keys {
+            let value = match key {
+                PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
+                PropertyKey::Symbol(symbol) => symbol.value(),
+            };
+            let output = self.safe_integer_property_atom(index)?;
+            self.set_own_data_property(result, output, value)?;
+            index = index
+                .checked_add(1)
+                .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        }
+        let length = self.length_atom()?;
+        self.set_own_data_property(result, length, safe_integer_value(index))?;
+        Ok(result)
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,

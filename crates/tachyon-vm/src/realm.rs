@@ -28,6 +28,7 @@ impl Isolate {
         self.initialize_collection_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
+        self.initialize_reflect_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -794,6 +795,7 @@ impl Isolate {
             function: self.intern_intrinsic_name(b"Function")?,
             math: self.intern_intrinsic_name(b"Math")?,
             json: self.intern_intrinsic_name(b"JSON")?,
+            reflect: self.intern_intrinsic_name(b"Reflect")?,
             global_numbers: [
                 self.intern_intrinsic_name(b"isFinite")?,
                 self.intern_intrinsic_name(b"isNaN")?,
@@ -1649,6 +1651,34 @@ impl Isolate {
         self.set_intrinsic_data_property(object, stringify_atom, stringify, true)
     }
 
+    /// Installs Reflect's ordinary-own-key consumer before Proxy internal methods are available.
+    fn initialize_reflect_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before Reflect"),
+        })?;
+        self.realm.reflect_object = Some(object);
+        let method = self.allocate_native_function(
+            NativeFunction::ReflectOwnKeys,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: self
+                    .realm
+                    .function_prototype
+                    .expect("Function prototype initializes before Reflect"),
+            },
+        )?;
+        let key = self.intern_intrinsic_name(b"ownKeys")?;
+        self.set_intrinsic_data_property(object, key, method, true)
+    }
+
     /// Publishes all mandatory names without charging the host quota for user-created globals.
     fn publish_realm_intrinsic_bindings(
         &mut self,
@@ -1779,6 +1809,13 @@ impl Isolate {
             self.realm
                 .json_object
                 .expect("JSON initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.reflect,
+            self.realm
+                .reflect_object
+                .expect("Reflect initializes before global publication"),
             true,
         )?;
         for (atom, value) in atoms
