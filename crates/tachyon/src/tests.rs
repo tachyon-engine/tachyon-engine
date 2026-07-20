@@ -8,7 +8,7 @@ use tachyon_vm::{
 };
 
 fn test_isolate() -> Isolate {
-    test_isolate_with_realm_limits(RealmLimits::new(64, 1_024))
+    test_isolate_with_realm_limits(RealmLimits::new(64, 1_024).with_max_shapes(256))
 }
 
 fn test_isolate_with_realm_limits(realm_limits: RealmLimits) -> Isolate {

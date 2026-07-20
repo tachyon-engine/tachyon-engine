@@ -318,7 +318,12 @@ impl Lowerer<'_> {
                 operator,
                 target,
                 value,
-            } => self.assignment_expression(*operator, target, value, expression.span),
+            } => {
+                let target = target.assignment_target().ok_or_else(|| {
+                    self.unsupported(target.span, "destructuring pattern bytecode")
+                })?;
+                self.assignment_expression(*operator, target, value, expression.span)
+            }
             HirExpressionKind::Update {
                 operator,
                 prefix,

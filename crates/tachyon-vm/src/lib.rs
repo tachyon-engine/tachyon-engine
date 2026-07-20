@@ -20,6 +20,7 @@ mod finalization;
 mod for_in;
 mod interpreter;
 mod isolate;
+mod iterator;
 mod number;
 mod object;
 mod property;
@@ -67,6 +68,7 @@ use conversion::{
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;
+use iterator::{ArrayIterationKind, ArrayIteratorObject};
 use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
     PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
@@ -78,19 +80,20 @@ use runtime::{
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, ErrorIntrinsics, FlatWork, FunctionExecutable, FunctionObject,
-        GenericPropertyDescriptor, IntrinsicPropertyAtoms, NativeFunction, ObjectReceiver,
-        PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
-        execution_error_kind,
+        GenericPropertyDescriptor, GlobalNumberFunction, IntrinsicPropertyAtoms, MathFunction,
+        NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
+        ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
     },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
         ActiveHandler, ArrayAllocationRoots, BuiltinPropertyKeyConsumer, CodeLoadRoots,
-        ConversionCallbackStage, ConversionConsumer, ConversionContinuation, Fiber, Frame,
-        NativeContinuation, NativeContinuationKind, NativeContinuationSite, PreferredType,
-        PropertyCallbackMode, PropertyMutationRoots, PrototypeInitializationRoots,
-        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
+        ConversionNativeFunction, Fiber, Frame, NativeContinuation, NativeContinuationKind,
+        NativeContinuationSite, PreferredType, PropertyCallbackMode, PropertyMutationRoots,
+        PrototypeInitializationRoots, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
+        next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

@@ -14,6 +14,7 @@ pub struct Isolate {
     pub(crate) types: VmTypes,
     pub(crate) intrinsic_property_atoms: IntrinsicPropertyAtoms,
     pub(crate) next_symbol_serial: NonZeroU32,
+    pub(crate) math_random_state: u64,
     pub(crate) stack_limits: StackLimits,
     #[cfg(feature = "opcode-profile")]
     pub(crate) execution_profile: ExecutionProfile,
@@ -30,6 +31,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             array: registry
                 .try_register("ArrayObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            array_iterator: registry
+                .try_register("ArrayIteratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             bound_function: registry
                 .try_register("BoundFunctionData")
@@ -81,6 +85,7 @@ impl Isolate {
             types,
             intrinsic_property_atoms: IntrinsicPropertyAtoms::default(),
             next_symbol_serial: NonZeroU32::MIN,
+            math_random_state: 0x6a09_e667_f3bc_c909,
             stack_limits: config.stack_limits,
             #[cfg(feature = "opcode-profile")]
             execution_profile: ExecutionProfile::default(),

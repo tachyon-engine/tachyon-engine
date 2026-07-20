@@ -8,6 +8,7 @@ use oxc::{
 use crate::{CompileError, ProgramKind, SourceId, SourceSpan, SourceText};
 
 use super::expression::HirExpression;
+use super::pattern::HirPattern;
 use super::statement::{HirStatement, StatementContext, lower_statement};
 use super::to_scope_id;
 
@@ -129,8 +130,9 @@ pub struct HirFunction {
     pub id: FunctionStencilId,
     pub span: SourceSpan,
     pub name: Option<Arc<str>>,
-    pub parameters: Arc<[HirBinding]>,
+    pub parameters: Arc<[HirPattern]>,
     pub parameter_initializers: Arc<[Option<HirExpression>]>,
+    pub rest_parameter: Option<HirPattern>,
     pub body: Arc<[HirStatement]>,
     pub scope: ScopeId,
     pub strict: bool,

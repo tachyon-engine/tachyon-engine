@@ -14,6 +14,7 @@ use oxc::{
 
 use crate::{CompileError, SourceSpan, SourceText};
 
+use super::pattern::{HirPattern, lower_assignment_pattern};
 use super::program::{
     BindingId, FunctionStencilId, HirFunction, HirIdentifierReference, ReferenceId, ScopeId,
 };
@@ -96,7 +97,7 @@ pub enum HirExpressionKind {
     },
     Assignment {
         operator: HirAssignmentOperator,
-        target: HirAssignmentTarget,
+        target: Box<HirPattern>,
         value: Box<HirExpression>,
     },
     Update {
@@ -462,7 +463,12 @@ pub(super) fn lower_expression(
         },
         Expression::AssignmentExpression(expression) => HirExpressionKind::Assignment {
             operator: lower_assignment_operator(expression.operator, source, expression.span)?,
-            target: lower_assignment_target(&expression.left, source, semantic, functions)?,
+            target: Box::new(lower_assignment_pattern(
+                &expression.left,
+                source,
+                semantic,
+                functions,
+            )?),
             value: Box::new(lower_expression(
                 &expression.right,
                 source,
@@ -714,7 +720,7 @@ fn lower_update_target(
 }
 
 /// Copies one Oxc semantic reference without retaining its arena-owned ID or symbol table.
-fn new_reference(
+pub(super) fn new_reference(
     identifier: &oxc::ast::ast::IdentifierReference<'_>,
     source: &SourceText,
     semantic: &Semantic<'_>,

@@ -116,7 +116,10 @@ pub(super) fn statements_scope_name_count(
                 .transpose()?
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
-            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
+            HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, statement_count, "scope names")?;
     }
@@ -173,7 +176,9 @@ fn declaration_scope_name_count(
 fn for_in_left_scope_name_count(left: &HirForInLeft) -> Result<usize, CompileError> {
     match left {
         HirForInLeft::Variable(_) => Ok(1),
-        HirForInLeft::Assignment(target) => assignment_target_scope_name_count(target),
+        HirForInLeft::Assignment(target) => target
+            .assignment_target()
+            .map_or(Ok(0), assignment_target_scope_name_count),
     }
 }
 
@@ -263,6 +268,9 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             "scope names",
         ),
         HirExpressionKind::Assignment { target, value, .. } => {
+            let Some(target) = target.assignment_target() else {
+                return expression_scope_name_count(value);
+            };
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 1,
                 HirAssignmentTarget::StaticMember { object, .. } => {
@@ -441,7 +449,10 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 statements_literal_count,
             )?,
             HirStatementKind::FunctionDeclaration(_) => 0,
-            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
+            HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
     }
@@ -475,7 +486,10 @@ fn for_literal_count(
 }
 
 fn for_in_left_literal_count(left: &HirForInLeft) -> Result<usize, CompileError> {
-    let HirForInLeft::Assignment(target) = left else {
+    let HirForInLeft::Assignment(pattern) = left else {
+        return Ok(0);
+    };
+    let Some(target) = pattern.assignment_target() else {
         return Ok(0);
     };
     match target {
@@ -572,6 +586,9 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::Assignment { target, value, .. } => {
+            let Some(target) = target.assignment_target() else {
+                return expression_literal_count(value);
+            };
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {

@@ -70,6 +70,9 @@ impl Lowerer<'_> {
                 self.entry_for_in_statement(left, right, body, result, statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::ForOf { .. } => {
+                Err(self.unsupported(statement.span, "for-of bytecode"))
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -332,6 +335,9 @@ impl Lowerer<'_> {
                 self.function_for_in_statement(left, right, body, statement.span)?;
                 Ok(false)
             }
+            HirStatementKind::ForOf { .. } => {
+                Err(self.unsupported(statement.span, "for-of bytecode"))
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -509,8 +515,9 @@ impl Lowerer<'_> {
             .first()
             .expect("HIR validates one for-in declarator");
         let initial = self.load_undefined(span)?;
+        let binding = self.simple_binding(&declarator.pattern)?.clone();
         self.add_local(
-            &declarator.binding,
+            &binding,
             Some(initial),
             declaration.kind == HirVariableDeclarationKind::Let,
         )
@@ -524,17 +531,23 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         match left {
-            HirForInLeft::Assignment(target) => self.assign_existing_value(target, value, span),
+            HirForInLeft::Assignment(pattern) => {
+                let target = pattern.assignment_target().ok_or_else(|| {
+                    self.unsupported(pattern.span, "destructuring pattern bytecode")
+                })?;
+                self.assign_existing_value(target, value, span)
+            }
             HirForInLeft::Variable(declaration) => {
                 let declarator = declaration
                     .declarators
                     .first()
                     .expect("HIR validates one for-in declarator");
-                if let Some(binding) = self.local_by_id(declarator.binding.id).cloned() {
+                let binding = self.simple_binding(&declarator.pattern)?.clone();
+                if let Some(binding) = self.local_by_id(binding.id).cloned() {
                     return self.write_local(&binding, value, span);
                 }
                 if self.script_scope && declaration.kind == HirVariableDeclarationKind::Var {
-                    let scope_name = self.global_binding(&declarator.binding.name, true)?;
+                    let scope_name = self.global_binding(&binding.name, true)?;
                     return self.emit(Opcode::StoreScope, &[value.index(), scope_name], span);
                 }
                 Err(self.unsupported(span, "uninstantiated for-in binding"))
@@ -926,7 +939,8 @@ impl Lowerer<'_> {
             )
             .map_err(CompileError::Builder)?;
         if let Some(parameter) = &handler.parameter {
-            self.add_local(parameter, Some(exception), true)?;
+            let binding = self.simple_binding(parameter)?.clone();
+            self.add_local(&binding, Some(exception), true)?;
         }
         Ok(offset)
     }

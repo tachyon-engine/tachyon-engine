@@ -20,7 +20,7 @@ use crate::{
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
 pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
-    let environments = EnvironmentPlans::new(hir)?;
+    let environments = EnvironmentPlans::new(source, hir)?;
     let module_capacity = capacity::estimate_module(hir)?;
     let mut constants = Vec::with_capacity(module_capacity.constants);
     let mut scope_names = Vec::with_capacity(module_capacity.scope_names);
@@ -177,7 +177,7 @@ fn lower_entry(
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
                         }
-                        HirStatementKind::Empty => {}
+                        HirStatementKind::Empty | HirStatementKind::ForOf { .. } => {}
                     }
                 }
                 match result {
@@ -262,7 +262,7 @@ struct GlobalLexicalPlan {
 
 impl EnvironmentPlans {
     /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
-    fn new(hir: &HirProgram) -> Result<Self, CompileError> {
+    fn new(source: &SourceText, hir: &HirProgram) -> Result<Self, CompileError> {
         let mut global_lexicals =
             Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
         for statement in hir.statements() {
@@ -276,10 +276,11 @@ impl EnvironmentPlans {
                 continue;
             }
             for declarator in declaration.declarators.iter() {
-                if declarator.binding.scope == hir.root_scope() {
+                let binding = simple_binding(source, &declarator.pattern)?;
+                if binding.scope == hir.root_scope() {
                     global_lexicals.push(GlobalLexicalPlan {
-                        id: declarator.binding.id,
-                        name: declarator.binding.name.clone(),
+                        id: binding.id,
+                        name: binding.name.clone(),
                         mutable: declaration.kind == HirVariableDeclarationKind::Let,
                         span: declarator.span,
                     });
@@ -297,9 +298,12 @@ impl EnvironmentPlans {
                 })?;
             let mut slots = Vec::with_capacity(capacity);
             for parameter in function.parameters.iter() {
-                push_captured_slot(parameter, true, true, &mut slots)?;
+                push_captured_slot(simple_binding(source, parameter)?, true, true, &mut slots)?;
             }
-            collect_captured_slots(&function.body, &mut slots)?;
+            if let Some(rest) = &function.rest_parameter {
+                simple_binding(source, rest)?;
+            }
+            collect_captured_slots(source, &function.body, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
                 parent_function: None,
@@ -412,8 +416,24 @@ fn push_captured_slot(
     Ok(())
 }
 
+/// Rejects destructuring at the bytecode boundary while preserving fully owned pattern HIR.
+#[inline(always)]
+fn simple_binding<'a>(
+    source: &SourceText,
+    pattern: &'a crate::HirPattern,
+) -> Result<&'a crate::HirBinding, CompileError> {
+    pattern
+        .binding()
+        .ok_or_else(|| CompileError::UnsupportedSyntax {
+            source_name: source.name().clone(),
+            span: pattern.span,
+            syntax: "destructuring pattern bytecode",
+        })
+}
+
 /// Walks activation-owned declarations while nested function bodies remain separate stencils.
 fn collect_captured_slots(
+    source: &SourceText,
     statements: &[HirStatement],
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
@@ -423,21 +443,26 @@ fn collect_captured_slots(
                 let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                 let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
-                    push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
+                    push_captured_slot(
+                        simple_binding(source, &declarator.pattern)?,
+                        mutable,
+                        initialized,
+                        slots,
+                    )?;
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
                 push_captured_slot(&declaration.binding, true, true, slots)?;
             }
-            HirStatementKind::Block(body) => collect_captured_slots(body, slots)?,
+            HirStatementKind::Block(body) => collect_captured_slots(source, body, slots)?,
             HirStatementKind::If {
                 consequent,
                 alternate,
                 ..
             } => {
-                collect_captured_slots(core::slice::from_ref(consequent), slots)?;
+                collect_captured_slots(source, core::slice::from_ref(consequent), slots)?;
                 if let Some(alternate) = alternate {
-                    collect_captured_slots(core::slice::from_ref(alternate), slots)?;
+                    collect_captured_slots(source, core::slice::from_ref(alternate), slots)?;
                 }
             }
             HirStatementKind::For {
@@ -447,27 +472,44 @@ fn collect_captured_slots(
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
+                        push_captured_slot(
+                            simple_binding(source, &declarator.pattern)?,
+                            mutable,
+                            initialized,
+                            slots,
+                        )?;
                     }
                 }
-                collect_captured_slots(core::slice::from_ref(body), slots)?;
+                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
             }
             HirStatementKind::ForIn { left, body, .. } => {
                 if let HirForInLeft::Variable(declaration) = left {
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(&declarator.binding, mutable, initialized, slots)?;
+                        push_captured_slot(
+                            simple_binding(source, &declarator.pattern)?,
+                            mutable,
+                            initialized,
+                            slots,
+                        )?;
                     }
                 }
-                collect_captured_slots(core::slice::from_ref(body), slots)?;
+                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
+            }
+            HirStatementKind::ForOf { .. } => {
+                return Err(CompileError::UnsupportedSyntax {
+                    source_name: source.name().clone(),
+                    span: statement.span,
+                    syntax: "for-of bytecode",
+                });
             }
             HirStatementKind::Loop { body, .. } => {
-                collect_captured_slots(core::slice::from_ref(body), slots)?;
+                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
             }
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
-                    collect_captured_slots(&case.consequent, slots)?;
+                    collect_captured_slots(source, &case.consequent, slots)?;
                 }
             }
             HirStatementKind::Try {
@@ -475,15 +517,15 @@ fn collect_captured_slots(
                 handler,
                 finalizer,
             } => {
-                collect_captured_slots(block, slots)?;
+                collect_captured_slots(source, block, slots)?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
-                        push_captured_slot(parameter, true, false, slots)?;
+                        push_captured_slot(simple_binding(source, parameter)?, true, false, slots)?;
                     }
-                    collect_captured_slots(&handler.body, slots)?;
+                    collect_captured_slots(source, &handler.body, slots)?;
                 }
                 if let Some(finalizer) = finalizer {
-                    collect_captured_slots(finalizer, slots)?;
+                    collect_captured_slots(source, finalizer, slots)?;
                 }
             }
             HirStatementKind::Expression(_)
@@ -511,10 +553,11 @@ fn lower_function(
     let var_initialization_count = var_bindings
         .iter()
         .filter(|binding| {
-            !function
-                .parameters
-                .iter()
-                .any(|parameter| parameter.id == binding.id)
+            !function.parameters.iter().any(|parameter| {
+                parameter
+                    .binding()
+                    .is_some_and(|parameter| parameter.id == binding.id)
+            })
         })
         .count();
     let captured_slots = &environments.functions[function_index].slots;
@@ -541,7 +584,7 @@ fn lower_function(
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
-        lowerer.add_local(parameter, Some(register), true)?;
+        lowerer.add_local(simple_binding(source, parameter)?, Some(register), true)?;
     }
     for (index, initializer) in function.parameter_initializers.iter().enumerate() {
         if let Some(initializer) = initializer {
@@ -731,6 +774,9 @@ fn collect_var_declared_bindings(
                 }
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
+            HirStatementKind::ForOf { body, .. } => {
+                collect_var_declared_bindings(core::slice::from_ref(body), bindings);
+            }
             HirStatementKind::Loop { body, .. } => {
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
@@ -768,11 +814,14 @@ fn push_var_declaration_bindings(
     bindings: &mut Vec<crate::HirBinding>,
 ) {
     for declarator in declaration.declarators.iter() {
+        let Some(declarator_binding) = declarator.pattern.binding() else {
+            continue;
+        };
         if bindings
             .iter()
-            .all(|binding| binding.id != declarator.binding.id)
+            .all(|binding| binding.id != declarator_binding.id)
         {
-            bindings.push(declarator.binding.clone());
+            bindings.push(declarator_binding.clone());
         }
     }
 }

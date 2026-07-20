@@ -846,7 +846,7 @@ fn loaded_code_and_global_binding_limits_are_explicit() {
         )
         .unwrap();
     let mut code_limited =
-        test_isolate_with_realm_limits(RealmLimits::new(1, 2).with_max_shapes(64));
+        test_isolate_with_realm_limits(RealmLimits::new(1, 2).with_max_shapes(256));
     for _ in 0..2 {
         code_limited
             .execute(
@@ -870,7 +870,7 @@ fn loaded_code_and_global_binding_limits_are_explicit() {
     ));
 
     let mut global_limited =
-        test_isolate_with_realm_limits(RealmLimits::new(2, 1).with_max_shapes(64));
+        test_isolate_with_realm_limits(RealmLimits::new(2, 1).with_max_shapes(256));
     global_limited
         .execute(
             &first,

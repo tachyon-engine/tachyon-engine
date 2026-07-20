@@ -304,6 +304,7 @@ impl Isolate {
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;
+        self.initialize_iterator_symbol(symbol_constructor)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
         let object_prototype = self
@@ -404,6 +405,21 @@ impl Isolate {
         self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)
     }
 
+    /// Allocates and publishes the realm-local well-known `Symbol.iterator` identity.
+    fn initialize_iterator_symbol(
+        &mut self,
+        symbol_constructor: Value,
+    ) -> Result<(), ExecutionError> {
+        let description = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Symbol.iterator")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let symbol = self.allocate_symbol(Some(description))?;
+        self.realm.well_known_symbols.iterator = Some(symbol);
+        let iterator = self.intern_intrinsic_name(b"iterator")?;
+        self.set_intrinsic_constant_property(symbol_constructor, iterator, symbol)
+    }
+
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
     fn initialize_function_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let call_atom = self.intern_intrinsic_name(b"call")?;
@@ -491,10 +507,12 @@ impl Isolate {
             infinity: self.intern_intrinsic_name(b"Infinity")?,
             errors: [
                 self.intern_intrinsic_name(b"Error")?,
+                self.intern_intrinsic_name(b"EvalError")?,
                 self.intern_intrinsic_name(b"ReferenceError")?,
                 self.intern_intrinsic_name(b"SyntaxError")?,
                 self.intern_intrinsic_name(b"TypeError")?,
                 self.intern_intrinsic_name(b"RangeError")?,
+                self.intern_intrinsic_name(b"URIError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             object: self.intern_intrinsic_name(b"Object")?,
@@ -504,6 +522,12 @@ impl Isolate {
             boolean: self.intern_intrinsic_name(b"Boolean")?,
             function: self.intern_intrinsic_name(b"Function")?,
             math: self.intern_intrinsic_name(b"Math")?,
+            global_numbers: [
+                self.intern_intrinsic_name(b"isFinite")?,
+                self.intern_intrinsic_name(b"isNaN")?,
+                self.intern_intrinsic_name(b"parseFloat")?,
+                self.intern_intrinsic_name(b"parseInt")?,
+            ],
         })
     }
 
@@ -589,6 +613,7 @@ impl Isolate {
         self.set_intrinsic_data_property(constructor, is_array_atom, is_array, true)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_intrinsic_data_property(prototype, length_atom, Value::from_i32(0), false)?;
+        self.initialize_array_iterator_intrinsics(prototype, function_prototype)?;
         let concat = self.allocate_native_function(
             NativeFunction::ArrayConcat,
             OrdinaryObject {
@@ -795,6 +820,91 @@ impl Isolate {
         self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)
     }
 
+    /// Builds `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and Array `values`/`@@iterator`.
+    fn initialize_array_iterator_intrinsics(
+        &mut self,
+        array_prototype: Value,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before iterator prototypes");
+        let iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let identity = self.allocate_native_function(
+            NativeFunction::IteratorIdentity,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.iterator_identity = Some(identity);
+        let iterator_symbol = self
+            .realm
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before Array");
+        let iterator_key = self.property_key(iterator_symbol)?;
+        self.define_data_property(
+            iterator_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(identity),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let array_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        self.realm.array_iterator_prototype = Some(array_iterator_prototype);
+        let next = self.allocate_native_function(
+            NativeFunction::ArrayIteratorNext,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_iterator_next = Some(next);
+        let next_atom = self.intern_intrinsic_name(b"next")?;
+        self.set_intrinsic_data_property(array_iterator_prototype, next_atom, next, true)?;
+        let values = self.allocate_native_function(
+            NativeFunction::ArrayValues,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_values = Some(values);
+        let values_atom = self.intern_intrinsic_name(b"values")?;
+        self.set_intrinsic_data_property(array_prototype, values_atom, values, true)?;
+        self.define_data_property(
+            array_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(values),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
     /// Builds the non-constructor Math namespace and its first numeric intrinsic.
     fn initialize_math_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -807,21 +917,40 @@ impl Isolate {
                 .expect("Object prototype initializes before Math"),
         })?;
         self.realm.math_object = Some(object);
-        let pow = self.allocate_native_function(
-            NativeFunction::MathPow,
-            OrdinaryObject {
-                shape: ShapeId::EMPTY,
-                extensible: true,
-                storage: None,
-                prototype: self
-                    .realm
-                    .function_prototype
-                    .expect("Function prototype initializes before Math methods"),
-            },
-        )?;
-        self.realm.math_pow = Some(pow);
-        let pow_atom = self.intern_intrinsic_name(b"pow")?;
-        self.set_intrinsic_data_property(object, pow_atom, pow, true)
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Math methods");
+        for function in MathFunction::ALL {
+            let method = self.allocate_native_function(
+                function.native(),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            self.realm.math_functions[function.index()] = Some(method);
+            if function == MathFunction::Pow {
+                self.realm.math_pow = Some(method);
+            }
+            let atom = self.intern_intrinsic_name(function.name().as_bytes())?;
+            self.set_intrinsic_data_property(object, atom, method, true)?;
+        }
+        for function in GlobalNumberFunction::ALL {
+            let method = self.allocate_native_function(
+                function.native(),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            self.realm.global_number_functions[function.index()] = Some(method);
+        }
+        Ok(())
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.
@@ -908,6 +1037,17 @@ impl Isolate {
                 .expect("Math initializes before global publication"),
             true,
         )?;
+        for (atom, value) in atoms
+            .global_numbers
+            .into_iter()
+            .zip(self.realm.global_number_functions)
+        {
+            self.realm.publish_intrinsic(
+                atom,
+                value.expect("numeric global initializes before publication"),
+                true,
+            )?;
+        }
         Ok(())
     }
 }

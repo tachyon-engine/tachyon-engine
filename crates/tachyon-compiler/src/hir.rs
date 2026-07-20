@@ -1,6 +1,7 @@
 //! Owned high-level IR that intentionally does not retain Oxc AST nodes or arena lifetimes.
 
 mod expression;
+mod pattern;
 mod program;
 mod statement;
 
@@ -9,6 +10,7 @@ pub use expression::{
     HirExpressionKind, HirLogicalOperator, HirObjectProperty, HirObjectPropertyKey,
     HirUnaryOperator, HirUpdateOperator,
 };
+pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
 pub(crate) use program::lower;
 pub use program::{
     BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration,

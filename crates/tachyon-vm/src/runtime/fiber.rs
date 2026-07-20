@@ -122,10 +122,59 @@ pub(crate) enum BuiltinPropertyKeyConsumer {
 
 const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
 
+/// Compact identity for the small native subset that can suspend during primitive conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ConversionNativeFunction {
+    StringConstructor,
+    NumberConstructor,
+    NumberToExponential,
+    NumberToFixed,
+    NumberToPrecision,
+    NumberToString,
+    GlobalIsFinite,
+    GlobalIsNaN,
+    GlobalParseFloat,
+    GlobalParseInt,
+}
+
+impl ConversionNativeFunction {
+    pub(crate) const fn from_native(native: NativeFunction) -> Option<Self> {
+        match native {
+            NativeFunction::StringConstructor => Some(Self::StringConstructor),
+            NativeFunction::NumberConstructor => Some(Self::NumberConstructor),
+            NativeFunction::NumberToExponential => Some(Self::NumberToExponential),
+            NativeFunction::NumberToFixed => Some(Self::NumberToFixed),
+            NativeFunction::NumberToPrecision => Some(Self::NumberToPrecision),
+            NativeFunction::NumberToString => Some(Self::NumberToString),
+            NativeFunction::GlobalIsFinite => Some(Self::GlobalIsFinite),
+            NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
+            NativeFunction::GlobalParseFloat => Some(Self::GlobalParseFloat),
+            NativeFunction::GlobalParseInt => Some(Self::GlobalParseInt),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn native(self) -> NativeFunction {
+        match self {
+            Self::StringConstructor => NativeFunction::StringConstructor,
+            Self::NumberConstructor => NativeFunction::NumberConstructor,
+            Self::NumberToExponential => NativeFunction::NumberToExponential,
+            Self::NumberToFixed => NativeFunction::NumberToFixed,
+            Self::NumberToPrecision => NativeFunction::NumberToPrecision,
+            Self::NumberToString => NativeFunction::NumberToString,
+            Self::GlobalIsFinite => NativeFunction::GlobalIsFinite,
+            Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
+            Self::GlobalParseFloat => NativeFunction::GlobalParseFloat,
+            Self::GlobalParseInt => NativeFunction::GlobalParseInt,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConversionConsumer {
-    NativeCall(NativeFunction),
-    NativeConstruct(NativeFunction),
+    NativeCall(ConversionNativeFunction),
+    NativeConstruct(ConversionNativeFunction),
     ToNumber,
     Negate,
     BitwiseNot,
@@ -144,7 +193,7 @@ impl ConversionConsumer {
     #[inline]
     pub(crate) const fn native(self) -> Option<NativeFunction> {
         match self {
-            Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native),
+            Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native.native()),
             Self::ToNumber
             | Self::Negate
             | Self::BitwiseNot
@@ -164,7 +213,9 @@ impl ConversionConsumer {
     pub(crate) const fn uses_string_hint(self) -> bool {
         matches!(
             self,
-            Self::NativeCall(NativeFunction::StringConstructor)
+            Self::NativeCall(ConversionNativeFunction::StringConstructor)
+                | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
+                | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
         )

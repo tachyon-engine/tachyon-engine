@@ -2114,23 +2114,37 @@ impl Isolate {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(NativeFunction::MathPow) => {
-                    let left = self
-                        .call_argument(&site, 0)?
-                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                    let right = self
-                        .call_argument(&site, 1)?
-                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                    let left = numeric_value(self.convert_to_number(left)?)
-                        .ok_or(ExecutionError::UnsupportedNumberConversion(left))?;
-                    let right = numeric_value(self.convert_to_number(right)?)
-                        .ok_or(ExecutionError::UnsupportedNumberConversion(right))?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_f64(left.powf(right)),
-                    );
+                FunctionExecutable::Native(NativeFunction::ArrayValues) => {
+                    let iterator =
+                        self.create_array_iterator(site.this_value, ArrayIterationKind::Value)?;
+                    return self.write(site.caller_base, site.destination, iterator);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayIteratorNext) => {
+                    let result = self.array_iterator_next(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorIdentity) => {
+                    return self.write(site.caller_base, site.destination, site.this_value);
+                }
+                FunctionExecutable::Native(native) if native.math_function().is_some() => {
+                    let function = native
+                        .math_function()
+                        .expect("math guard establishes the native identity");
+                    let value = self.math_value(function, &site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(native) if native.global_number_function().is_some() => {
+                    let argument = self.call_argument(&site, 0)?;
+                    if argument.is_some_and(|value| self.is_object_value(value)) {
+                        return self.dispatch_conversion_native(native, &site, false);
+                    }
+                    let function = native
+                        .global_number_function()
+                        .expect("global-number guard establishes the native identity");
+                    let value = self.global_number_value(function, &site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                _ => return Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
             }
         }
     }

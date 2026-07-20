@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        BindingPattern, ForStatementInit, ForStatementLeft, Statement, VariableDeclaration,
-        VariableDeclarationKind,
+        ForStatementInit, ForStatementLeft, Statement, VariableDeclaration, VariableDeclarationKind,
     },
     semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::GetSpan,
@@ -11,13 +10,9 @@ use oxc::{
 
 use crate::{CompileError, SourceSpan, SourceText};
 
-use super::expression::{
-    HirAssignmentTarget, HirExpression, lower_assignment_target, lower_expression,
-};
-use super::program::{
-    BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration,
-    StatementCompletion,
-};
+use super::expression::{HirExpression, lower_expression};
+use super::pattern::{HirPattern, lower_assignment_pattern, lower_binding_pattern, new_binding};
+use super::program::{FunctionStencilId, HirFunction, HirFunctionDeclaration, StatementCompletion};
 use super::{missing_semantic, source_span, to_scope_id, unsupported};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +40,12 @@ pub enum HirStatementKind {
         body: Box<HirStatement>,
     },
     ForIn {
+        left: HirForInLeft,
+        right: HirExpression,
+        body: Box<HirStatement>,
+    },
+    ForOf {
+        r#await: bool,
         left: HirForInLeft,
         right: HirExpression,
         body: Box<HirStatement>,
@@ -79,13 +80,13 @@ pub enum HirForInitializer {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirForInLeft {
     Variable(HirVariableDeclaration),
-    Assignment(HirAssignmentTarget),
+    Assignment(HirPattern),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirCatchClause {
     pub span: SourceSpan,
-    pub parameter: Option<HirBinding>,
+    pub parameter: Option<HirPattern>,
     pub body: Arc<[HirStatement]>,
 }
 
@@ -99,7 +100,7 @@ pub struct HirSwitchCase {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirVariableDeclarator {
     pub span: SourceSpan,
-    pub binding: HirBinding,
+    pub pattern: HirPattern,
     pub initializer: Option<HirExpression>,
 }
 
@@ -226,6 +227,9 @@ pub(super) fn lower_statement(
         Statement::ForInStatement(statement) => {
             lower_for_in_statement(statement, source, semantic, functions, context)
         }
+        Statement::ForOfStatement(statement) => {
+            lower_for_of_statement(statement, source, semantic, functions, context)
+        }
         Statement::WhileStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
@@ -341,7 +345,7 @@ fn lower_for_in_statement(
                     "for-in assignment target",
                 )
             })?;
-            HirForInLeft::Assignment(lower_assignment_target(
+            HirForInLeft::Assignment(lower_assignment_pattern(
                 target, source, semantic, functions,
             )?)
         }
@@ -350,6 +354,49 @@ fn lower_for_in_statement(
         span: source_span(statement.span),
         completion: StatementCompletion::Empty,
         kind: HirStatementKind::ForIn {
+            left,
+            right: lower_expression(&statement.right, source, semantic, functions)?,
+            body: Box::new(lower_statement(
+                &statement.body,
+                source,
+                semantic,
+                functions,
+                context.nested(),
+            )?),
+        },
+    })
+}
+
+/// Copies synchronous and async ForOf structure while leaving iterator bytecode to the next slice.
+fn lower_for_of_statement(
+    statement: &oxc::ast::ast::ForOfStatement<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+    context: StatementContext,
+) -> Result<HirStatement, CompileError> {
+    let left = match &statement.left {
+        ForStatementLeft::VariableDeclaration(declaration) => HirForInLeft::Variable(
+            lower_variable_declaration(declaration, source, semantic, functions)?,
+        ),
+        left => {
+            let target = left.as_assignment_target().ok_or_else(|| {
+                unsupported(
+                    source.name(),
+                    source_span(statement.left.span()),
+                    "for-of assignment target",
+                )
+            })?;
+            HirForInLeft::Assignment(lower_assignment_pattern(
+                target, source, semantic, functions,
+            )?)
+        }
+    };
+    Ok(HirStatement {
+        span: source_span(statement.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::ForOf {
+            r#await: statement.r#await,
             left,
             right: lower_expression(&statement.right, source, semantic, functions)?,
             body: Box::new(lower_statement(
@@ -436,15 +483,8 @@ fn lower_try_statement(
             let parameter = handler
                 .param
                 .as_ref()
-                .map(|parameter| match &parameter.pattern {
-                    BindingPattern::BindingIdentifier(identifier) => {
-                        new_binding(identifier, source, semantic)
-                    }
-                    _ => Err(unsupported(
-                        source.name(),
-                        source_span(parameter.span),
-                        "catch binding pattern",
-                    )),
+                .map(|parameter| {
+                    lower_binding_pattern(&parameter.pattern, source, semantic, functions)
                 })
                 .transpose()?;
             let mut body = Vec::with_capacity(handler.body.body.len());
@@ -572,7 +612,7 @@ pub(super) fn lower_function_stencil(
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.generator || function.r#async || function.params.rest.is_some() {
+    if function.generator || function.r#async {
         return Err(unsupported(
             source.name(),
             source_span(function.span),
@@ -589,14 +629,12 @@ pub(super) fn lower_function_stencil(
     let mut parameters = Vec::with_capacity(function.params.items.len());
     let mut parameter_initializers = Vec::with_capacity(function.params.items.len());
     for parameter in &function.params.items {
-        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-            return Err(unsupported(
-                source.name(),
-                source_span(parameter.pattern.span()),
-                "parameter binding pattern",
-            ));
-        };
-        parameters.push(new_binding(identifier, source, semantic)?);
+        parameters.push(lower_binding_pattern(
+            &parameter.pattern,
+            source,
+            semantic,
+            functions,
+        )?);
         parameter_initializers.push(
             parameter
                 .initializer
@@ -622,12 +660,19 @@ pub(super) fn lower_function_stencil(
         .scope_id
         .get()
         .ok_or_else(|| missing_semantic(source, source_span(function.span), "function scope"))?;
+    let rest_parameter = function
+        .params
+        .rest
+        .as_ref()
+        .map(|rest| lower_binding_pattern(&rest.rest.argument, source, semantic, functions))
+        .transpose()?;
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
         name,
         parameters: parameters.into(),
         parameter_initializers: parameter_initializers.into(),
+        rest_parameter,
         body: statements.into(),
         scope: to_scope_id(oxc_scope),
         strict: semantic
@@ -645,7 +690,7 @@ pub(super) fn lower_arrow_function_stencil(
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.r#async || function.params.rest.is_some() {
+    if function.r#async {
         return Err(unsupported(
             source.name(),
             source_span(function.span),
@@ -655,14 +700,12 @@ pub(super) fn lower_arrow_function_stencil(
     let mut parameters = Vec::with_capacity(function.params.items.len());
     let mut parameter_initializers = Vec::with_capacity(function.params.items.len());
     for parameter in &function.params.items {
-        let BindingPattern::BindingIdentifier(identifier) = &parameter.pattern else {
-            return Err(unsupported(
-                source.name(),
-                source_span(parameter.pattern.span()),
-                "arrow parameter binding pattern",
-            ));
-        };
-        parameters.push(new_binding(identifier, source, semantic)?);
+        parameters.push(lower_binding_pattern(
+            &parameter.pattern,
+            source,
+            semantic,
+            functions,
+        )?);
         parameter_initializers.push(
             parameter
                 .initializer
@@ -709,12 +752,19 @@ pub(super) fn lower_arrow_function_stencil(
         .scope_id
         .get()
         .ok_or_else(|| missing_semantic(source, source_span(function.span), "arrow scope"))?;
+    let rest_parameter = function
+        .params
+        .rest
+        .as_ref()
+        .map(|rest| lower_binding_pattern(&rest.rest.argument, source, semantic, functions))
+        .transpose()?;
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
         name: None,
         parameters: parameters.into(),
         parameter_initializers: parameter_initializers.into(),
+        rest_parameter,
         body: statements.into(),
         scope: to_scope_id(oxc_scope),
         strict: semantic
@@ -723,52 +773,6 @@ pub(super) fn lower_arrow_function_stencil(
             .contains(OxcScopeFlags::StrictMode),
     });
     Ok(id)
-}
-
-fn new_binding(
-    identifier: &oxc::ast::ast::BindingIdentifier<'_>,
-    source: &SourceText,
-    semantic: &Semantic<'_>,
-) -> Result<HirBinding, CompileError> {
-    let span = source_span(identifier.span);
-    let symbol = identifier
-        .symbol_id
-        .get()
-        .ok_or_else(|| missing_semantic(source, span, "binding symbol"))?;
-    let binding_scope = semantic.scoping().symbol_scope_id(symbol);
-    let binding_function = nearest_function_scope(semantic, binding_scope);
-    let captured = binding_function.is_some_and(|binding_function| {
-        semantic
-            .scoping()
-            .get_resolved_references(symbol)
-            .any(|reference| {
-                nearest_function_scope(semantic, reference.scope_id()) != Some(binding_function)
-            })
-    });
-    Ok(HirBinding {
-        id: BindingId(symbol.index() as u32),
-        scope: to_scope_id(binding_scope),
-        span,
-        name: Arc::from(identifier.name.as_str()),
-        captured,
-    })
-}
-
-/// Finds the activation-owning function scope for capture analysis without retaining Oxc IDs.
-fn nearest_function_scope(
-    semantic: &Semantic<'_>,
-    mut scope: oxc::semantic::ScopeId,
-) -> Option<oxc::semantic::ScopeId> {
-    loop {
-        if semantic
-            .scoping()
-            .scope_flags(scope)
-            .contains(OxcScopeFlags::Function)
-        {
-            return Some(scope);
-        }
-        scope = semantic.scoping().scope_parent_id(scope)?;
-    }
 }
 
 /// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.
@@ -780,17 +784,10 @@ fn lower_variable_declaration(
 ) -> Result<HirVariableDeclaration, CompileError> {
     let mut declarators = Vec::with_capacity(declaration.declarations.len());
     for declarator in &declaration.declarations {
-        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
-            return Err(unsupported(
-                source.name(),
-                source_span(declarator.id.span()),
-                "binding pattern",
-            ));
-        };
-        let binding = new_binding(identifier, source, semantic)?;
+        let pattern = lower_binding_pattern(&declarator.id, source, semantic, functions)?;
         declarators.push(HirVariableDeclarator {
             span: source_span(declarator.span),
-            binding,
+            pattern,
             initializer: declarator
                 .init
                 .as_ref()

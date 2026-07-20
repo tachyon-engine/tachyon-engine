@@ -121,7 +121,7 @@ pub(super) fn statements_instruction_count(
                 checked_count_add(nested, control, "bytecode instructions")?
             }
             HirStatementKind::Break | HirStatementKind::Continue => 1,
-            HirStatementKind::Empty => 0,
+            HirStatementKind::Empty | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
     }
@@ -170,22 +170,23 @@ fn for_instruction_count(
 fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileError> {
     match left {
         HirForInLeft::Variable(_) => Ok(1),
-        HirForInLeft::Assignment(HirAssignmentTarget::Identifier(_)) => Ok(1),
-        HirForInLeft::Assignment(HirAssignmentTarget::StaticMember { object, .. }) => {
-            checked_count_add(
+        HirForInLeft::Assignment(pattern) => match pattern.assignment_target() {
+            None => Ok(0),
+            Some(HirAssignmentTarget::Identifier(_)) => Ok(1),
+            Some(HirAssignmentTarget::StaticMember { object, .. }) => checked_count_add(
                 expression_instruction_count(object)?,
                 1,
                 "bytecode instructions",
-            )
-        }
-        HirForInLeft::Assignment(HirAssignmentTarget::ComputedMember { object, property }) => {
-            let nested = checked_count_add(
-                expression_instruction_count(object)?,
-                expression_instruction_count(property)?,
-                "bytecode instructions",
-            )?;
-            checked_count_add(nested, 2, "bytecode instructions")
-        }
+            ),
+            Some(HirAssignmentTarget::ComputedMember { object, property }) => {
+                let nested = checked_count_add(
+                    expression_instruction_count(object)?,
+                    expression_instruction_count(property)?,
+                    "bytecode instructions",
+                )?;
+                checked_count_add(nested, 2, "bytecode instructions")
+            }
+        },
     }
 }
 
@@ -316,6 +317,9 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             target,
             value,
         } => {
+            let Some(target) = target.assignment_target() else {
+                return expression_instruction_count(value);
+            };
             let computed_target = matches!(target, HirAssignmentTarget::ComputedMember { .. });
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,

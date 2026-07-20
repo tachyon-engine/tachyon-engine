@@ -121,6 +121,10 @@ pub(crate) struct Realm {
     pub(crate) array_flat: Option<Value>,
     pub(crate) array_sort: Option<Value>,
     pub(crate) array_to_string: Option<Value>,
+    pub(crate) array_values: Option<Value>,
+    pub(crate) array_iterator_prototype: Option<Value>,
+    pub(crate) array_iterator_next: Option<Value>,
+    pub(crate) iterator_identity: Option<Value>,
     pub(crate) object_constructor: Option<Value>,
     pub(crate) object_prototype: Option<Value>,
     pub(crate) object_define_property: Option<Value>,
@@ -157,6 +161,8 @@ pub(crate) struct Realm {
     pub(crate) function_constructor: Option<Value>,
     pub(crate) math_object: Option<Value>,
     pub(crate) math_pow: Option<Value>,
+    pub(crate) math_functions: [Option<Value>; MathFunction::ALL.len()],
+    pub(crate) global_number_functions: [Option<Value>; GlobalNumberFunction::ALL.len()],
     pub(crate) error_intrinsics: ErrorIntrinsics,
     pub(crate) well_known_symbols: WellKnownSymbols,
     pub(crate) primitive_hint_strings: PrimitiveHintStrings,
@@ -201,6 +207,10 @@ impl Realm {
             array_flat: None,
             array_sort: None,
             array_to_string: None,
+            array_values: None,
+            array_iterator_prototype: None,
+            array_iterator_next: None,
+            iterator_identity: None,
             object_constructor: None,
             object_prototype: None,
             object_define_property: None,
@@ -237,6 +247,8 @@ impl Realm {
             function_constructor: None,
             math_object: None,
             math_pow: None,
+            math_functions: [None; MathFunction::ALL.len()],
+            global_number_functions: [None; GlobalNumberFunction::ALL.len()],
             error_intrinsics: ErrorIntrinsics::default(),
             well_known_symbols: WellKnownSymbols::default(),
             primitive_hint_strings,
@@ -512,6 +524,10 @@ impl Trace for Realm {
         self.array_flat.trace(tracer);
         self.array_sort.trace(tracer);
         self.array_to_string.trace(tracer);
+        self.array_values.trace(tracer);
+        self.array_iterator_prototype.trace(tracer);
+        self.array_iterator_next.trace(tracer);
+        self.iterator_identity.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
@@ -548,6 +564,8 @@ impl Trace for Realm {
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
         self.math_pow.trace(tracer);
+        self.math_functions.trace(tracer);
+        self.global_number_functions.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.well_known_symbols.trace(tracer);
         self.primitive_hint_strings.trace(tracer);
@@ -558,12 +576,14 @@ impl Trace for Realm {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WellKnownSymbols {
     pub(crate) to_primitive: Option<Value>,
+    pub(crate) iterator: Option<Value>,
 }
 
 impl Trace for WellKnownSymbols {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.to_primitive.trace(tracer);
+        self.iterator.trace(tracer);
     }
 }
 

@@ -3,6 +3,14 @@
 use super::super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "native entries are installed by staged realm batches"
+    )
+)]
 pub(crate) enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
@@ -59,7 +67,272 @@ pub(crate) enum NativeFunction {
     ArrayFlat,
     ArraySort,
     ArrayToString,
+    ArrayValues,
+    ArrayIteratorNext,
+    IteratorIdentity,
+    MathAbs,
+    MathAcos,
+    MathAcosh,
+    MathAsin,
+    MathAsinh,
+    MathAtan,
+    MathAtanh,
+    MathAtan2,
+    MathCbrt,
+    MathCeil,
+    MathClz32,
+    MathCos,
+    MathCosh,
+    MathExp,
+    MathExpm1,
+    MathFloor,
+    MathF16Round,
+    MathFround,
+    MathHypot,
+    MathImul,
+    MathLog,
+    MathLog1p,
+    MathLog10,
+    MathLog2,
+    MathMax,
+    MathMin,
     MathPow,
+    MathRandom,
+    MathRound,
+    MathSign,
+    MathSin,
+    MathSinh,
+    MathSqrt,
+    MathTan,
+    MathTanh,
+    MathTrunc,
+    GlobalIsFinite,
+    GlobalIsNaN,
+    GlobalParseFloat,
+    GlobalParseInt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum GlobalNumberFunction {
+    IsFinite,
+    IsNaN,
+    ParseFloat,
+    ParseInt,
+}
+
+impl GlobalNumberFunction {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::IsFinite,
+        Self::IsNaN,
+        Self::ParseFloat,
+        Self::ParseInt,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::IsFinite => "isFinite",
+            Self::IsNaN => "isNaN",
+            Self::ParseFloat => "parseFloat",
+            Self::ParseInt => "parseInt",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        if matches!(self, Self::ParseInt) { 2 } else { 1 }
+    }
+
+    pub(crate) const fn native(self) -> NativeFunction {
+        match self {
+            Self::IsFinite => NativeFunction::GlobalIsFinite,
+            Self::IsNaN => NativeFunction::GlobalIsNaN,
+            Self::ParseFloat => NativeFunction::GlobalParseFloat,
+            Self::ParseInt => NativeFunction::GlobalParseInt,
+        }
+    }
+
+    #[allow(dead_code, reason = "used when intrinsic installation is table-driven")]
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum MathFunction {
+    Abs,
+    Acos,
+    Acosh,
+    Asin,
+    Asinh,
+    Atan,
+    Atanh,
+    Atan2,
+    Cbrt,
+    Ceil,
+    Clz32,
+    Cos,
+    Cosh,
+    Exp,
+    Expm1,
+    Floor,
+    F16Round,
+    Fround,
+    Hypot,
+    Imul,
+    Log,
+    Log1p,
+    Log10,
+    Log2,
+    Max,
+    Min,
+    Pow,
+    Random,
+    Round,
+    Sign,
+    Sin,
+    Sinh,
+    Sqrt,
+    Tan,
+    Tanh,
+    Trunc,
+}
+
+impl MathFunction {
+    pub(crate) const ALL: [Self; 36] = [
+        Self::Abs,
+        Self::Acos,
+        Self::Acosh,
+        Self::Asin,
+        Self::Asinh,
+        Self::Atan,
+        Self::Atanh,
+        Self::Atan2,
+        Self::Cbrt,
+        Self::Ceil,
+        Self::Clz32,
+        Self::Cos,
+        Self::Cosh,
+        Self::Exp,
+        Self::Expm1,
+        Self::Floor,
+        Self::F16Round,
+        Self::Fround,
+        Self::Hypot,
+        Self::Imul,
+        Self::Log,
+        Self::Log1p,
+        Self::Log10,
+        Self::Log2,
+        Self::Max,
+        Self::Min,
+        Self::Pow,
+        Self::Random,
+        Self::Round,
+        Self::Sign,
+        Self::Sin,
+        Self::Sinh,
+        Self::Sqrt,
+        Self::Tan,
+        Self::Tanh,
+        Self::Trunc,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Abs => "abs",
+            Self::Acos => "acos",
+            Self::Acosh => "acosh",
+            Self::Asin => "asin",
+            Self::Asinh => "asinh",
+            Self::Atan => "atan",
+            Self::Atanh => "atanh",
+            Self::Atan2 => "atan2",
+            Self::Cbrt => "cbrt",
+            Self::Ceil => "ceil",
+            Self::Clz32 => "clz32",
+            Self::Cos => "cos",
+            Self::Cosh => "cosh",
+            Self::Exp => "exp",
+            Self::Expm1 => "expm1",
+            Self::Floor => "floor",
+            Self::F16Round => "f16round",
+            Self::Fround => "fround",
+            Self::Hypot => "hypot",
+            Self::Imul => "imul",
+            Self::Log => "log",
+            Self::Log1p => "log1p",
+            Self::Log10 => "log10",
+            Self::Log2 => "log2",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Pow => "pow",
+            Self::Random => "random",
+            Self::Round => "round",
+            Self::Sign => "sign",
+            Self::Sin => "sin",
+            Self::Sinh => "sinh",
+            Self::Sqrt => "sqrt",
+            Self::Tan => "tan",
+            Self::Tanh => "tanh",
+            Self::Trunc => "trunc",
+        }
+    }
+
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Random => 0,
+            Self::Atan2 | Self::Hypot | Self::Imul | Self::Max | Self::Min | Self::Pow => 2,
+            _ => 1,
+        }
+    }
+
+    pub(crate) const fn native(self) -> NativeFunction {
+        use MathFunction as M;
+        match self {
+            M::Abs => NativeFunction::MathAbs,
+            M::Acos => NativeFunction::MathAcos,
+            M::Acosh => NativeFunction::MathAcosh,
+            M::Asin => NativeFunction::MathAsin,
+            M::Asinh => NativeFunction::MathAsinh,
+            M::Atan => NativeFunction::MathAtan,
+            M::Atanh => NativeFunction::MathAtanh,
+            M::Atan2 => NativeFunction::MathAtan2,
+            M::Cbrt => NativeFunction::MathCbrt,
+            M::Ceil => NativeFunction::MathCeil,
+            M::Clz32 => NativeFunction::MathClz32,
+            M::Cos => NativeFunction::MathCos,
+            M::Cosh => NativeFunction::MathCosh,
+            M::Exp => NativeFunction::MathExp,
+            M::Expm1 => NativeFunction::MathExpm1,
+            M::Floor => NativeFunction::MathFloor,
+            M::F16Round => NativeFunction::MathF16Round,
+            M::Fround => NativeFunction::MathFround,
+            M::Hypot => NativeFunction::MathHypot,
+            M::Imul => NativeFunction::MathImul,
+            M::Log => NativeFunction::MathLog,
+            M::Log1p => NativeFunction::MathLog1p,
+            M::Log10 => NativeFunction::MathLog10,
+            M::Log2 => NativeFunction::MathLog2,
+            M::Max => NativeFunction::MathMax,
+            M::Min => NativeFunction::MathMin,
+            M::Pow => NativeFunction::MathPow,
+            M::Random => NativeFunction::MathRandom,
+            M::Round => NativeFunction::MathRound,
+            M::Sign => NativeFunction::MathSign,
+            M::Sin => NativeFunction::MathSin,
+            M::Sinh => NativeFunction::MathSinh,
+            M::Sqrt => NativeFunction::MathSqrt,
+            M::Tan => NativeFunction::MathTan,
+            M::Tanh => NativeFunction::MathTanh,
+            M::Trunc => NativeFunction::MathTrunc,
+        }
+    }
+
+    #[allow(dead_code, reason = "used when intrinsic installation is table-driven")]
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 pub(crate) enum FlatWork {
@@ -84,6 +357,12 @@ impl NativeFunction {
 
     #[inline(always)]
     pub(crate) const fn length(self) -> i32 {
+        if let Some(function) = self.math_function() {
+            return function.length();
+        }
+        if let Some(function) = self.global_number_function() {
+            return function.length();
+        }
         match self {
             Self::ObjectDefineProperty => 3,
             Self::ObjectAssign
@@ -134,17 +413,63 @@ impl NativeFunction {
             | Self::NumberToPrecision
             | Self::NumberToString => 1,
             Self::ArrayPush | Self::ArrayJoin => 1,
-            Self::MathPow => 2,
+            Self::MathAbs
+            | Self::MathAcos
+            | Self::MathAcosh
+            | Self::MathAsin
+            | Self::MathAsinh
+            | Self::MathAtan
+            | Self::MathAtanh
+            | Self::MathAtan2
+            | Self::MathCbrt
+            | Self::MathCeil
+            | Self::MathClz32
+            | Self::MathCos
+            | Self::MathCosh
+            | Self::MathExp
+            | Self::MathExpm1
+            | Self::MathFloor
+            | Self::MathF16Round
+            | Self::MathFround
+            | Self::MathHypot
+            | Self::MathImul
+            | Self::MathLog
+            | Self::MathLog1p
+            | Self::MathLog10
+            | Self::MathLog2
+            | Self::MathMax
+            | Self::MathMin
+            | Self::MathPow
+            | Self::MathRandom
+            | Self::MathRound
+            | Self::MathSign
+            | Self::MathSin
+            | Self::MathSinh
+            | Self::MathSqrt
+            | Self::MathTan
+            | Self::MathTanh
+            | Self::MathTrunc
+            | Self::GlobalIsFinite
+            | Self::GlobalIsNaN
+            | Self::GlobalParseFloat
+            | Self::GlobalParseInt => unreachable!(),
             Self::ObjectToString
             | Self::SymbolConstructor
             | Self::NumberValueOf
             | Self::FunctionPrototype
             | Self::ArrayToString => 0,
+            Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
         }
     }
 
     #[inline]
     pub(crate) const fn name(self) -> &'static str {
+        if let Some(function) = self.math_function() {
+            return function.name();
+        }
+        if let Some(function) = self.global_number_function() {
+            return function.name();
+        }
         match self {
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
@@ -182,10 +507,12 @@ impl NativeFunction {
             Self::FunctionPrototypeBind => "bind",
             Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
+            Self::ErrorConstructor(NativeErrorKind::Eval) => "EvalError",
             Self::ErrorConstructor(NativeErrorKind::Reference) => "ReferenceError",
             Self::ErrorConstructor(NativeErrorKind::Syntax) => "SyntaxError",
             Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
             Self::ErrorConstructor(NativeErrorKind::Range) => "RangeError",
+            Self::ErrorConstructor(NativeErrorKind::Uri) => "URIError",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -205,8 +532,103 @@ impl NativeFunction {
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
             Self::ArrayToString => "toString",
-            Self::MathPow => "pow",
+            Self::ArrayValues => "values",
+            Self::ArrayIteratorNext => "next",
+            Self::IteratorIdentity => "[Symbol.iterator]",
+            Self::MathAbs
+            | Self::MathAcos
+            | Self::MathAcosh
+            | Self::MathAsin
+            | Self::MathAsinh
+            | Self::MathAtan
+            | Self::MathAtanh
+            | Self::MathAtan2
+            | Self::MathCbrt
+            | Self::MathCeil
+            | Self::MathClz32
+            | Self::MathCos
+            | Self::MathCosh
+            | Self::MathExp
+            | Self::MathExpm1
+            | Self::MathFloor
+            | Self::MathF16Round
+            | Self::MathFround
+            | Self::MathHypot
+            | Self::MathImul
+            | Self::MathLog
+            | Self::MathLog1p
+            | Self::MathLog10
+            | Self::MathLog2
+            | Self::MathMax
+            | Self::MathMin
+            | Self::MathPow
+            | Self::MathRandom
+            | Self::MathRound
+            | Self::MathSign
+            | Self::MathSin
+            | Self::MathSinh
+            | Self::MathSqrt
+            | Self::MathTan
+            | Self::MathTanh
+            | Self::MathTrunc
+            | Self::GlobalIsFinite
+            | Self::GlobalIsNaN
+            | Self::GlobalParseFloat
+            | Self::GlobalParseInt => unreachable!(),
         }
+    }
+
+    pub(crate) const fn math_function(self) -> Option<MathFunction> {
+        use MathFunction as M;
+        Some(match self {
+            Self::MathAbs => M::Abs,
+            Self::MathAcos => M::Acos,
+            Self::MathAcosh => M::Acosh,
+            Self::MathAsin => M::Asin,
+            Self::MathAsinh => M::Asinh,
+            Self::MathAtan => M::Atan,
+            Self::MathAtanh => M::Atanh,
+            Self::MathAtan2 => M::Atan2,
+            Self::MathCbrt => M::Cbrt,
+            Self::MathCeil => M::Ceil,
+            Self::MathClz32 => M::Clz32,
+            Self::MathCos => M::Cos,
+            Self::MathCosh => M::Cosh,
+            Self::MathExp => M::Exp,
+            Self::MathExpm1 => M::Expm1,
+            Self::MathFloor => M::Floor,
+            Self::MathF16Round => M::F16Round,
+            Self::MathFround => M::Fround,
+            Self::MathHypot => M::Hypot,
+            Self::MathImul => M::Imul,
+            Self::MathLog => M::Log,
+            Self::MathLog1p => M::Log1p,
+            Self::MathLog10 => M::Log10,
+            Self::MathLog2 => M::Log2,
+            Self::MathMax => M::Max,
+            Self::MathMin => M::Min,
+            Self::MathPow => M::Pow,
+            Self::MathRandom => M::Random,
+            Self::MathRound => M::Round,
+            Self::MathSign => M::Sign,
+            Self::MathSin => M::Sin,
+            Self::MathSinh => M::Sinh,
+            Self::MathSqrt => M::Sqrt,
+            Self::MathTan => M::Tan,
+            Self::MathTanh => M::Tanh,
+            Self::MathTrunc => M::Trunc,
+            _ => return None,
+        })
+    }
+
+    pub(crate) const fn global_number_function(self) -> Option<GlobalNumberFunction> {
+        Some(match self {
+            Self::GlobalIsFinite => GlobalNumberFunction::IsFinite,
+            Self::GlobalIsNaN => GlobalNumberFunction::IsNaN,
+            Self::GlobalParseFloat => GlobalNumberFunction::ParseFloat,
+            Self::GlobalParseInt => GlobalNumberFunction::ParseInt,
+            _ => return None,
+        })
     }
 }
 
@@ -214,19 +636,23 @@ impl NativeFunction {
 #[repr(u8)]
 pub enum NativeErrorKind {
     Error,
+    Eval,
     Reference,
     Syntax,
     Type,
     Range,
+    Uri,
 }
 
 impl NativeErrorKind {
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::Error,
+        Self::Eval,
         Self::Reference,
         Self::Syntax,
         Self::Type,
         Self::Range,
+        Self::Uri,
     ];
 
     #[inline(always)]
@@ -238,10 +664,12 @@ impl NativeErrorKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Error => "Error",
+            Self::Eval => "EvalError",
             Self::Reference => "ReferenceError",
             Self::Syntax => "SyntaxError",
             Self::Type => "TypeError",
             Self::Range => "RangeError",
+            Self::Uri => "URIError",
         }
     }
 }
@@ -331,6 +759,7 @@ pub(crate) enum ObjectReceiver {
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
     Number(GcRef<NumberObject>),
+    ArrayIterator(GcRef<ArrayIteratorObject>),
 }
 
 impl ObjectReceiver {
@@ -341,6 +770,7 @@ impl ObjectReceiver {
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
+            Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
 }
@@ -448,6 +878,7 @@ impl Trace for FunctionObject {
 pub(crate) struct VmTypes {
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array: GcType<ArrayObject>,
+    pub(crate) array_iterator: GcType<ArrayIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) environment: GcType<Environment>,
     pub(crate) for_in_iterator: GcType<ForInIterator>,
@@ -484,10 +915,13 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) boolean: AtomId,
     pub(crate) function: AtomId,
     pub(crate) math: AtomId,
+    #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
+    pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 11 + NativeErrorKind::ALL.len();
+    pub(crate) const BINDING_COUNT: usize =
+        11 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

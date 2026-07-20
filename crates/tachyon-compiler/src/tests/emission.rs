@@ -54,7 +54,14 @@ fn function_hir_owns_parameters_body_and_direct_call() {
         panic!("expected one owned function stencil");
     };
     assert_eq!(function.name.as_deref(), Some("addTwo"));
-    assert_eq!(function.parameters[0].name.as_ref(), "value");
+    let HirPattern {
+        kind: HirPatternKind::Binding(binding),
+        ..
+    } = &function.parameters[0]
+    else {
+        panic!("expected simple binding parameter");
+    };
+    assert_eq!(binding.name.as_ref(), "value");
     assert!(matches!(function.body[0].kind, HirStatementKind::Return(_)));
     assert!(matches!(
         hir.statements().last().map(|statement| &statement.kind),

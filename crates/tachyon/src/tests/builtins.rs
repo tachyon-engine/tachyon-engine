@@ -765,3 +765,32 @@ fn typeof_and_string_constants_follow_primitive_semantics() {
         Some(tachyon_value::Immediate::True)
     );
 }
+
+#[test]
+/// Covers the Math family registration, corner-case signed zero, and numeric globals.
+fn math_family_and_number_globals_are_available() {
+    assert_eq!(
+        execute_source(
+            901,
+            "Math.abs(-3) === 3 && Math.floor(1.9) === 1 && Math.ceil(1.1) === 2 && Math.trunc(-1.9) === -1 && Math.round(-0.5) === 0 && 1 / Math.round(-0.5) === -Infinity && Math.min(0, -0) === -0 && Math.max(-0, 0) === 0 && Math.hypot(3, 4) === 5 && Math.imul(0xffffffff, 5) === -5 && Math.clz32(1) === 31 && Math.random() >= 0 && Math.random() < 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            902,
+            "isNaN(NaN) && !isNaN(1) && isFinite(1) && !isFinite(Infinity) && parseInt('  -0x10tail') === -16 && parseInt('11', 2) === 3 && parseFloat(' -1.25e2tail') === -125;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            903,
+            "let finite = { valueOf() { return '2'; } }; let nan = { valueOf() { return 'x'; } }; isFinite(finite) && isNaN(nan);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}

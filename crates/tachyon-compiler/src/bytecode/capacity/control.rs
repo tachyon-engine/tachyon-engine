@@ -67,7 +67,8 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, nested, "exception handlers")?;
     }
@@ -143,7 +144,8 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         depth = depth.max(nested);
     }
@@ -289,7 +291,8 @@ pub(super) fn statements_binding_count(statements: &[HirStatement]) -> Result<us
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, statement_count, "local bindings")?;
     }
@@ -445,7 +448,8 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
-            | HirStatementKind::Empty => {}
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => {}
         }
     }
     Ok(count)
@@ -497,7 +501,10 @@ fn for_label_count(
 }
 
 fn for_in_left_label_count(left: &HirForInLeft) -> Result<usize, CompileError> {
-    let HirForInLeft::Assignment(target) = left else {
+    let HirForInLeft::Assignment(pattern) = left else {
+        return Ok(0);
+    };
+    let Some(target) = pattern.assignment_target() else {
         return Ok(0);
     };
     match target {
@@ -579,7 +586,8 @@ pub(super) fn statements_expression_count(
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, statement_count, "entry completion instructions")?;
     }
@@ -656,7 +664,8 @@ pub(super) fn statements_switch_count(statements: &[HirStatement]) -> Result<usi
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, nested, "switch control targets")?;
     }
@@ -720,7 +729,8 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty => 0,
+            | HirStatementKind::Empty
+            | HirStatementKind::ForOf { .. } => 0,
         };
         count = checked_count_add(count, nested, "loop continue targets")?;
     }
@@ -780,6 +790,9 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             target,
             value,
         } => {
+            let Some(target) = target.assignment_target() else {
+                return expression_label_count(value);
+            };
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => expression_label_count(object)?,

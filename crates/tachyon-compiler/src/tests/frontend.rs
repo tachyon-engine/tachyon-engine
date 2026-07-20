@@ -136,7 +136,14 @@ fn hir_lowering_copies_local_binding_without_oxc_values() {
     let [declarator] = declaration.declarators.as_ref() else {
         panic!("expected one owned declarator");
     };
-    assert_eq!(declarator.binding.name.as_ref(), "answer");
+    let HirPattern {
+        kind: HirPatternKind::Binding(binding),
+        ..
+    } = &declarator.pattern
+    else {
+        panic!("expected simple binding pattern");
+    };
+    assert_eq!(binding.name.as_ref(), "answer");
     assert!(matches!(
         declarator.initializer.as_ref(),
         Some(HirExpression {
@@ -184,8 +191,20 @@ fn hir_owns_scope_binding_and_reference_identity() {
     else {
         panic!("expected outer read");
     };
-    let outer = &outer_declaration.declarators[0].binding;
-    let inner = &inner_declaration.declarators[0].binding;
+    let HirPattern {
+        kind: HirPatternKind::Binding(outer),
+        ..
+    } = &outer_declaration.declarators[0].pattern
+    else {
+        panic!("expected outer binding pattern");
+    };
+    let HirPattern {
+        kind: HirPatternKind::Binding(inner),
+        ..
+    } = &inner_declaration.declarators[0].pattern
+    else {
+        panic!("expected inner binding pattern");
+    };
     assert_ne!(outer.id, inner.id);
     assert_ne!(outer.scope, inner.scope);
     assert_eq!(inner_read.binding, Some(inner.id));

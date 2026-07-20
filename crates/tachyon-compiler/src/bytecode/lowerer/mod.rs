@@ -144,6 +144,17 @@ impl Lowerer<'_> {
 }
 
 impl Lowerer<'_> {
+    /// Extracts a simple pattern leaf or reports the unimplemented destructuring backend.
+    #[inline(always)]
+    pub(super) fn simple_binding<'a>(
+        &self,
+        pattern: &'a crate::HirPattern,
+    ) -> Result<&'a crate::HirBinding, CompileError> {
+        pattern
+            .binding()
+            .ok_or_else(|| self.unsupported(pattern.span, "destructuring pattern bytecode"))
+    }
+
     /// Lowers one declaration list in source order so initializers can use preceding local bindings.
     pub(super) fn variable_declaration(
         &mut self,
@@ -168,6 +179,7 @@ impl Lowerer<'_> {
             });
         }
         for declarator in declaration.declarators.iter() {
+            let binding = self.simple_binding(&declarator.pattern)?.clone();
             let register = match declarator.initializer.as_ref() {
                 Some(initializer) => self.expression(initializer)?,
                 None if declaration.kind == HirVariableDeclarationKind::Let => {
@@ -181,10 +193,10 @@ impl Lowerer<'_> {
                     });
                 }
             };
-            if self.script_scope && declarator.binding.scope == self.root_scope {
+            if self.script_scope && binding.scope == self.root_scope {
                 let lexical = self
                     .environments
-                    .global_lexical(declarator.binding.id)
+                    .global_lexical(binding.id)
                     .ok_or(CompileError::BindingOverflow)?;
                 let scope_name = self.global_lexical_binding(lexical)?;
                 self.emit(
@@ -195,7 +207,7 @@ impl Lowerer<'_> {
                 continue;
             }
             self.add_local(
-                &declarator.binding,
+                &binding,
                 Some(register),
                 declaration.kind == HirVariableDeclarationKind::Let,
             )?;
@@ -209,14 +221,15 @@ impl Lowerer<'_> {
         declaration: &HirVariableDeclaration,
     ) -> Result<(), CompileError> {
         for declarator in declaration.declarators.iter() {
+            let binding = self.simple_binding(&declarator.pattern)?.clone();
             let Some(initializer) = declarator.initializer.as_ref() else {
                 continue;
             };
             let value = self.expression(initializer)?;
-            if let Some(binding) = self.local_by_id(declarator.binding.id).cloned() {
-                self.write_local(&binding, value, declarator.span)?;
+            if let Some(local) = self.local_by_id(binding.id).cloned() {
+                self.write_local(&local, value, declarator.span)?;
             } else if self.script_scope {
-                let scope_name = self.global_binding(&declarator.binding.name, true)?;
+                let scope_name = self.global_binding(&binding.name, true)?;
                 self.emit(
                     Opcode::StoreScope,
                     &[value.index(), scope_name],

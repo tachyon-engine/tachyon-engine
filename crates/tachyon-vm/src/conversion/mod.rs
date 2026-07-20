@@ -114,10 +114,12 @@ impl Isolate {
         site: &CallSite,
         construct: bool,
     ) -> Result<(), ExecutionError> {
+        let conversion_native = ConversionNativeFunction::from_native(native)
+            .expect("only conversion natives enter the resumable conversion path");
         let consumer = if construct {
-            ConversionConsumer::NativeConstruct(native)
+            ConversionConsumer::NativeConstruct(conversion_native)
         } else {
-            ConversionConsumer::NativeCall(native)
+            ConversionConsumer::NativeCall(conversion_native)
         };
         let argument = self.call_argument(site, 0)?;
         if let Some(object) = argument
@@ -136,6 +138,10 @@ impl Isolate {
                         Value::from_immediate(Immediate::Undefined)
                     }
                 }
+                NativeFunction::GlobalIsFinite
+                | NativeFunction::GlobalIsNaN
+                | NativeFunction::GlobalParseFloat
+                | NativeFunction::GlobalParseInt => Value::from_immediate(Immediate::Undefined),
                 _ => unreachable!("only conversion consumers enter this dispatch path"),
             };
             let continuation = ConversionContinuation {
@@ -535,6 +541,15 @@ impl Isolate {
             NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
             NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),
             NativeFunction::NumberToString => self.number_to_string(receiver, argument),
+            NativeFunction::GlobalIsFinite
+            | NativeFunction::GlobalIsNaN
+            | NativeFunction::GlobalParseFloat
+            | NativeFunction::GlobalParseInt => self.global_number_primitive_value(
+                native
+                    .global_number_function()
+                    .expect("global numeric native has metadata"),
+                argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            ),
             _ => unreachable!("only conversion consumers create this continuation"),
         }
     }
