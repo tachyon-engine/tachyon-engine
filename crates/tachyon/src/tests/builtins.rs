@@ -608,6 +608,27 @@ fn object_assign_copies_own_data_properties() {
     );
 }
 
+/// Covers numeric key sorting, canonical uint32 boundaries, and function-key creation history.
+#[test]
+fn object_enumeration_uses_ordinary_own_property_key_order() {
+    assert_eq!(
+        execute_source(
+            171,
+            "let object = {}; object[9] = 9; object[2] = 2; object[10] = 10; object['01'] = 1; object[4294967294] = 4; object[4294967295] = 5; object.alpha = 6; Object.keys(object).join(',') === '2,9,10,4294967294,01,4294967295,alpha' && Object.getOwnPropertyNames(object).join(',') === '2,9,10,4294967294,01,4294967295,alpha';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            172,
+            "let fn = () => {}; fn.a = 1; Object.defineProperty(fn, 'length', { enumerable: true }); let original = Object.keys(fn).join(',') === 'length,a'; delete fn.length; fn.length = 2; original && Object.keys(fn).join(',') === 'a,length';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
 /// Verifies the shared Function identity and the current always-extensible object policy.
 #[test]
 fn function_identity_and_object_extensibility_are_published() {

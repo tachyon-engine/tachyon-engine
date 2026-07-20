@@ -4,6 +4,7 @@ mod accessor;
 mod descriptor;
 mod descriptor_parse;
 mod function;
+mod keys;
 mod storage;
 
 use super::*;

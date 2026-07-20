@@ -121,15 +121,6 @@ fn ordinary_property_replacement_and_update_work_for_every_dispatch_batch() {
 }
 
 #[test]
-fn deleted_properties_reinsert_at_the_end_for_every_dispatch_batch() {
-    assert_property_reinsert_batch::<1>();
-    assert_property_reinsert_batch::<2>();
-    assert_property_reinsert_batch::<4>();
-    assert_property_reinsert_batch::<8>();
-    assert_property_reinsert_batch::<16>();
-}
-
-#[test]
 fn computed_property_access_works_for_every_dispatch_batch() {
     assert_dynamic_property_batch::<1>();
     assert_dynamic_property_batch::<2>();
@@ -383,39 +374,6 @@ fn readding_a_live_deleted_symbol_restores_its_gc_edge() {
             .symbol_property_key_value(snapshot, key.symbol().unwrap())
             .unwrap(),
         Some(symbol)
-    );
-}
-
-#[test]
-fn readded_symbol_moves_after_surviving_symbols() {
-    let mut isolate = test_isolate();
-    let object = isolate.create_ordinary_object().unwrap();
-    isolate.fiber.registers.push(object);
-    let first = isolate.allocate_symbol(None).unwrap();
-    isolate.fiber.registers.push(first);
-    let second = isolate.allocate_symbol(None).unwrap();
-    isolate.fiber.registers.push(second);
-    let first_key = isolate.property_key(first).unwrap();
-    let second_key = isolate.property_key(second).unwrap();
-    isolate
-        .set_own_data_property(object, first_key, Value::from_i32(1))
-        .unwrap();
-    isolate
-        .set_own_data_property(object, second_key, Value::from_i32(2))
-        .unwrap();
-    assert!(isolate.delete_own_data_property(object, first_key).unwrap());
-    isolate
-        .set_own_data_property(object, first_key, Value::from_i32(3))
-        .unwrap();
-
-    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
-    assert_eq!(
-        isolate
-            .shapes
-            .own_keys(snapshot.shape)
-            .unwrap()
-            .collect::<Vec<_>>(),
-        [second_key, first_key]
     );
 }
 

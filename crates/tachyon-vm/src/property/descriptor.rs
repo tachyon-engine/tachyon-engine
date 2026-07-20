@@ -266,7 +266,7 @@ impl Isolate {
             .unwrap_or_else(|| property.attributes.configurable());
         match descriptor {
             PropertyDescriptor::Generic(_) => {
-                let attributes = match property.kind {
+                let mut attributes = match property.kind {
                     PropertyKind::Data => PropertyAttributes::data(
                         property.attributes.writable(),
                         enumerable,
@@ -276,6 +276,9 @@ impl Isolate {
                         PropertyAttributes::accessor(enumerable, configurable)
                     }
                 };
+                if property.attributes.virtual_origin() {
+                    attributes = attributes.with_virtual_origin();
+                }
                 let shape = self
                     .shapes
                     .transition_reconfigure_kind(snapshot.shape, key, property.kind, attributes)
@@ -302,6 +305,7 @@ impl Isolate {
                 descriptor,
                 enumerable,
                 configurable,
+                property.attributes.virtual_origin(),
             ),
         }
     }
@@ -377,11 +381,14 @@ impl Isolate {
             StoredProperty::Accessor { .. } => (undefined, false),
         };
         let value = descriptor.value.unwrap_or(current_value);
-        let attributes = PropertyAttributes::data(
+        let mut attributes = PropertyAttributes::data(
             descriptor.writable.unwrap_or(current_writable),
             enumerable,
             configurable,
         );
+        if property.attributes.virtual_origin() {
+            attributes = attributes.with_virtual_origin();
+        }
         let shape = self
             .shapes
             .transition_reconfigure_kind(snapshot.shape, key, PropertyKind::Data, attributes)
@@ -404,8 +411,12 @@ impl Isolate {
         descriptor: AccessorPropertyDescriptor,
         enumerable: bool,
         configurable: bool,
+        virtual_origin: bool,
     ) -> Result<(), ExecutionError> {
-        let attributes = PropertyAttributes::accessor(enumerable, configurable);
+        let mut attributes = PropertyAttributes::accessor(enumerable, configurable);
+        if virtual_origin {
+            attributes = attributes.with_virtual_origin();
+        }
         if let StoredProperty::Accessor { reference, .. } = current {
             let shape = self
                 .shapes
@@ -457,7 +468,7 @@ impl Isolate {
                 key,
                 PropertyKind::Data,
                 current_value,
-                PropertyAttributes::data(false, enumerable, configurable),
+                PropertyAttributes::data(false, enumerable, configurable).with_virtual_origin(),
             ),
             PropertyDescriptor::Data(descriptor) => self.add_property_slot_with_kind(
                 object,
@@ -469,7 +480,8 @@ impl Isolate {
                     descriptor.writable.unwrap_or(false),
                     enumerable,
                     configurable,
-                ),
+                )
+                .with_virtual_origin(),
             ),
             PropertyDescriptor::Accessor(descriptor) => {
                 let undefined = Value::from_immediate(Immediate::Undefined);
@@ -486,7 +498,7 @@ impl Isolate {
                     key,
                     PropertyKind::Accessor,
                     pair,
-                    PropertyAttributes::accessor(enumerable, configurable),
+                    PropertyAttributes::accessor(enumerable, configurable).with_virtual_origin(),
                 )
             }
         }

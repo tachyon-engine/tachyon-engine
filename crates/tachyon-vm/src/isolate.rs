@@ -623,24 +623,17 @@ impl Isolate {
             .map_err(|_: ForInAllocationError| ExecutionError::ForInKeyAllocationFailed)?;
         let mut current = source;
         loop {
-            self.insert_for_in_virtual_function_keys(current, &mut keys)?;
             let (_, snapshot) = self.object_snapshot(current)?;
-            for key in self
-                .shapes
-                .own_keys(snapshot.shape)
-                .map_err(ExecutionError::Shape)?
-            {
-                let Some(key) = key.atom() else {
+            let mut own_keys = self.ordinary_own_property_keys(current, snapshot)?;
+            while let Some(entry) = own_keys.next_entry() {
+                let Some(key) = entry.key.atom() else {
                     continue;
                 };
-                let property = self
-                    .shapes
-                    .lookup(snapshot.shape, key)
-                    .expect("own key resolves in its source shape");
-                if self.property_is_present_from_snapshot(snapshot, property)?
-                    && keys.insert(key)
-                    && property.attributes.enumerable()
-                {
+                let Some(property) = entry.property else {
+                    keys.insert(key);
+                    continue;
+                };
+                if keys.insert(key) && property.attributes.enumerable() {
                     keys.push_enumerable(key);
                 }
             }
@@ -688,33 +681,6 @@ impl Isolate {
             }
             current = snapshot.prototype;
         }
-    }
-
-    /// Adds non-enumerable virtual function fields to the shadow set without materializing values.
-    pub(crate) fn insert_for_in_virtual_function_keys(
-        &mut self,
-        receiver: Value,
-        keys: &mut ForInKeySet,
-    ) -> Result<(), ExecutionError> {
-        if self.resolve_function_object(receiver).is_err() {
-            return Ok(());
-        }
-        let (_, snapshot) = self.object_snapshot(receiver)?;
-        let name = self.name_atom()?;
-        if self.shapes.lookup(snapshot.shape, name).is_none() {
-            keys.insert(name);
-        }
-        let length = self.length_atom()?;
-        if self.shapes.lookup(snapshot.shape, length).is_none() {
-            keys.insert(length);
-        }
-        let prototype = self.prototype_atom()?;
-        if self.shapes.lookup(snapshot.shape, prototype).is_none()
-            && self.is_function_prototype_property(receiver, prototype)
-        {
-            keys.insert(prototype);
-        }
-        Ok(())
     }
 
     /// Enumerates primitive string indices without retaining copies of their character values.

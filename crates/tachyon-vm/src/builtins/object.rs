@@ -184,18 +184,13 @@ impl Isolate {
             return Ok(());
         }
         let (_, snapshot) = self.object_snapshot(source)?;
-        let keys = self
-            .shapes
-            .own_keys(snapshot.shape)
-            .map_err(ExecutionError::Shape)?;
-        for key in keys {
-            if !self
-                .shapes
-                .lookup(snapshot.shape, key)
-                .expect("own key resolves in its source shape")
-                .attributes
-                .enumerable()
-            {
+        let mut keys = self.ordinary_own_property_keys(source, snapshot)?;
+        while let Some(entry) = keys.next_entry() {
+            let key = entry.key;
+            let Some(property) = entry.property else {
+                continue;
+            };
+            if !property.attributes.enumerable() {
                 continue;
             }
             if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
@@ -252,16 +247,13 @@ impl Isolate {
             return Ok(result);
         }
         let (_, snapshot) = self.object_snapshot(source)?;
-        let keys = self
-            .shapes
-            .own_keys(snapshot.shape)
-            .map_err(ExecutionError::Shape)?;
+        let mut keys = self.ordinary_own_property_keys(source, snapshot)?;
         let mut output_index = 0_i32;
-        for key in keys {
-            let property = self
-                .shapes
-                .lookup(snapshot.shape, key)
-                .expect("own key resolves in its source shape");
+        while let Some(entry) = keys.next_entry() {
+            let key = entry.key;
+            let Some(property) = entry.property else {
+                continue;
+            };
             if !property.attributes.enumerable()
                 || !self.property_is_present_from_snapshot(snapshot, property)?
             {
@@ -321,19 +313,9 @@ impl Isolate {
             return Ok(result);
         }
         let (_, snapshot) = self.object_snapshot(source)?;
-        let keys = self
-            .shapes
-            .own_keys(snapshot.shape)
-            .map_err(ExecutionError::Shape)?;
+        let keys = self.ordinary_own_property_keys(source, snapshot)?;
         let mut output_index = 0_u64;
         for key in keys {
-            let property = self
-                .shapes
-                .lookup(snapshot.shape, key)
-                .expect("own key resolves in its source shape");
-            if !self.property_is_present_from_snapshot(snapshot, property)? {
-                continue;
-            }
             let Some(key) = key.atom() else {
                 continue;
             };
@@ -343,30 +325,6 @@ impl Isolate {
             output_index = output_index
                 .checked_add(1)
                 .ok_or(ExecutionError::ArrayLengthOverflow)?;
-        }
-        if self.resolve_function_object(source).is_ok() {
-            for key in [self.length_atom()?, self.name_atom()?] {
-                if self.shapes.lookup(snapshot.shape, key).is_some() {
-                    continue;
-                }
-                let name = self.atom_string_value(key)?;
-                let output_key = self.safe_integer_property_atom(output_index)?;
-                self.set_own_data_property(result, output_key, name)?;
-                output_index = output_index
-                    .checked_add(1)
-                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
-            }
-            let prototype = self.prototype_atom()?;
-            if self.is_function_prototype_property(source, prototype)
-                && self.shapes.lookup(snapshot.shape, prototype).is_none()
-            {
-                let name = self.atom_string_value(prototype)?;
-                let output_key = self.safe_integer_property_atom(output_index)?;
-                self.set_own_data_property(result, output_key, name)?;
-                output_index = output_index
-                    .checked_add(1)
-                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
-            }
         }
         let length = self.length_atom()?;
         self.set_own_data_property(result, length, safe_integer_value(output_index))?;
@@ -431,10 +389,7 @@ impl Isolate {
             return Err(ExecutionError::NotObject(descriptors));
         }
         let (_, snapshot) = self.object_snapshot(descriptors)?;
-        let keys = self
-            .shapes
-            .own_keys(snapshot.shape)
-            .map_err(ExecutionError::Shape)?;
+        let keys = self.ordinary_own_property_keys(descriptors, snapshot)?;
         for key in keys {
             let Some(descriptor) = self.data_property_from_snapshot(snapshot, key)? else {
                 continue;

@@ -64,6 +64,14 @@ fn for_in_enumerates_visible_string_keys() {
         .as_immediate(),
         Some(tachyon_value::Immediate::False)
     );
+    assert_eq!(
+        execute_source(
+            173,
+            "let object = {}; object[9] = 9; object[2] = 2; object[10] = 10; object.tail = 1; let order = ''; for (let key in object) order += key + ','; order === '2,9,10,tail,';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
 
 #[test]

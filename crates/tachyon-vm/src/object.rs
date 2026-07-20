@@ -94,6 +94,7 @@ impl PropertyAttributes {
     const WRITABLE: u8 = 1 << 0;
     const ENUMERABLE: u8 = 1 << 1;
     const CONFIGURABLE: u8 = 1 << 2;
+    const VIRTUAL_ORIGIN: u8 = 1 << 3;
 
     pub(crate) const DEFAULT_DATA: Self = Self(0b111);
 
@@ -119,6 +120,15 @@ impl PropertyAttributes {
 
     pub(crate) const fn configurable(self) -> bool {
         self.0 & Self::CONFIGURABLE != 0
+    }
+
+    pub(crate) const fn with_virtual_origin(mut self) -> Self {
+        self.0 |= Self::VIRTUAL_ORIGIN;
+        self
+    }
+
+    pub(crate) const fn virtual_origin(self) -> bool {
+        self.0 & Self::VIRTUAL_ORIGIN != 0
     }
 }
 
@@ -158,23 +168,27 @@ pub(crate) struct PropertyLookup {
 }
 
 pub(crate) struct OwnPropertyKeys {
-    slots: Box<[Option<PropertyKey>]>,
+    slots: Box<[Option<OwnPropertyEntry>]>,
     index: usize,
     symbols: bool,
     remaining: usize,
 }
 
-impl Iterator for OwnPropertyKeys {
-    type Item = PropertyKey;
+#[derive(Clone, Copy)]
+pub(crate) struct OwnPropertyEntry {
+    pub(crate) key: PropertyKey,
+    pub(crate) property: PropertyLookup,
+}
 
+impl OwnPropertyKeys {
     #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
+    pub(crate) fn next_entry(&mut self) -> Option<OwnPropertyEntry> {
         loop {
-            while let Some(key) = self.slots.get(self.index).copied().flatten() {
+            while let Some(entry) = self.slots.get(self.index).copied().flatten() {
                 self.index += 1;
-                if matches!(key, PropertyKey::Symbol(_)) == self.symbols {
+                if matches!(entry.key, PropertyKey::Symbol(_)) == self.symbols {
                     self.remaining -= 1;
-                    return Some(key);
+                    return Some(entry);
                 }
             }
             if self.symbols {
@@ -183,6 +197,15 @@ impl Iterator for OwnPropertyKeys {
             self.symbols = true;
             self.index = 0;
         }
+    }
+}
+
+impl Iterator for OwnPropertyKeys {
+    type Item = PropertyKey;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_entry().map(|entry| entry.key)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -259,7 +282,14 @@ impl ShapeTable {
             if let Some(key) = entry.key {
                 let slot = &mut keys[entry.slot as usize];
                 if slot.is_none() {
-                    *slot = Some(key);
+                    *slot = Some(OwnPropertyEntry {
+                        key,
+                        property: PropertyLookup {
+                            slot: entry.slot,
+                            kind: entry.kind,
+                            attributes: entry.attributes,
+                        },
+                    });
                 }
             }
             current = entry.parent.expect("non-root shapes have a parent");

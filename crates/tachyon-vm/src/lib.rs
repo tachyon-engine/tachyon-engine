@@ -268,6 +268,7 @@ pub enum ExecutionError {
     BoundNameAllocationFailed,
     SymbolIdExhausted,
     ArrayLengthOverflow,
+    OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),
     UnsupportedErrorMessage(Value),
