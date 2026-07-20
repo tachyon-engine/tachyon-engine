@@ -3,6 +3,18 @@
 use super::super::*;
 
 impl Isolate {
+    /// Returns the primitive String receiver required by String.prototype.toString and valueOf.
+    pub(crate) fn string_primitive_value(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_string_value(receiver) {
+            Ok(receiver)
+        } else {
+            Err(ExecutionError::NotObject(receiver))
+        }
+    }
+
     /// Implements String.prototype.charAt over the engine's UTF-16 code-unit representation.
     pub(crate) fn string_char_at(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let Some(unit) = self.string_code_unit_at(site)? else {

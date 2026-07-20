@@ -139,6 +139,19 @@ fn string_code_point_methods_preserve_utf16_boundaries() {
 }
 
 #[test]
+/// Publishes String's primitive identity methods without coercing unrelated receivers.
+fn string_identity_methods_return_the_primitive_receiver() {
+    assert_eq!(
+        execute_source(
+            935,
+            "'tachyon'.toString() === 'tachyon' && String.prototype.valueOf.call('tachyon') === 'tachyon';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

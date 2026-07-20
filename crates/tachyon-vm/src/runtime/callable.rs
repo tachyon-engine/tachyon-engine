@@ -37,6 +37,8 @@ pub(crate) enum NativeFunction {
     StringCodePointAt,
     StringFromCharCode,
     StringFromCodePoint,
+    StringToString,
+    StringValueOf,
     StringSlice,
     StringSubstring,
     StringIndexOf,
@@ -411,6 +413,8 @@ impl NativeFunction {
             | Self::StringCodePointAt
             | Self::StringFromCharCode
             | Self::StringFromCodePoint
+            | Self::StringToString
+            | Self::StringValueOf
             | Self::StringSlice
             | Self::StringSubstring
             | Self::StringIndexOf
@@ -542,6 +546,8 @@ impl NativeFunction {
             Self::StringCodePointAt => "codePointAt",
             Self::StringFromCharCode => "fromCharCode",
             Self::StringFromCodePoint => "fromCodePoint",
+            Self::StringToString => "toString",
+            Self::StringValueOf => "valueOf",
             Self::StringSlice => "slice",
             Self::StringSubstring => "substring",
             Self::StringIndexOf => "indexOf",

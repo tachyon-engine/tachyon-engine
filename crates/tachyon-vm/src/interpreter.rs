@@ -2035,6 +2035,12 @@ impl Isolate {
                     let value = self.string_from_code_point(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(
+                    NativeFunction::StringToString | NativeFunction::StringValueOf,
+                ) => {
+                    let value = self.string_primitive_value(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::StringSlice) => {
                     let value = self.string_slice(&site)?;
                     return self.write(site.caller_base, site.destination, value);
