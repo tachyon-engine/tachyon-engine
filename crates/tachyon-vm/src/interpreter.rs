@@ -2183,6 +2183,22 @@ impl Isolate {
                     let value = self.symbol_key_for(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::SymbolToString) => {
+                    let value = self.symbol_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SymbolValueOf) => {
+                    let value = self.symbol_value_of(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SymbolDescription) => {
+                    let value = self.symbol_description_get(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SymbolToPrimitive) => {
+                    let value = self.symbol_to_primitive(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectDefineProperty) => {
                     return self.object_define_property(&site);
                 }

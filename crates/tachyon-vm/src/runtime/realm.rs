@@ -174,6 +174,7 @@ pub(crate) struct Realm {
     pub(crate) regexp_constructor: Option<Value>,
     pub(crate) regexp_prototype: Option<Value>,
     pub(crate) symbol_constructor: Option<Value>,
+    pub(crate) symbol_prototype: Option<Value>,
     pub(crate) number_constructor: Option<Value>,
     pub(crate) number_prototype: Option<Value>,
     pub(crate) number_is_nan: Option<Value>,
@@ -277,6 +278,7 @@ impl Realm {
             regexp_constructor: None,
             regexp_prototype: None,
             symbol_constructor: None,
+            symbol_prototype: None,
             number_constructor: None,
             number_prototype: None,
             number_is_nan: None,
@@ -610,6 +612,7 @@ impl Trace for Realm {
         self.regexp_constructor.trace(tracer);
         self.regexp_prototype.trace(tracer);
         self.symbol_constructor.trace(tracer);
+        self.symbol_prototype.trace(tracer);
         self.number_constructor.trace(tracer);
         self.number_prototype.trace(tracer);
         self.number_is_nan.trace(tracer);

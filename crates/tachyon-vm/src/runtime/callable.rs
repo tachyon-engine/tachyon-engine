@@ -62,6 +62,10 @@ pub(crate) enum NativeFunction {
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
+    SymbolToString,
+    SymbolValueOf,
+    SymbolDescription,
+    SymbolToPrimitive,
     NumberConstructor,
     NumberIsNaN,
     NumberIsFinite,
@@ -591,6 +595,10 @@ impl NativeFunction {
             | Self::ArrayToString => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
+            Self::SymbolToString
+            | Self::SymbolValueOf
+            | Self::SymbolDescription
+            | Self::SymbolToPrimitive => 0,
             Self::JsonParse => 1,
             Self::JsonStringify => 3,
         }
@@ -655,6 +663,10 @@ impl NativeFunction {
             Self::SymbolConstructor => "Symbol",
             Self::SymbolFor => "for",
             Self::SymbolKeyFor => "keyFor",
+            Self::SymbolToString => "toString",
+            Self::SymbolValueOf => "valueOf",
+            Self::SymbolDescription => "get description",
+            Self::SymbolToPrimitive => "[Symbol.toPrimitive]",
             Self::NumberConstructor => "Number",
             Self::NumberIsNaN => "isNaN",
             Self::NumberIsFinite => "isFinite",

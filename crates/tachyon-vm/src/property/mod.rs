@@ -47,6 +47,10 @@ impl Isolate {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
+        } else if self.is_symbol_value(receiver) {
+            self.realm
+                .symbol_prototype
+                .expect("Symbol prototype initializes before property access")
         } else {
             receiver
         };

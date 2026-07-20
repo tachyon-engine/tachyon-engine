@@ -410,6 +410,13 @@ impl Isolate {
         }
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
+        self.initialize_symbol_prototype(
+            symbol_constructor,
+            self.realm
+                .object_prototype
+                .expect("Object initializes before Symbol"),
+            function_prototype,
+        )?;
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
         self.initialize_remaining_well_known_symbols(symbol_constructor)?;
@@ -511,7 +518,65 @@ impl Isolate {
         let symbol = self.allocate_symbol(Some(description))?;
         self.realm.well_known_symbols.to_primitive = Some(symbol);
         let to_primitive = self.intern_intrinsic_name(b"toPrimitive")?;
-        self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)
+        self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)?;
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function initializes before Symbol methods");
+        let key = self.property_key(symbol)?;
+        let method = self.allocate_native_function(
+            NativeFunction::SymbolToPrimitive,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.define_data_property(
+            self.realm
+                .symbol_prototype
+                .expect("Symbol prototype initializes before methods"),
+            key,
+            DataPropertyDescriptor {
+                value: Some(method),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
+    /// Installs the ordinary Symbol prototype and the primitive-receiver methods it owns.
+    fn initialize_symbol_prototype(
+        &mut self,
+        symbol_constructor: Value,
+        object_prototype: Value,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.symbol_prototype = Some(prototype);
+        self.set_function_prototype(symbol_constructor, prototype)?;
+        let constructor = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor, symbol_constructor, true)?;
+        for (name, native) in [
+            (b"toString".as_slice(), NativeFunction::SymbolToString),
+            (b"valueOf".as_slice(), NativeFunction::SymbolValueOf),
+        ] {
+            self.install_collection_method(prototype, function_prototype, name, native)?;
+        }
+        self.install_collection_accessor(
+            prototype,
+            function_prototype,
+            b"description",
+            NativeFunction::SymbolDescription,
+        )?;
+        Ok(())
     }
 
     /// Allocates and publishes the realm-local well-known `Symbol.iterator` identity.
