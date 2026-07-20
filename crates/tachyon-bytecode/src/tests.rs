@@ -70,6 +70,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::LoadThis,
                 Opcode::LoadNewTarget,
                 Opcode::LoadArgumentsLength,
+                Opcode::LoadArgumentsObject,
                 Opcode::BreakThroughFinally,
                 Opcode::ContinueThroughFinally,
             ],

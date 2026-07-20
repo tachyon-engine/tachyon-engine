@@ -423,6 +423,7 @@ impl Isolate {
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
     fn initialize_function_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let call_atom = self.intern_intrinsic_name(b"call")?;
+        let apply_atom = self.intern_intrinsic_name(b"apply")?;
         let object_prototype = self
             .realm
             .object_prototype
@@ -472,6 +473,16 @@ impl Isolate {
         )?;
         self.realm.function_prototype = Some(function_prototype);
         self.set_function_internal_prototype(call, function_prototype)?;
+        let apply = self.allocate_native_function(
+            NativeFunction::FunctionPrototypeApply,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_intrinsic_data_property(function_prototype, apply_atom, apply, true)?;
         let bind = self.allocate_native_function(
             NativeFunction::FunctionPrototypeBind,
             OrdinaryObject {

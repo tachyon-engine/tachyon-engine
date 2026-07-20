@@ -631,7 +631,8 @@ fn verify_instruction(
         | Opcode::LoadException
         | Opcode::LoadThis
         | Opcode::LoadNewTarget
-        | Opcode::LoadArgumentsLength => check_register(operands[0])?,
+        | Opcode::LoadArgumentsLength
+        | Opcode::LoadArgumentsObject => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;

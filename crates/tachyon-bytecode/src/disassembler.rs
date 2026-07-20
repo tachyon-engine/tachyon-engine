@@ -74,7 +74,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::LoadException
         | Opcode::LoadThis
         | Opcode::LoadNewTarget
-        | Opcode::LoadArgumentsLength => write!(output, " r{}", operands[0])?,
+        | Opcode::LoadArgumentsLength
+        | Opcode::LoadArgumentsObject => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,

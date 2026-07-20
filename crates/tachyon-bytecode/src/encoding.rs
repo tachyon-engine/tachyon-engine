@@ -215,9 +215,11 @@ pub enum Opcode {
     CopyDataProperties = 84,
     /// Collects the active function's positional arguments starting at one fixed parameter index.
     CollectRestArguments = 85,
+    /// Materializes the active function's actual arguments as one independent Array-like object.
+    LoadArgumentsObject = 86,
 }
 
-pub(super) const OPCODE_COUNT: usize = 86;
+pub(super) const OPCODE_COUNT: usize = 87;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -305,10 +307,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // ExcludePropertyKey
     3, // CopyDataProperties
     2, // CollectRestArguments
+    1, // LoadArgumentsObject
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CollectRestArguments as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LoadArgumentsObject as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -440,6 +443,7 @@ impl Opcode {
             19 => Some(Self::ExcludePropertyKey),
             20 => Some(Self::CopyDataProperties),
             21 => Some(Self::CollectRestArguments),
+            22 => Some(Self::LoadArgumentsObject),
             _ => None,
         }
     }

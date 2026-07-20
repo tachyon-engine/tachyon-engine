@@ -973,6 +973,10 @@ impl Isolate {
                     .argument_count;
                 self.write(base, operands[0], safe_integer_value(u64::from(length)))?;
             }
+            Opcode::LoadArgumentsObject => {
+                let arguments = self.collect_rest_arguments(0)?;
+                self.write(base, operands[0], arguments)?;
+            }
             Opcode::CollectRestArguments => {
                 let rest = self.collect_rest_arguments(operands[1])?;
                 self.write(base, operands[0], rest)?;
@@ -2127,6 +2131,21 @@ impl Isolate {
                         site.argument_count -= 1;
                     }
                 }
+                FunctionExecutable::Native(NativeFunction::FunctionPrototypeApply) => {
+                    let this_value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let argument_list = self.call_argument(&site, 1)?;
+                    let (prefix, argument_count) =
+                        self.apply_argument_prefix(site.this_value, this_value, argument_list)?;
+                    site.callee = site.this_value;
+                    site.this_value = this_value;
+                    site.argument_base = 0;
+                    site.argument_prefix = Some(prefix);
+                    site.argument_prefix_offset = 0;
+                    site.argument_prefix_count = argument_count;
+                    site.argument_count = argument_count;
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeBind) => {
                     let bound = self.create_bound_function(&site)?;
                     return self.write(site.caller_base, site.destination, bound);
@@ -2395,6 +2414,42 @@ impl Isolate {
         let length = self.intern_intrinsic_name(b"length")?;
         self.set_own_data_property(result, length, safe_integer_value(u64::from(output_index)))?;
         Ok(result)
+    }
+
+    /// Materializes the ordinary-Array subset of CreateListFromArrayLike for `Function.prototype.apply`.
+    fn apply_argument_prefix(
+        &mut self,
+        target: Value,
+        this_value: Value,
+        argument_list: Option<Value>,
+    ) -> Result<(GcRef<BoundFunctionData>, u32), ExecutionError> {
+        let Some(argument_list) = argument_list else {
+            let prefix = self.create_apply_argument_prefix(target, this_value, Vec::new())?;
+            return Ok((prefix, 0));
+        };
+        if !self.is_array_value(argument_list)? {
+            return Err(ExecutionError::NotObject(argument_list));
+        }
+        let length_atom = self.length_atom()?;
+        let length = self
+            .get_data_property(argument_list, length_atom)?
+            .and_then(|value| value.as_i32())
+            .filter(|length| *length >= 0)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(argument_list))?;
+        let count = u32::try_from(length).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+        let mut arguments = Vec::new();
+        arguments
+            .try_reserve_exact(length as usize)
+            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+        for index in 0..length {
+            let key = self.safe_integer_property_atom(index as u64)?;
+            arguments.push(
+                self.get_data_property(argument_list, key)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            );
+        }
+        let prefix = self.create_apply_argument_prefix(target, this_value, arguments)?;
+        Ok((prefix, count))
     }
 
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.

@@ -310,6 +310,38 @@ impl Isolate {
         Ok(Value::from_heap_ref(function.raw()))
     }
 
+    /// Stores an apply argument list in the existing immutable bound-prefix representation.
+    pub(crate) fn create_apply_argument_prefix(
+        &mut self,
+        target: Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+    ) -> Result<GcRef<BoundFunctionData>, ExecutionError> {
+        self.resolve_function_object(target)?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.bound_function,
+                0,
+                BoundFunctionData {
+                    bound_target: target,
+                    call_target: target,
+                    bound_this: this_value,
+                    arguments: arguments.into_boxed_slice(),
+                    length: Value::from_i32(0),
+                    name: Value::from_immediate(Immediate::Undefined),
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
     /// Computes the configurable bound length from the target's own numeric length property.
     pub(crate) fn bound_function_length(
         &mut self,

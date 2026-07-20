@@ -267,7 +267,8 @@ impl BytecodeBuilder {
             | Opcode::LoadException
             | Opcode::LoadThis
             | Opcode::LoadNewTarget
-            | Opcode::LoadArgumentsLength => &[0],
+            | Opcode::LoadArgumentsLength
+            | Opcode::LoadArgumentsObject => &[0],
             Opcode::Move
             | Opcode::Not
             | Opcode::Negate

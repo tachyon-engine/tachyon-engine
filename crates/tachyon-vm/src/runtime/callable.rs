@@ -45,6 +45,7 @@ pub(crate) enum NativeFunction {
     BooleanConstructor,
     FunctionPrototype,
     FunctionPrototypeCall,
+    FunctionPrototypeApply,
     FunctionPrototypeBind,
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
@@ -385,6 +386,7 @@ impl NativeFunction {
             | Self::NumberConstructor
             | Self::BooleanConstructor
             | Self::FunctionPrototypeCall
+            | Self::FunctionPrototypeApply
             | Self::FunctionPrototypeBind
             | Self::FunctionConstructor
             | Self::ErrorConstructor(_)
@@ -504,6 +506,7 @@ impl NativeFunction {
             Self::BooleanConstructor => "Boolean",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
+            Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
             Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
