@@ -593,6 +593,13 @@ pub(crate) struct SymbolObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Function activation arguments with an ordinary property base and stable exotic identity.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct ArgumentsObject {
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// RegExp state whose observable properties remain in the ordinary-object base.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -631,6 +638,13 @@ impl Trace for SymbolObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.symbol_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for ArgumentsObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.ordinary.trace(tracer);
     }
 }

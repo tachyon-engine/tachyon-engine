@@ -59,6 +59,9 @@ impl Isolate {
             accessor_pair: registry
                 .try_register("AccessorPair")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            arguments_object: registry
+                .try_register("ArgumentsObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             array: registry
                 .try_register("ArrayObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -611,6 +614,38 @@ impl Isolate {
             )
             .map_err(ExecutionError::HeapAllocation)?;
         Ok(Value::from_heap_ref(object.raw()))
+    }
+
+    /// Allocates the ordinary backing of one activation-local unmapped Arguments exotic object.
+    pub(crate) fn allocate_arguments_object(&mut self) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before arguments objects");
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.arguments_object,
+                0,
+                0,
+                ArgumentsObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     /// Allocates one boxed Number while keeping its data and prototype live across collection.

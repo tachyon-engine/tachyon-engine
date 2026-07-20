@@ -979,7 +979,7 @@ impl Isolate {
                 self.write(base, operands[0], safe_integer_value(u64::from(length)))?;
             }
             Opcode::LoadArgumentsObject => {
-                let arguments = self.collect_rest_arguments(0)?;
+                let arguments = self.materialize_arguments_object()?;
                 self.write(base, operands[0], arguments)?;
             }
             Opcode::CollectRestArguments => {
@@ -1722,6 +1722,7 @@ impl Isolate {
             return Err(ExecutionError::CallStackLimit { limit: 0 });
         }
         self.fiber.frames.clear();
+        self.fiber.argument_objects.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -1761,6 +1762,7 @@ impl Isolate {
             construct_receiver: None,
             call_site: None,
         });
+        self.fiber.argument_objects.push(None);
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
@@ -2793,6 +2795,52 @@ impl Isolate {
         Ok(result)
     }
 
+    /// Lazily creates one identity-stable unmapped arguments object for the active activation.
+    fn materialize_arguments_object(&mut self) -> Result<Value, ExecutionError> {
+        if let Some(arguments) = self.fiber.argument_objects.last().copied().flatten() {
+            return Ok(arguments);
+        }
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let arguments = self.allocate_arguments_object()?;
+        let site = CallSite {
+            caller_base: frame.base,
+            destination: 0,
+            callee: Value::from_immediate(Immediate::Undefined),
+            argument_base: frame.argument_base,
+            argument_prefix: frame.argument_prefix,
+            argument_prefix_offset: frame.argument_prefix_offset,
+            argument_prefix_count: frame.argument_prefix_count,
+            argument_count: frame.argument_count,
+            this_value: frame.this_value,
+            new_target: frame.new_target,
+            construct_receiver: frame.construct_receiver,
+            call_site: frame.call_site.unwrap_or(WordOffset::new(0)),
+        };
+        for index in 0..site.argument_count {
+            let value = self
+                .call_argument(&site, index)?
+                .expect("arguments index stays below the exact argument count");
+            let key = self.safe_integer_property_atom(u64::from(index))?;
+            self.set_own_data_property(arguments, key, value)?;
+        }
+        let length = self.length_atom()?;
+        self.set_own_data_property(
+            arguments,
+            length,
+            safe_integer_value(u64::from(site.argument_count)),
+        )?;
+        *self
+            .fiber
+            .argument_objects
+            .last_mut()
+            .expect("arguments cache stays aligned with active frames") = Some(arguments);
+        Ok(arguments)
+    }
+
     /// Materializes the ordinary-Array subset of CreateListFromArrayLike for `Function.prototype.apply`.
     fn apply_argument_prefix(
         &mut self,
@@ -2920,6 +2968,7 @@ impl Isolate {
             completion_base: self.fiber.completions.len() as u32,
             call_site: Some(site.call_site),
         });
+        self.fiber.argument_objects.push(None);
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
             && let Err(error) = self.allocate_current_environment(
                 target.kind,
@@ -2931,6 +2980,7 @@ impl Isolate {
             )
         {
             self.fiber.frames.pop();
+            self.fiber.argument_objects.pop();
             self.fiber.registers.truncate(callee_base as usize);
             return Err(error);
         }
@@ -2969,6 +3019,10 @@ impl Isolate {
             .frames
             .pop()
             .expect("callee return always has an active frame");
+        self.fiber
+            .argument_objects
+            .pop()
+            .expect("arguments cache stays aligned with active frames");
         let value = match frame.construct_receiver {
             Some(receiver) if !self.is_object_value(value) => receiver,
             _ => value,

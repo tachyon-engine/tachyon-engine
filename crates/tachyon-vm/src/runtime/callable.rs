@@ -968,6 +968,7 @@ impl Trace for AccessorPair {
 #[derive(Clone, Copy)]
 pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
+    Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
     Number(GcRef<NumberObject>),
@@ -987,6 +988,7 @@ impl ObjectReceiver {
     pub(crate) fn value(self) -> Value {
         match self {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
+            Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
@@ -1106,6 +1108,7 @@ impl Trace for FunctionObject {
 pub(crate) struct VmTypes {
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array: GcType<ArrayObject>,
+    pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
     pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,

@@ -72,6 +72,18 @@ fn arrow_function_expression_can_be_called() {
 }
 
 #[test]
+fn arguments_object_is_activation_stable_and_indexed() {
+    assert_eq!(
+        execute_source(
+            165,
+            "function inspect(value) { return arguments === arguments && arguments[0] === value && arguments.length === 1; } inspect(7);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}
+
+#[test]
 /// Collects actual positional arguments after fixed parameters for ordinary and arrow functions.
 fn rest_parameters_collect_exact_argument_tails() {
     assert_eq!(

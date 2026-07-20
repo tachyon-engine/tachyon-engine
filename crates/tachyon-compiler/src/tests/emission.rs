@@ -44,6 +44,27 @@ fn compiler_emits_verified_bytecode_for_one_plus_two() {
 }
 
 #[test]
+fn compiler_materializes_the_arguments_object_in_function_scope() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function read() { return arguments; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.contains("LoadArgumentsObject"));
+    assert!(!disassembly.contains("LoadArgumentsLength"));
+}
+
+#[test]
 fn compiler_keeps_loose_and_strict_inequality_opcodes_distinct() {
     let module = Compiler
         .compile(

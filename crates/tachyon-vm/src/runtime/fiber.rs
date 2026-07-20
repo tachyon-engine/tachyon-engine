@@ -570,6 +570,8 @@ pub(crate) struct ActiveHandler {
 #[derive(Debug, Default)]
 pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
+    /// Activation-aligned lazy Arguments object roots; avoids growing the hot Frame layout.
+    pub(crate) argument_objects: Vec<Option<Value>>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -583,6 +585,8 @@ impl Fiber {
     /// own heap references, while registers, frame context, and abrupt completion payloads do.
     pub(crate) fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.registers.trace(tracer);
+        self.argument_objects.trace(tracer);
+        debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         for frame in &mut self.frames {
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);

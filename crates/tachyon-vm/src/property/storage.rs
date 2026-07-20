@@ -497,6 +497,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Ordinary(object), snapshot));
         }
+        if let Ok(arguments) = self
+            .heap
+            .checked_reference(raw, self.types.arguments_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(arguments, self.types.arguments_object)
+                        .map(|arguments| arguments.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Arguments(arguments), ordinary));
+        }
         if let Ok(array) = self.heap.checked_reference(raw, self.types.array) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(array).map_err(ExecutionError::Root)?;
@@ -665,6 +680,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Arguments(arguments) => self.heap.with_running_scope(|scope| {
+                let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(arguments, self.types.arguments_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Array(array) => self.heap.with_running_scope(|scope| {
                 let array = scope.root(array).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -813,6 +839,17 @@ impl Isolate {
                     no_gc
                         .borrow_mut(object, self.types.ordinary_object)
                         .map_err(ExecutionError::NoGcBorrow)?
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Arguments(arguments) => self.heap.with_running_scope(|scope| {
+                let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(arguments, self.types.arguments_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
                         .shape = shape;
                     Ok(())
                 })
@@ -977,6 +1014,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(object, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::Arguments(arguments) => self.heap.with_running_scope(|scope| {
+                let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let arguments = no_gc
+                        .borrow_mut(arguments, self.types.arguments_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    arguments.ordinary.shape = shape;
+                    arguments.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(arguments, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -1244,6 +1302,10 @@ impl Isolate {
         self.heap
             .checked_reference(raw, self.types.ordinary_object)
             .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.arguments_object)
+                .is_ok()
             || self.heap.checked_reference(raw, self.types.array).is_ok()
             || self
                 .heap
