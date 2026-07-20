@@ -961,6 +961,22 @@ fn array_destructuring_rest_collects_the_iterator_tail() {
         .as_i32(),
         Some(6),
     );
+    assert_eq!(
+        execute_source(
+            209,
+            "var head; var tail; [head, ...tail] = [1, 2, 3]; head + tail[0] + tail[1];"
+        )
+        .as_i32(),
+        Some(6),
+    );
+    assert_eq!(
+        execute_source(
+            210,
+            "let head = 0; let tail = []; [head, ...tail] = [1, 2, 3]; head + tail[0] + tail[1];"
+        )
+        .as_i32(),
+        Some(6),
+    );
 }
 
 #[test]

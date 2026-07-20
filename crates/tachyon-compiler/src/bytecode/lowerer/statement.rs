@@ -799,9 +799,6 @@ impl Lowerer<'_> {
                 Ok(())
             }
             crate::HirPatternKind::Array { elements, rest } => {
-                if rest.is_some() {
-                    return Err(self.unsupported(pattern.span, "array rest bytecode"));
-                }
                 let iterator = self.get_sync_iterator(value, pattern.span)?;
                 for element in elements.iter() {
                     let next = self.iterator_next(iterator, pattern.span)?;
@@ -836,6 +833,10 @@ impl Lowerer<'_> {
                     self.builder
                         .bind_label(end)
                         .map_err(CompileError::Builder)?;
+                }
+                if let Some(rest) = rest {
+                    let array = self.collect_iterator_rest(iterator, pattern.span)?;
+                    self.assign_pattern(rest, array, span)?;
                 }
                 self.close_iterator_normally(iterator, pattern.span)
             }
