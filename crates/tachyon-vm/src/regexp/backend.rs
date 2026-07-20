@@ -12,7 +12,7 @@ pub(crate) struct CompiledRegExp {
 }
 
 /// A successful match expressed only in ECMAScript UTF-16 code-unit offsets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[allow(
     dead_code,
     reason = "RegExp object integration follows the backend contract"
@@ -20,6 +20,7 @@ pub(crate) struct CompiledRegExp {
 pub(crate) struct RegExpMatch {
     pub(crate) start: usize,
     pub(crate) end: usize,
+    pub(crate) captures: Vec<Option<core::ops::Range<usize>>>,
 }
 
 #[allow(
@@ -49,6 +50,7 @@ impl CompiledRegExp {
                 RegExpMatch {
                     start: range.start,
                     end: range.end,
+                    captures: matched.groups().skip(1).collect(),
                 }
             })
     }

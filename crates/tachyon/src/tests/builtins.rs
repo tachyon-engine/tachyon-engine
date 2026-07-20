@@ -61,6 +61,19 @@ fn regexp_constructor_defaults_to_the_canonical_empty_pattern() {
 }
 
 #[test]
+/// Materializes matched and unmatched positional captures in RegExp exec results.
+fn regexp_exec_preserves_capture_slots() {
+    assert_eq!(
+        execute_source(
+            951,
+            "let result = /(a)(b)?/.exec('a'); result.length === 3 && result[0] === 'a' && result[1] === 'a' && result[2] === undefined;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(

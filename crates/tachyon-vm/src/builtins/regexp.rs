@@ -105,7 +105,7 @@ impl Isolate {
         Ok(regexp)
     }
 
-    /// Executes the current no-capture backend and materializes the minimum RegExp result array.
+    /// Executes the backend and materializes the match plus every positional capture.
     pub(crate) fn regexp_exec(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let (source, flags) = self.regexp_data(site.this_value)?;
         let input_argument = self.call_argument(site, 0)?;
@@ -146,14 +146,35 @@ impl Isolate {
             .array_prototype
             .expect("Array prototype initializes before RegExp result construction");
         let result = self.create_array_object_with_prototype(prototype)?;
-        let matched_text = self.allocate_runtime_string(
-            JsString::try_from_utf16(&input_units[matched.start..matched.end])
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )?;
-        let zero = self.property_key_atom(Value::from_i32(0))?;
-        self.set_own_data_property(result, zero, matched_text)?;
+        let capture_count = matched.captures.len();
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(matched.captures.len() + 1)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        ranges.push(Some(matched.start..matched.end));
+        ranges.extend(matched.captures);
+        for (index, range) in ranges.into_iter().enumerate() {
+            let value = match range {
+                Some(range) => self.allocate_runtime_string(
+                    JsString::try_from_utf16(&input_units[range])
+                        .map_err(ExecutionError::PropertyKeyString)?,
+                )?,
+                None => Value::from_immediate(Immediate::Undefined),
+            };
+            let key = self.property_key_atom(Value::from_i32(
+                i32::try_from(index).map_err(|_| ExecutionError::InvalidStringLength)?,
+            ))?;
+            self.set_own_data_property(result, key, value)?;
+        }
         let length = self.intern_intrinsic_name(b"length")?;
-        self.set_own_data_property(result, length, Value::from_i32(1))?;
+        self.set_own_data_property(
+            result,
+            length,
+            Value::from_i32(
+                i32::try_from(capture_count + 1)
+                    .map_err(|_| ExecutionError::InvalidStringLength)?,
+            ),
+        )?;
         let index = self.intern_intrinsic_name(b"index")?;
         self.set_own_data_property(
             result,
