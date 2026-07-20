@@ -47,6 +47,24 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::RegExp { pattern, flags } => {
+                let mut code_units = Vec::new();
+                code_units
+                    .try_reserve_exact(pattern.encode_utf16().count())
+                    .map_err(|_| CompileError::ConstantAllocationFailed)?;
+                code_units.extend(pattern.encode_utf16());
+                let constant = u32::try_from(self.constants.len())
+                    .map_err(|_| CompileError::ConstantOverflow)?;
+                self.constants
+                    .push(BytecodeConstant::regexp_from_utf16(code_units, *flags));
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::LoadConstant,
+                    &[destination.index(), constant],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Boolean(value) => self.load_boolean(*value, expression.span),
             HirExpressionKind::Null => self.load_null(expression.span),
             HirExpressionKind::Unary {

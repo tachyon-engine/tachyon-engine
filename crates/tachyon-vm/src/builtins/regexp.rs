@@ -4,6 +4,42 @@ use super::super::*;
 use crate::regexp::backend::CompiledRegExp;
 
 impl Isolate {
+    /// Creates one independent RegExp literal object from verified, module-owned UTF-16 data.
+    pub(crate) fn create_regexp_literal(
+        &mut self,
+        pattern: &[u16],
+        flags: u8,
+    ) -> Result<Value, ExecutionError> {
+        let source = self.allocate_runtime_string(
+            JsString::try_from_utf16(pattern).map_err(ExecutionError::ConstantString)?,
+        )?;
+        let flag_text = regexp_flag_text(flags)?;
+        let flags = self.allocate_runtime_string(
+            JsString::try_from_latin1(&flag_text).map_err(ExecutionError::ConstantString)?,
+        )?;
+        self.validate_regexp_flags(flags)?;
+        let source_text =
+            String::from_utf16(pattern).map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        CompiledRegExp::compile_with_flags(
+            &source_text,
+            core::str::from_utf8(&flag_text).expect("RegExp flags are ASCII"),
+        )
+        .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let prototype = self
+            .realm
+            .regexp_prototype
+            .expect("RegExp prototype initializes before literal evaluation");
+        let regexp = self.allocate_regexp_object(source, flags, prototype)?;
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        self.define_fresh_data_property(
+            regexp,
+            last_index,
+            Value::from_i32(0),
+            PropertyAttributes::data(true, false, false),
+        )?;
+        Ok(regexp)
+    }
+
     /// Creates a RegExp exotic after validating the supported flag set and source program.
     pub(crate) fn create_regexp_from_site(
         &mut self,
@@ -223,4 +259,38 @@ struct RegExpFlags {
     dot_all: bool,
     unicode: bool,
     unicode_sets: bool,
+}
+
+/// Reconstructs canonical flag order from Oxc's stable bit encoding.
+fn regexp_flag_text(flags: u8) -> Result<Vec<u8>, ExecutionError> {
+    const G: u8 = 1 << 0;
+    const I: u8 = 1 << 1;
+    const M: u8 = 1 << 2;
+    const S: u8 = 1 << 3;
+    const U: u8 = 1 << 4;
+    const Y: u8 = 1 << 5;
+    const D: u8 = 1 << 6;
+    const V: u8 = 1 << 7;
+    if flags & U != 0 && flags & V != 0 {
+        return Err(ExecutionError::InvalidRegExpFlags);
+    }
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(8)
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    for (mask, flag) in [
+        (D, b'd'),
+        (G, b'g'),
+        (I, b'i'),
+        (M, b'm'),
+        (S, b's'),
+        (U, b'u'),
+        (V, b'v'),
+        (Y, b'y'),
+    ] {
+        if flags & mask != 0 {
+            result.push(flag);
+        }
+    }
+    Ok(result)
 }

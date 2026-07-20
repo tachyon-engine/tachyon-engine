@@ -61,6 +61,19 @@ fn regexp_test_observes_sticky_last_index_and_failure_reset() {
 }
 
 #[test]
+/// Ensures each RegExp literal evaluation creates an independent `lastIndex` state carrier.
+fn regexp_literals_lower_to_independent_runtime_objects() {
+    assert_eq!(
+        execute_source(
+            949,
+            "let first = /a/g; let second = /a/g; first.test('aa') && first.lastIndex === 1 && second.lastIndex === 0 && second.test('aa') && second.lastIndex === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Exercises String character methods against primitive UTF-16 code units and out-of-range values.
 fn string_character_methods_preserve_utf16_and_numeric_boundaries() {
     assert_eq!(

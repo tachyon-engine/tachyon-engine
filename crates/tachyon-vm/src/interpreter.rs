@@ -526,20 +526,25 @@ impl Isolate {
             }
             Opcode::LoadConstant => {
                 let constant_index = operands[1] as usize;
-                let loaded = self.loaded_code(code)?;
-                let constant = loaded
+                let constant = self
+                    .loaded_code(code)?
                     .module
                     .constants()
                     .get(constant_index)
+                    .cloned()
                     .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?;
                 let value = match constant {
-                    BytecodeConstant::NumberBits(bits) => Value::from_f64(f64::from_bits(*bits)),
-                    BytecodeConstant::String(_) => loaded
+                    BytecodeConstant::NumberBits(bits) => Value::from_f64(f64::from_bits(bits)),
+                    BytecodeConstant::String(_) => self
+                        .loaded_code(code)?
                         .constant_values
                         .get(constant_index)
                         .copied()
                         .flatten()
                         .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?,
+                    BytecodeConstant::RegExp { pattern, flags } => {
+                        self.create_regexp_literal(&pattern, flags)?
+                    }
                     _ => return Err(ExecutionError::UnsupportedConstant(operands[1])),
                 };
                 self.write(base, operands[0], value)?;

@@ -79,6 +79,10 @@ pub enum HirAssignmentOperator {
 pub enum HirExpressionKind {
     Number(u64),
     String(Arc<str>),
+    RegExp {
+        pattern: Arc<str>,
+        flags: u8,
+    },
     Boolean(bool),
     Null,
     Identifier(HirIdentifierReference),
@@ -199,6 +203,10 @@ pub(super) fn lower_expression(
         Expression::StringLiteral(literal) => {
             HirExpressionKind::String(Arc::from(literal.value.as_str()))
         }
+        Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
+            pattern: Arc::from(literal.regex.pattern.text.as_str()),
+            flags: literal.regex.flags.bits(),
+        },
         Expression::BooleanLiteral(literal) => HirExpressionKind::Boolean(literal.value),
         Expression::NullLiteral(_) => HirExpressionKind::Null,
         Expression::Identifier(identifier) => {

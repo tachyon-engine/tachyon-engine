@@ -363,6 +363,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         }
         HirExpressionKind::Number(_)
         | HirExpressionKind::String(_)
+        | HirExpressionKind::RegExp { .. }
         | HirExpressionKind::Boolean(_)
         | HirExpressionKind::Null
         | HirExpressionKind::Function(_)
