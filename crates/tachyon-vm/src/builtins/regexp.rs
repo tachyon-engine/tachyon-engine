@@ -47,31 +47,43 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let pattern_argument = self.call_argument(site, 0)?;
         let flags_argument = self.call_argument(site, 1)?;
-        let mut pattern = if pattern_argument.is_none()
-            || pattern_argument
-                .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined))
-        {
-            self.allocate_runtime_string(
-                JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
-            )?
+        let flags_are_absent = flags_argument.is_none()
+            || flags_argument
+                .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined));
+        let copied_regexp = pattern_argument.filter(|value| {
+            value.as_heap_ref().is_some_and(|raw| {
+                self.heap
+                    .checked_reference(raw, self.types.regexp_object)
+                    .is_ok()
+            })
+        });
+        let (mut pattern, flags) = if flags_are_absent && let Some(regexp) = copied_regexp {
+            self.regexp_data(regexp)?
         } else {
-            self.regexp_string_argument(pattern_argument)?
+            let pattern = if pattern_argument.is_none()
+                || pattern_argument
+                    .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined))
+            {
+                self.allocate_runtime_string(
+                    JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+                )?
+            } else {
+                self.regexp_string_argument(pattern_argument)?
+            };
+            let flags = if flags_are_absent {
+                self.allocate_runtime_string(
+                    JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
+                )?
+            } else {
+                self.regexp_string_argument(flags_argument)?
+            };
+            (pattern, flags)
         };
         if self.regexp_string_units(pattern)?.is_empty() {
             pattern = self.allocate_runtime_string(
                 JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
             )?;
         }
-        let flags = if flags_argument.is_none()
-            || flags_argument
-                .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined))
-        {
-            self.allocate_runtime_string(
-                JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
-            )?
-        } else {
-            self.regexp_string_argument(flags_argument)?
-        };
         let source_units = self.regexp_string_units(pattern)?;
         let source =
             String::from_utf16(&source_units).map_err(|_| ExecutionError::InvalidRegExpPattern)?;

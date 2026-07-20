@@ -109,6 +109,15 @@ fn regexp_to_string_uses_source_and_flags() {
 }
 
 #[test]
+/// Copies source and flags from a RegExp pattern when no overriding flags are supplied.
+fn regexp_constructor_copies_existing_regexp_pattern() {
+    assert_eq!(
+        execute_source(956, "let source = /a/gi; let copy = new RegExp(source); copy !== source && copy.toString() === '/a/gi';").as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(
