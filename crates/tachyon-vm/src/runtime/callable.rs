@@ -455,6 +455,7 @@ pub(crate) struct VmTypes {
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
+    pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) property_storage: GcType<PropertyStorage>,
     pub(crate) string: GcType<JsString>,
     pub(crate) symbol: GcType<SymbolValue>,

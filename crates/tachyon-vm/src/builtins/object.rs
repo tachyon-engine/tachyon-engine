@@ -29,13 +29,12 @@ impl Isolate {
         let descriptor = self
             .call_argument(site, 2)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key(key)?;
-        self.begin_property_descriptor(
-            NativeContinuationSite {
-                caller_base: site.caller_base,
-                destination: site.destination,
-                call_site: site.call_site,
-            },
+        if !self.is_object_value(object) {
+            return Err(ExecutionError::NotObject(object));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::DefineProperty,
+            site,
             object,
             key,
             descriptor,
@@ -46,7 +45,7 @@ impl Isolate {
     pub(crate) fn object_get_own_property_descriptor(
         &mut self,
         site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let object = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -59,50 +58,51 @@ impl Isolate {
         let key = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key(key)?;
-        let property = if self.is_object_value(object) {
-            self.complete_own_property_descriptor(object, key)?
-        } else {
-            None
-        };
-        let Some(descriptor) = property else {
-            return Ok(Value::from_immediate(Immediate::Undefined));
-        };
-
-        let result = self.create_ordinary_object()?;
-        self.write(site.caller_base, site.destination, result)?;
-        self.materialize_property_descriptor(result, descriptor)?;
-        Ok(result)
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::GetOwnPropertyDescriptor,
+            site,
+            object,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+        )
     }
 
     /// Implements Object.prototype.hasOwnProperty for the currently supported ordinary properties.
     pub(crate) fn object_has_own_property(
         &mut self,
         site: &CallSite,
-    ) -> Result<bool, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let key = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key(key)?;
-        self.has_own_property(site.this_value, key)
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::HasOwnProperty,
+            site,
+            site.this_value,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+        )
     }
 
     /// Implements Object.prototype.propertyIsEnumerable for one ordinary own property.
     pub(crate) fn object_property_is_enumerable(
         &mut self,
         site: &CallSite,
-    ) -> Result<bool, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let key = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key(key)?;
-        Ok(self
-            .complete_own_property_descriptor(site.this_value, key)?
-            .is_some_and(|descriptor| descriptor.enumerable().unwrap_or(false)))
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::PropertyIsEnumerable,
+            site,
+            site.this_value,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+        )
     }
 
     /// Implements the static Object.hasOwn nullish boundary and ordinary own-property query.
-    pub(crate) fn object_has_own(&mut self, site: &CallSite) -> Result<bool, ExecutionError> {
+    pub(crate) fn object_has_own(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let object = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -115,8 +115,13 @@ impl Isolate {
         let key = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.property_key(key)?;
-        self.has_own_property(object, key)
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::HasOwn,
+            site,
+            object,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+        )
     }
 
     /// Implements Object.is with the VM's SameValue primitive.

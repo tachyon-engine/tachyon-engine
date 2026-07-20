@@ -1918,48 +1918,20 @@ impl Isolate {
                     return self.object_define_property(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
-                    let result = self.object_get_own_property_descriptor(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.object_get_own_property_descriptor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyNames) => {
                     let result = self.object_get_own_property_names(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwnProperty) => {
-                    let result = self.object_has_own_property(&site)?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(if result {
-                            Immediate::True
-                        } else {
-                            Immediate::False
-                        }),
-                    );
+                    return self.object_has_own_property(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectPropertyIsEnumerable) => {
-                    let enumerable = self.object_property_is_enumerable(&site)?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(if enumerable {
-                            Immediate::True
-                        } else {
-                            Immediate::False
-                        }),
-                    );
+                    return self.object_property_is_enumerable(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwn) => {
-                    let result = self.object_has_own(&site)?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(if result {
-                            Immediate::True
-                        } else {
-                            Immediate::False
-                        }),
-                    );
+                    return self.object_has_own(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIs) => {
                     let result = self.object_is(&site)?;

@@ -399,6 +399,40 @@ fn accessor_property_descriptor_abrupt_and_mixed_order() {
     );
 }
 
+#[test]
+/// Exercises resumable object keys across each Object property-query and definition builtin.
+fn object_builtin_property_keys_resume_once_with_string_hint() {
+    assert_eq!(
+        execute_source(
+            202,
+            "let calls = 0; let key = { [Symbol.toPrimitive](hint) { calls++; return hint === 'string' ? 'answer' : 'wrong'; } }; let object = { answer: 42 }; let descriptor = Object.getOwnPropertyDescriptor(object, key); let staticOwn = Object.hasOwn(object, key); let protoOwn = object.hasOwnProperty(key); let enumerable = object.propertyIsEnumerable(key); descriptor.value === 42 && staticOwn && protoOwn && enumerable && calls === 4;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            203,
+            "let order = ''; let key = { [Symbol.toPrimitive](hint) { order += hint === 'string' ? 'k' : 'x'; return 'created'; } }; let descriptor = {}; Object.defineProperty(descriptor, 'value', { get() { order += 'd'; return 42; } }); let target = {}; Object.defineProperty(target, key, descriptor); order === 'kd' && target.created === 42;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Locks the opposite ToObject/ToPropertyKey order of static and prototype Object queries.
+fn object_builtin_property_key_guards_follow_each_spec_order() {
+    assert_eq!(
+        execute_source(
+            204,
+            "let staticCalls = 0; let staticKey = { [Symbol.toPrimitive]() { staticCalls++; return 'x'; } }; let staticError = false; try { Object.hasOwn(null, staticKey); } catch (error) { staticError = error instanceof TypeError; } let prototypeCalls = 0; let prototypeKey = { [Symbol.toPrimitive]() { prototypeCalls++; throw 42; } }; let prototypeError = false; try { Object.prototype.hasOwnProperty.call(null, prototypeKey); } catch (error) { prototypeError = error === 42; } staticError && staticCalls === 0 && prototypeError && prototypeCalls === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
 /// Verifies primitive constructors reuse the VM numeric, truthiness, and string contracts.
 #[test]
 fn primitive_constructors_convert_values() {

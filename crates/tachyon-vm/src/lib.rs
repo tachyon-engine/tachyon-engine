@@ -59,9 +59,10 @@ use tachyon_value::{Immediate, Value};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use conversion::{
-    boolean_value, is_non_string_truthy, is_nullish, numeric_binary, numeric_binary_hot,
-    numeric_binary_operation, numeric_bitwise_not, numeric_negate, numeric_relational,
-    numeric_relational_hot, numeric_value, safe_integer_value, strict_equal_hot,
+    PendingNativePropertyKey, boolean_value, is_non_string_truthy, is_nullish, numeric_binary,
+    numeric_binary_hot, numeric_binary_operation, numeric_bitwise_not, numeric_negate,
+    numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
+    strict_equal_hot,
 };
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
@@ -85,11 +86,11 @@ use runtime::{
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
-        ActiveHandler, ArrayAllocationRoots, CodeLoadRoots, ConversionCallbackStage,
-        ConversionConsumer, ConversionContinuation, Fiber, Frame, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
-        PropertyMutationRoots, PrototypeInitializationRoots, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ActiveHandler, ArrayAllocationRoots, BuiltinPropertyKeyConsumer, CodeLoadRoots,
+        ConversionCallbackStage, ConversionConsumer, ConversionContinuation, Fiber, Frame,
+        NativeContinuation, NativeContinuationKind, NativeContinuationSite, PreferredType,
+        PropertyCallbackMode, PropertyMutationRoots, PrototypeInitializationRoots,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

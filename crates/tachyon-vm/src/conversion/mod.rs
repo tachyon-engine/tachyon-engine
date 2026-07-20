@@ -2,6 +2,7 @@
 
 mod equality;
 mod exotic;
+mod native_property_key;
 mod numeric;
 mod property_key;
 
@@ -17,6 +18,8 @@ pub(super) enum ConversionCallbackResult {
     Suspended,
     Returned(Value),
 }
+
+pub(crate) use native_property_key::PendingNativePropertyKey;
 
 impl Isolate {
     /// Executes one primitive constructor using the exact call argument window.
@@ -171,7 +174,7 @@ impl Isolate {
         call_site: WordOffset,
     ) -> Result<(), ExecutionError> {
         debug_assert!(self.is_object_value(object));
-        debug_assert!(consumer.is_opcode_conversion());
+        debug_assert!(consumer.is_resumable_operation());
         self.advance_native_conversion(
             ConversionContinuation {
                 site: NativeContinuationSite {
@@ -202,6 +205,16 @@ impl Isolate {
                     continuation.callback_stage = ConversionCallbackStage::MethodCall;
                     resolved_method = Some(value);
                 } else if !self.is_object_value(value) {
+                    if let ConversionConsumer::BuiltinPropertyKey(consumer) = continuation.consumer
+                    {
+                        let pending = self.pending_native_property_key(continuation.receiver)?;
+                        return self.finish_builtin_property_key(
+                            continuation.site,
+                            consumer,
+                            pending,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -500,6 +513,9 @@ impl Isolate {
                     })
                 }
                 ConversionConsumer::ToPropertyKey => argument,
+                ConversionConsumer::BuiltinPropertyKey(_) => {
+                    unreachable!("builtin property-key consumers finish inside the state machine")
+                }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }

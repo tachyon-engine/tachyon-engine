@@ -111,6 +111,18 @@ pub(crate) enum ConversionCallbackStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum BuiltinPropertyKeyConsumer {
+    DefineProperty,
+    GetOwnPropertyDescriptor,
+    HasOwnProperty,
+    PropertyIsEnumerable,
+    HasOwn,
+}
+
+const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConversionConsumer {
     NativeCall(NativeFunction),
     NativeConstruct(NativeFunction),
@@ -125,6 +137,7 @@ pub(crate) enum ConversionConsumer {
     RelationalRight(Opcode),
     Equality(Opcode),
     ToPropertyKey,
+    BuiltinPropertyKey(BuiltinPropertyKeyConsumer),
 }
 
 impl ConversionConsumer {
@@ -142,7 +155,8 @@ impl ConversionConsumer {
             | Self::RelationalLeft(_)
             | Self::RelationalRight(_)
             | Self::Equality(_)
-            | Self::ToPropertyKey => None,
+            | Self::ToPropertyKey
+            | Self::BuiltinPropertyKey(_) => None,
         }
     }
 
@@ -150,7 +164,9 @@ impl ConversionConsumer {
     pub(crate) const fn uses_string_hint(self) -> bool {
         matches!(
             self,
-            Self::NativeCall(NativeFunction::StringConstructor) | Self::ToPropertyKey
+            Self::NativeCall(NativeFunction::StringConstructor)
+                | Self::ToPropertyKey
+                | Self::BuiltinPropertyKey(_)
         )
     }
 
@@ -166,7 +182,7 @@ impl ConversionConsumer {
     }
 
     #[inline]
-    pub(crate) const fn is_opcode_conversion(self) -> bool {
+    pub(crate) const fn is_resumable_operation(self) -> bool {
         matches!(
             self,
             Self::ToNumber
@@ -180,6 +196,7 @@ impl ConversionConsumer {
                 | Self::RelationalRight(_)
                 | Self::Equality(_)
                 | Self::ToPropertyKey
+                | Self::BuiltinPropertyKey(_)
         )
     }
 }
