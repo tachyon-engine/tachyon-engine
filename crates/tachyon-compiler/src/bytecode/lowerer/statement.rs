@@ -635,19 +635,14 @@ impl Lowerer<'_> {
                 if rest.is_some() {
                     return Err(self.unsupported(pattern.span, "array rest bytecode"));
                 }
-                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                let iterator = self.get_sync_iterator(value, pattern.span)?;
                 for element in elements.iter() {
-                    let next = self.array_pattern_next(iterator, pattern.span)?;
-                    let done = self.pattern_property(
-                        next,
-                        &crate::HirObjectPropertyKey::Static("done".into()),
-                        pattern.span,
-                    )?;
+                    let next = self.iterator_next(iterator, pattern.span)?;
                     let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
                     let end = self.builder.new_label().map_err(CompileError::Builder)?;
                     self.builder
                         .emit_jump_if_true(
-                            done,
+                            iterator.done,
                             use_undefined,
                             tachyon_bytecode::SourceSpan {
                                 start: pattern.span.start,
@@ -675,7 +670,7 @@ impl Lowerer<'_> {
                         .bind_label(end)
                         .map_err(CompileError::Builder)?;
                 }
-                Ok(())
+                self.close_iterator_normally(iterator, pattern.span)
             }
             crate::HirPatternKind::Binding(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))

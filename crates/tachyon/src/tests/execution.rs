@@ -926,10 +926,23 @@ fn object_destructuring_preserves_nested_defaults_and_coercibility() {
 }
 
 #[test]
-fn array_destructuring_reads_values_in_iterator_order() {
+/// Covers a custom `Symbol.iterator` record and the normal early-close branch.
+fn array_destructuring_uses_symbol_iterator_and_closes_early() {
     assert_eq!(
         execute_source(
             910,
+            "let stage = 0; let iter = {}; stage = 1; iter[Symbol.iterator] = function() { stage = 2; return { next: function() { stage = 3; return { value: 1, done: false }; }, return: function() { stage = 4; return {}; } }; }; let [first] = iter; if (stage === 4) stage = 6; stage;"
+        )
+        .as_i32(),
+        Some(6)
+    );
+}
+
+#[test]
+fn array_destructuring_reads_values_in_iterator_order() {
+    assert_eq!(
+        execute_source(
+            911,
             "let [first, second = 4] = [1, 2]; first * 10 + second;"
         )
         .as_i32(),

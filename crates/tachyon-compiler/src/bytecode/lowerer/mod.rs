@@ -56,6 +56,15 @@ pub(super) enum LocalStorage {
     Environment { depth: u32, slot: u32 },
 }
 
+/// Registers retained for one synchronous iterator record across lowered pattern operations.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct IteratorRegisters {
+    pub(super) iterator: RegisterId,
+    receiver: RegisterId,
+    next: RegisterId,
+    done: RegisterId,
+}
+
 impl Lowerer<'_> {
     /// Destructures one object binding into locals, preserving property and default evaluation order.
     pub(super) fn bind_pattern(
@@ -89,20 +98,15 @@ impl Lowerer<'_> {
                 if rest.is_some() {
                     return Err(self.unsupported(pattern.span, "array rest bytecode"));
                 }
-                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                let iterator = self.get_sync_iterator(value, pattern.span)?;
                 for element in elements.iter() {
-                    let next = self.array_pattern_next(iterator, pattern.span)?;
-                    let done = self.pattern_property(
-                        next,
-                        &HirObjectPropertyKey::Static("done".into()),
-                        pattern.span,
-                    )?;
+                    let next = self.iterator_next(iterator, pattern.span)?;
                     let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
                     let end = self.builder.new_label().map_err(CompileError::Builder)?;
                     let selected = element.as_ref().map(|_| self.register()).transpose()?;
                     self.builder
                         .emit_jump_if_true(
-                            done,
+                            iterator.done,
                             use_undefined,
                             tachyon_bytecode::SourceSpan {
                                 start: pattern.span.start,
@@ -141,7 +145,7 @@ impl Lowerer<'_> {
                         self.bind_pattern(element, selected, mutable)?;
                     }
                 }
-                Ok(())
+                self.close_iterator_normally(iterator, pattern.span)
             }
             HirPatternKind::Assignment(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
@@ -149,47 +153,143 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Calls an object's `values` method to obtain the iterator used by array binding patterns.
-    pub(super) fn array_pattern_iterator(
+    /// Obtains and caches a synchronous iterator record through the realm's `Symbol.iterator`.
+    pub(super) fn get_sync_iterator(
         &mut self,
         object: RegisterId,
         span: SourceSpan,
-    ) -> Result<RegisterId, CompileError> {
-        self.method_call_by_name(object, "values", span)
+    ) -> Result<IteratorRegisters, CompileError> {
+        let symbol = self.register()?;
+        let symbol_scope = self.global_binding(&std::sync::Arc::from("Symbol"), false)?;
+        self.emit(Opcode::LoadScope, &[symbol.index(), symbol_scope], span)?;
+        let iterator_key = self.register()?;
+        let iterator_atom = self.scope_name(&std::sync::Arc::from("iterator"))?;
+        self.emit(
+            Opcode::GetById,
+            &[iterator_key.index(), symbol.index(), iterator_atom],
+            span,
+        )?;
+        self.prepare_property_key(iterator_key, object, false, span)?;
+        let iterator = self.computed_method_call(object, iterator_key, span)?;
+        let receiver = self.register()?;
+        self.emit(Opcode::Move, &[receiver.index(), iterator.index()], span)?;
+        let next = self.register()?;
+        let next_atom = self.scope_name(&std::sync::Arc::from("next"))?;
+        self.emit(
+            Opcode::GetById,
+            &[next.index(), receiver.index(), next_atom],
+            span,
+        )?;
+        let done = self.load_boolean(false, span)?;
+        Ok(IteratorRegisters {
+            iterator,
+            receiver,
+            next,
+            done,
+        })
     }
 
-    /// Calls an iterator's `next` method and returns its iterator-result record.
-    pub(super) fn array_pattern_next(
+    /// Calls cached `next`, then updates the record's done register from its result object.
+    pub(super) fn iterator_next(
         &mut self,
-        iterator: RegisterId,
+        iterator: IteratorRegisters,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        self.method_call_by_name(iterator, "next", span)
+        let result = self.call_receiver(iterator.receiver, iterator.next, span)?;
+        let done =
+            self.pattern_property(result, &HirObjectPropertyKey::Static("done".into()), span)?;
+        self.emit(Opcode::Move, &[iterator.done.index(), done.index()], span)?;
+        Ok(result)
     }
 
-    /// Emits a zero-argument receiver call after materializing a contiguous receiver/callee window.
-    fn method_call_by_name(
+    /// Loads a computed method then calls it with its original receiver in a contiguous window.
+    fn computed_method_call(
         &mut self,
         receiver: RegisterId,
-        name: &str,
+        key: RegisterId,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
         let base = self.register()?;
         self.emit(Opcode::Move, &[base.index(), receiver.index()], span)?;
         let callee = self.register()?;
-        let property = self.scope_name(&std::sync::Arc::from(name))?;
         self.emit(
-            Opcode::GetById,
-            &[callee.index(), base.index(), property],
+            Opcode::GetByValue,
+            &[callee.index(), base.index(), key.index()],
             span,
         )?;
+        self.call_receiver(base, callee, span)
+    }
+
+    /// Calls a cached callee located immediately after the receiver register.
+    fn call_receiver(
+        &mut self,
+        receiver: RegisterId,
+        callee: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        debug_assert_eq!(callee.index(), receiver.index() + 1);
         let destination = self.register()?;
         self.emit(
             Opcode::CallWithReceiver,
-            &[destination.index(), base.index(), 0],
+            &[destination.index(), receiver.index(), 0],
             span,
         )?;
         Ok(destination)
+    }
+
+    /// Performs the normal-completion `IteratorClose` branch after a pattern stops early.
+    fn close_iterator_normally(
+        &mut self,
+        iterator: IteratorRegisters,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let closed = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .emit_jump_if_true(
+                iterator.done,
+                closed,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let return_value = self.register()?;
+        let return_atom = self.scope_name(&std::sync::Arc::from("return"))?;
+        self.emit(
+            Opcode::GetById,
+            &[return_value.index(), iterator.iterator.index(), return_atom],
+            span,
+        )?;
+        let undefined = self.load_undefined(span)?;
+        let missing = self.register()?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[missing.index(), return_value.index(), undefined.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                missing,
+                closed,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let receiver = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[receiver.index(), iterator.iterator.index()],
+            span,
+        )?;
+        let callee = self.register()?;
+        self.emit(Opcode::Move, &[callee.index(), return_value.index()], span)?;
+        self.call_receiver(receiver, callee, span)?;
+        self.builder
+            .bind_label(closed)
+            .map_err(CompileError::Builder)
     }
 
     /// Emits the existing base guard without performing an observable property lookup.
@@ -496,19 +596,14 @@ impl Lowerer<'_> {
                 if rest.is_some() {
                     return Err(self.unsupported(pattern.span, "array rest bytecode"));
                 }
-                let iterator = self.array_pattern_iterator(value, pattern.span)?;
+                let iterator = self.get_sync_iterator(value, pattern.span)?;
                 for element in elements.iter() {
-                    let next = self.array_pattern_next(iterator, pattern.span)?;
-                    let done = self.pattern_property(
-                        next,
-                        &HirObjectPropertyKey::Static("done".into()),
-                        pattern.span,
-                    )?;
+                    let next = self.iterator_next(iterator, pattern.span)?;
                     let use_undefined = self.builder.new_label().map_err(CompileError::Builder)?;
                     let end = self.builder.new_label().map_err(CompileError::Builder)?;
                     self.builder
                         .emit_jump_if_true(
-                            done,
+                            iterator.done,
                             use_undefined,
                             tachyon_bytecode::SourceSpan {
                                 start: pattern.span.start,
@@ -536,7 +631,7 @@ impl Lowerer<'_> {
                         .bind_label(end)
                         .map_err(CompileError::Builder)?;
                 }
-                Ok(())
+                self.close_iterator_normally(iterator, pattern.span)
             }
             HirPatternKind::Assignment(_) => {
                 Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
