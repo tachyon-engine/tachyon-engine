@@ -23,6 +23,105 @@ impl Isolate {
         ))
     }
 
+    /// Implements String.prototype.at with relative UTF-16 code-unit indexing.
+    pub(crate) fn string_at(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(site.this_value)?;
+        let argument = self.call_argument(site, 0)?;
+        let position = self.string_at_position(argument, units.len())?;
+        match position.and_then(|index| units.get(index)) {
+            Some(unit) => self.allocate_runtime_string(
+                JsString::try_from_utf16(&[*unit]).map_err(ExecutionError::PropertyKeyString)?,
+            ),
+            None => Ok(Value::from_immediate(Immediate::Undefined)),
+        }
+    }
+
+    /// Reads one Unicode scalar or unpaired UTF-16 unit at the requested code-unit position.
+    pub(crate) fn string_code_point_at(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(site.this_value)?;
+        let argument = self.call_argument(site, 0)?;
+        let position = self.string_at_position(argument, units.len())?;
+        let Some(&first) = position.and_then(|index| units.get(index)) else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        let position = position.expect("a present code unit has an index");
+        let code_point = if let Some(&second) = units.get(position + 1)
+            && (0xd800..=0xdbff).contains(&first)
+            && (0xdc00..=0xdfff).contains(&second)
+        {
+            0x1_0000 + ((u32::from(first) - 0xd800) << 10) + (u32::from(second) - 0xdc00)
+        } else {
+            u32::from(first)
+        };
+        Ok(Value::from_f64(f64::from(code_point)))
+    }
+
+    /// Materializes each argument's ToUint16 value into a single UTF-16 string.
+    pub(crate) fn string_from_char_code(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(site.argument_count as usize)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for index in 0..site.argument_count {
+            let value = self
+                .call_argument(site, index)?
+                .expect("argument count is bounded");
+            let number = numeric_value(self.convert_to_number(value)?)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+            let unit = if !number.is_finite() || number == 0.0 {
+                0
+            } else {
+                number.trunc().rem_euclid(65_536.0) as u16
+            };
+            units.push(unit);
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Validates Unicode scalar arguments and writes their exact UTF-16 encoding once.
+    pub(crate) fn string_from_code_point(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(site.argument_count as usize)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for index in 0..site.argument_count {
+            let value = self
+                .call_argument(site, index)?
+                .expect("argument count is bounded");
+            let number = numeric_value(self.convert_to_number(value)?)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+            if !number.is_finite()
+                || number.fract() != 0.0
+                || !(0.0..=0x10_ffff as f64).contains(&number)
+            {
+                return Err(ExecutionError::InvalidStringLength);
+            }
+            let code_point = number as u32;
+            if let Some(character) = char::from_u32(code_point) {
+                let mut encoded = [0; 2];
+                units.extend_from_slice(character.encode_utf16(&mut encoded));
+            } else {
+                return Err(ExecutionError::InvalidStringLength);
+            }
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Implements String.prototype.slice with relative UTF-16 code-unit positions.
     pub(crate) fn string_slice(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let units = self.string_receiver_units(site.this_value)?;
@@ -467,6 +566,32 @@ impl Isolate {
             return Ok(length);
         }
         Ok((integer as usize).min(length))
+    }
+
+    /// Normalizes String.prototype.at and codePointAt positions, retaining an absent result.
+    fn string_at_position(
+        &mut self,
+        value: Option<Value>,
+        length: usize,
+    ) -> Result<Option<usize>, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok((length > 0).then_some(0));
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        if !number.is_finite() {
+            return Ok(None);
+        }
+        let integer = if number.is_nan() { 0.0 } else { number.trunc() };
+        let index = if integer < 0.0 {
+            length as f64 + integer
+        } else {
+            integer
+        };
+        Ok((0.0..length as f64)
+            .contains(&index)
+            .then_some(index as usize))
     }
 
     /// Implements ToLength for pad targets within the engine's representable string limit.

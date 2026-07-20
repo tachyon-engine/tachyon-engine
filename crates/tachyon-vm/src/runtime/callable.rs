@@ -33,6 +33,10 @@ pub(crate) enum NativeFunction {
     StringConstructor,
     StringCharAt,
     StringCharCodeAt,
+    StringAt,
+    StringCodePointAt,
+    StringFromCharCode,
+    StringFromCodePoint,
     StringSlice,
     StringSubstring,
     StringIndexOf,
@@ -403,6 +407,10 @@ impl NativeFunction {
             | Self::StringConstructor
             | Self::StringCharAt
             | Self::StringCharCodeAt
+            | Self::StringAt
+            | Self::StringCodePointAt
+            | Self::StringFromCharCode
+            | Self::StringFromCodePoint
             | Self::StringSlice
             | Self::StringSubstring
             | Self::StringIndexOf
@@ -530,6 +538,10 @@ impl NativeFunction {
             Self::StringConstructor => "String",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
+            Self::StringAt => "at",
+            Self::StringCodePointAt => "codePointAt",
+            Self::StringFromCharCode => "fromCharCode",
+            Self::StringFromCodePoint => "fromCodePoint",
             Self::StringSlice => "slice",
             Self::StringSubstring => "substring",
             Self::StringIndexOf => "indexOf",

@@ -2019,6 +2019,22 @@ impl Isolate {
                     let value = self.string_char_code_at(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringAt) => {
+                    let value = self.string_at(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringCodePointAt) => {
+                    let value = self.string_code_point_at(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringFromCharCode) => {
+                    let value = self.string_from_char_code(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringFromCodePoint) => {
+                    let value = self.string_from_code_point(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::StringSlice) => {
                     let value = self.string_slice(&site)?;
                     return self.write(site.caller_base, site.destination, value);

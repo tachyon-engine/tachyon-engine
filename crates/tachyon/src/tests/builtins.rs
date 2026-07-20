@@ -126,6 +126,19 @@ fn string_search_and_construction_methods_cover_code_unit_boundaries() {
 }
 
 #[test]
+/// Covers code-unit and code-point String APIs, including surrogate-pair materialization.
+fn string_code_point_methods_preserve_utf16_boundaries() {
+    assert_eq!(
+        execute_source(
+            934,
+            r#"'abc'.at(-1) === 'c' && 'abc'.at(3) === undefined && '\uD83D\uDE00'.codePointAt(0) === 128512 && String.fromCharCode(65, 0xD83D, 0xDE00) === 'A\uD83D\uDE00' && String.fromCodePoint(0x1F600) === '\uD83D\uDE00';"#,
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

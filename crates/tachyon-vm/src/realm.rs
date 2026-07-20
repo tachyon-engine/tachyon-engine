@@ -324,6 +324,8 @@ impl Isolate {
         for (native, name) in [
             (NativeFunction::StringCharAt, b"charAt".as_slice()),
             (NativeFunction::StringCharCodeAt, b"charCodeAt".as_slice()),
+            (NativeFunction::StringAt, b"at".as_slice()),
+            (NativeFunction::StringCodePointAt, b"codePointAt".as_slice()),
             (NativeFunction::StringSlice, b"slice".as_slice()),
             (NativeFunction::StringSubstring, b"substring".as_slice()),
             (NativeFunction::StringIndexOf, b"indexOf".as_slice()),
@@ -339,6 +341,20 @@ impl Isolate {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(string_prototype, atom, method, true)?;
+        }
+        for (native, name) in [
+            (
+                NativeFunction::StringFromCharCode,
+                b"fromCharCode".as_slice(),
+            ),
+            (
+                NativeFunction::StringFromCodePoint,
+                b"fromCodePoint".as_slice(),
+            ),
+        ] {
+            let method = allocate(self, native)?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(string_constructor, atom, method, true)?;
         }
         let trim = allocate(self, NativeFunction::StringTrim)?;
         let trim_start = allocate(self, NativeFunction::StringTrimStart)?;
