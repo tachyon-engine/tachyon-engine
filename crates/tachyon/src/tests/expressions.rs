@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+/// Lowers cooked template quasis and substitutions through the existing Add coercion path.
+fn template_literals_preserve_left_to_right_substitution_order() {
+    assert_eq!(
+        execute_source(
+            953,
+            "let value = 2; `prefix-${value}-suffix` === 'prefix-2-suffix';"
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Exercises object literal creation, ordered data-property publication, and shape-backed updates.
 fn object_literals_publish_and_update_plain_data_properties() {
     assert_eq!(

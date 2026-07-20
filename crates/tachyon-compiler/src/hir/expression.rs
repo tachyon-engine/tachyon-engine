@@ -203,6 +203,51 @@ pub(super) fn lower_expression(
         Expression::StringLiteral(literal) => {
             HirExpressionKind::String(Arc::from(literal.value.as_str()))
         }
+        Expression::TemplateLiteral(template) => {
+            let first = template
+                .quasis
+                .first()
+                .and_then(|quasi| quasi.value.cooked.as_ref())
+                .ok_or_else(|| unsupported(source.name(), span, "template literal"))?;
+            let mut accumulated = HirExpression {
+                span,
+                kind: HirExpressionKind::String(Arc::from(first.as_str())),
+            };
+            for (expression, quasi) in template
+                .expressions
+                .iter()
+                .zip(template.quasis.iter().skip(1))
+            {
+                let expression = lower_expression(expression, source, semantic, functions)?;
+                accumulated = HirExpression {
+                    span,
+                    kind: HirExpressionKind::Binary {
+                        operator: HirBinaryOperator::Add,
+                        left: Box::new(accumulated),
+                        right: Box::new(expression),
+                    },
+                };
+                let cooked = quasi
+                    .value
+                    .cooked
+                    .as_ref()
+                    .ok_or_else(|| unsupported(source.name(), span, "template literal"))?;
+                if !cooked.is_empty() {
+                    accumulated = HirExpression {
+                        span,
+                        kind: HirExpressionKind::Binary {
+                            operator: HirBinaryOperator::Add,
+                            left: Box::new(accumulated),
+                            right: Box::new(HirExpression {
+                                span,
+                                kind: HirExpressionKind::String(Arc::from(cooked.as_str())),
+                            }),
+                        },
+                    };
+                }
+            }
+            accumulated.kind
+        }
         Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
             pattern: Arc::from(literal.regex.pattern.text.as_str()),
             flags: literal.regex.flags.bits(),
