@@ -283,6 +283,8 @@ pub enum ExecutionError {
     UnsupportedErrorMessage(Value),
     UnsupportedStringValue(Value),
     UnsupportedPrimitiveStringConversion(Value),
+    InvalidJsonText,
+    InvalidJsonCircularStructure,
     UnsupportedDynamicFunctionConstructor,
     NonExtensibleObject(Value),
     ReadOnlyProperty(Value),

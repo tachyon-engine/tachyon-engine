@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+/// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
+fn json_parse_materializes_engine_values_and_rejects_extensions() {
+    assert_eq!(
+        execute_source(
+            920,
+            "let value = JSON.parse('{\"a\":[1,{\"b\":true}],\"a\":4,\"escaped\":\"\\\\u0041\"}'); value.a === 4 && value.escaped === 'A';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            921,
+            "let threw = false; try { JSON.parse('[1,]'); } catch (error) { threw = error instanceof SyntaxError; } threw && JSON.parse.length === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Covers synchronous JSON serialization of primitive, Array, ordinary-object, and cyclic values.
+fn json_stringify_serializes_core_values_and_rejects_cycles() {
+    assert_eq!(
+        execute_source(
+            922,
+            "JSON.stringify({ b: [true, undefined, -0, NaN], a: 'x\\n' }) === '{\"b\":[true,null,0,null],\"a\":\"x\\\\n\"}';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            923,
+            "let value = {}; value.self = value; let threw = false; try { JSON.stringify(value); } catch (error) { threw = error instanceof TypeError; } threw && JSON.stringify.length === 3;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers dense array indexing, elision as an absent property, and length publication.
 fn array_literals_support_basic_indexing_and_length() {
     assert_eq!(

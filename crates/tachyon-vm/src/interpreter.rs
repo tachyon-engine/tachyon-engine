@@ -2282,6 +2282,14 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorIdentity) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }
+                FunctionExecutable::Native(NativeFunction::JsonParse) => {
+                    let value = self.json_parse(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::JsonStringify) => {
+                    let value = self.json_stringify(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(native) if native.math_function().is_some() => {
                     let function = native
                         .math_function()

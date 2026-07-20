@@ -26,6 +26,7 @@ impl Isolate {
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
         self.initialize_math_intrinsics()?;
+        self.initialize_json_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -534,6 +535,7 @@ impl Isolate {
             boolean: self.intern_intrinsic_name(b"Boolean")?,
             function: self.intern_intrinsic_name(b"Function")?,
             math: self.intern_intrinsic_name(b"Math")?,
+            json: self.intern_intrinsic_name(b"JSON")?,
             global_numbers: [
                 self.intern_intrinsic_name(b"isFinite")?,
                 self.intern_intrinsic_name(b"isNaN")?,
@@ -965,6 +967,48 @@ impl Isolate {
         Ok(())
     }
 
+    /// Builds the non-constructor JSON namespace and its UTF-16 parser entry point.
+    fn initialize_json_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before JSON"),
+        })?;
+        self.realm.json_object = Some(object);
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before JSON.parse");
+        let parse = self.allocate_native_function(
+            NativeFunction::JsonParse,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.json_parse = Some(parse);
+        let parse_atom = self.intern_intrinsic_name(b"parse")?;
+        self.set_intrinsic_data_property(object, parse_atom, parse, true)?;
+        let stringify = self.allocate_native_function(
+            NativeFunction::JsonStringify,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.json_stringify = Some(stringify);
+        let stringify_atom = self.intern_intrinsic_name(b"stringify")?;
+        self.set_intrinsic_data_property(object, stringify_atom, stringify, true)
+    }
+
     /// Publishes all mandatory names without charging the host quota for user-created globals.
     fn publish_realm_intrinsic_bindings(
         &mut self,
@@ -1053,6 +1097,13 @@ impl Isolate {
             self.realm
                 .math_object
                 .expect("Math initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.json,
+            self.realm
+                .json_object
+                .expect("JSON initializes before global publication"),
             true,
         )?;
         for (atom, value) in atoms

@@ -71,6 +71,8 @@ pub(crate) enum NativeFunction {
     ArrayValues,
     ArrayIteratorNext,
     IteratorIdentity,
+    JsonParse,
+    JsonStringify,
     MathAbs,
     MathAcos,
     MathAcosh,
@@ -461,6 +463,8 @@ impl NativeFunction {
             | Self::FunctionPrototype
             | Self::ArrayToString => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
+            Self::JsonParse => 1,
+            Self::JsonStringify => 3,
         }
     }
 
@@ -538,6 +542,8 @@ impl NativeFunction {
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",
             Self::IteratorIdentity => "[Symbol.iterator]",
+            Self::JsonParse => "parse",
+            Self::JsonStringify => "stringify",
             Self::MathAbs
             | Self::MathAcos
             | Self::MathAcosh
@@ -921,13 +927,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) boolean: AtomId,
     pub(crate) function: AtomId,
     pub(crate) math: AtomId,
+    pub(crate) json: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        12 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        13 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -954,12 +961,12 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidPropertyDescriptor(_)
         | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::ArrayLengthOverflow
-        | ExecutionError::NotObject(_) => Some(NativeErrorKind::Type),
+        | ExecutionError::NotObject(_)
+        | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
-        | ExecutionError::EnvironmentBindingAlreadyInitialized { .. } => {
-            Some(NativeErrorKind::Syntax)
-        }
+        | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }
+        | ExecutionError::InvalidJsonText => Some(NativeErrorKind::Syntax),
         ExecutionError::InvalidNumberRadix(_) | ExecutionError::InvalidNumberPrecision(_) => {
             Some(NativeErrorKind::Range)
         }
