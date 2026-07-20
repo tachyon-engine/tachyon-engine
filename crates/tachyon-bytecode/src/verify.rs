@@ -140,7 +140,7 @@ pub(super) fn validate_handlers(
             || bytecode.is_instruction_start(handler.handler_end);
         let handler_kind_is_valid = match handler.kind {
             HandlerKind::Catch => handler.handler_end == handler.handler,
-            HandlerKind::Finally => {
+            HandlerKind::Finally | HandlerKind::IteratorClose => {
                 handler.handler.index() < handler.handler_end.index()
                     && finalizer_ends_with_resume(bytecode, handler.handler_end)
             }
@@ -192,7 +192,7 @@ pub(super) fn validate_handlers(
     }
     for &current in handlers
         .iter()
-        .filter(|handler| handler.kind == HandlerKind::Finally)
+        .filter(|handler| handler.kind.is_finalizer())
     {
         let active_depth = handlers
             .iter()
@@ -246,19 +246,19 @@ fn crosses_handler_ranges(left: HandlerEntry, right: HandlerEntry) -> bool {
 }
 
 fn finalizer_contains(outer: HandlerEntry, inner: HandlerEntry) -> bool {
-    outer.kind == HandlerKind::Finally
+    outer.kind.is_finalizer()
         && outer.handler.index() <= inner.handler.index()
         && inner.handler_end.index() <= outer.handler_end.index()
 }
 
 fn finalizer_executes_around(outer: HandlerEntry, inner: HandlerEntry) -> bool {
-    outer.kind == HandlerKind::Finally
+    outer.kind.is_finalizer()
         && outer.handler.index() <= inner.protected_start.index()
         && inner.protected_end.index() <= outer.handler_end.index()
 }
 
 fn crosses_finalizer_ranges(left: HandlerEntry, right: HandlerEntry) -> bool {
-    if left.kind != HandlerKind::Finally || right.kind != HandlerKind::Finally {
+    if !left.kind.is_finalizer() || !right.kind.is_finalizer() {
         return false;
     }
     let (first, second) = if left.handler.index() <= right.handler.index() {
@@ -285,19 +285,19 @@ pub(super) fn validate_finally_instructions(
         let next = offset + u32::from(instruction.word_len);
         let valid = match instruction.opcode {
             Opcode::EnterFinally => handlers.iter().any(|handler| {
-                handler.kind == HandlerKind::Finally
+                handler.kind.is_finalizer()
                     && handler.protected_start.index() <= offset
                     && offset < handler.protected_end.index()
             }),
             Opcode::ResumeCompletion => handlers.iter().any(|handler| {
-                handler.kind == HandlerKind::Finally
+                handler.kind.is_finalizer()
                     && handler.handler.index() <= offset
                     && handler.handler_end.index() == next
             }),
             Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
                 let target = instruction.operands[0];
                 handlers.iter().any(|handler| {
-                    handler.kind == HandlerKind::Finally
+                    handler.kind.is_finalizer()
                         && ((handler.protected_start.index() <= offset
                             && offset < handler.protected_end.index()
                             && !(handler.protected_start.index() <= target

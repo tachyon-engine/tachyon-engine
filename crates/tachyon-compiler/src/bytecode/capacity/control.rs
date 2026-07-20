@@ -28,10 +28,14 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
             }
             HirStatementKind::For { body, .. }
             | HirStatementKind::ForIn { body, .. }
-            | HirStatementKind::ForOf { body, .. }
             | HirStatementKind::Loop { body, .. } => {
                 statements_handler_count(core::slice::from_ref(body))?
             }
+            HirStatementKind::ForOf { body, .. } => checked_count_add(
+                1,
+                statements_handler_count(core::slice::from_ref(body))?,
+                "exception handlers",
+            )?,
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
                 for case in cases.iter() {
@@ -99,6 +103,13 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::Loop { body, .. } => {
                 statements_handler_depth(core::slice::from_ref(body))?
             }
+            HirStatementKind::ForOf { body, .. } => {
+                statements_handler_depth(core::slice::from_ref(body))?
+                    .checked_add(1)
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "exception handler depth",
+                    })?
+            }
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;
                 for case in cases.iter() {
@@ -144,8 +155,7 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         depth = depth.max(nested);
     }
@@ -175,6 +185,13 @@ pub(super) fn statements_finally_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::ForIn { body, .. }
             | HirStatementKind::Loop { body, .. } => {
                 statements_finally_depth(core::slice::from_ref(body))?
+            }
+            HirStatementKind::ForOf { body, .. } => {
+                statements_finally_depth(core::slice::from_ref(body))?
+                    .checked_add(1)
+                    .ok_or(CompileError::LoweringCapacityOverflow {
+                        collection: "completion depth",
+                    })?
             }
             HirStatementKind::Switch { cases, .. } => {
                 let mut nested = 0;

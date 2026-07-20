@@ -2522,7 +2522,7 @@ impl Isolate {
     #[inline(never)]
     fn dispatch_abrupt(
         &mut self,
-        completion: CompletionRecord,
+        mut completion: CompletionRecord,
         mut instruction_offset: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
@@ -2534,10 +2534,17 @@ impl Isolate {
             self.fiber
                 .completions
                 .discard_native_suffix(frame.completion_base);
+            if completion.kind() == CompletionKind::Throw
+                && let Some(origin) =
+                    self.suppress_iterator_close_error(frame, instruction_offset, &mut completion)?
+            {
+                instruction_offset = origin;
+                continue;
+            }
             let handler = self.find_abrupt_handler(frame, instruction_offset, completion)?;
             self.discard_exited_finalizers(frame, instruction_offset, completion, handler)?;
             if let Some((index, handler)) = handler {
-                if handler.kind == HandlerKind::Finally {
+                if handler.kind.is_finalizer() {
                     self.enter_finalizer(index, handler, completion)?;
                     return Ok(None);
                 }
@@ -2615,9 +2622,9 @@ impl Isolate {
             }
             let eligible = match completion.kind() {
                 CompletionKind::Throw => true,
-                CompletionKind::Return => handler.kind == HandlerKind::Finally,
+                CompletionKind::Return => handler.kind.is_finalizer(),
                 CompletionKind::Break | CompletionKind::Continue => {
-                    handler.kind == HandlerKind::Finally
+                    handler.kind.is_finalizer()
                         && completion.target().is_some_and(|target| {
                             target.index() < handler.protected_start.index()
                                 || handler.protected_end.index() <= target.index()
@@ -2650,7 +2657,7 @@ impl Isolate {
             .function(frame.function)
             .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
         for (index, handler) in function.handlers().iter().copied().enumerate().rev() {
-            if handler.kind == HandlerKind::Finally
+            if handler.kind.is_finalizer()
                 && handler.protected_start.index() <= instruction_offset.index()
                 && instruction_offset.index() < handler.protected_end.index()
             {
@@ -2688,6 +2695,47 @@ impl Isolate {
         });
         self.set_pc(handler.handler);
         Ok(())
+    }
+
+    /// Restores an original throw when `IteratorClose` itself throws, per IteratorClose precedence.
+    fn suppress_iterator_close_error(
+        &mut self,
+        frame: Frame,
+        instruction_offset: WordOffset,
+        completion: &mut CompletionRecord,
+    ) -> Result<Option<WordOffset>, ExecutionError> {
+        let Some(active) = self.fiber.handlers.last().copied() else {
+            return Ok(None);
+        };
+        if active.frame_depth as usize != self.fiber.frames.len() {
+            return Ok(None);
+        }
+        let handler = self.active_handler_entry(frame, active.handler_index)?;
+        let inside_finalizer = handler.handler.index() <= instruction_offset.index()
+            && instruction_offset.index() < handler.handler_end.index();
+        if handler.kind != HandlerKind::IteratorClose || !inside_finalizer {
+            return Ok(None);
+        }
+        let Some(saved) = self
+            .fiber
+            .completions
+            .record(frame.completion_base as usize)
+            .copied()
+        else {
+            return Err(ExecutionError::MissingCompletionRecord);
+        };
+        if saved.kind() != CompletionKind::Throw {
+            return Ok(None);
+        }
+        self.fiber.handlers.pop();
+        *completion = self
+            .fiber
+            .completions
+            .restore_record(frame.completion_base)
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        // Resume outside this handler's protected range so the original throw cannot re-enter the
+        // same close finalizer; enclosing handlers still cover the finalizer's instruction range.
+        Ok(Some(handler.handler))
     }
 
     /// Pops one verified active finalizer and replays its saved completion iteratively.

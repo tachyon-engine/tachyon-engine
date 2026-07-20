@@ -473,7 +473,7 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Emits synchronous `for...of`, sharing the cached iterator record with pattern lowering.
+    /// Emits synchronous `for...of` through a synthetic iterator-close finalizer.
     pub(in crate::bytecode) fn entry_for_of_statement(
         &mut self,
         left: &HirForInLeft,
@@ -483,9 +483,12 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (iterator, condition, natural_end, close, end) =
+        let (iterator, condition, natural_end, end, finally_slot, protected_start) =
             self.for_of_prelude(left, right, span)?;
-        self.break_targets.push(self.control_target(close));
+        self.break_targets.push(ControlTarget {
+            label: end,
+            finally_depth: self.finally_depth - 1,
+        });
         self.continue_targets.push(self.control_target(condition));
         self.entry_statement(body, result)?;
         self.continue_targets.pop();
@@ -494,11 +497,19 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(natural_end)
             .map_err(CompileError::Builder)?;
-        self.emit_jump(end, span)?;
-        self.builder
-            .bind_label(close)
+        self.emit(Opcode::EnterFinally, &[], span)?;
+        let finalizer = self
+            .builder
+            .current_offset()
             .map_err(CompileError::Builder)?;
         self.close_iterator_normally(iterator, span)?;
+        self.emit(Opcode::ResumeCompletion, &[], span)?;
+        let handler_end = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.finally_depth -= 1;
+        self.publish_iterator_close_handler(finally_slot, protected_start, finalizer, handler_end)?;
         self.builder
             .bind_label(end)
             .map_err(CompileError::Builder)?;
@@ -515,9 +526,12 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
-        let (iterator, condition, natural_end, close, end) =
+        let (iterator, condition, natural_end, end, finally_slot, protected_start) =
             self.for_of_prelude(left, right, span)?;
-        self.break_targets.push(self.control_target(close));
+        self.break_targets.push(ControlTarget {
+            label: end,
+            finally_depth: self.finally_depth - 1,
+        });
         self.continue_targets.push(self.control_target(condition));
         self.function_statement(body)?;
         self.continue_targets.pop();
@@ -526,11 +540,19 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(natural_end)
             .map_err(CompileError::Builder)?;
-        self.emit_jump(end, span)?;
-        self.builder
-            .bind_label(close)
+        self.emit(Opcode::EnterFinally, &[], span)?;
+        let finalizer = self
+            .builder
+            .current_offset()
             .map_err(CompileError::Builder)?;
         self.close_iterator_normally(iterator, span)?;
+        self.emit(Opcode::ResumeCompletion, &[], span)?;
+        let handler_end = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.finally_depth -= 1;
+        self.publish_iterator_close_handler(finally_slot, protected_start, finalizer, handler_end)?;
         self.builder
             .bind_label(end)
             .map_err(CompileError::Builder)?;
@@ -538,19 +560,36 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Evaluates the iterable once and leaves labels for completion, early close, and loop exit.
+    /// Evaluates the iterable once and creates the protected synchronous iterator loop prelude.
     fn for_of_prelude(
         &mut self,
         left: &HirForInLeft,
         right: &HirExpression,
         span: SourceSpan,
-    ) -> Result<(IteratorRegisters, Label, Label, Label, Label), CompileError> {
+    ) -> Result<
+        (
+            IteratorRegisters,
+            Label,
+            Label,
+            Label,
+            usize,
+            tachyon_bytecode::WordOffset,
+        ),
+        CompileError,
+    > {
         let source = self.expression(right)?;
         let iterator = self.get_sync_iterator(source, span)?;
         self.prepare_for_in_binding(left, span)?;
+        let finally_slot = self.reserve_handler();
+        self.finally_depth =
+            self.finally_depth
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "finally nesting depth",
+                })?;
+        let protected_start = self.emit_marker(span)?;
         let condition = self.builder.new_label().map_err(CompileError::Builder)?;
         let natural_end = self.builder.new_label().map_err(CompileError::Builder)?;
-        let close = self.builder.new_label().map_err(CompileError::Builder)?;
         let end = self.builder.new_label().map_err(CompileError::Builder)?;
         self.builder
             .bind_label(condition)
@@ -572,7 +611,14 @@ impl Lowerer<'_> {
             span,
         )?;
         self.store_for_in_left(left, value, span)?;
-        Ok((iterator, condition, natural_end, close, end))
+        Ok((
+            iterator,
+            condition,
+            natural_end,
+            end,
+            finally_slot,
+            protected_start,
+        ))
     }
 
     /// Evaluates the source once, advances the iterator, checks completion, and stores each key.
@@ -1194,6 +1240,29 @@ impl Lowerer<'_> {
             handler,
             handler_end,
             kind: HandlerKind::Finally,
+            environment_depth: 0,
+        };
+        *self
+            .handlers
+            .get_mut(slot)
+            .ok_or(CompileError::UnboundExceptionHandler)? = Some(entry);
+        Ok(())
+    }
+
+    /// Publishes the synthetic finalizer used to close a synchronous iterator on every exit path.
+    fn publish_iterator_close_handler(
+        &mut self,
+        slot: usize,
+        protected_start: tachyon_bytecode::WordOffset,
+        handler: tachyon_bytecode::WordOffset,
+        handler_end: tachyon_bytecode::WordOffset,
+    ) -> Result<(), CompileError> {
+        let entry = HandlerEntry {
+            protected_start,
+            protected_end: handler,
+            handler,
+            handler_end,
+            kind: HandlerKind::IteratorClose,
             environment_depth: 0,
         };
         *self

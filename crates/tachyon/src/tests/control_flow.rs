@@ -154,6 +154,27 @@ fn for_of_uses_cached_iterator_protocol_and_closes_on_break() {
 }
 
 #[test]
+/// Proves the synthetic close finalizer handles return and preserves an earlier throw over close errors.
+fn for_of_closes_on_return_and_preserves_original_throw() {
+    assert_eq!(
+        execute_source(
+            185,
+            "let stage = 0; let iterable = {}; iterable[Symbol.iterator] = function() { return { next: function() { return { value: 1, done: false }; }, return: function() { stage = 5; return {}; } }; }; function first() { for (var value of iterable) return value; } first() * 10 + stage;",
+        )
+        .as_i32(),
+        Some(15)
+    );
+    assert_eq!(
+        execute_source(
+            186,
+            "let iterable = {}; iterable[Symbol.iterator] = function() { return { next: function() { return { value: 1, done: false }; }, return: function() { throw 9; } }; }; let observed = 0; try { for (var value of iterable) { throw 7; } } catch (error) { observed = error; } observed;",
+        )
+        .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
 /// Covers pre-test/post-test ordering, continue targets, breaks, and script completion values.
 fn while_and_do_while_preserve_loop_control_and_completion() {
     assert_eq!(

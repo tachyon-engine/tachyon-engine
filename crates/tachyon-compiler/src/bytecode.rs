@@ -807,7 +807,12 @@ fn collect_var_declared_bindings(
                 }
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
-            HirStatementKind::ForOf { body, .. } => {
+            HirStatementKind::ForOf { left, body, .. } => {
+                if let HirForInLeft::Variable(declaration) = left
+                    && declaration.kind == HirVariableDeclarationKind::Var
+                {
+                    push_var_declaration_bindings(declaration, bindings);
+                }
                 collect_var_declared_bindings(core::slice::from_ref(body), bindings);
             }
             HirStatementKind::Loop { body, .. } => {

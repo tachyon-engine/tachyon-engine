@@ -259,6 +259,16 @@ pub struct HandlerEntry {
 pub enum HandlerKind {
     Catch,
     Finally,
+    /// A finalizer that suppresses close errors while replaying an existing throw completion.
+    IteratorClose,
+}
+
+impl HandlerKind {
+    /// Returns whether this handler owns a saved completion and ends in `ResumeCompletion`.
+    #[must_use]
+    pub const fn is_finalizer(self) -> bool {
+        matches!(self, Self::Finally | Self::IteratorClose)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
