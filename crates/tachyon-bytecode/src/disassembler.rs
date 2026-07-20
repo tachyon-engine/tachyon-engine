@@ -88,6 +88,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::BitwiseNot
         | Opcode::CreateForInIterator
         | Opcode::ForInNext => write!(output, " r{}, r{}", operands[0], operands[1])?,
+        Opcode::SetFunctionName => write!(output, " r{}, name={}", operands[0], operands[1])?,
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul

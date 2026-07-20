@@ -949,3 +949,17 @@ fn array_destructuring_reads_values_in_iterator_order() {
         Some(12)
     );
 }
+
+#[test]
+/// Assigns inferred names to anonymous function defaults without changing ordinary name writes.
+fn destructuring_defaults_infer_anonymous_function_names() {
+    assert_eq!(
+        execute_source_with_heap(
+            912,
+            "let [arrayName = function() {}] = []; arrayName.name === 'arrayName';",
+            HeapLimit::new(9 * SPAN_SIZE_BYTES),
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}

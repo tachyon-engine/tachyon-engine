@@ -782,7 +782,8 @@ impl Lowerer<'_> {
                 target,
                 initializer,
             } => {
-                let value = self.default_pattern_value(value, initializer)?;
+                let value =
+                    self.default_pattern_value(value, initializer, target.inferred_name())?;
                 self.assign_pattern(target, value, span)
             }
             crate::HirPatternKind::Object { properties, rest } => {

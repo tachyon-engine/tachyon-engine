@@ -97,6 +97,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CreateForInIterator,
                 Opcode::ForInNext,
                 Opcode::TypeofScope,
+                Opcode::SetFunctionName,
             ],
         ),
         (

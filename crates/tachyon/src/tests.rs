@@ -23,6 +23,15 @@ fn test_isolate_with_realm_limits(realm_limits: RealmLimits) -> Isolate {
 
 /// Compiles and executes one in-memory script with enough budget for expression fixtures.
 fn execute_source(source_id: u32, text: &str) -> tachyon_value::Value {
+    execute_source_with_heap(source_id, text, HeapLimit::new(8 * SPAN_SIZE_BYTES))
+}
+
+/// Compiles and executes one fixture with an explicit heap budget for payload-growth regressions.
+fn execute_source_with_heap(
+    source_id: u32,
+    text: &str,
+    heap_limit: HeapLimit,
+) -> tachyon_value::Value {
     let module = Compiler
         .compile(
             SourceText::new(
@@ -34,7 +43,14 @@ fn execute_source(source_id: u32, text: &str) -> tachyon_value::Value {
             CompileOptions::default(),
         )
         .unwrap();
-    match test_isolate()
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        heap_limit,
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024).with_max_shapes(256),
+    ))
+    .expect("test isolate descriptors register");
+    match isolate
         .execute(
             &module,
             ExecutionBudget {

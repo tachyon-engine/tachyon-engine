@@ -639,6 +639,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
+        Opcode::SetFunctionName => check_register(operands[0])?,
         Opcode::Add
         | Opcode::Sub
         | Opcode::Mul

@@ -79,7 +79,8 @@ impl Lowerer<'_> {
                 target,
                 initializer,
             } => {
-                let value = self.default_pattern_value(value, initializer)?;
+                let value =
+                    self.default_pattern_value(value, initializer, target.inferred_name())?;
                 self.bind_pattern(target, value, mutable)
             }
             HirPatternKind::Object { properties, rest } => {
@@ -341,6 +342,7 @@ impl Lowerer<'_> {
         &mut self,
         value: RegisterId,
         initializer: &HirExpression,
+        inferred_name: Option<&std::sync::Arc<str>>,
     ) -> Result<RegisterId, CompileError> {
         let undefined = self.load_undefined(initializer.span)?;
         let is_undefined = self.register()?;
@@ -372,6 +374,16 @@ impl Lowerer<'_> {
             .bind_label(use_initializer)
             .map_err(CompileError::Builder)?;
         let initialized = self.expression(initializer)?;
+        if matches!(initializer.kind, HirExpressionKind::Function(_))
+            && let Some(name) = inferred_name
+        {
+            let name = self.scope_name(name)?;
+            self.emit(
+                Opcode::SetFunctionName,
+                &[initialized.index(), name],
+                initializer.span,
+            )?;
+        }
         self.emit(
             Opcode::Move,
             &[result.index(), initialized.index()],
@@ -577,7 +589,8 @@ impl Lowerer<'_> {
                 target,
                 initializer,
             } => {
-                let value = self.default_pattern_value(value, initializer)?;
+                let value =
+                    self.default_pattern_value(value, initializer, target.inferred_name())?;
                 self.initialize_var_pattern(target, value)
             }
             HirPatternKind::Object { properties, rest } => {

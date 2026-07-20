@@ -54,6 +54,17 @@ pub struct HirPatternProperty {
 }
 
 impl HirPattern {
+    /// Returns the identifier name eligible for SetFunctionName in a default initializer.
+    pub(crate) fn inferred_name(&self) -> Option<&Arc<str>> {
+        match &self.kind {
+            HirPatternKind::Binding(binding) => Some(&binding.name),
+            HirPatternKind::Assignment(super::expression::HirAssignmentTarget::Identifier(
+                reference,
+            )) => Some(&reference.name),
+            _ => None,
+        }
+    }
+
     /// Returns the declaration leaf used by the bytecode subset until destructuring is implemented.
     #[inline(always)]
     pub(crate) fn binding(&self) -> Option<&HirBinding> {

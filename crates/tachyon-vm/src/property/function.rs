@@ -71,6 +71,41 @@ impl Isolate {
         }
     }
 
+    /// Publishes an inferred name only for an anonymous bytecode function created by the compiler.
+    pub(crate) fn set_inferred_function_name(
+        &mut self,
+        receiver: Value,
+        name: AtomId,
+    ) -> Result<(), ExecutionError> {
+        let function = self
+            .resolve_function_object(receiver)
+            .map_err(|_| ExecutionError::NonCallable(receiver))?;
+        if !matches!(function.executable, FunctionExecutable::Bytecode { .. }) {
+            return Ok(());
+        }
+        let text = self
+            .atoms
+            .get(name)
+            .ok_or(ExecutionError::InvalidAtom(name))?;
+        let text = match text.as_view() {
+            JsStringView::Latin1(bytes) => JsString::try_from_latin1(bytes),
+            JsStringView::Utf16(units) => JsString::try_from_utf16(units),
+        }
+        .map_err(ExecutionError::PropertyKeyString)?;
+        let value = self.allocate_runtime_string(text)?;
+        let name_key = self.name_atom()?;
+        self.define_data_property(
+            receiver,
+            name_key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
     /// Tests the virtual metadata key without materializing a runtime name string.
     pub(super) fn is_function_metadata_property(
         &mut self,

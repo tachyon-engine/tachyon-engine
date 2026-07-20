@@ -873,6 +873,11 @@ impl Isolate {
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
             }
+            Opcode::SetFunctionName => {
+                let function = self.read(base, operands[0])?;
+                let name = self.scope_atom(code, operands[1])?;
+                self.set_inferred_function_name(function, name)?;
+            }
             Opcode::CreateObject => {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;

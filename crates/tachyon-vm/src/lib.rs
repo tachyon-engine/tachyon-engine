@@ -248,6 +248,7 @@ pub enum ExecutionError {
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },
+    InvalidAtom(AtomId),
     MissingEnvironment,
     InvalidEnvironmentSlot { depth: u32, slot: u32 },
     UninitializedEnvironmentBinding { depth: u32, slot: u32 },
