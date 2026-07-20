@@ -17,6 +17,21 @@ impl Trace for CollectionAllocationRoots<'_> {
     }
 }
 
+struct WeakCollectionAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    storage: Option<GcRef<WeakCollection>>,
+}
+
+impl Trace for WeakCollectionAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.storage.trace(tracer);
+    }
+}
+
 /// A single-thread-owned ECMAScript execution state; `Cell` intentionally makes it `!Sync`.
 pub struct Isolate {
     pub(crate) fiber: Fiber,
@@ -70,6 +85,15 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             ordered_collection: registry
                 .try_register("OrderedCollection")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            weak_collection: registry
+                .try_register("WeakCollection")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            weak_map_object: registry
+                .try_register("WeakMapObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            weak_set_object: registry
+                .try_register("WeakSetObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
@@ -769,6 +793,102 @@ impl Isolate {
                 0,
                 0,
                 SetObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    storage,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates an ephemeron-backed WeakMap and its exact external backing together.
+    pub(crate) fn allocate_weak_map_object(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = WeakCollectionAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+            storage: None,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.weak_collection,
+                0,
+                WeakCollection::with_capacity(tuning::collections::INITIAL_ENTRY_CAPACITY)
+                    .map_err(|_| ExecutionError::CollectionStorageAllocationFailed)?,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.weak_map_object,
+                0,
+                0,
+                WeakMapObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    storage,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates an ephemeron-backed WeakSet and its exact external backing together.
+    pub(crate) fn allocate_weak_set_object(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = WeakCollectionAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+            storage: None,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.weak_collection,
+                0,
+                WeakCollection::with_capacity(tuning::collections::INITIAL_ENTRY_CAPACITY)
+                    .map_err(|_| ExecutionError::CollectionStorageAllocationFailed)?,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.weak_set_object,
+                0,
+                0,
+                WeakSetObject {
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

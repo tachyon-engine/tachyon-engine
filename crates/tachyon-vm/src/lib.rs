@@ -31,6 +31,7 @@ mod regexp;
 mod runtime;
 mod string;
 mod tuning;
+mod weak_collection;
 
 pub use atom::{AtomHashSeed, AtomId, AtomTable, AtomTableConfig, AtomTableError, AtomTableStats};
 
@@ -111,6 +112,7 @@ use runtime::{
         TypeofStrings,
     },
 };
+use weak_collection::{WeakCollection, WeakMapObject, WeakSetObject};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
 #[derive(Clone, Copy, Debug, Default)]

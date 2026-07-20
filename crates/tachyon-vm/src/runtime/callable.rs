@@ -121,6 +121,15 @@ pub(crate) enum NativeFunction {
     SetValues,
     SetEntries,
     SetForEach,
+    WeakMapConstructor,
+    WeakMapGet,
+    WeakMapSet,
+    WeakMapHas,
+    WeakMapDelete,
+    WeakSetConstructor,
+    WeakSetAdd,
+    WeakSetHas,
+    WeakSetDelete,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -408,6 +417,8 @@ impl NativeFunction {
                 | Self::ArrayConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
+                | Self::WeakMapConstructor
+                | Self::WeakSetConstructor
         )
     }
 
@@ -489,7 +500,10 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
-            Self::MapConstructor | Self::SetConstructor => 0,
+            Self::MapConstructor
+            | Self::SetConstructor
+            | Self::WeakMapConstructor
+            | Self::WeakSetConstructor => 0,
             Self::MapGet
             | Self::MapSet
             | Self::MapHas
@@ -499,6 +513,13 @@ impl NativeFunction {
             | Self::SetHas
             | Self::SetDelete
             | Self::SetForEach => 1,
+            Self::WeakMapGet
+            | Self::WeakMapSet
+            | Self::WeakMapHas
+            | Self::WeakMapDelete
+            | Self::WeakSetAdd
+            | Self::WeakSetHas
+            | Self::WeakSetDelete => 1,
             Self::MapGetOrInsert => 2,
             Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
             Self::MapKeys
@@ -691,6 +712,15 @@ impl NativeFunction {
             Self::SetValues => "values",
             Self::SetEntries => "entries",
             Self::SetForEach => "forEach",
+            Self::WeakMapConstructor => "WeakMap",
+            Self::WeakMapGet => "get",
+            Self::WeakMapSet => "set",
+            Self::WeakMapHas => "has",
+            Self::WeakMapDelete => "delete",
+            Self::WeakSetConstructor => "WeakSet",
+            Self::WeakSetAdd => "add",
+            Self::WeakSetHas => "has",
+            Self::WeakSetDelete => "delete",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::MathAbs
@@ -921,6 +951,8 @@ pub(crate) enum ObjectReceiver {
     RegExp(GcRef<RegExpObject>),
     Map(GcRef<MapObject>),
     Set(GcRef<SetObject>),
+    WeakMap(GcRef<WeakMapObject>),
+    WeakSet(GcRef<WeakSetObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
     CollectionIterator(GcRef<CollectionIteratorObject>),
 }
@@ -937,6 +969,8 @@ impl ObjectReceiver {
             Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
             Self::Map(map) => Value::from_heap_ref(map.raw()),
             Self::Set(set) => Value::from_heap_ref(set.raw()),
+            Self::WeakMap(map) => Value::from_heap_ref(map.raw()),
+            Self::WeakSet(set) => Value::from_heap_ref(set.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
@@ -1054,6 +1088,9 @@ pub(crate) struct VmTypes {
     pub(crate) for_in_iterator: GcType<ForInIterator>,
     pub(crate) map_object: GcType<MapObject>,
     pub(crate) ordered_collection: GcType<OrderedCollection>,
+    pub(crate) weak_collection: GcType<WeakCollection>,
+    pub(crate) weak_map_object: GcType<WeakMapObject>,
+    pub(crate) weak_set_object: GcType<WeakSetObject>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) string_object: GcType<StringObject>,
@@ -1092,6 +1129,8 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) regexp: AtomId,
     pub(crate) map: AtomId,
     pub(crate) set: AtomId,
+    pub(crate) weak_map: AtomId,
+    pub(crate) weak_set: AtomId,
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
     pub(crate) boolean: AtomId,
@@ -1104,7 +1143,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        16 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        18 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

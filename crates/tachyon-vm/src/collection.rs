@@ -37,6 +37,8 @@ pub(crate) struct SetObject {
 pub(crate) enum CollectionInitializerKind {
     Map,
     Set,
+    WeakMap,
+    WeakSet,
 }
 
 /// GC-owned state that survives every observable step of `new Map(iterable)` and `new Set(iterable)`.

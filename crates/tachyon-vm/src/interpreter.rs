@@ -1907,6 +1907,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::SetConstructor) => {
                     return self.begin_set_from_site(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::WeakMapConstructor) => {
+                    return self.begin_weak_map_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakSetConstructor) => {
+                    return self.begin_weak_set_from_site(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
@@ -2303,6 +2309,72 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::SetConstructor) => {
                     return self.begin_set_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakMapConstructor) => {
+                    return self.begin_weak_map_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakSetConstructor) => {
+                    return self.begin_weak_set_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakMapGet) => {
+                    let value = self.weak_map_get(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakMapSet) => {
+                    let value = self.weak_map_set(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakMapHas) => {
+                    let value = self.weak_map_has(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::WeakMapDelete) => {
+                    let value = self.weak_map_delete(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::WeakSetAdd) => {
+                    let value = self.weak_set_add(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakSetHas) => {
+                    let value = self.weak_set_has(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::WeakSetDelete) => {
+                    let value = self.weak_set_delete(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::MapGet) => {
                     let value = self.map_get(&site)?;

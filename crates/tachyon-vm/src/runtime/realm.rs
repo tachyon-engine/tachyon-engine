@@ -131,6 +131,10 @@ pub(crate) struct Realm {
     pub(crate) set_constructor: Option<Value>,
     pub(crate) set_prototype: Option<Value>,
     pub(crate) set_iterator_prototype: Option<Value>,
+    pub(crate) weak_map_constructor: Option<Value>,
+    pub(crate) weak_map_prototype: Option<Value>,
+    pub(crate) weak_set_constructor: Option<Value>,
+    pub(crate) weak_set_prototype: Option<Value>,
     pub(crate) object_constructor: Option<Value>,
     pub(crate) object_prototype: Option<Value>,
     pub(crate) object_define_property: Option<Value>,
@@ -229,6 +233,10 @@ impl Realm {
             set_constructor: None,
             set_prototype: None,
             set_iterator_prototype: None,
+            weak_map_constructor: None,
+            weak_map_prototype: None,
+            weak_set_constructor: None,
+            weak_set_prototype: None,
             object_constructor: None,
             object_prototype: None,
             object_define_property: None,
@@ -558,6 +566,10 @@ impl Trace for Realm {
         self.set_constructor.trace(tracer);
         self.set_prototype.trace(tracer);
         self.set_iterator_prototype.trace(tracer);
+        self.weak_map_constructor.trace(tracer);
+        self.weak_map_prototype.trace(tracer);
+        self.weak_set_constructor.trace(tracer);
+        self.weak_set_prototype.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);

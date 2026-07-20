@@ -82,6 +82,14 @@ impl<T: ?Sized> GcRef<T> {
     }
 }
 
+impl GcRef<()> {
+    /// Builds an erased reference from a logical heap address already validated by the owning heap.
+    #[must_use]
+    pub const fn from_erased_raw(raw: RawHeapRef) -> Self {
+        Self::from_raw(raw)
+    }
+}
+
 const _: [(); 4] = [(); core::mem::size_of::<GcRef<()>>()];
 const _: [(); 4] = [(); core::mem::align_of::<GcRef<()>>()];
 

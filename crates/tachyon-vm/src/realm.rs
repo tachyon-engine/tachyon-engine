@@ -639,6 +639,8 @@ impl Isolate {
             regexp: self.intern_intrinsic_name(b"RegExp")?,
             map: self.intern_intrinsic_name(b"Map")?,
             set: self.intern_intrinsic_name(b"Set")?,
+            weak_map: self.intern_intrinsic_name(b"WeakMap")?,
+            weak_set: self.intern_intrinsic_name(b"WeakSet")?,
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
@@ -1190,6 +1192,12 @@ impl Isolate {
         )?;
         let keys_atom = self.intern_intrinsic_name(b"keys")?;
         self.set_intrinsic_data_property(set_prototype, keys_atom, set_values, true)?;
+
+        self.initialize_weak_collection_intrinsics(
+            object_prototype,
+            function_prototype,
+            constructor_atom,
+        )?;
         let iterator_symbol = self
             .realm
             .well_known_symbols
@@ -1275,6 +1283,70 @@ impl Isolate {
             },
         )?;
         let _ = (map_keys, map_values, set_entries);
+        Ok(())
+    }
+
+    /// Installs weak collection constructors and prototype methods over ephemeron-backed objects.
+    fn initialize_weak_collection_intrinsics(
+        &mut self,
+        object_prototype: Value,
+        function_prototype: Value,
+        constructor_atom: AtomId,
+    ) -> Result<(), ExecutionError> {
+        let weak_map_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let weak_map = self.allocate_native_function(
+            NativeFunction::WeakMapConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.weak_map_prototype = Some(weak_map_prototype);
+        self.realm.weak_map_constructor = Some(weak_map);
+        self.set_function_prototype(weak_map, weak_map_prototype)?;
+        self.set_intrinsic_data_property(weak_map_prototype, constructor_atom, weak_map, true)?;
+        for (name, native) in [
+            (b"delete".as_slice(), NativeFunction::WeakMapDelete),
+            (b"get".as_slice(), NativeFunction::WeakMapGet),
+            (b"has".as_slice(), NativeFunction::WeakMapHas),
+            (b"set".as_slice(), NativeFunction::WeakMapSet),
+        ] {
+            self.install_collection_method(weak_map_prototype, function_prototype, name, native)?;
+        }
+
+        let weak_set_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let weak_set = self.allocate_native_function(
+            NativeFunction::WeakSetConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.weak_set_prototype = Some(weak_set_prototype);
+        self.realm.weak_set_constructor = Some(weak_set);
+        self.set_function_prototype(weak_set, weak_set_prototype)?;
+        self.set_intrinsic_data_property(weak_set_prototype, constructor_atom, weak_set, true)?;
+        for (name, native) in [
+            (b"add".as_slice(), NativeFunction::WeakSetAdd),
+            (b"delete".as_slice(), NativeFunction::WeakSetDelete),
+            (b"has".as_slice(), NativeFunction::WeakSetHas),
+        ] {
+            self.install_collection_method(weak_set_prototype, function_prototype, name, native)?;
+        }
         Ok(())
     }
 
@@ -1446,6 +1518,20 @@ impl Isolate {
             self.realm
                 .set_constructor
                 .expect("Set initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.weak_map,
+            self.realm
+                .weak_map_constructor
+                .expect("WeakMap initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.weak_set,
+            self.realm
+                .weak_set_constructor
+                .expect("WeakSet initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

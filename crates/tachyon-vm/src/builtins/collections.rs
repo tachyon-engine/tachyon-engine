@@ -59,6 +59,32 @@ impl Isolate {
         self.begin_collection_initializer(site, target, CollectionInitializerKind::Set)
     }
 
+    /// Starts WeakMap construction with the same resumable iterable protocol as Map.
+    pub(crate) fn begin_weak_map_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self.allocate_weak_map_object(
+            self.realm
+                .weak_map_prototype
+                .expect("WeakMap prototype initializes before construction"),
+        )?;
+        self.begin_collection_initializer(site, target, CollectionInitializerKind::WeakMap)
+    }
+
+    /// Starts WeakSet construction with the same resumable iterable protocol as Set.
+    pub(crate) fn begin_weak_set_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self.allocate_weak_set_object(
+            self.realm
+                .weak_set_prototype
+                .expect("WeakSet prototype initializes before construction"),
+        )?;
+        self.begin_collection_initializer(site, target, CollectionInitializerKind::WeakSet)
+    }
+
     /// Runs the Map/Set constructor protocol without representing JavaScript calls on the Rust stack.
     fn begin_collection_initializer(
         &mut self,
@@ -69,7 +95,7 @@ impl Isolate {
         let iterable = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if iterable.as_immediate() == Some(Immediate::Undefined) {
+        if is_nullish(iterable) {
             return self.write(site.caller_base, site.destination, target);
         }
         let state = self.allocate_pending_collection_initializer(PendingCollectionInitializer {
@@ -96,7 +122,10 @@ impl Isolate {
             state,
             CollectionInitializerStage::Adder,
             target,
-            if kind == CollectionInitializerKind::Map {
+            if matches!(
+                kind,
+                CollectionInitializerKind::Map | CollectionInitializerKind::WeakMap
+            ) {
                 b"set"
             } else {
                 b"add"
@@ -202,7 +231,10 @@ impl Isolate {
             }
             CollectionInitializerStage::ResultValue => {
                 let pending = self.pending_collection_initializer(state)?;
-                if pending.kind == CollectionInitializerKind::Set {
+                if matches!(
+                    pending.kind,
+                    CollectionInitializerKind::Set | CollectionInitializerKind::WeakSet
+                ) {
                     self.update_pending_collection_initializer(state, |pending| {
                         pending.result = value
                     })?;
