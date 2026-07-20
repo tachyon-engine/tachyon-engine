@@ -2308,6 +2308,10 @@ impl Isolate {
                     let value = self.map_get(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::MapGetOrInsert) => {
+                    let value = self.map_get_or_insert(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::MapSet) => {
                     let value = self.map_set(&site)?;
                     return self.write(site.caller_base, site.destination, value);

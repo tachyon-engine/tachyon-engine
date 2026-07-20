@@ -1113,6 +1113,7 @@ impl Isolate {
             (b"delete".as_slice(), NativeFunction::MapDelete),
             (b"clear".as_slice(), NativeFunction::MapClear),
             (b"forEach".as_slice(), NativeFunction::MapForEach),
+            (b"getOrInsert".as_slice(), NativeFunction::MapGetOrInsert),
         ] {
             self.install_collection_method(map_prototype, function_prototype, name, native)?;
         }

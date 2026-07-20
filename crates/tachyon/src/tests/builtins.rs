@@ -40,6 +40,19 @@ fn collection_for_each_uses_live_insertion_order_and_callback_contract() {
 }
 
 #[test]
+/// Preserves an existing Map entry and inserts a missing key's supplied default exactly once.
+fn map_get_or_insert_uses_same_value_zero_lookup() {
+    assert_eq!(
+        execute_source(
+            1_021,
+            "var map = new Map(); map.set(1, 2); map.getOrInsert(1, 9) === 2 && map.getOrInsert(3, 4) === 4 && map.get(3) === 4 && map.size === 2;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Publishes `%String.prototype%` and routes primitive string length through its exotic boundary.
 fn primitive_string_length_and_prototype_are_available() {
     assert_eq!(

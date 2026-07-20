@@ -110,6 +110,7 @@ pub(crate) enum NativeFunction {
     MapValues,
     MapEntries,
     MapForEach,
+    MapGetOrInsert,
     CollectionIteratorNext,
     SetConstructor,
     SetAdd,
@@ -498,6 +499,7 @@ impl NativeFunction {
             | Self::SetHas
             | Self::SetDelete
             | Self::SetForEach => 1,
+            Self::MapGetOrInsert => 2,
             Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
             Self::MapKeys
             | Self::MapValues
@@ -678,6 +680,7 @@ impl NativeFunction {
             Self::MapValues => "values",
             Self::MapEntries => "entries",
             Self::MapForEach => "forEach",
+            Self::MapGetOrInsert => "getOrInsert",
             Self::CollectionIteratorNext => "next",
             Self::SetConstructor => "Set",
             Self::SetAdd => "add",

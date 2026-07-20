@@ -487,6 +487,25 @@ impl Isolate {
         Ok(value.unwrap_or(Value::from_immediate(Immediate::Undefined)))
     }
 
+    /// Returns an existing Map value or inserts the supplied default with one SameValueZero probe.
+    pub(crate) fn map_get_or_insert(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let key = self.call_argument(site, 0)?;
+        let key = self.collection_key(key);
+        let default = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let storage = self.map_storage(site.this_value)?;
+        if let Some(index) = self.collection_find(storage, key)? {
+            return self
+                .collection_entry(storage, index)?
+                .map(|entry| entry.value)
+                .ok_or(ExecutionError::CollectionStorageAllocationFailed);
+        }
+        let storage = self.ensure_map_capacity(site.this_value, storage)?;
+        self.collection_append(storage, key, default)?;
+        Ok(default)
+    }
+
     /// Implements Map.prototype.set, including canonical -0 keys and replacement backing growth.
     pub(crate) fn map_set(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let argument = self.call_argument(site, 0)?;
