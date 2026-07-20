@@ -819,6 +819,36 @@ fn compiled_module_verifies_environment_slot_metadata() {
         ),
         Err(ModuleBuildError::EmptyEnvironmentSlotName { slot: 0, .. })
     ));
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            Vec::new(),
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                self_binding_slot: Some(1),
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Function,
+            vec![environment_slot("self", false, true)],
+        ),
+        Err(ModuleBuildError::InvalidSelfBindingSlot { slot: 1, .. })
+    ));
+    assert!(matches!(
+        binding_plan_entries_module(
+            FunctionKind::Ordinary,
+            Vec::new(),
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                self_binding_slot: Some(0),
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Function,
+            vec![environment_slot("self", true, true)],
+        ),
+        Err(ModuleBuildError::InvalidSelfBindingSlot { slot: 0, .. })
+    ));
 }
 
 #[test]

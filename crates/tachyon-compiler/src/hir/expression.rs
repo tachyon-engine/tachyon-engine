@@ -14,7 +14,7 @@ use oxc::{
 
 use crate::{CompileError, SourceSpan, SourceText};
 
-use super::pattern::{HirPattern, lower_assignment_pattern};
+use super::pattern::{HirPattern, lower_assignment_pattern, new_binding};
 use super::program::{
     BindingId, FunctionStencilId, HirFunction, HirIdentifierReference, ReferenceId, ScopeId,
 };
@@ -196,17 +196,21 @@ pub(super) fn lower_expression(
         Expression::Identifier(identifier) => {
             HirExpressionKind::Identifier(new_reference(identifier, source, semantic)?)
         }
-        Expression::FunctionExpression(function) if function.id.is_none() => {
+        Expression::FunctionExpression(function) => {
+            let self_binding = function
+                .id
+                .as_ref()
+                .map(|identifier| new_binding(identifier, source, semantic))
+                .transpose()?;
+            let name = self_binding.as_ref().map(|binding| binding.name.clone());
             HirExpressionKind::Function(lower_function_stencil(
-                function, None, source, semantic, functions,
+                function,
+                name,
+                self_binding,
+                source,
+                semantic,
+                functions,
             )?)
-        }
-        Expression::FunctionExpression(_) => {
-            return Err(unsupported(
-                source.name(),
-                span,
-                "named function expression",
-            ));
         }
         Expression::ArrowFunctionExpression(function) => HirExpressionKind::Function(
             lower_arrow_function_stencil(function, source, semantic, functions)?,
@@ -334,51 +338,52 @@ pub(super) fn lower_expression(
                     };
                     HirObjectPropertyKey::Static(key)
                 };
-                let value =
-                    if property.kind == PropertyKind::Get || property.kind == PropertyKind::Set {
-                        let Expression::FunctionExpression(function) = &property.value else {
-                            return Err(unsupported(
-                                source.name(),
-                                source_span(property.span),
-                                "object accessor value",
-                            ));
-                        };
-                        let function =
-                            lower_function_stencil(function, None, source, semantic, functions)?;
-                        if property.kind == PropertyKind::Get {
-                            HirObjectPropertyValue::Getter(function)
-                        } else {
-                            HirObjectPropertyValue::Setter(function)
-                        }
-                    } else if property.method {
-                        let Expression::FunctionExpression(function) = &property.value else {
-                            return Err(unsupported(
-                                source.name(),
-                                source_span(property.span),
-                                "object method value",
-                            ));
-                        };
-                        if function.id.is_some() {
-                            return Err(unsupported(
-                                source.name(),
-                                source_span(function.span),
-                                "named object method",
-                            ));
-                        }
-                        HirObjectPropertyValue::Data(HirExpression {
-                            span: source_span(function.span),
-                            kind: HirExpressionKind::Function(lower_function_stencil(
-                                function, None, source, semantic, functions,
-                            )?),
-                        })
-                    } else {
-                        HirObjectPropertyValue::Data(lower_expression(
-                            &property.value,
-                            source,
-                            semantic,
-                            functions,
-                        )?)
+                let value = if property.kind == PropertyKind::Get
+                    || property.kind == PropertyKind::Set
+                {
+                    let Expression::FunctionExpression(function) = &property.value else {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(property.span),
+                            "object accessor value",
+                        ));
                     };
+                    let function =
+                        lower_function_stencil(function, None, None, source, semantic, functions)?;
+                    if property.kind == PropertyKind::Get {
+                        HirObjectPropertyValue::Getter(function)
+                    } else {
+                        HirObjectPropertyValue::Setter(function)
+                    }
+                } else if property.method {
+                    let Expression::FunctionExpression(function) = &property.value else {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(property.span),
+                            "object method value",
+                        ));
+                    };
+                    if function.id.is_some() {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(function.span),
+                            "named object method",
+                        ));
+                    }
+                    HirObjectPropertyValue::Data(HirExpression {
+                        span: source_span(function.span),
+                        kind: HirExpressionKind::Function(lower_function_stencil(
+                            function, None, None, source, semantic, functions,
+                        )?),
+                    })
+                } else {
+                    HirObjectPropertyValue::Data(lower_expression(
+                        &property.value,
+                        source,
+                        semantic,
+                        functions,
+                    )?)
+                };
                 properties.push(HirObjectProperty {
                     span: source_span(property.span),
                     key,

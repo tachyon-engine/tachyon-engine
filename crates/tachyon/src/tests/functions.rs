@@ -108,6 +108,35 @@ fn function_expressions_are_callable_and_function_objects_hold_methods() {
 }
 
 #[test]
+/// Ensures a named function expression owns an internal recursive lexical binding.
+fn named_function_expressions_recurse_without_publishing_their_name() {
+    assert_eq!(
+        execute_source(
+            204,
+            "let factorial = function fact(value) { return value === 0 ? 1 : value * fact(value - 1); }; factorial(5);",
+        )
+        .as_i32(),
+        Some(120),
+    );
+    assert_eq!(
+        execute_source(
+            205,
+            "let factorial = function fact() { return fact; }; typeof fact === 'undefined' && factorial() === factorial;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            206,
+            "let outer = function self() { return function () { return self; }; }; outer()() === outer;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 fn function_prototype_call_forwards_this_and_positional_arguments() {
     let value = execute_source(
         60,

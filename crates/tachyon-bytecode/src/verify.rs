@@ -437,6 +437,14 @@ pub(super) fn validate_environment_slots(
             });
         }
     }
+    if let Some(slot) = layout.self_binding_slot {
+        let Some(metadata) = slots.get(slot as usize) else {
+            return Err(ModuleBuildError::InvalidSelfBindingSlot { function, slot });
+        };
+        if metadata.mutable || !metadata.initialized {
+            return Err(ModuleBuildError::InvalidSelfBindingSlot { function, slot });
+        }
+    }
     Ok(())
 }
 

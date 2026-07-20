@@ -123,10 +123,12 @@ pub(super) fn estimate_function(
     let handlers = control::statements_handler_count(&function.body)?;
     let max_handler_depth = control::statements_handler_depth(&function.body)?;
     let max_completion_depth = control::statements_finally_depth(&function.body)?;
+    let statement_bindings = control::statements_binding_count(&function.body)?;
     let local_bindings = function
         .parameters
         .len()
-        .checked_add(control::statements_binding_count(&function.body)?)
+        .checked_add(usize::from(function.self_binding.is_some()))
+        .and_then(|count| count.checked_add(statement_bindings))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function local bindings",
         })?;

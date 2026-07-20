@@ -590,6 +590,7 @@ fn lower_function_declaration(
     let id = lower_function_stencil(
         function,
         Some(Arc::from(identifier.name.as_str())),
+        None,
         source,
         semantic,
         functions,
@@ -608,6 +609,7 @@ fn lower_function_declaration(
 pub(super) fn lower_function_stencil(
     function: &oxc::ast::ast::Function<'_>,
     name: Option<Arc<str>>,
+    self_binding: Option<super::program::HirBinding>,
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
@@ -670,6 +672,7 @@ pub(super) fn lower_function_stencil(
         id,
         span: source_span(function.span),
         name,
+        self_binding,
         parameters: parameters.into(),
         parameter_initializers: parameter_initializers.into(),
         rest_parameter,
@@ -762,6 +765,7 @@ pub(super) fn lower_arrow_function_stencil(
         id,
         span: source_span(function.span),
         name: None,
+        self_binding: None,
         parameters: parameters.into(),
         parameter_initializers: parameter_initializers.into(),
         rest_parameter,

@@ -301,6 +301,9 @@ impl EnvironmentPlans {
                     collection: "captured environment slots",
                 })?;
             let mut slots = Vec::with_capacity(capacity);
+            if let Some(binding) = &function.self_binding {
+                push_function_name_slot(binding, &mut slots)?;
+            }
             for parameter in function.parameters.iter() {
                 for binding in pattern_bindings(parameter) {
                     push_captured_slot(&binding, true, true, &mut slots)?;
@@ -418,6 +421,25 @@ fn push_captured_slot(
         name: binding.name.clone(),
         mutable,
         initialized,
+    });
+    Ok(())
+}
+
+/// Reserves the lexical self binding for a named function expression even without a nested capture.
+fn push_function_name_slot(
+    binding: &crate::HirBinding,
+    slots: &mut Vec<CapturedSlot>,
+) -> Result<(), CompileError> {
+    if slots.iter().any(|slot| slot.id == binding.id) {
+        return Ok(());
+    }
+    let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
+    slots.push(CapturedSlot {
+        id: binding.id,
+        slot,
+        name: binding.name.clone(),
+        mutable: false,
+        initialized: true,
     });
     Ok(())
 }
@@ -615,6 +637,9 @@ fn lower_function(
         function_scope: Some(function.scope),
         environments,
     };
+    if let Some(binding) = &function.self_binding {
+        lowerer.add_local(binding, None, false)?;
+    }
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
         lowerer.bind_pattern(parameter, register, true)?;
@@ -666,6 +691,12 @@ fn lower_function(
         .position(Option::is_some)
         .unwrap_or(function.parameters.len());
     let environment_slots = freeze_environment_slot_metadata(captured_slots);
+    let self_binding_slot = function.self_binding.as_ref().and_then(|binding| {
+        captured_slots
+            .iter()
+            .find(|slot| slot.id == binding.id)
+            .map(|slot| slot.slot)
+    });
     let handlers = freeze_handlers(lowerer.handlers)?;
     let binding_plan = lowerer.binding_plan.into();
     // Unused parameters own frame registers even when no instruction mentions them. The bytecode
@@ -703,6 +734,7 @@ fn lower_function(
                     environments.functions[function_index].slots.len(),
                 )
                 .map_err(|_| CompileError::BindingOverflow)?,
+                self_binding_slot,
                 ..FunctionLayout::default()
             },
             source_map,

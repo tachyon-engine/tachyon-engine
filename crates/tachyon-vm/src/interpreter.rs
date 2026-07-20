@@ -858,7 +858,16 @@ impl Isolate {
             }
             Opcode::StoreEnvironment => {
                 let value = self.read(base, operands[0])?;
-                self.store_environment(operands[1], operands[2], value)?;
+                if let Err(error) = self.store_environment(operands[1], operands[2], value) {
+                    let sloppy_immutable_write =
+                        matches!(error, ExecutionError::ImmutableEnvironmentBinding { .. })
+                            && self.fiber.frames.last().is_some_and(|frame| {
+                                frame.strictness == FunctionStrictness::Sloppy
+                            });
+                    if !sloppy_immutable_write {
+                        return Err(error);
+                    }
+                }
             }
             Opcode::DeclareScope => {
                 self.declare_scope(code, operands[0])?;
@@ -1560,12 +1569,17 @@ impl Isolate {
         &mut self,
         kind: FunctionKind,
         slot_count: NonZeroU32,
+        self_binding: Option<(u32, Value)>,
     ) -> Result<(), ExecutionError> {
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
         let mut environment = if kind == FunctionKind::Module {
             Environment::try_bindings(environment_kind, parent, slot_count, |_| {
                 BindingState::new(true, false)
+            })
+        } else if let Some((self_slot, _)) = self_binding {
+            Environment::try_bindings(environment_kind, parent, slot_count, |slot| {
+                BindingState::new(slot != self_slot, slot != self_slot)
             })
         } else {
             Environment::try_captured(environment_kind, parent, slot_count)
@@ -1577,6 +1591,10 @@ impl Isolate {
                     .initialize(slot, Value::from_immediate(Immediate::Undefined))
                     .expect("fresh module binding slots initialize exactly once");
             }
+        } else if let Some((self_slot, value)) = self_binding {
+            environment
+                .initialize(self_slot, value)
+                .expect("fresh named function binding initializes exactly once");
         }
         debug_assert_eq!(environment.kind(), environment_kind);
         let roots = &mut VmRoots {
@@ -1670,7 +1688,7 @@ impl Isolate {
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
-        self.allocate_current_environment(kind, slot_count)
+        self.allocate_current_environment(kind, slot_count, None)
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
@@ -2371,7 +2389,14 @@ impl Isolate {
             call_site: Some(site.call_site),
         });
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
-            && let Err(error) = self.allocate_current_environment(target.kind, slot_count)
+            && let Err(error) = self.allocate_current_environment(
+                target.kind,
+                slot_count,
+                target
+                    .layout
+                    .self_binding_slot
+                    .map(|slot| (slot, site.callee)),
+            )
         {
             self.fiber.frames.pop();
             self.fiber.registers.truncate(callee_base as usize);

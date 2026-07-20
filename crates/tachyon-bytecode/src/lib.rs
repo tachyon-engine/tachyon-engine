@@ -387,6 +387,8 @@ pub struct FunctionLayout {
     pub temporary_register_count: u32,
     pub feedback_slot_count: u32,
     pub environment_slot_count: u32,
+    /// Immutable environment slot initialized to the called closure for a named function expression.
+    pub self_binding_slot: Option<u32>,
     pub max_handler_depth: u32,
     pub max_completion_depth: u32,
 }
@@ -630,6 +632,10 @@ pub enum ModuleBuildError {
         binding: BindingPlanEntry,
     },
     EmptyEnvironmentSlotName {
+        function: FunctionId,
+        slot: u32,
+    },
+    InvalidSelfBindingSlot {
         function: FunctionId,
         slot: u32,
     },

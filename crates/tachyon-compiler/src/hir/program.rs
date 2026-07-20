@@ -130,6 +130,8 @@ pub struct HirFunction {
     pub id: FunctionStencilId,
     pub span: SourceSpan,
     pub name: Option<Arc<str>>,
+    /// The immutable lexical name visible only inside a named function expression.
+    pub self_binding: Option<HirBinding>,
     pub parameters: Arc<[HirPattern]>,
     pub parameter_initializers: Arc<[Option<HirExpression>]>,
     pub rest_parameter: Option<HirPattern>,

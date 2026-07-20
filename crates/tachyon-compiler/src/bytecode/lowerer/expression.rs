@@ -418,7 +418,7 @@ impl Lowerer<'_> {
         match target {
             HirAssignmentTarget::Identifier(target) => {
                 if let Some(binding) = self.local_reference(target).cloned() {
-                    if !binding.mutable {
+                    if !binding.mutable && matches!(binding.storage, LocalStorage::Register(_)) {
                         return Err(self.unsupported(span, "assignment to immutable local"));
                     }
                     let result = match operator {
@@ -437,7 +437,7 @@ impl Lowerer<'_> {
                     return Ok(result);
                 }
                 if let Some(binding) = self.captured_reference(target)? {
-                    if !binding.mutable {
+                    if !binding.mutable && matches!(binding.storage, LocalStorage::Register(_)) {
                         return Err(self.unsupported(span, "assignment to immutable capture"));
                     }
                     let result = match operator {
@@ -684,7 +684,7 @@ impl Lowerer<'_> {
         match target {
             HirAssignmentTarget::Identifier(target) => {
                 if let Some(binding) = self.local_reference(target).cloned() {
-                    if !binding.mutable {
+                    if !binding.mutable && matches!(binding.storage, LocalStorage::Register(_)) {
                         return Err(self.unsupported(span, "update of immutable local"));
                     }
                     let old = self.snapshot_local(&binding, span)?;
@@ -694,7 +694,7 @@ impl Lowerer<'_> {
                     return Ok(if prefix { updated } else { old });
                 }
                 if let Some(binding) = self.captured_reference(target)? {
-                    if !binding.mutable {
+                    if !binding.mutable && matches!(binding.storage, LocalStorage::Register(_)) {
                         return Err(self.unsupported(span, "update of immutable capture"));
                     }
                     let old = self.snapshot_local(&binding, span)?;
