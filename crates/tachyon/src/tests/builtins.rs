@@ -22,6 +22,19 @@ fn primitive_string_length_and_prototype_are_available() {
 }
 
 #[test]
+/// Reads only canonical primitive-string indices and preserves UTF-16 code-unit boundaries.
+fn primitive_string_indexed_properties_follow_string_exotic_rules() {
+    assert_eq!(
+        execute_source(
+            926,
+            "'tachyon'[1] === 'a' && 'tachyon'[99] === undefined && 'tachyon'['01'] === undefined;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

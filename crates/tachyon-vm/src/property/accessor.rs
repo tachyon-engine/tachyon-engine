@@ -60,6 +60,36 @@ impl Isolate {
                         .map_err(|_| ExecutionError::ArrayLengthOverflow)
                 });
             }
+            if let Some(atom) = key.atom()
+                && let Some(index) = self
+                    .atoms
+                    .get(atom)
+                    .and_then(|name| crate::property::keys::array_index(name.as_view()))
+                && (index as usize) < self.string_value_length(receiver)?
+            {
+                let raw = receiver
+                    .as_heap_ref()
+                    .expect("primitive String identity has a managed reference");
+                let string = self
+                    .heap
+                    .checked_reference(raw, self.types.string)
+                    .map_err(ExecutionError::HeapReference)?;
+                let unit = self.heap.with_running_scope(|scope| {
+                    let string = scope.root(string).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(string, self.types.string)
+                            .map(|string| {
+                                string.code_unit_at(index as usize).expect("checked index")
+                            })
+                            .map_err(ExecutionError::NoGcBorrow)
+                    })
+                })?;
+                let value = self.allocate_runtime_string(
+                    JsString::try_from_utf16(&[unit]).map_err(ExecutionError::PropertyKeyString)?,
+                )?;
+                return Ok(PropertyRead::Data(value));
+            }
             self.realm
                 .string_prototype
                 .expect("String prototype initializes before primitive String access")

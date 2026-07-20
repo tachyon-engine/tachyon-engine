@@ -159,7 +159,7 @@ impl Isolate {
 }
 
 /// Recognizes only canonical decimal spellings in the `0..=2^32-2` ArrayIndex range.
-fn array_index(string: JsStringView<'_>) -> Option<u32> {
+pub(crate) fn array_index(string: JsStringView<'_>) -> Option<u32> {
     let length = string.len();
     if length == 0 || length > 10 {
         return None;
