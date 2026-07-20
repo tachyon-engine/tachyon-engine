@@ -50,6 +50,22 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<PropertyRead, ExecutionError> {
+        if let Some(raw) = receiver.as_heap_ref()
+            && self
+                .heap
+                .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+        {
+            let source = self.intern_intrinsic_name(b"source")?;
+            let flags = self.intern_intrinsic_name(b"flags")?;
+            let (regexp_source, regexp_flags) = self.regexp_data(receiver)?;
+            if key == PropertyKey::Atom(source) {
+                return Ok(PropertyRead::Data(regexp_source));
+            }
+            if key == PropertyKey::Atom(flags) {
+                return Ok(PropertyRead::Data(regexp_flags));
+            }
+        }
         let mut current = if self.is_string_value(receiver) || self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {
@@ -139,6 +155,18 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWrite, ExecutionError> {
+        if let Some(raw) = receiver.as_heap_ref()
+            && self
+                .heap
+                .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+        {
+            let source = self.intern_intrinsic_name(b"source")?;
+            let flags = self.intern_intrinsic_name(b"flags")?;
+            if key == PropertyKey::Atom(source) || key == PropertyKey::Atom(flags) {
+                return Ok(PropertyWrite::Complete(false));
+            }
+        }
         let mut current = if self.is_string_value(receiver) {
             return Ok(PropertyWrite::Complete(false));
         } else if numeric_value(receiver).is_some() {

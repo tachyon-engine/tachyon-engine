@@ -151,7 +151,10 @@ impl Isolate {
     }
 
     /// Reads the private source and flags slots after validating the receiver's exotic identity.
-    fn regexp_data(&mut self, receiver: Value) -> Result<(Value, Value), ExecutionError> {
+    pub(crate) fn regexp_data(
+        &mut self,
+        receiver: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
         let raw = receiver
             .as_heap_ref()
             .ok_or(ExecutionError::NotObject(receiver))?;
