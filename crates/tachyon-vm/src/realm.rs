@@ -1121,6 +1121,24 @@ impl Isolate {
             b"size",
             NativeFunction::MapSize,
         )?;
+        let map_keys = self.install_collection_method(
+            map_prototype,
+            function_prototype,
+            b"keys",
+            NativeFunction::MapKeys,
+        )?;
+        let map_values = self.install_collection_method(
+            map_prototype,
+            function_prototype,
+            b"values",
+            NativeFunction::MapValues,
+        )?;
+        let map_entries = self.install_collection_method(
+            map_prototype,
+            function_prototype,
+            b"entries",
+            NativeFunction::MapEntries,
+        )?;
 
         let set_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
@@ -1154,7 +1172,107 @@ impl Isolate {
             function_prototype,
             b"size",
             NativeFunction::SetSize,
-        )
+        )?;
+        let set_values = self.install_collection_method(
+            set_prototype,
+            function_prototype,
+            b"values",
+            NativeFunction::SetValues,
+        )?;
+        let set_entries = self.install_collection_method(
+            set_prototype,
+            function_prototype,
+            b"entries",
+            NativeFunction::SetEntries,
+        )?;
+        let keys_atom = self.intern_intrinsic_name(b"keys")?;
+        self.set_intrinsic_data_property(set_prototype, keys_atom, set_values, true)?;
+        let iterator_symbol = self
+            .realm
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before collections");
+        let iterator_key = self.property_key(iterator_symbol)?;
+        self.define_data_property(
+            map_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(map_entries),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        self.define_data_property(
+            set_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(set_values),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let iterator_parent = self
+            .object_snapshot(
+                self.realm
+                    .array_iterator_prototype
+                    .expect("Array iterator initializes before collections"),
+            )?
+            .1
+            .prototype;
+        let map_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_parent,
+        })?;
+        let set_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_parent,
+        })?;
+        self.realm.map_iterator_prototype = Some(map_iterator_prototype);
+        self.realm.set_iterator_prototype = Some(set_iterator_prototype);
+        let next = self.allocate_native_function(
+            NativeFunction::CollectionIteratorNext,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let next_atom = self.intern_intrinsic_name(b"next")?;
+        self.set_intrinsic_data_property(map_iterator_prototype, next_atom, next, true)?;
+        self.set_intrinsic_data_property(set_iterator_prototype, next_atom, next, true)?;
+        let identity = self
+            .realm
+            .iterator_identity
+            .expect("Iterator identity initializes before collections");
+        self.define_data_property(
+            map_iterator_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(identity),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        self.define_data_property(
+            set_iterator_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(identity),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let _ = (map_keys, map_values, set_entries);
+        Ok(())
     }
 
     /// Installs a standard writable, non-enumerable collection prototype method.
@@ -1164,7 +1282,7 @@ impl Isolate {
         function_prototype: Value,
         name: &[u8],
         native: NativeFunction,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Value, ExecutionError> {
         let method = self.allocate_native_function(
             native,
             OrdinaryObject {
@@ -1175,7 +1293,8 @@ impl Isolate {
             },
         )?;
         let name = self.intern_intrinsic_name(name)?;
-        self.set_intrinsic_data_property(prototype, name, method, true)
+        self.set_intrinsic_data_property(prototype, name, method, true)?;
+        Ok(method)
     }
 
     /// Installs `size` as a getter, retaining ordinary accessor observability for later completion.

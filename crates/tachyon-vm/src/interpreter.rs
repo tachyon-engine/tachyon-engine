@@ -2346,6 +2346,18 @@ impl Isolate {
                     let value = self.map_size(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::MapKeys) => {
+                    let value = self.map_keys(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::MapValues) => {
+                    let value = self.map_values(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::MapEntries) => {
+                    let value = self.map_entries(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::SetAdd) => {
                     let value = self.set_add(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -2384,6 +2396,18 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::SetSize) => {
                     let value = self.set_size(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SetValues) => {
+                    let value = self.set_values(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SetEntries) => {
+                    let value = self.set_entries(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::CollectionIteratorNext) => {
+                    let value = self.collection_iterator_next(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIsArray) => {

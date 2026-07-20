@@ -581,6 +581,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::ArrayIterator(iterator), ordinary));
         }
+        if let Ok(iterator) = self
+            .heap
+            .checked_reference(raw, self.types.collection_iterator)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.collection_iterator)
+                        .map(|iterator| iterator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::CollectionIterator(iterator), ordinary));
+        }
         let function = self
             .heap
             .checked_reference(raw, self.types.function)
@@ -702,6 +717,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(iterator, self.types.collection_iterator)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
         }
     }
 
@@ -804,6 +830,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(iterator, self.types.array_iterator)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(iterator, self.types.collection_iterator)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1010,6 +1047,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let iterator = no_gc
+                        .borrow_mut(iterator, self.types.collection_iterator)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    iterator.ordinary.shape = shape;
+                    iterator.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(iterator, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
         }
     }
 
@@ -1049,6 +1107,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.array_iterator)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.collection_iterator)
                 .is_ok()
     }
 }

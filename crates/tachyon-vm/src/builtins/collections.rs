@@ -19,6 +19,24 @@ impl Trace for CollectionReplacementRoots<'_> {
 }
 
 impl Isolate {
+    #[inline(always)]
+    pub(crate) fn is_map_value(&self, value: Value) -> bool {
+        value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.map_object)
+                .is_ok()
+        })
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_set_value(&self, value: Value) -> bool {
+        value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.set_object)
+                .is_ok()
+        })
+    }
+
     /// Creates an empty Map; iterable initialization joins the resumable iterator-protocol slice.
     pub(crate) fn create_map_from_site(
         &mut self,
@@ -113,6 +131,24 @@ impl Isolate {
         Ok(safe_integer_value(u64::from(self.collection_len(storage)?)))
     }
 
+    /// Creates a Map keys iterator retaining live insertion-order state.
+    pub(crate) fn map_keys(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        self.map_storage(receiver)?;
+        self.create_collection_iterator(receiver, CollectionIterationKind::Key, true)
+    }
+
+    /// Creates a Map values iterator retaining live insertion-order state.
+    pub(crate) fn map_values(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        self.map_storage(receiver)?;
+        self.create_collection_iterator(receiver, CollectionIterationKind::Value, true)
+    }
+
+    /// Creates a Map entries iterator retaining live insertion-order state.
+    pub(crate) fn map_entries(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        self.map_storage(receiver)?;
+        self.create_collection_iterator(receiver, CollectionIterationKind::KeyAndValue, true)
+    }
+
     /// Implements Set.prototype.add by storing each member as both ordered key and value.
     pub(crate) fn set_add(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let argument = self.call_argument(site, 0)?;
@@ -158,6 +194,18 @@ impl Isolate {
         Ok(safe_integer_value(u64::from(self.collection_len(storage)?)))
     }
 
+    /// Creates a Set values iterator retaining live insertion-order state.
+    pub(crate) fn set_values(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        self.set_storage(receiver)?;
+        self.create_collection_iterator(receiver, CollectionIterationKind::Value, false)
+    }
+
+    /// Creates a Set entries iterator yielding `[value, value]` pairs.
+    pub(crate) fn set_entries(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        self.set_storage(receiver)?;
+        self.create_collection_iterator(receiver, CollectionIterationKind::KeyAndValue, false)
+    }
+
     #[inline(always)]
     fn collection_key(&self, value: Option<Value>) -> Value {
         let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -168,7 +216,10 @@ impl Isolate {
         }
     }
 
-    fn map_storage(&mut self, receiver: Value) -> Result<GcRef<OrderedCollection>, ExecutionError> {
+    pub(crate) fn map_storage(
+        &mut self,
+        receiver: Value,
+    ) -> Result<GcRef<OrderedCollection>, ExecutionError> {
         let raw = receiver
             .as_heap_ref()
             .ok_or(ExecutionError::IncompatibleCollectionReceiver(receiver))?;
@@ -187,7 +238,10 @@ impl Isolate {
         })
     }
 
-    fn set_storage(&mut self, receiver: Value) -> Result<GcRef<OrderedCollection>, ExecutionError> {
+    pub(crate) fn set_storage(
+        &mut self,
+        receiver: Value,
+    ) -> Result<GcRef<OrderedCollection>, ExecutionError> {
         let raw = receiver
             .as_heap_ref()
             .ok_or(ExecutionError::IncompatibleCollectionReceiver(receiver))?;
@@ -223,7 +277,7 @@ impl Isolate {
         Ok(None)
     }
 
-    fn collection_entry(
+    pub(crate) fn collection_entry(
         &mut self,
         storage: GcRef<OrderedCollection>,
         index: u32,
@@ -239,7 +293,7 @@ impl Isolate {
         })
     }
 
-    fn collection_used(
+    pub(crate) fn collection_used(
         &mut self,
         storage: GcRef<OrderedCollection>,
     ) -> Result<u32, ExecutionError> {

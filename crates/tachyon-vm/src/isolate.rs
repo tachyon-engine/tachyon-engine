@@ -50,6 +50,9 @@ impl Isolate {
             array_iterator: registry
                 .try_register("ArrayIteratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            collection_iterator: registry
+                .try_register("CollectionIteratorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             bound_function: registry
                 .try_register("BoundFunctionData")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -106,12 +106,18 @@ pub(crate) enum NativeFunction {
     MapDelete,
     MapClear,
     MapSize,
+    MapKeys,
+    MapValues,
+    MapEntries,
+    CollectionIteratorNext,
     SetConstructor,
     SetAdd,
     SetHas,
     SetDelete,
     SetClear,
     SetSize,
+    SetValues,
+    SetEntries,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -489,6 +495,12 @@ impl NativeFunction {
             | Self::SetHas
             | Self::SetDelete => 1,
             Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
+            Self::MapKeys
+            | Self::MapValues
+            | Self::MapEntries
+            | Self::CollectionIteratorNext
+            | Self::SetValues
+            | Self::SetEntries => 0,
             Self::NumberIsNaN
             | Self::NumberIsFinite
             | Self::NumberIsInteger
@@ -658,12 +670,18 @@ impl NativeFunction {
             Self::MapDelete => "delete",
             Self::MapClear => "clear",
             Self::MapSize => "get size",
+            Self::MapKeys => "keys",
+            Self::MapValues => "values",
+            Self::MapEntries => "entries",
+            Self::CollectionIteratorNext => "next",
             Self::SetConstructor => "Set",
             Self::SetAdd => "add",
             Self::SetHas => "has",
             Self::SetDelete => "delete",
             Self::SetClear => "clear",
             Self::SetSize => "get size",
+            Self::SetValues => "values",
+            Self::SetEntries => "entries",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::MathAbs
@@ -895,6 +913,7 @@ pub(crate) enum ObjectReceiver {
     Map(GcRef<MapObject>),
     Set(GcRef<SetObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
+    CollectionIterator(GcRef<CollectionIteratorObject>),
 }
 
 impl ObjectReceiver {
@@ -910,6 +929,7 @@ impl ObjectReceiver {
             Self::Map(map) => Value::from_heap_ref(map.raw()),
             Self::Set(set) => Value::from_heap_ref(set.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
+            Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
 }
@@ -1018,6 +1038,7 @@ pub(crate) struct VmTypes {
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
+    pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) environment: GcType<Environment>,
     pub(crate) exclusion_list: GcType<ExclusionList>,

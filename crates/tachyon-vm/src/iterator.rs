@@ -45,6 +45,33 @@ pub(crate) struct ArrayIteratorObject {
     pub(crate) kind: ArrayIterationKind,
 }
 
+/// The result projection selected by a Map or Set iterator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum CollectionIterationKind {
+    Key,
+    Value,
+    KeyAndValue,
+}
+
+/// GC-managed Map/Set iterator retaining its exotic identity rather than one replaceable backing.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct CollectionIteratorObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) collection: Option<Value>,
+    pub(crate) next_index: u32,
+    pub(crate) kind: CollectionIterationKind,
+}
+
+impl Trace for CollectionIteratorObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.collection.trace(tracer);
+    }
+}
+
 impl Trace for ArrayIteratorObject {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -56,6 +83,12 @@ impl Trace for ArrayIteratorObject {
 struct ArrayIteratorAllocationRoots<'a> {
     vm: VmRoots<'a>,
     iterated_object: Value,
+    prototype: Value,
+}
+
+struct CollectionIteratorAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    collection: Value,
     prototype: Value,
 }
 
@@ -83,7 +116,102 @@ impl Trace for ArrayIteratorAllocationRoots<'_> {
     }
 }
 
+impl Trace for CollectionIteratorAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.collection.trace(tracer);
+        self.prototype.trace(tracer);
+    }
+}
+
 impl Isolate {
+    /// Creates a live Map/Set iterator whose cursor remains valid across backing replacement.
+    pub(crate) fn create_collection_iterator(
+        &mut self,
+        collection: Value,
+        kind: CollectionIterationKind,
+        map: bool,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = if map {
+            self.realm.map_iterator_prototype
+        } else {
+            self.realm.set_iterator_prototype
+        }
+        .expect("collection iterator prototype initializes before iterator creation");
+        let mut roots = CollectionIteratorAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            collection,
+            prototype,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.collection_iterator,
+                0,
+                0,
+                CollectionIteratorObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    collection: Some(roots.collection),
+                    next_index: 0,
+                    kind,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|iterator| Value::from_heap_ref(iterator.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Advances a live Map/Set iterator, rereading physical storage after every mutation.
+    pub(crate) fn collection_iterator_next(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let reference = self.collection_iterator_reference(value)?;
+        loop {
+            let snapshot = self.collection_iterator_snapshot(reference)?;
+            let Some(collection) = snapshot.collection else {
+                return self
+                    .create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+            };
+            let storage = if self.is_map_value(collection) {
+                self.map_storage(collection)?
+            } else if self.is_set_value(collection) {
+                self.set_storage(collection)?
+            } else {
+                return Err(ExecutionError::IncompatibleCollectionReceiver(collection));
+            };
+            let used = self.collection_used(storage)?;
+            if snapshot.next_index >= used {
+                self.finish_collection_iterator(reference)?;
+                return self
+                    .create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+            }
+            self.set_collection_iterator_index(reference, snapshot.next_index + 1)?;
+            let Some(entry) = self.collection_entry(storage, snapshot.next_index)? else {
+                continue;
+            };
+            let result = match snapshot.kind {
+                CollectionIterationKind::Key => entry.key,
+                CollectionIterationKind::Value => entry.value,
+                CollectionIterationKind::KeyAndValue => {
+                    self.create_collection_entry_array(entry.key, entry.value)?
+                }
+            };
+            return self.create_iterator_result(result, false);
+        }
+    }
+
     /// Creates an Array iterator with GC-owned internal slots and no observable state properties.
     pub(crate) fn create_array_iterator(
         &mut self,
@@ -314,8 +442,88 @@ impl Isolate {
         })
     }
 
+    fn collection_iterator_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<tachyon_gc::GcRef<CollectionIteratorObject>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        self.heap
+            .checked_reference(raw, self.types.collection_iterator)
+            .map_err(|_| ExecutionError::NotObject(value))
+    }
+
+    fn collection_iterator_snapshot(
+        &mut self,
+        reference: tachyon_gc::GcRef<CollectionIteratorObject>,
+    ) -> Result<CollectionIteratorObject, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let iterator = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(iterator, self.types.collection_iterator)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn set_collection_iterator_index(
+        &mut self,
+        iterator: tachyon_gc::GcRef<CollectionIteratorObject>,
+        next_index: u32,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(iterator, self.types.collection_iterator)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .next_index = next_index;
+                Ok(())
+            })
+        })
+    }
+
+    fn finish_collection_iterator(
+        &mut self,
+        iterator: tachyon_gc::GcRef<CollectionIteratorObject>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(iterator, self.types.collection_iterator)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .collection = None;
+                Ok(())
+            })
+        })
+    }
+
+    /// Allocates the two-element array required for Map entries and Set key/value pairs.
+    fn create_collection_entry_array(
+        &mut self,
+        key: Value,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before collection iterator entries");
+        let array = self.create_array_object_with_prototype(prototype)?;
+        let first = self.safe_integer_property_atom(0)?;
+        let second = self.safe_integer_property_atom(1)?;
+        let length = self.length_atom()?;
+        self.set_own_data_property(array, first, key)?;
+        self.set_own_data_property(array, second, value)?;
+        self.set_own_data_property(array, length, Value::from_i32(2))?;
+        Ok(array)
+    }
+
     /// Materializes the spec result record with the mandated writable/enumerable/configurable fields.
-    fn create_iterator_result(
+    pub(crate) fn create_iterator_result(
         &mut self,
         value: Value,
         done: bool,
