@@ -412,6 +412,7 @@ impl Isolate {
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
+        self.initialize_remaining_well_known_symbols(symbol_constructor)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
         let object_prototype = self
@@ -525,6 +526,46 @@ impl Isolate {
         self.realm.well_known_symbols.iterator = Some(symbol);
         let iterator = self.intern_intrinsic_name(b"iterator")?;
         self.set_intrinsic_constant_property(symbol_constructor, iterator, symbol)
+    }
+
+    /// Publishes the remaining standard well-known Symbols as immutable constructor properties.
+    fn initialize_remaining_well_known_symbols(
+        &mut self,
+        symbol_constructor: Value,
+    ) -> Result<(), ExecutionError> {
+        for (name, description) in [
+            (
+                b"asyncDispose".as_slice(),
+                b"Symbol.asyncDispose".as_slice(),
+            ),
+            (
+                b"asyncIterator".as_slice(),
+                b"Symbol.asyncIterator".as_slice(),
+            ),
+            (b"dispose".as_slice(), b"Symbol.dispose".as_slice()),
+            (b"hasInstance".as_slice(), b"Symbol.hasInstance".as_slice()),
+            (
+                b"isConcatSpreadable".as_slice(),
+                b"Symbol.isConcatSpreadable".as_slice(),
+            ),
+            (b"match".as_slice(), b"Symbol.match".as_slice()),
+            (b"matchAll".as_slice(), b"Symbol.matchAll".as_slice()),
+            (b"replace".as_slice(), b"Symbol.replace".as_slice()),
+            (b"search".as_slice(), b"Symbol.search".as_slice()),
+            (b"species".as_slice(), b"Symbol.species".as_slice()),
+            (b"split".as_slice(), b"Symbol.split".as_slice()),
+            (b"toStringTag".as_slice(), b"Symbol.toStringTag".as_slice()),
+            (b"unscopables".as_slice(), b"Symbol.unscopables".as_slice()),
+        ] {
+            let description = self.allocate_runtime_string(
+                JsString::try_from_latin1(description)
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let symbol = self.allocate_symbol(Some(description))?;
+            let property = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
+        }
+        Ok(())
     }
 
     /// Builds the callable prototype chain before constructors depend on `%Function.prototype%`.
