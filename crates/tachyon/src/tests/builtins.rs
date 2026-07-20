@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+/// Publishes `%String.prototype%` and routes primitive string length through its exotic boundary.
+fn primitive_string_length_and_prototype_are_available() {
+    assert_eq!(
+        execute_source(
+            924,
+            "String.prototype.constructor === String && 'tachyon'.length === 7 && String('x').length === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            925,
+            "let value = 'x'; value.length = 9; value.length === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

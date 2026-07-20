@@ -50,7 +50,20 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<PropertyRead, ExecutionError> {
-        let mut current = if numeric_value(receiver).is_some() {
+        let mut current = if self.is_string_value(receiver) {
+            let length = self.length_atom()?;
+            if key == PropertyKey::Atom(length) {
+                return self.string_value_length(receiver).and_then(|length| {
+                    i32::try_from(length)
+                        .map(Value::from_i32)
+                        .map(PropertyRead::Data)
+                        .map_err(|_| ExecutionError::ArrayLengthOverflow)
+                });
+            }
+            self.realm
+                .string_prototype
+                .expect("String prototype initializes before primitive String access")
+        } else if numeric_value(receiver).is_some() {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
@@ -95,7 +108,9 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWrite, ExecutionError> {
-        let mut current = if numeric_value(receiver).is_some() {
+        let mut current = if self.is_string_value(receiver) {
+            return Ok(PropertyWrite::Complete(false));
+        } else if numeric_value(receiver).is_some() {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")

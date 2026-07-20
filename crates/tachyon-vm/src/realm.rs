@@ -301,7 +301,26 @@ impl Isolate {
                 },
             )
         };
-        self.realm.string_constructor = Some(allocate(self, NativeFunction::StringConstructor)?);
+        let string_constructor = allocate(self, NativeFunction::StringConstructor)?;
+        self.realm.string_constructor = Some(string_constructor);
+        let string_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before String prototype"),
+        })?;
+        self.realm.string_prototype = Some(string_prototype);
+        self.set_function_prototype(string_constructor, string_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(
+            string_prototype,
+            constructor_atom,
+            string_constructor,
+            true,
+        )?;
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;

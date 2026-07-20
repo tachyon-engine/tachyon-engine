@@ -32,7 +32,18 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<Value>, ExecutionError> {
         let key = key.into();
-        let mut current = if numeric_value(receiver).is_some() {
+        let mut current = if self.is_string_value(receiver) {
+            let length = self.length_atom()?;
+            if key == PropertyKey::Atom(length) {
+                let length = self.string_value_length(receiver)?;
+                let length =
+                    i32::try_from(length).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+                return Ok(Some(Value::from_i32(length)));
+            }
+            self.realm
+                .string_prototype
+                .expect("String prototype initializes before primitive String access")
+        } else if numeric_value(receiver).is_some() {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
