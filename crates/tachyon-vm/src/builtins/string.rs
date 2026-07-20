@@ -99,6 +99,32 @@ impl Isolate {
         }))
     }
 
+    /// Trims ECMAScript WhiteSpace and LineTerminator code units from either string boundary.
+    pub(crate) fn string_trim(
+        &mut self,
+        receiver: Value,
+        trim_start: bool,
+        trim_end: bool,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(receiver)?;
+        let mut start = 0;
+        let mut end = units.len();
+        if trim_start {
+            while start < end && is_ecmascript_trim_unit(units[start]) {
+                start += 1;
+            }
+        }
+        if trim_end {
+            while end > start && is_ecmascript_trim_unit(units[end - 1]) {
+                end -= 1;
+            }
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_utf16(&units[start..end])
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Reads one primitive receiver unit after the currently supported ToIntegerOrInfinity conversion.
     fn string_code_unit_at(&mut self, site: &CallSite) -> Result<Option<u16>, ExecutionError> {
         let receiver = site.this_value;
@@ -247,4 +273,13 @@ impl Isolate {
         }
         Ok((integer as usize).min(length))
     }
+}
+
+#[inline(always)]
+const fn is_ecmascript_trim_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009 | 0x000a | 0x000b | 0x000c | 0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000
+            ..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+    )
 }

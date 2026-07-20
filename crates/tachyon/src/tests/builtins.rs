@@ -100,6 +100,19 @@ fn string_includes_reuses_utf16_search_boundaries() {
 }
 
 #[test]
+/// Trims the ECMAScript whitespace set and preserves the start/end alias identities.
+fn string_trim_methods_use_ecmascript_code_units() {
+    assert_eq!(
+        execute_source(
+            932,
+            "'\\u00a0\\t tachyon \\u2029'.trim() === 'tachyon' && '  x  '.trimStart() === 'x  ' && '  x  '.trimEnd() === '  x' && String.prototype.trimLeft === String.prototype.trimStart && String.prototype.trimRight === String.prototype.trimEnd;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

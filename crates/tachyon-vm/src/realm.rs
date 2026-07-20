@@ -333,6 +333,19 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(string_prototype, atom, method, true)?;
         }
+        let trim = allocate(self, NativeFunction::StringTrim)?;
+        let trim_start = allocate(self, NativeFunction::StringTrimStart)?;
+        let trim_end = allocate(self, NativeFunction::StringTrimEnd)?;
+        for (name, method) in [
+            (b"trim".as_slice(), trim),
+            (b"trimStart".as_slice(), trim_start),
+            (b"trimEnd".as_slice(), trim_end),
+            (b"trimLeft".as_slice(), trim_start),
+            (b"trimRight".as_slice(), trim_end),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(string_prototype, atom, method, true)?;
+        }
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;

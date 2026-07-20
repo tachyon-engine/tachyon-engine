@@ -2035,6 +2035,18 @@ impl Isolate {
                     let value = self.string_includes(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringTrim) => {
+                    let value = self.string_trim(site.this_value, true, true)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringTrimStart) => {
+                    let value = self.string_trim(site.this_value, true, false)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringTrimEnd) => {
+                    let value = self.string_trim(site.this_value, false, true)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
                     | NativeFunction::NumberToExponential
