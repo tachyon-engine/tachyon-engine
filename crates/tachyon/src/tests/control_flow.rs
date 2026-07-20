@@ -133,6 +133,27 @@ fn for_in_preserves_control_flow_and_primitive_boundaries() {
 }
 
 #[test]
+/// Covers synchronous values, continue, and normal IteratorClose after a `for...of` break.
+fn for_of_uses_cached_iterator_protocol_and_closes_on_break() {
+    assert_eq!(
+        execute_source(
+            183,
+            "let sum = 0; for (let value of [1, 2, 3]) { if (value === 2) continue; sum += value; } sum;",
+        )
+        .as_i32(),
+        Some(4)
+    );
+    assert_eq!(
+        execute_source(
+            184,
+            "let stage = 0; let iterable = {}; iterable[Symbol.iterator] = function() { return { next: function() { return { value: 1, done: false }; }, return: function() { stage = 7; return {}; } }; }; for (var value of iterable) { break; } stage;",
+        )
+        .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
 /// Covers pre-test/post-test ordering, continue targets, breaks, and script completion values.
 fn while_and_do_while_preserve_loop_control_and_completion() {
     assert_eq!(

@@ -90,6 +90,20 @@ pub(super) fn statements_scope_name_count(
                     "scope names",
                 )?
             }
+            HirStatementKind::ForOf {
+                left, right, body, ..
+            } => {
+                let mut nested = expression_scope_name_count(right)?;
+                nested =
+                    checked_count_add(nested, for_in_left_scope_name_count(left)?, "scope names")?;
+                nested = checked_count_add(
+                    nested,
+                    statements_scope_name_count(core::slice::from_ref(body))?,
+                    "scope names",
+                )?;
+                // Symbol, iterator, next, done, value, and return.
+                checked_count_add(nested, 6, "scope names")?
+            }
             HirStatementKind::Loop { test, body, .. } => checked_count_add(
                 expression_scope_name_count(test)?,
                 statements_scope_name_count(core::slice::from_ref(body))?,
@@ -116,10 +130,7 @@ pub(super) fn statements_scope_name_count(
                 .transpose()?
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
-            HirStatementKind::Break
-            | HirStatementKind::Continue
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "scope names")?;
     }
@@ -428,6 +439,21 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                     "bytecode constants",
                 )?
             }
+            HirStatementKind::ForOf {
+                left, right, body, ..
+            } => {
+                let mut nested = expression_literal_count(right)?;
+                nested = checked_count_add(
+                    nested,
+                    for_in_left_literal_count(left)?,
+                    "bytecode constants",
+                )?;
+                checked_count_add(
+                    nested,
+                    statements_literal_count(core::slice::from_ref(body))?,
+                    "bytecode constants",
+                )?
+            }
             HirStatementKind::Loop { test, body, .. } => checked_count_add(
                 expression_literal_count(test)?,
                 statements_literal_count(core::slice::from_ref(body))?,
@@ -449,10 +475,7 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 statements_literal_count,
             )?,
             HirStatementKind::FunctionDeclaration(_) => 0,
-            HirStatementKind::Break
-            | HirStatementKind::Continue
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
     }

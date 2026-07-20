@@ -28,6 +28,7 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
             }
             HirStatementKind::For { body, .. }
             | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. }
             | HirStatementKind::Loop { body, .. } => {
                 statements_handler_count(core::slice::from_ref(body))?
             }
@@ -67,8 +68,7 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, nested, "exception handlers")?;
     }
@@ -260,6 +260,14 @@ pub(super) fn statements_binding_count(statements: &[HirStatement]) -> Result<us
                     "local bindings",
                 )?
             }
+            HirStatementKind::ForOf { left, body, .. } => {
+                let head = usize::from(matches!(left, HirForInLeft::Variable(_)));
+                checked_count_add(
+                    head,
+                    statements_binding_count(core::slice::from_ref(body))?,
+                    "local bindings",
+                )?
+            }
             HirStatementKind::Loop { body, .. } => {
                 statements_binding_count(core::slice::from_ref(body))?
             }
@@ -291,8 +299,7 @@ pub(super) fn statements_binding_count(statements: &[HirStatement]) -> Result<us
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "local bindings")?;
     }
@@ -415,6 +422,21 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                 count = checked_count_add(count, nested, "bytecode labels")?;
                 count = checked_count_add(count, 2, "bytecode labels")?;
             }
+            HirStatementKind::ForOf {
+                left, right, body, ..
+            } => {
+                let mut nested = expression_label_count(right)?;
+                nested =
+                    checked_count_add(nested, for_in_left_label_count(left)?, "bytecode labels")?;
+                nested = checked_count_add(
+                    nested,
+                    statements_label_count(core::slice::from_ref(body))?,
+                    "bytecode labels",
+                )?;
+                // condition, natural end, close, final exit, and close's internal skip label.
+                count = checked_count_add(count, nested, "bytecode labels")?;
+                count = checked_count_add(count, 5, "bytecode labels")?;
+            }
             HirStatementKind::Switch {
                 discriminant,
                 cases,
@@ -448,8 +470,7 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => {}
+            | HirStatementKind::Empty => {}
         }
     }
     Ok(count)
@@ -565,6 +586,7 @@ pub(super) fn statements_expression_count(
             }
             HirStatementKind::For { body, .. }
             | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. }
             | HirStatementKind::Loop { body, .. } => {
                 statements_expression_count(core::slice::from_ref(body))?
             }
@@ -586,8 +608,7 @@ pub(super) fn statements_expression_count(
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "entry completion instructions")?;
     }
@@ -630,6 +651,7 @@ pub(super) fn statements_switch_count(statements: &[HirStatement]) -> Result<usi
             }
             HirStatementKind::For { body, .. }
             | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. }
             | HirStatementKind::Loop { body, .. } => checked_count_add(
                 1,
                 statements_switch_count(core::slice::from_ref(body))?,
@@ -664,8 +686,7 @@ pub(super) fn statements_switch_count(statements: &[HirStatement]) -> Result<usi
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, nested, "switch control targets")?;
     }
@@ -695,6 +716,7 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
             }
             HirStatementKind::For { body, .. }
             | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. }
             | HirStatementKind::Loop { body, .. } => checked_count_add(
                 1,
                 statements_loop_count(core::slice::from_ref(body))?,
@@ -729,8 +751,7 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
             | HirStatementKind::Continue
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
-            | HirStatementKind::Empty
-            | HirStatementKind::ForOf { .. } => 0,
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, nested, "loop continue targets")?;
     }

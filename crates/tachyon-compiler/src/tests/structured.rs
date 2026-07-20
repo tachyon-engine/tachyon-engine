@@ -152,6 +152,29 @@ fn compiler_emits_verified_for_in_iterator_bytecode() {
 }
 
 #[test]
+/// Keeps synchronous `for...of` on the shared property/call iterator protocol.
+fn compiler_emits_verified_for_of_iterator_bytecode() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "let result = 0; for (let value of [1, 2]) { result += value; } result;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.contains("CallWithReceiver"));
+    assert!(disassembly.contains("GetByValue"));
+    assert!(disassembly.contains("JumpIfTrue"));
+}
+
+#[test]
 /// Owns ordinary object data properties and rejects descriptor-bearing syntax at the boundary.
 fn hir_owns_plain_object_literal_properties() {
     let hir = Compiler

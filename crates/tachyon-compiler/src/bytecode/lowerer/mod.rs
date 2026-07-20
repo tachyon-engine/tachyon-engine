@@ -60,8 +60,8 @@ pub(super) enum LocalStorage {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct IteratorRegisters {
     pub(super) iterator: RegisterId,
-    receiver: RegisterId,
-    next: RegisterId,
+    pub(super) receiver: RegisterId,
+    pub(super) next: RegisterId,
     done: RegisterId,
 }
 

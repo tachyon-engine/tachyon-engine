@@ -78,6 +78,23 @@ pub(super) fn statements_instruction_count(
                 )?;
                 checked_count_add(nested, 8, "bytecode instructions")?
             }
+            HirStatementKind::ForOf {
+                left, right, body, ..
+            } => {
+                let mut nested = expression_instruction_count(right)?;
+                nested = checked_count_add(
+                    nested,
+                    for_in_left_instruction_count(left)?,
+                    "bytecode instructions",
+                )?;
+                nested = checked_count_add(
+                    nested,
+                    statements_instruction_count(core::slice::from_ref(body))?,
+                    "bytecode instructions",
+                )?;
+                // GetIterator + next/value loop, normal exit, and the early-close branch.
+                checked_count_add(nested, 24, "bytecode instructions")?
+            }
             HirStatementKind::Loop {
                 test,
                 body,
@@ -121,7 +138,7 @@ pub(super) fn statements_instruction_count(
                 checked_count_add(nested, control, "bytecode instructions")?
             }
             HirStatementKind::Break | HirStatementKind::Continue => 1,
-            HirStatementKind::Empty | HirStatementKind::ForOf { .. } => 0,
+            HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;
     }

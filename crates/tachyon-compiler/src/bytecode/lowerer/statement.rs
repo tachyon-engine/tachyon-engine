@@ -70,8 +70,17 @@ impl Lowerer<'_> {
                 self.entry_for_in_statement(left, right, body, result, statement.span)?;
                 Ok(false)
             }
-            HirStatementKind::ForOf { .. } => {
-                Err(self.unsupported(statement.span, "for-of bytecode"))
+            HirStatementKind::ForOf {
+                r#await,
+                left,
+                right,
+                body,
+            } => {
+                if *r#await {
+                    return Err(self.unsupported(statement.span, "for-await-of bytecode"));
+                }
+                self.entry_for_of_statement(left, right, body, result, statement.span)?;
+                Ok(false)
             }
             HirStatementKind::Loop {
                 test,
@@ -335,8 +344,17 @@ impl Lowerer<'_> {
                 self.function_for_in_statement(left, right, body, statement.span)?;
                 Ok(false)
             }
-            HirStatementKind::ForOf { .. } => {
-                Err(self.unsupported(statement.span, "for-of bytecode"))
+            HirStatementKind::ForOf {
+                r#await,
+                left,
+                right,
+                body,
+            } => {
+                if *r#await {
+                    return Err(self.unsupported(statement.span, "for-await-of bytecode"));
+                }
+                self.function_for_of_statement(left, right, body, statement.span)?;
+                Ok(false)
             }
             HirStatementKind::Loop {
                 test,
@@ -453,6 +471,108 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)?;
         self.restore_for_in_scope(left, checkpoint);
         Ok(())
+    }
+
+    /// Emits synchronous `for...of`, sharing the cached iterator record with pattern lowering.
+    pub(in crate::bytecode) fn entry_for_of_statement(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        body: &HirStatement,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (iterator, condition, natural_end, close, end) =
+            self.for_of_prelude(left, right, span)?;
+        self.break_targets.push(self.control_target(close));
+        self.continue_targets.push(self.control_target(condition));
+        self.entry_statement(body, result)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(natural_end)
+            .map_err(CompileError::Builder)?;
+        self.emit_jump(end, span)?;
+        self.builder
+            .bind_label(close)
+            .map_err(CompileError::Builder)?;
+        self.close_iterator_normally(iterator, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_in_scope(left, checkpoint);
+        Ok(())
+    }
+
+    /// Emits function-body synchronous `for...of` without native iterator state or recursion.
+    pub(in crate::bytecode) fn function_for_of_statement(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        body: &HirStatement,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let checkpoint = self.locals.len();
+        let (iterator, condition, natural_end, close, end) =
+            self.for_of_prelude(left, right, span)?;
+        self.break_targets.push(self.control_target(close));
+        self.continue_targets.push(self.control_target(condition));
+        self.function_statement(body)?;
+        self.continue_targets.pop();
+        self.break_targets.pop();
+        self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(natural_end)
+            .map_err(CompileError::Builder)?;
+        self.emit_jump(end, span)?;
+        self.builder
+            .bind_label(close)
+            .map_err(CompileError::Builder)?;
+        self.close_iterator_normally(iterator, span)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_in_scope(left, checkpoint);
+        Ok(())
+    }
+
+    /// Evaluates the iterable once and leaves labels for completion, early close, and loop exit.
+    fn for_of_prelude(
+        &mut self,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<(IteratorRegisters, Label, Label, Label, Label), CompileError> {
+        let source = self.expression(right)?;
+        let iterator = self.get_sync_iterator(source, span)?;
+        self.prepare_for_in_binding(left, span)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let natural_end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let close = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        let next = self.iterator_next(iterator, span)?;
+        self.builder
+            .emit_jump_if_true(
+                iterator.done,
+                natural_end,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let value = self.pattern_property(
+            next,
+            &crate::HirObjectPropertyKey::Static("value".into()),
+            span,
+        )?;
+        self.store_for_in_left(left, value, span)?;
+        Ok((iterator, condition, natural_end, close, end))
     }
 
     /// Evaluates the source once, advances the iterator, checks completion, and stores each key.

@@ -76,6 +76,7 @@ fn lower_entry(
                 | HirStatementKind::If { .. }
                 | HirStatementKind::For { .. }
                 | HirStatementKind::ForIn { .. }
+                | HirStatementKind::ForOf { .. }
                 | HirStatementKind::Loop { .. }
                 | HirStatementKind::Switch { .. }
                 | HirStatementKind::Try { .. }
@@ -169,6 +170,7 @@ fn lower_entry(
                         | HirStatementKind::If { .. }
                         | HirStatementKind::For { .. }
                         | HirStatementKind::ForIn { .. }
+                        | HirStatementKind::ForOf { .. }
                         | HirStatementKind::Loop { .. }
                         | HirStatementKind::Switch { .. }
                         | HirStatementKind::Try { .. }
@@ -177,7 +179,7 @@ fn lower_entry(
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
                         }
-                        HirStatementKind::Empty | HirStatementKind::ForOf { .. } => {}
+                        HirStatementKind::Empty => {}
                     }
                 }
                 match result {
@@ -523,12 +525,17 @@ fn collect_captured_slots(
                 }
                 collect_captured_slots(source, core::slice::from_ref(body), slots)?;
             }
-            HirStatementKind::ForOf { .. } => {
-                return Err(CompileError::UnsupportedSyntax {
-                    source_name: source.name().clone(),
-                    span: statement.span,
-                    syntax: "for-of bytecode",
-                });
+            HirStatementKind::ForOf { left, body, .. } => {
+                if let HirForInLeft::Variable(declaration) = left {
+                    let mutable = declaration.kind != HirVariableDeclarationKind::Const;
+                    let initialized = declaration.kind == HirVariableDeclarationKind::Var;
+                    for declarator in declaration.declarators.iter() {
+                        for binding in pattern_bindings(&declarator.pattern) {
+                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                        }
+                    }
+                }
+                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
             }
             HirStatementKind::Loop { body, .. } => {
                 collect_captured_slots(source, core::slice::from_ref(body), slots)?;
