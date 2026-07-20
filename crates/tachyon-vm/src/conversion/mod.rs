@@ -889,6 +889,19 @@ impl Isolate {
         self.strict_equal_values(left, right)
     }
 
+    /// Implements SameValueZero for Array and keyed collections without allocating.
+    #[inline(always)]
+    pub(crate) fn same_value_zero(
+        &mut self,
+        left: Value,
+        right: Value,
+    ) -> Result<bool, ExecutionError> {
+        if let (Some(left), Some(right)) = (numeric_value(left), numeric_value(right)) {
+            return Ok((left.is_nan() && right.is_nan()) || left == right);
+        }
+        self.strict_equal_values(left, right)
+    }
+
     /// Applies strict equality without allocating while preserving numeric and string semantics.
     pub(crate) fn strict_equal_values(
         &mut self,

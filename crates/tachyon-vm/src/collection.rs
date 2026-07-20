@@ -2,15 +2,45 @@
 
 use core::mem::size_of;
 
-use tachyon_gc::{GcExternalMemory, Trace, Tracer};
+use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::Value;
+
+use crate::object::OrdinaryObject;
+
+/// Map exotic private slots plus its ordinary named-property base.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct MapObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) storage: GcRef<OrderedCollection>,
+}
+
+impl Trace for MapObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.storage.trace(tracer);
+    }
+}
+
+/// Set exotic private slots plus its ordinary named-property base.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct SetObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) storage: GcRef<OrderedCollection>,
+}
+
+impl Trace for SetObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.storage.trace(tracer);
+    }
+}
 
 /// One insertion-ordered entry retained as a tombstone after deletion for live iterators.
 #[derive(Clone, Copy, Debug)]
-#[allow(
-    dead_code,
-    reason = "Map and Set object payloads consume this in the next collection slice"
-)]
 pub(crate) struct CollectionEntry {
     pub(crate) key: Value,
     pub(crate) value: Value,
@@ -25,72 +55,65 @@ impl Trace for CollectionEntry {
 }
 
 /// Exact external backing for insertion-ordered ECMAScript collections.
-#[derive(Debug, Default)]
-#[allow(
-    dead_code,
-    reason = "Map and Set object payloads consume this in the next collection slice"
-)]
+///
+/// Capacity is fixed at publication: growth must use a new GC-accounted payload rather than
+/// changing an existing `GcExternalMemory` charge.
+#[derive(Debug)]
 pub(crate) struct OrderedCollection {
-    entries: Vec<Option<CollectionEntry>>,
+    entries: Box<[Option<CollectionEntry>]>,
+    used: u32,
     live_len: u32,
 }
 
-#[allow(
-    dead_code,
-    reason = "Map and Set native methods consume this in the next collection slice"
-)]
 impl OrderedCollection {
-    /// Updates an existing entry or appends one new insertion while preserving cursor stability.
-    pub(crate) fn insert_or_update(
-        &mut self,
-        key: Value,
-        value: Value,
-        mut equal: impl FnMut(Value, Value) -> bool,
-    ) -> Result<bool, ()> {
-        for entry in self.entries.iter_mut().flatten() {
-            if equal(entry.key, key) {
-                entry.value = value;
-                return Ok(false);
-            }
-        }
-        self.entries.try_reserve(1).map_err(|_| ())?;
-        self.entries.push(Some(CollectionEntry { key, value }));
+    /// Builds an exactly charged boxed backing with a checked allocation.
+    pub(crate) fn with_capacity(capacity: usize) -> Result<Self, ()> {
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(capacity).map_err(|_| ())?;
+        entries.resize(capacity, None);
+        Ok(Self {
+            entries: entries.into_boxed_slice(),
+            used: 0,
+            live_len: 0,
+        })
+    }
+
+    /// Returns one physical entry so callers can perform VM-level SameValueZero without holding a
+    /// GC payload borrow across string comparison.
+    #[inline(always)]
+    pub(crate) fn entry_at(&self, index: u32) -> Option<CollectionEntry> {
+        self.entries.get(index as usize).copied().flatten()
+    }
+
+    /// Replaces a known live entry value without changing insertion order or cardinality.
+    pub(crate) fn update_at(&mut self, index: u32, value: Value) -> Result<(), ()> {
+        let entry = self
+            .entries
+            .get_mut(index as usize)
+            .and_then(Option::as_mut)
+            .ok_or(())?;
+        entry.value = value;
+        Ok(())
+    }
+
+    /// Appends after the caller has checked capacity and canonicalized the key.
+    pub(crate) fn append(&mut self, key: Value, value: Value) -> Result<(), ()> {
+        let entry = self.entries.get_mut(self.used as usize).ok_or(())?;
+        debug_assert!(entry.is_none());
+        *entry = Some(CollectionEntry { key, value });
+        self.used = self.used.checked_add(1).ok_or(())?;
         self.live_len = self.live_len.checked_add(1).ok_or(())?;
-        Ok(true)
+        Ok(())
     }
 
-    /// Marks a matching entry deleted without shifting later iterator positions.
-    pub(crate) fn delete(
-        &mut self,
-        key: Value,
-        mut equal: impl FnMut(Value, Value) -> bool,
-    ) -> bool {
-        for entry in &mut self.entries {
-            if entry.is_some_and(|entry| equal(entry.key, key)) {
-                *entry = None;
-                self.live_len = self.live_len.saturating_sub(1);
-                return true;
-            }
+    /// Turns one known live position into a tombstone without shifting later cursor positions.
+    pub(crate) fn delete_at(&mut self, index: u32) -> Result<(), ()> {
+        let entry = self.entries.get_mut(index as usize).ok_or(())?;
+        if entry.take().is_none() {
+            return Err(());
         }
-        false
-    }
-
-    /// Returns the current value for one key without exposing internal storage references.
-    pub(crate) fn get(
-        &self,
-        key: Value,
-        mut equal: impl FnMut(Value, Value) -> bool,
-    ) -> Option<Value> {
-        self.entries
-            .iter()
-            .flatten()
-            .find(|entry| equal(entry.key, key))
-            .map(|entry| entry.value)
-    }
-
-    /// Reports membership using the same equality callback as Map and Set mutation paths.
-    pub(crate) fn has(&self, key: Value, equal: impl FnMut(Value, Value) -> bool) -> bool {
-        self.get(key, equal).is_some()
+        self.live_len = self.live_len.saturating_sub(1);
+        Ok(())
     }
 
     /// Clears live entries while retaining the historical cursor backing for existing iterators.
@@ -102,6 +125,28 @@ impl OrderedCollection {
     #[inline(always)]
     pub(crate) const fn len(&self) -> u32 {
         self.live_len
+    }
+
+    #[inline(always)]
+    pub(crate) const fn used(&self) -> u32 {
+        self.used
+    }
+
+    #[inline(always)]
+    pub(crate) fn capacity(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Copies physical positions, including tombstones, into a larger fixed backing.
+    pub(crate) fn grow_copy(&self, capacity: usize) -> Result<Self, ()> {
+        if capacity < self.used as usize {
+            return Err(());
+        }
+        let mut grown = Self::with_capacity(capacity)?;
+        grown.entries[..self.used as usize].copy_from_slice(&self.entries[..self.used as usize]);
+        grown.used = self.used;
+        grown.live_len = self.live_len;
+        Ok(grown)
     }
 }
 
@@ -115,7 +160,13 @@ impl Trace for OrderedCollection {
 impl GcExternalMemory for OrderedCollection {
     #[inline(always)]
     fn external_memory_bytes(&self) -> usize {
-        self.entries.capacity() * size_of::<Option<CollectionEntry>>()
+        self.entries.len() * size_of::<Option<CollectionEntry>>()
+    }
+}
+
+impl Default for OrderedCollection {
+    fn default() -> Self {
+        Self::with_capacity(0).expect("zero-capacity collection backing never allocates")
     }
 }
 
@@ -126,21 +177,17 @@ mod tests {
 
     #[test]
     fn updates_and_deletes_keep_later_positions_stable() {
-        let mut collection = OrderedCollection::default();
+        let mut collection = OrderedCollection::with_capacity(2).unwrap();
         collection
-            .insert_or_update(Value::from_i32(1), Value::from_i32(10), |left, right| {
-                left == right
-            })
+            .append(Value::from_i32(1), Value::from_i32(10))
             .unwrap();
         collection
-            .insert_or_update(Value::from_i32(2), Value::from_i32(20), |left, right| {
-                left == right
-            })
+            .append(Value::from_i32(2), Value::from_i32(20))
             .unwrap();
-        assert!(collection.delete(Value::from_i32(1), |left, right| left == right));
+        collection.delete_at(0).unwrap();
         assert_eq!(
-            collection.get(Value::from_i32(2), |left, right| left == right),
-            Some(Value::from_i32(20))
+            collection.entry_at(1).map(|entry| entry.value),
+            Some(Value::from_i32(20)),
         );
         assert_eq!(collection.len(), 1);
     }

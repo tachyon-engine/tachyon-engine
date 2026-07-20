@@ -25,6 +25,7 @@ impl Isolate {
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
+        self.initialize_collection_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
@@ -636,6 +637,8 @@ impl Isolate {
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
             regexp: self.intern_intrinsic_name(b"RegExp")?,
+            map: self.intern_intrinsic_name(b"Map")?,
+            set: self.intern_intrinsic_name(b"Set")?,
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
@@ -1073,6 +1076,138 @@ impl Isolate {
         Ok(())
     }
 
+    /// Builds Map and Set constructor/prototype pairs before either global becomes observable.
+    fn initialize_collection_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before collection intrinsics");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before collection intrinsics");
+        let map_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.map_prototype = Some(map_prototype);
+        let map = self.allocate_native_function(
+            NativeFunction::MapConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.map_constructor = Some(map);
+        self.set_function_prototype(map, map_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(map_prototype, constructor_atom, map, true)?;
+        for (name, native) in [
+            (b"get".as_slice(), NativeFunction::MapGet),
+            (b"set".as_slice(), NativeFunction::MapSet),
+            (b"has".as_slice(), NativeFunction::MapHas),
+            (b"delete".as_slice(), NativeFunction::MapDelete),
+            (b"clear".as_slice(), NativeFunction::MapClear),
+        ] {
+            self.install_collection_method(map_prototype, function_prototype, name, native)?;
+        }
+        self.install_collection_accessor(
+            map_prototype,
+            function_prototype,
+            b"size",
+            NativeFunction::MapSize,
+        )?;
+
+        let set_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.set_prototype = Some(set_prototype);
+        let set = self.allocate_native_function(
+            NativeFunction::SetConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.set_constructor = Some(set);
+        self.set_function_prototype(set, set_prototype)?;
+        self.set_intrinsic_data_property(set_prototype, constructor_atom, set, true)?;
+        for (name, native) in [
+            (b"add".as_slice(), NativeFunction::SetAdd),
+            (b"has".as_slice(), NativeFunction::SetHas),
+            (b"delete".as_slice(), NativeFunction::SetDelete),
+            (b"clear".as_slice(), NativeFunction::SetClear),
+        ] {
+            self.install_collection_method(set_prototype, function_prototype, name, native)?;
+        }
+        self.install_collection_accessor(
+            set_prototype,
+            function_prototype,
+            b"size",
+            NativeFunction::SetSize,
+        )
+    }
+
+    /// Installs a standard writable, non-enumerable collection prototype method.
+    fn install_collection_method(
+        &mut self,
+        prototype: Value,
+        function_prototype: Value,
+        name: &[u8],
+        native: NativeFunction,
+    ) -> Result<(), ExecutionError> {
+        let method = self.allocate_native_function(
+            native,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let name = self.intern_intrinsic_name(name)?;
+        self.set_intrinsic_data_property(prototype, name, method, true)
+    }
+
+    /// Installs `size` as a getter, retaining ordinary accessor observability for later completion.
+    fn install_collection_accessor(
+        &mut self,
+        prototype: Value,
+        function_prototype: Value,
+        name: &[u8],
+        native: NativeFunction,
+    ) -> Result<(), ExecutionError> {
+        let getter = self.allocate_native_function(
+            native,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let name = self.intern_intrinsic_name(name)?;
+        self.define_property(
+            prototype,
+            PropertyKey::Atom(name),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: Some(Value::from_immediate(Immediate::Undefined)),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )
+    }
+
     /// Builds the non-constructor JSON namespace and its UTF-16 parser entry point.
     fn initialize_json_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -1175,6 +1310,20 @@ impl Isolate {
             self.realm
                 .regexp_constructor
                 .expect("RegExp initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.map,
+            self.realm
+                .map_constructor
+                .expect("Map initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.set,
+            self.realm
+                .set_constructor
+                .expect("Set initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

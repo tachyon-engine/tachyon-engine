@@ -61,6 +61,7 @@ use tachyon_value::{Immediate, Value};
 
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
+use collection::{MapObject, OrderedCollection, SetObject};
 use conversion::{
     PendingNativePropertyKey, boolean_value, is_non_string_truthy, is_nullish, numeric_binary,
     numeric_binary_hot, numeric_binary_operation, numeric_bitwise_not, numeric_negate,
@@ -272,6 +273,9 @@ pub enum ExecutionError {
     IntrinsicBindingIndexAllocationFailed,
     Shape(ShapeError),
     PropertyStorageAllocationFailed,
+    CollectionStorageAllocationFailed,
+    UnsupportedCollectionInitializer,
+    IncompatibleCollectionReceiver(Value),
     ExclusionListAllocationFailed,
     ExclusionListCapacityExceeded,
     InvalidExclusionList(Value),

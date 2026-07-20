@@ -2,6 +2,21 @@
 
 use super::*;
 
+struct CollectionAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    storage: Option<GcRef<OrderedCollection>>,
+}
+
+impl Trace for CollectionAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.storage.trace(tracer);
+    }
+}
+
 /// A single-thread-owned ECMAScript execution state; `Cell` intentionally makes it `!Sync`.
 pub struct Isolate {
     pub(crate) fiber: Fiber,
@@ -47,6 +62,12 @@ impl Isolate {
             for_in_iterator: registry
                 .try_register("ForInIterator")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            map_object: registry
+                .try_register("MapObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            ordered_collection: registry
+                .try_register("OrderedCollection")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -70,6 +91,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             regexp_object: registry
                 .try_register("RegExpObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            set_object: registry
+                .try_register("SetObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             property_storage: registry
                 .try_register("PropertyStorage")
@@ -650,6 +674,102 @@ impl Isolate {
                 },
                 AllocationSpace::Young,
                 roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates a Map exotic and its externally accounted insertion-ordered backing together.
+    pub(crate) fn allocate_map_object(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = CollectionAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+            storage: None,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.ordered_collection,
+                0,
+                OrderedCollection::with_capacity(tuning::collections::INITIAL_ENTRY_CAPACITY)
+                    .map_err(|_| ExecutionError::CollectionStorageAllocationFailed)?,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.map_object,
+                0,
+                0,
+                MapObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    storage,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates a Set exotic and its externally accounted insertion-ordered backing together.
+    pub(crate) fn allocate_set_object(
+        &mut self,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        let mut roots = CollectionAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+            storage: None,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.ordered_collection,
+                0,
+                OrderedCollection::with_capacity(tuning::collections::INITIAL_ENTRY_CAPACITY)
+                    .map_err(|_| ExecutionError::CollectionStorageAllocationFailed)?,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.set_object,
+                0,
+                0,
+                SetObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    storage,
+                },
+                AllocationSpace::Young,
+                &mut roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
             .map_err(ExecutionError::HeapAllocation)

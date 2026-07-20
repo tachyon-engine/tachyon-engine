@@ -99,6 +99,19 @@ pub(crate) enum NativeFunction {
     ArrayValues,
     ArrayIteratorNext,
     IteratorIdentity,
+    MapConstructor,
+    MapGet,
+    MapSet,
+    MapHas,
+    MapDelete,
+    MapClear,
+    MapSize,
+    SetConstructor,
+    SetAdd,
+    SetHas,
+    SetDelete,
+    SetClear,
+    SetSize,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -384,6 +397,8 @@ impl NativeFunction {
                 | Self::FunctionConstructor
                 | Self::ErrorConstructor(_)
                 | Self::ArrayConstructor
+                | Self::MapConstructor
+                | Self::SetConstructor
         )
     }
 
@@ -465,6 +480,15 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
+            Self::MapConstructor | Self::SetConstructor => 0,
+            Self::MapGet
+            | Self::MapSet
+            | Self::MapHas
+            | Self::MapDelete
+            | Self::SetAdd
+            | Self::SetHas
+            | Self::SetDelete => 1,
+            Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
             Self::NumberIsNaN
             | Self::NumberIsFinite
             | Self::NumberIsInteger
@@ -627,6 +651,19 @@ impl NativeFunction {
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",
             Self::IteratorIdentity => "[Symbol.iterator]",
+            Self::MapConstructor => "Map",
+            Self::MapGet => "get",
+            Self::MapSet => "set",
+            Self::MapHas => "has",
+            Self::MapDelete => "delete",
+            Self::MapClear => "clear",
+            Self::MapSize => "get size",
+            Self::SetConstructor => "Set",
+            Self::SetAdd => "add",
+            Self::SetHas => "has",
+            Self::SetDelete => "delete",
+            Self::SetClear => "clear",
+            Self::SetSize => "get size",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::MathAbs
@@ -855,6 +892,8 @@ pub(crate) enum ObjectReceiver {
     Number(GcRef<NumberObject>),
     String(GcRef<StringObject>),
     RegExp(GcRef<RegExpObject>),
+    Map(GcRef<MapObject>),
+    Set(GcRef<SetObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
 }
 
@@ -868,6 +907,8 @@ impl ObjectReceiver {
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
+            Self::Map(map) => Value::from_heap_ref(map.raw()),
+            Self::Set(set) => Value::from_heap_ref(set.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
@@ -981,6 +1022,8 @@ pub(crate) struct VmTypes {
     pub(crate) environment: GcType<Environment>,
     pub(crate) exclusion_list: GcType<ExclusionList>,
     pub(crate) for_in_iterator: GcType<ForInIterator>,
+    pub(crate) map_object: GcType<MapObject>,
+    pub(crate) ordered_collection: GcType<OrderedCollection>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) string_object: GcType<StringObject>,
@@ -989,6 +1032,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) regexp_object: GcType<RegExpObject>,
+    pub(crate) set_object: GcType<SetObject>,
     pub(crate) property_storage: GcType<PropertyStorage>,
     pub(crate) string: GcType<JsString>,
     pub(crate) symbol: GcType<SymbolValue>,
@@ -1014,6 +1058,8 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) object: AtomId,
     pub(crate) string: AtomId,
     pub(crate) regexp: AtomId,
+    pub(crate) map: AtomId,
+    pub(crate) set: AtomId,
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
     pub(crate) boolean: AtomId,
@@ -1026,7 +1072,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        14 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        16 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

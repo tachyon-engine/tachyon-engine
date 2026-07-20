@@ -668,14 +668,6 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined)))
     }
 
-    #[inline(always)]
-    fn same_value_zero(&mut self, left: Value, right: Value) -> Result<bool, ExecutionError> {
-        if let (Some(left), Some(right)) = (numeric_value(left), numeric_value(right)) {
-            return Ok((left.is_nan() && right.is_nan()) || left == right);
-        }
-        self.strict_equal_values(left, right)
-    }
-
     /// Implements Array.prototype.toString as comma-joined primitive elements for this subset.
     pub(crate) fn array_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         self.join_array_like(receiver, None)

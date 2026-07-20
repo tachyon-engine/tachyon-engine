@@ -1895,6 +1895,14 @@ impl Isolate {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(caller_base, destination, array);
                 }
+                FunctionExecutable::Native(NativeFunction::MapConstructor) => {
+                    let map = self.create_map_from_site(&site)?;
+                    return self.write(caller_base, destination, map);
+                }
+                FunctionExecutable::Native(NativeFunction::SetConstructor) => {
+                    let set = self.create_set_from_site(&site)?;
+                    return self.write(caller_base, destination, set);
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
@@ -2285,6 +2293,98 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
+                }
+                FunctionExecutable::Native(NativeFunction::MapConstructor) => {
+                    let map = self.create_map_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, map);
+                }
+                FunctionExecutable::Native(NativeFunction::SetConstructor) => {
+                    let set = self.create_set_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, set);
+                }
+                FunctionExecutable::Native(NativeFunction::MapGet) => {
+                    let value = self.map_get(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::MapSet) => {
+                    let value = self.map_set(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::MapHas) => {
+                    let value = self.map_has(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::MapDelete) => {
+                    let value = self.map_delete(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::MapClear) => {
+                    self.map_clear(site.this_value)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::MapSize) => {
+                    let value = self.map_size(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SetAdd) => {
+                    let value = self.set_add(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SetHas) => {
+                    let value = self.set_has(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::SetDelete) => {
+                    let value = self.set_delete(&site)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if value {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::SetClear) => {
+                    self.set_clear(site.this_value)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::SetSize) => {
+                    let value = self.set_size(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIsArray) => {
                     let value = self
