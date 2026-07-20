@@ -48,6 +48,19 @@ fn string_character_methods_preserve_utf16_and_numeric_boundaries() {
 }
 
 #[test]
+/// Verifies String.prototype.slice normalizes relative positions without splitting UTF-16 units.
+fn string_slice_uses_relative_utf16_code_unit_indices() {
+    assert_eq!(
+        execute_source(
+            928,
+            "'tachyon'.slice(1, -1) === 'achyo' && 'tachyon'.slice(-3) === 'yon' && 'tachyon'.slice(5, 2) === '' && 'tachyon'.slice(NaN, 1) === 't';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

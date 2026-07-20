@@ -324,6 +324,7 @@ impl Isolate {
         for (native, name) in [
             (NativeFunction::StringCharAt, b"charAt".as_slice()),
             (NativeFunction::StringCharCodeAt, b"charCodeAt".as_slice()),
+            (NativeFunction::StringSlice, b"slice".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
