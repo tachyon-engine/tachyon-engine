@@ -2011,6 +2011,14 @@ impl Isolate {
                     let value = self.this_number_value(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringCharAt) => {
+                    let value = self.string_char_at(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::StringCharCodeAt) => {
+                    let value = self.string_char_code_at(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
                     | NativeFunction::NumberToExponential

@@ -321,6 +321,14 @@ impl Isolate {
             string_constructor,
             true,
         )?;
+        for (native, name) in [
+            (NativeFunction::StringCharAt, b"charAt".as_slice()),
+            (NativeFunction::StringCharCodeAt, b"charCodeAt".as_slice()),
+        ] {
+            let method = allocate(self, native)?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(string_prototype, atom, method, true)?;
+        }
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;

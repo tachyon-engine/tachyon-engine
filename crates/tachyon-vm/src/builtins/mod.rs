@@ -5,3 +5,4 @@ mod global;
 mod json;
 mod math;
 mod object;
+mod string;

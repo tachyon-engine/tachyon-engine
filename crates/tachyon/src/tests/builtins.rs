@@ -35,6 +35,19 @@ fn primitive_string_indexed_properties_follow_string_exotic_rules() {
 }
 
 #[test]
+/// Exercises String character methods against primitive UTF-16 code units and out-of-range values.
+fn string_character_methods_preserve_utf16_and_numeric_boundaries() {
+    assert_eq!(
+        execute_source(
+            927,
+            "'abc'.charAt() === 'a' && 'abc'.charAt(1) === 'b' && 'abc'.charAt(9) === '' && 'abc'.charCodeAt(1) === 98 && Number.isNaN('abc'.charCodeAt(9));",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

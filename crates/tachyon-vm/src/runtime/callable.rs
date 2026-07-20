@@ -31,6 +31,8 @@ pub(crate) enum NativeFunction {
     ObjectIsExtensible,
     ObjectPreventExtensions,
     StringConstructor,
+    StringCharAt,
+    StringCharCodeAt,
     SymbolConstructor,
     NumberConstructor,
     NumberIsNaN,
@@ -385,6 +387,8 @@ impl NativeFunction {
             | Self::ObjectIsExtensible
             | Self::ObjectPreventExtensions
             | Self::StringConstructor
+            | Self::StringCharAt
+            | Self::StringCharCodeAt
             | Self::NumberConstructor
             | Self::BooleanConstructor
             | Self::FunctionPrototypeCall
@@ -496,6 +500,8 @@ impl NativeFunction {
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
+            Self::StringCharAt => "charAt",
+            Self::StringCharCodeAt => "charCodeAt",
             Self::SymbolConstructor => "Symbol",
             Self::NumberConstructor => "Number",
             Self::NumberIsNaN => "isNaN",
