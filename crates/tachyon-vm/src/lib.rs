@@ -65,7 +65,7 @@ use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
-    PendingCollectionInitializer, SetObject,
+    PendingCollectionInitializer, PendingMapGetOrInsertComputed, SetObject,
 };
 use conversion::{
     PendingNativePropertyKey, boolean_value, is_non_string_truthy, is_nullish, numeric_binary,

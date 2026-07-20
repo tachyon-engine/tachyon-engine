@@ -664,7 +664,7 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn collection_key(&self, value: Option<Value>) -> Value {
+    pub(crate) fn collection_key(&self, value: Option<Value>) -> Value {
         let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
         if numeric_value(value).is_some_and(|number| number == 0.0) {
             Value::from_f64(0.0)
@@ -718,7 +718,7 @@ impl Isolate {
     }
 
     /// Scans physical entries with borrow-free SameValueZero comparisons between reads.
-    fn collection_find(
+    pub(crate) fn collection_find(
         &mut self,
         storage: GcRef<OrderedCollection>,
         key: Value,
@@ -777,7 +777,7 @@ impl Isolate {
         })
     }
 
-    fn collection_update(
+    pub(crate) fn collection_update(
         &mut self,
         storage: GcRef<OrderedCollection>,
         index: u32,
@@ -799,7 +799,7 @@ impl Isolate {
         })
     }
 
-    fn collection_append(
+    pub(crate) fn collection_append(
         &mut self,
         storage: GcRef<OrderedCollection>,
         key: Value,
@@ -858,7 +858,7 @@ impl Isolate {
         })
     }
 
-    fn ensure_map_capacity(
+    pub(crate) fn ensure_map_capacity(
         &mut self,
         receiver: Value,
         storage: GcRef<OrderedCollection>,

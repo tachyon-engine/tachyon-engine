@@ -4,6 +4,7 @@ mod array;
 mod collections;
 mod global;
 mod json;
+mod map_upsert;
 mod math;
 mod object;
 mod regexp;

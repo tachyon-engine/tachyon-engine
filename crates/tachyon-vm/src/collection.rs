@@ -66,6 +66,23 @@ pub(crate) struct PendingCollectionForEach {
     pub(crate) map: bool,
 }
 
+/// GC-owned state retained while Map.prototype.getOrInsertComputed invokes its callback.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingMapGetOrInsertComputed {
+    pub(crate) map: Value,
+    pub(crate) key: Value,
+    pub(crate) callback: Value,
+}
+
+impl Trace for PendingMapGetOrInsertComputed {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.map.trace(tracer);
+        self.key.trace(tracer);
+        self.callback.trace(tracer);
+    }
+}
+
 impl Trace for PendingCollectionForEach {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {

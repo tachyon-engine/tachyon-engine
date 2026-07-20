@@ -327,6 +327,7 @@ pub(crate) enum NativeContinuationKind {
     PropertySet,
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
+    MapGetOrInsertComputed,
     ConversionCallRoot,
 }
 
@@ -424,6 +425,21 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::CollectionForEach,
+            first: state,
+            second: callback,
+        }
+    }
+
+    /// Roots pending Map upsert callback state while its JavaScript callback executes.
+    #[inline]
+    pub(crate) const fn map_get_or_insert_computed(
+        site: NativeContinuationSite,
+        state: Value,
+        callback: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::MapGetOrInsertComputed,
             first: state,
             second: callback,
         }

@@ -113,6 +113,7 @@ pub(crate) enum NativeFunction {
     MapEntries,
     MapForEach,
     MapGetOrInsert,
+    MapGetOrInsertComputed,
     CollectionIteratorNext,
     SetConstructor,
     SetAdd,
@@ -522,7 +523,7 @@ impl NativeFunction {
             | Self::WeakSetAdd
             | Self::WeakSetHas
             | Self::WeakSetDelete => 1,
-            Self::MapGetOrInsert => 2,
+            Self::MapGetOrInsert | Self::MapGetOrInsertComputed => 2,
             Self::MapClear | Self::MapSize | Self::SetClear | Self::SetSize => 0,
             Self::MapKeys
             | Self::MapValues
@@ -707,6 +708,7 @@ impl NativeFunction {
             Self::MapEntries => "entries",
             Self::MapForEach => "forEach",
             Self::MapGetOrInsert => "getOrInsert",
+            Self::MapGetOrInsertComputed => "getOrInsertComputed",
             Self::CollectionIteratorNext => "next",
             Self::SetConstructor => "Set",
             Self::SetAdd => "add",
@@ -1106,6 +1108,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
     pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,
+    pub(crate) pending_map_get_or_insert_computed: GcType<PendingMapGetOrInsertComputed>,
     pub(crate) regexp_object: GcType<RegExpObject>,
     pub(crate) set_object: GcType<SetObject>,
     pub(crate) property_storage: GcType<PropertyStorage>,

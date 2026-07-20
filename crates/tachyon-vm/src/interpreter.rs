@@ -1304,6 +1304,9 @@ impl Isolate {
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::MapGetOrInsertComputed => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -2392,6 +2395,9 @@ impl Isolate {
                     let value = self.map_get_or_insert(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::MapGetOrInsertComputed) => {
+                    return self.begin_map_get_or_insert_computed(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::MapSet) => {
                     let value = self.map_set(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -3053,6 +3059,10 @@ impl Isolate {
                 NativeContinuationKind::CollectionForEach => {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;
                     self.resume_collection_for_each(site, state)
+                }
+                NativeContinuationKind::MapGetOrInsertComputed => {
+                    let state = self.pending_map_upsert_reference(continuation.first())?;
+                    self.resume_map_get_or_insert_computed(site, state, value)
                 }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")

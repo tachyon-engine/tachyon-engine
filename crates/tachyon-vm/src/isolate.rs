@@ -122,6 +122,9 @@ impl Isolate {
             pending_collection_for_each: registry
                 .try_register("PendingCollectionForEach")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_map_get_or_insert_computed: registry
+                .try_register("PendingMapGetOrInsertComputed")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             regexp_object: registry
                 .try_register("RegExpObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
