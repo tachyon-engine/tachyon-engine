@@ -676,10 +676,22 @@ fn verify_instruction(
         | Opcode::ToPropertyKey
         | Opcode::ToPropertyKeyForIn
         | Opcode::DefineGetterById
-        | Opcode::DefineSetterById => {
+        | Opcode::DefineSetterById
+        | Opcode::DefineGetterByValue
+        | Opcode::DefineSetterByValue => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
+        }
+        Opcode::SetAccessorFunctionName => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            if operands[2] > 1 {
+                return Err(VerifyError::InvalidBooleanOperand {
+                    offset,
+                    operand: operands[2],
+                });
+            }
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
         Opcode::GetById | Opcode::SetById => {

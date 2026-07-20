@@ -72,6 +72,27 @@ fn arrow_function_expression_can_be_called() {
 }
 
 #[test]
+/// Covers computed accessor key coercion, property publication, and the accessor naming contract.
+fn computed_object_accessors_preserve_runtime_key_order_and_names() {
+    assert_eq!(
+        execute_source(
+            158,
+            "let key = 'value'; let object = { get [key]() { return 40; }, set [key](next) {} }; let descriptor = Object.getOwnPropertyDescriptor(object, key); object[key] === 40 && descriptor.get.name === 'get value' && descriptor.set.name === 'set value';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            159,
+            "let key = Symbol('item'); let object = { get [key]() { return 7; } }; let descriptor = Object.getOwnPropertyDescriptor(object, key); object[key] === 7 && descriptor.get.name === 'get [item]';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}
+
+#[test]
 fn sequence_expression_preserves_side_effects_and_last_value() {
     assert_eq!(
         execute_source(

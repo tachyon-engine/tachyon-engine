@@ -3,6 +3,107 @@
 use super::super::*;
 
 impl Isolate {
+    /// Materializes an accessor function name after the computed key has become a PropertyKey.
+    pub(crate) fn set_accessor_function_name(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        is_getter: bool,
+    ) -> Result<(), ExecutionError> {
+        const GET_PREFIX: &[u8] = b"get ";
+        const SET_PREFIX: &[u8] = b"set ";
+        let prefix = if is_getter { GET_PREFIX } else { SET_PREFIX };
+        let function = self
+            .resolve_function_object(receiver)
+            .map_err(|_| ExecutionError::NonCallable(receiver))?;
+        if !matches!(function.executable, FunctionExecutable::Bytecode { .. }) {
+            return Ok(());
+        }
+
+        let (key_length, symbol_description) = match key {
+            PropertyKey::Atom(atom) => (
+                self.atoms
+                    .get(atom)
+                    .ok_or(ExecutionError::InvalidAtom(atom))?
+                    .len(),
+                None,
+            ),
+            PropertyKey::Symbol(symbol) => {
+                let description = self.symbol_description(symbol)?;
+                let description_length = description
+                    .map(|value| self.string_value_length(value))
+                    .transpose()?
+                    .unwrap_or(0);
+                (
+                    description_length
+                        .checked_add(2)
+                        .ok_or(ExecutionError::StringBufferAllocationFailed)?,
+                    description,
+                )
+            }
+        };
+        let capacity = prefix
+            .len()
+            .checked_add(key_length)
+            .ok_or(ExecutionError::StringBufferAllocationFailed)?;
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        units.extend(prefix.iter().map(|&unit| u16::from(unit)));
+        match key {
+            PropertyKey::Atom(atom) => {
+                let text = self
+                    .atoms
+                    .get(atom)
+                    .ok_or(ExecutionError::InvalidAtom(atom))?;
+                for index in 0..text.len() {
+                    units.push(
+                        text.as_view()
+                            .code_unit_at(index)
+                            .expect("index is bounded"),
+                    );
+                }
+            }
+            PropertyKey::Symbol(_) => {
+                units.push(u16::from(b'['));
+                if let Some(description) = symbol_description {
+                    self.append_primitive_string_units(description, &mut units)?;
+                }
+                units.push(u16::from(b']'));
+            }
+        }
+        debug_assert_eq!(units.len(), capacity);
+        let name = JsString::try_from_owned_code_units(units)
+            .map_err(ExecutionError::PropertyKeyString)?;
+        let name = self.allocate_runtime_string(name)?;
+        let name_key = self.name_atom()?;
+        self.define_data_property(
+            receiver,
+            name_key,
+            DataPropertyDescriptor {
+                value: Some(name),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
+    /// Reads a symbol's optional string description while the symbol remains rooted by its caller.
+    fn symbol_description(&mut self, symbol: SymbolId) -> Result<Option<Value>, ExecutionError> {
+        let symbol = self
+            .heap
+            .checked_reference(symbol.reference(), self.types.symbol)
+            .map_err(ExecutionError::HeapReference)?;
+        self.heap.with_no_gc_scope(|no_gc| {
+            no_gc
+                .borrow_reference(symbol, self.types.symbol)
+                .map(|symbol| symbol.description)
+                .map_err(ExecutionError::NoGcBorrow)
+        })
+    }
+
     /// Exposes callable metadata as non-enumerable own virtual data properties.
     pub(super) fn function_metadata_property(
         &mut self,

@@ -887,6 +887,11 @@ impl Isolate {
                 let name = self.scope_atom(code, operands[1])?;
                 self.set_inferred_function_name(function, name)?;
             }
+            Opcode::SetAccessorFunctionName => {
+                let function = self.read(base, operands[0])?;
+                let key = self.property_key(self.read(base, operands[1])?)?;
+                self.set_accessor_function_name(function, key, operands[2] != 0)?;
+            }
             Opcode::CreateObject => {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
@@ -992,6 +997,27 @@ impl Isolate {
                     key.into(),
                     PropertyDescriptor::Accessor(descriptor),
                 )?;
+            }
+            Opcode::DefineGetterByValue | Opcode::DefineSetterByValue => {
+                let receiver = self.read(base, operands[0])?;
+                let function = self.read(base, operands[1])?;
+                let key = self.property_key(self.read(base, operands[2])?)?;
+                let descriptor = if opcode == Opcode::DefineGetterByValue {
+                    AccessorPropertyDescriptor {
+                        getter: Some(function),
+                        setter: None,
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                    }
+                } else {
+                    AccessorPropertyDescriptor {
+                        getter: None,
+                        setter: Some(function),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                    }
+                };
+                self.define_property(receiver, key, PropertyDescriptor::Accessor(descriptor))?;
             }
             Opcode::GetByValue => {
                 let receiver = self.read(base, operands[1])?;

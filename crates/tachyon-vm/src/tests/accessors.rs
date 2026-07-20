@@ -63,6 +63,31 @@ fn literal_accessor_definition_opcodes_merge_pairs_for_every_dispatch_batch() {
     assert_literal_accessor_definition_batch::<16>();
 }
 
+#[test]
+fn computed_accessor_definition_and_names_work_for_every_dispatch_batch() {
+    assert_computed_accessor_batch::<1>();
+    assert_computed_accessor_batch::<2>();
+    assert_computed_accessor_batch::<4>();
+    assert_computed_accessor_batch::<8>();
+    assert_computed_accessor_batch::<16>();
+}
+
+/// Exercises the runtime-key accessor opcodes and their function-name allocation in every batch.
+fn assert_computed_accessor_batch<const N: usize>() {
+    let module = computed_accessor_definition_module();
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(42)));
+}
+
 /// Runs the compiler-facing getter/setter definition opcode sequence through every dispatch batch.
 fn assert_literal_accessor_definition_batch<const N: usize>() {
     let module = literal_accessor_definition_module();
@@ -152,6 +177,63 @@ fn literal_accessor_definition_module() -> CompiledModule {
                         ..FunctionLayout::default()
                     },
                     source_map: setter_map,
+                    ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                },
+            ),
+        ],
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
+/// Builds a dynamic-key accessor whose name allocation and definition share one opcode path.
+fn computed_accessor_definition_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+    entry.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+    entry.emit(Opcode::CreateClosure, &[2, 1], span).unwrap();
+    entry
+        .emit(Opcode::SetAccessorFunctionName, &[2, 1, 1], span)
+        .unwrap();
+    entry
+        .emit(Opcode::DefineGetterByValue, &[0, 2, 1], span)
+        .unwrap();
+    entry.emit(Opcode::GetByValue, &[3, 0, 1], span).unwrap();
+    entry.emit(Opcode::Return, &[3], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::LoadImmediate, &[0, 42], span).unwrap();
+    getter.emit(Opcode::Return, &[0], span).unwrap();
+    let (getter_bytecode, getter_map, getter_registers) = getter.finish().unwrap();
+
+    CompiledModule::new(
+        Arc::from("computed accessor definition"),
+        Vec::new(),
+        Vec::new(),
+        vec![
+            CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                entry_bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count: entry_registers,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: entry_map,
+                    ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                },
+            ),
+            CompiledFunctionTemplate::new(
+                FunctionId::new(1),
+                getter_bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count: getter_registers,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: getter_map,
                     ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
                 },
             ),

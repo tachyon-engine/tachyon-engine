@@ -141,6 +141,9 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::ToPropertyKeyForIn,
                 Opcode::DefineGetterById,
                 Opcode::DefineSetterById,
+                Opcode::DefineGetterByValue,
+                Opcode::DefineSetterByValue,
+                Opcode::SetAccessorFunctionName,
             ],
         ),
     ];

@@ -201,9 +201,15 @@ pub enum Opcode {
     DefineGetterById = 77,
     /// Defines or updates the setter half of an object literal own accessor property.
     DefineSetterById = 78,
+    /// Defines or updates the getter half of an object literal with a runtime PropertyKey.
+    DefineGetterByValue = 79,
+    /// Defines or updates the setter half of an object literal with a runtime PropertyKey.
+    DefineSetterByValue = 80,
+    /// Assigns an accessor's `get` or `set` name from an already-normalized PropertyKey value.
+    SetAccessorFunctionName = 81,
 }
 
-pub(super) const OPCODE_COUNT: usize = 79;
+pub(super) const OPCODE_COUNT: usize = 82;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -284,10 +290,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // SetFunctionName
     3, // DefineGetterById
     3, // DefineSetterById
+    3, // DefineGetterByValue
+    3, // DefineSetterByValue
+    3, // SetAccessorFunctionName
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DefineSetterById as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::SetAccessorFunctionName as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -412,6 +421,9 @@ impl Opcode {
             12 => Some(Self::SetFunctionName),
             13 => Some(Self::DefineGetterById),
             14 => Some(Self::DefineSetterById),
+            15 => Some(Self::DefineGetterByValue),
+            16 => Some(Self::DefineSetterByValue),
+            17 => Some(Self::SetAccessorFunctionName),
             _ => None,
         }
     }

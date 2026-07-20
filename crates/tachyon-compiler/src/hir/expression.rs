@@ -299,13 +299,6 @@ pub(super) fn lower_expression(
                     saw_spread = true;
                     continue;
                 };
-                if property.kind != PropertyKind::Init && property.computed {
-                    return Err(unsupported(
-                        source.name(),
-                        source_span(property.span),
-                        "computed object accessor",
-                    ));
-                }
                 let key = if property.computed {
                     HirObjectPropertyKey::Computed(lower_expression(
                         property.key.to_expression(),
