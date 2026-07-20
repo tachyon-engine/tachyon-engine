@@ -61,6 +61,31 @@ impl Isolate {
         )
     }
 
+    /// Implements String.prototype.indexOf with an exact UTF-16 code-unit search.
+    pub(crate) fn string_index_of(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let haystack = self.string_receiver_units(site.this_value)?;
+        let needle = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let mut needle_units = Vec::new();
+        self.append_primitive_string_units(needle, &mut needle_units)?;
+        let start_value = self.call_argument(site, 1)?;
+        let start = self.string_search_start(start_value, haystack.len())?;
+        if needle_units.is_empty() {
+            return Ok(safe_integer_value(start as u64));
+        }
+        if needle_units.len() > haystack.len().saturating_sub(start) {
+            return Ok(Value::from_i32(-1));
+        }
+        let last = haystack.len() - needle_units.len();
+        for index in start..=last {
+            if haystack[index..index + needle_units.len()] == needle_units {
+                return Ok(safe_integer_value(index as u64));
+            }
+        }
+        Ok(Value::from_i32(-1))
+    }
+
     /// Reads one primitive receiver unit after the currently supported ToIntegerOrInfinity conversion.
     fn string_code_unit_at(&mut self, site: &CallSite) -> Result<Option<u16>, ExecutionError> {
         let receiver = site.this_value;
@@ -167,6 +192,32 @@ impl Isolate {
         let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
         else {
             return Ok(default);
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        let integer = if number.is_nan() || number == 0.0 {
+            0.0
+        } else {
+            number.trunc()
+        };
+        if integer <= 0.0 {
+            return Ok(0);
+        }
+        if integer.is_infinite() {
+            return Ok(length);
+        }
+        Ok((integer as usize).min(length))
+    }
+
+    /// Normalizes String.prototype.indexOf's optional fromIndex without relative negative indexing.
+    fn string_search_start(
+        &mut self,
+        value: Option<Value>,
+        length: usize,
+    ) -> Result<usize, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(0);
         };
         let number = numeric_value(self.convert_to_number(value)?)
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;

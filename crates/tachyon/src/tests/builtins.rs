@@ -74,6 +74,19 @@ fn string_substring_clamps_and_reorders_positions() {
 }
 
 #[test]
+/// Searches primitive String values in UTF-16 code-unit order with exact empty-needle behavior.
+fn string_index_of_normalizes_positions_and_empty_needles() {
+    assert_eq!(
+        execute_source(
+            930,
+            "'tachyon'.indexOf('ch') === 2 && 'tachyon'.indexOf('t', 1) === -1 && 'tachyon'.indexOf('', 99) === 7 && 'tachyon'.indexOf('ta', -1) === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(
