@@ -74,6 +74,19 @@ fn regexp_exec_preserves_capture_slots() {
 }
 
 #[test]
+/// Maps backend named-capture ranges into the RegExp result groups object.
+fn regexp_exec_materializes_named_groups() {
+    assert_eq!(
+        execute_source(
+            952,
+            "let result = /(?<word>a)/.exec('a'); result.groups.word === 'a';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(

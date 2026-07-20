@@ -152,7 +152,7 @@ impl Isolate {
             .try_reserve_exact(matched.captures.len() + 1)
             .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
         ranges.push(Some(matched.start..matched.end));
-        ranges.extend(matched.captures);
+        ranges.extend(matched.captures.iter().cloned());
         for (index, range) in ranges.into_iter().enumerate() {
             let value = match range {
                 Some(range) => self.allocate_runtime_string(
@@ -185,6 +185,22 @@ impl Isolate {
         )?;
         let input_atom = self.intern_intrinsic_name(b"input")?;
         self.set_own_data_property(result, input_atom, input)?;
+        if !matched.named_captures.is_empty() {
+            let groups = self.create_ordinary_object()?;
+            for (name, range) in matched.named_captures {
+                let atom = self.intern_intrinsic_name(name.as_bytes())?;
+                let value = match range {
+                    Some(range) => self.allocate_runtime_string(
+                        JsString::try_from_utf16(&input_units[range])
+                            .map_err(ExecutionError::PropertyKeyString)?,
+                    )?,
+                    None => Value::from_immediate(Immediate::Undefined),
+                };
+                self.set_own_data_property(groups, atom, value)?;
+            }
+            let groups_atom = self.intern_intrinsic_name(b"groups")?;
+            self.set_own_data_property(result, groups_atom, groups)?;
+        }
         Ok(result)
     }
 

@@ -21,6 +21,7 @@ pub(crate) struct RegExpMatch {
     pub(crate) start: usize,
     pub(crate) end: usize,
     pub(crate) captures: Vec<Option<core::ops::Range<usize>>>,
+    pub(crate) named_captures: Vec<(Box<str>, Option<core::ops::Range<usize>>)>,
 }
 
 #[allow(
@@ -51,6 +52,10 @@ impl CompiledRegExp {
                     start: range.start,
                     end: range.end,
                     captures: matched.groups().skip(1).collect(),
+                    named_captures: matched
+                        .named_groups()
+                        .map(|(name, range)| (Box::from(name), range))
+                        .collect(),
                 }
             })
     }
