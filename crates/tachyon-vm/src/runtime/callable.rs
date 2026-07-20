@@ -36,6 +36,7 @@ pub(crate) enum NativeFunction {
     StringSlice,
     StringSubstring,
     StringIndexOf,
+    StringIncludes,
     SymbolConstructor,
     NumberConstructor,
     NumberIsNaN,
@@ -395,6 +396,7 @@ impl NativeFunction {
             | Self::StringSlice
             | Self::StringSubstring
             | Self::StringIndexOf
+            | Self::StringIncludes
             | Self::NumberConstructor
             | Self::BooleanConstructor
             | Self::FunctionPrototypeCall
@@ -511,6 +513,7 @@ impl NativeFunction {
             Self::StringSlice => "slice",
             Self::StringSubstring => "substring",
             Self::StringIndexOf => "indexOf",
+            Self::StringIncludes => "includes",
             Self::SymbolConstructor => "Symbol",
             Self::NumberConstructor => "Number",
             Self::NumberIsNaN => "isNaN",

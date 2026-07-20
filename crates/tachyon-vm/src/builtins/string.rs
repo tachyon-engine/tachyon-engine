@@ -86,6 +86,19 @@ impl Isolate {
         Ok(Value::from_i32(-1))
     }
 
+    /// Implements String.prototype.includes through the same code-unit search as indexOf.
+    pub(crate) fn string_includes(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let found = self
+            .string_index_of(site)?
+            .as_i32()
+            .is_some_and(|index| index >= 0);
+        Ok(Value::from_immediate(if found {
+            Immediate::True
+        } else {
+            Immediate::False
+        }))
+    }
+
     /// Reads one primitive receiver unit after the currently supported ToIntegerOrInfinity conversion.
     fn string_code_unit_at(&mut self, site: &CallSite) -> Result<Option<u16>, ExecutionError> {
         let receiver = site.this_value;

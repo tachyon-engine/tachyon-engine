@@ -87,6 +87,19 @@ fn string_index_of_normalizes_positions_and_empty_needles() {
 }
 
 #[test]
+/// Confirms String.prototype.includes reuses indexOf's code-unit and position semantics.
+fn string_includes_reuses_utf16_search_boundaries() {
+    assert_eq!(
+        execute_source(
+            931,
+            "'tachyon'.includes('chy') && !'tachyon'.includes('ta', 1) && 'tachyon'.includes('', 99);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(
