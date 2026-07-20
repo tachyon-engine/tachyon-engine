@@ -184,7 +184,7 @@ fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileEr
                 expression_instruction_count(property)?,
                 "bytecode instructions",
             )?;
-            checked_count_add(nested, 1, "bytecode instructions")
+            checked_count_add(nested, 2, "bytecode instructions")
         }
     }
 }
@@ -266,6 +266,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                         expression_instruction_count(key)?,
                         "bytecode instructions",
                     )?;
+                    count = checked_count_add(count, 1, "bytecode instructions")?;
                 }
                 count = checked_count_add(count, 1, "bytecode instructions")?;
             }
@@ -281,14 +282,12 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 expression_instruction_count(right)?,
                 "bytecode instructions",
             )?;
-            let own = if matches!(
+            let own = 1 + usize::from(matches!(
                 operator,
-                HirBinaryOperator::NotEqual | HirBinaryOperator::StrictNotEqual
-            ) {
-                2
-            } else {
-                1
-            };
+                HirBinaryOperator::NotEqual
+                    | HirBinaryOperator::StrictNotEqual
+                    | HirBinaryOperator::In
+            ));
             checked_count_add(own, operands, "bytecode instructions")
         }
         HirExpressionKind::Logical { left, right, .. } => {
@@ -310,13 +309,14 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 expression_instruction_count(property)?,
                 "bytecode instructions",
             )?;
-            checked_count_add(operands, 1, "bytecode instructions")
+            checked_count_add(operands, 2, "bytecode instructions")
         }
         HirExpressionKind::Assignment {
             operator,
             target,
             value,
         } => {
+            let computed_target = matches!(target, HirAssignmentTarget::ComputedMember { .. });
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {
@@ -338,7 +338,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 (HirAssignmentOperator::Binary(_), _) => 3,
                 (HirAssignmentOperator::Logical(_), _) => 5,
             };
-            checked_count_add(operands, own_instructions, "bytecode instructions")
+            checked_count_add(
+                operands,
+                own_instructions + usize::from(computed_target),
+                "bytecode instructions",
+            )
         }
         HirExpressionKind::Update { prefix, target, .. } => {
             let identifier_target = matches!(target, HirAssignmentTarget::Identifier(_));
@@ -355,7 +359,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                         expression_instruction_count(property)?,
                         "bytecode instructions",
                     )?;
-                    checked_count_add(operands, 1, "bytecode instructions")?
+                    checked_count_add(operands, 2, "bytecode instructions")?
                 }
             };
             let own = match (identifier_target, *prefix) {

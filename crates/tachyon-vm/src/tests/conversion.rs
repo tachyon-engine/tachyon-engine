@@ -5,6 +5,8 @@ enum ExoticOperation {
     Add,
     LooseEqual,
     LooseNotEqual,
+    PropertyKey,
+    PropertyKeyForIn,
 }
 
 #[test]
@@ -26,9 +28,23 @@ fn exotic_equality_resumes_for_every_dispatch_batch() {
 }
 
 #[test]
+fn exotic_property_key_resumes_for_every_dispatch_batch() {
+    assert_exotic_property_key_batch::<1>();
+    assert_exotic_property_key_batch::<2>();
+    assert_exotic_property_key_batch::<4>();
+    assert_exotic_property_key_batch::<8>();
+    assert_exotic_property_key_batch::<16>();
+}
+
+#[test]
 /// The exotic getter call needs one parent entry and its returned callable needs one child root.
 fn exotic_conversion_respects_two_entry_completion_limit() {
-    for operation in [ExoticOperation::Add, ExoticOperation::LooseEqual] {
+    for operation in [
+        ExoticOperation::Add,
+        ExoticOperation::LooseEqual,
+        ExoticOperation::PropertyKey,
+        ExoticOperation::PropertyKeyForIn,
+    ] {
         for limit in [1, 2] {
             let module = exotic_conversion_module(operation);
             let mut isolate = test_isolate();
@@ -43,7 +59,9 @@ fn exotic_conversion_respects_two_entry_completion_limit() {
             );
             if limit == 2 {
                 match operation {
-                    ExoticOperation::Add => assert!(
+                    ExoticOperation::Add
+                    | ExoticOperation::PropertyKey
+                    | ExoticOperation::PropertyKeyForIn => assert!(
                         matches!(result, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(42))
                     ),
                     ExoticOperation::LooseEqual => assert!(matches!(
@@ -65,6 +83,33 @@ fn exotic_conversion_respects_two_entry_completion_limit() {
                 );
                 assert_eq!(isolate.fiber.completions.len(), 0);
             }
+        }
+    }
+}
+
+/// Exercises string-hint key conversion after a fresh callable and two forced collections.
+fn assert_exotic_property_key_batch<const N: usize>() {
+    for operation in [
+        ExoticOperation::PropertyKey,
+        ExoticOperation::PropertyKeyForIn,
+    ] {
+        for inherited in [false, true] {
+            let module = exotic_conversion_module(operation);
+            let mut isolate = test_isolate();
+            install_exotic_getter(&mut isolate, &module, inherited);
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+            let outcome = isolate
+                .execute_with_batch::<N>(
+                    &module,
+                    ExecutionBudget {
+                        fuel: 96,
+                        quantum: 96,
+                    },
+                )
+                .unwrap();
+            assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
         }
     }
 }
@@ -190,18 +235,39 @@ fn allocate_test_function(isolate: &mut Isolate, code: CodeId, function: Functio
 /// Builds one exotic operation, a fresh getter closure, and a method validating hint plus this.
 fn exotic_conversion_module(operation: ExoticOperation) -> CompiledModule {
     let span = SourceSpan { start: 0, end: 1 };
-    let mut entry = BytecodeBuilder::with_capacity(4, 0);
-    let (opcode, primitive) = match operation {
-        ExoticOperation::Add => (Opcode::Add, 40),
-        ExoticOperation::LooseEqual => (Opcode::LooseEqual, 2),
-        ExoticOperation::LooseNotEqual => (Opcode::LooseNotEqual, 3),
-    };
-    entry
-        .emit(Opcode::LoadImmediate, &[0, primitive], span)
-        .unwrap();
-    entry.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
-    entry.emit(opcode, &[2, 0, 1], span).unwrap();
-    entry.emit(Opcode::Return, &[2], span).unwrap();
+    let mut entry = BytecodeBuilder::with_capacity(7, 0);
+    if matches!(
+        operation,
+        ExoticOperation::PropertyKey | ExoticOperation::PropertyKeyForIn
+    ) {
+        entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+        entry.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
+        let opcode = if matches!(operation, ExoticOperation::PropertyKeyForIn) {
+            Opcode::ToPropertyKeyForIn
+        } else {
+            Opcode::ToPropertyKey
+        };
+        entry.emit(opcode, &[1, 1, 0], span).unwrap();
+        entry.emit(Opcode::LoadImmediate, &[2, 42], span).unwrap();
+        entry.emit(Opcode::SetByValue, &[0, 2, 1], span).unwrap();
+        entry.emit(Opcode::GetByValue, &[3, 0, 1], span).unwrap();
+        entry.emit(Opcode::Return, &[3], span).unwrap();
+    } else {
+        let (opcode, primitive) = match operation {
+            ExoticOperation::Add => (Opcode::Add, 40),
+            ExoticOperation::LooseEqual => (Opcode::LooseEqual, 2),
+            ExoticOperation::LooseNotEqual => (Opcode::LooseNotEqual, 3),
+            ExoticOperation::PropertyKey | ExoticOperation::PropertyKeyForIn => {
+                unreachable!("property key uses its own fixture")
+            }
+        };
+        entry
+            .emit(Opcode::LoadImmediate, &[0, primitive], span)
+            .unwrap();
+        entry.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
+        entry.emit(opcode, &[2, 0, 1], span).unwrap();
+        entry.emit(Opcode::Return, &[2], span).unwrap();
+    }
     let (entry_code, entry_map, entry_registers) = entry.finish().unwrap();
 
     let mut getter = BytecodeBuilder::with_capacity(9, 0);
@@ -253,10 +319,18 @@ fn exotic_conversion_module(operation: ExoticOperation) -> CompiledModule {
             },
         )
     };
+    let expected_hint = if matches!(
+        operation,
+        ExoticOperation::PropertyKey | ExoticOperation::PropertyKeyForIn
+    ) {
+        "string"
+    } else {
+        "default"
+    };
     CompiledModule::new(
         Arc::from("resumable Symbol.toPrimitive"),
         vec![BytecodeConstant::string_from_utf16(
-            "default".encode_utf16().collect(),
+            expected_hint.encode_utf16().collect(),
         )],
         vec![Arc::from("target")],
         vec![

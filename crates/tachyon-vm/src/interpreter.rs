@@ -760,6 +760,17 @@ impl Isolate {
                     }),
                 )?;
             }
+            Opcode::ToPropertyKey | Opcode::ToPropertyKeyForIn => {
+                self.dispatch_to_property_key(
+                    base,
+                    operands[0],
+                    operands[1],
+                    operands[2],
+                    opcode == Opcode::ToPropertyKeyForIn,
+                    instruction_offset,
+                )?;
+                return Ok(None);
+            }
             Opcode::TypeofScope => {
                 let resolution = self.scope_resolution(code, operands[1])?;
                 let value = self
@@ -2896,6 +2907,15 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
                     _ => unreachable!("numeric unary hot dispatch is exhaustive"),
                 };
                 registers.write(operands[0], value);
+                HotControl::Continue
+            }
+            Opcode::ToPropertyKey => {
+                let key = registers.read(operands[1]);
+                let guard = registers.read(operands[2]);
+                if is_nullish(guard) || key.as_heap_ref().is_some() {
+                    return HotControl::Slow;
+                }
+                registers.write(operands[0], key);
                 HotControl::Continue
             }
             Opcode::Add => {

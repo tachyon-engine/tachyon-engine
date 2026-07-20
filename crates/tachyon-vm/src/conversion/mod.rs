@@ -3,6 +3,7 @@
 mod equality;
 mod exotic;
 mod numeric;
+mod property_key;
 
 use super::*;
 use numeric::parse_number_code_units;
@@ -498,6 +499,7 @@ impl Isolate {
                         Immediate::False
                     })
                 }
+                ConversionConsumer::ToPropertyKey => argument,
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }

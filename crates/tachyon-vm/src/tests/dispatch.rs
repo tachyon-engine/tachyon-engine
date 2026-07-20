@@ -248,6 +248,7 @@ fn verified_hot_kernel_matches_checked_dispatch() {
         (Opcode::Negate, [0, 1, 0], [i(7), i(i32::MIN), i(3)]),
         (Opcode::BitwiseNot, [0, 1, 0], [i(7), i(12), i(3)]),
         (Opcode::ToNumber, [0, 1, 0], [i(7), i(-0), i(3)]),
+        (Opcode::ToPropertyKey, [0, 1, 2], [i(7), i(2), i(3)]),
         (Opcode::Add, [0, 0, 1], [i(i32::MAX), i(1), i(3)]),
         (Opcode::Sub, [0, 0, 1], [i(i32::MIN), i(1), i(3)]),
         (Opcode::Mul, [0, 0, 1], [i(100_000), i(100_000), i(3)]),
@@ -324,7 +325,12 @@ fn verified_hot_kernel_matches_checked_dispatch() {
     let heap_value = Value::from_heap_ref(RawHeapRef::new(1).unwrap());
     let mut registers = [heap_value, heap_value, Value::from_i32(0)];
     let mut window = RegisterWindow::new(&mut registers, 0, 3).unwrap();
-    for opcode in [Opcode::Not, Opcode::JumpIfFalse, Opcode::JumpIfTrue] {
+    for opcode in [
+        Opcode::Not,
+        Opcode::JumpIfFalse,
+        Opcode::JumpIfTrue,
+        Opcode::ToPropertyKey,
+    ] {
         let instruction = DecodedInstruction {
             opcode,
             width: OperandWidth::Compact,
@@ -332,7 +338,7 @@ fn verified_hot_kernel_matches_checked_dispatch() {
             operand_count: opcode.operand_count() as u8,
             word_len: 1,
         };
-        // SAFETY: the fixed window covers the operands; heap-tagged truthiness must return Slow
+        // SAFETY: the fixed window covers the operands; heap-sensitive fast paths return Slow
         // before dereferencing the synthetic logical address.
         assert_eq!(
             unsafe {

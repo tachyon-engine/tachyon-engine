@@ -51,6 +51,48 @@ fn object_literals_support_computed_string_keys() {
 }
 
 #[test]
+/// Locks ToPropertyKey hinting and the observable order of computed object and assignment keys.
+fn computed_property_keys_follow_ecmascript_order() {
+    assert_eq!(
+        execute_source(
+            198,
+            "let order = ''; let key = { [Symbol.toPrimitive](hint) { order += hint; return 'x'; } }; let object = { [key]: (order += 'v', 42) }; order === 'stringv' && object.x === 42;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            199,
+            "let order = ''; let key = { [Symbol.toPrimitive](hint) { order += hint; return 'x'; } }; let object = {}; object[key] = (order += 'r', 40); let simple = order === 'rstring'; order = ''; object.x = 40; object[key] += (order += 'r', 2); simple && order === 'stringr' && object.x === 42;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            201,
+            "let order = ''; let key = { [Symbol.toPrimitive](hint) { order += hint; return 'run'; } }; let object = { run(value) { return this === object ? value : 0; } }; object[key]((order += 'a', 42)) === 42 && order === 'stringa';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Checks base/RHS guards run before key callbacks for nullish assignment and invalid `in` RHS.
+fn computed_property_key_guards_precede_conversion() {
+    assert_eq!(
+        execute_source(
+            200,
+            "let calls = 0; let rhs = 0; let key = { [Symbol.toPrimitive]() { calls++; return 'x'; } }; let assigned = false; try { null[key] = (rhs = 1); } catch (error) { assigned = error instanceof TypeError; } let checked = false; try { key in null; } catch (error) { checked = error instanceof TypeError; } assigned && checked && rhs === 1 && calls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers ordinary and computed object methods through the existing receiver call path.
 fn object_literals_support_methods() {
     assert_eq!(

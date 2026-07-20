@@ -124,6 +124,7 @@ pub(crate) enum ConversionConsumer {
     RelationalLeft(Opcode),
     RelationalRight(Opcode),
     Equality(Opcode),
+    ToPropertyKey,
 }
 
 impl ConversionConsumer {
@@ -140,13 +141,17 @@ impl ConversionConsumer {
             | Self::AddRight
             | Self::RelationalLeft(_)
             | Self::RelationalRight(_)
-            | Self::Equality(_) => None,
+            | Self::Equality(_)
+            | Self::ToPropertyKey => None,
         }
     }
 
     #[inline]
     pub(crate) const fn uses_string_hint(self) -> bool {
-        matches!(self, Self::NativeCall(NativeFunction::StringConstructor))
+        matches!(
+            self,
+            Self::NativeCall(NativeFunction::StringConstructor) | Self::ToPropertyKey
+        )
     }
 
     #[inline]
@@ -174,6 +179,7 @@ impl ConversionConsumer {
                 | Self::RelationalLeft(_)
                 | Self::RelationalRight(_)
                 | Self::Equality(_)
+                | Self::ToPropertyKey
         )
     }
 }

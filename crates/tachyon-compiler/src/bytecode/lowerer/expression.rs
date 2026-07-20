@@ -127,6 +127,7 @@ impl Lowerer<'_> {
                 HirExpressionKind::ComputedMember { object, property } => {
                     let receiver = self.expression(object)?;
                     let property = self.expression(property)?;
+                    self.prepare_property_key(property, receiver, false, expression.span)?;
                     let destination = self.register()?;
                     self.emit(
                         Opcode::DeleteByValue,
@@ -264,7 +265,9 @@ impl Lowerer<'_> {
                             (Opcode::SetById, self.scope_name(key)?)
                         }
                         HirObjectPropertyKey::Computed(key) => {
-                            (Opcode::SetByValue, self.expression(key)?.index())
+                            let key = self.expression(key)?;
+                            self.prepare_property_key(key, object, false, property.span)?;
+                            (Opcode::SetByValue, key.index())
                         }
                     };
                     let value = self.expression(&property.value)?;
@@ -302,6 +305,7 @@ impl Lowerer<'_> {
             HirExpressionKind::ComputedMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let property = self.expression(property)?;
+                self.prepare_property_key(property, receiver, false, expression.span)?;
                 let destination = self.register()?;
                 self.emit(
                     Opcode::GetByValue,
@@ -428,8 +432,13 @@ impl Lowerer<'_> {
                 let receiver = self.expression(object)?;
                 let property = self.expression(property)?;
                 let result = match operator {
-                    HirAssignmentOperator::Assign => self.expression(value)?,
+                    HirAssignmentOperator::Assign => {
+                        let value = self.expression(value)?;
+                        self.prepare_property_key(property, receiver, false, span)?;
+                        value
+                    }
                     HirAssignmentOperator::Binary(operator) => {
+                        self.prepare_property_key(property, receiver, false, span)?;
                         let old_value = self.register()?;
                         self.emit(
                             Opcode::GetByValue,
@@ -440,6 +449,7 @@ impl Lowerer<'_> {
                         self.emit_binary(operator, old_value, right, span)?
                     }
                     HirAssignmentOperator::Logical(operator) => {
+                        self.prepare_property_key(property, receiver, false, span)?;
                         let old_value = self.register()?;
                         self.emit(
                             Opcode::GetByValue,
@@ -559,6 +569,9 @@ impl Lowerer<'_> {
                 });
             }
         };
+        if operator == HirBinaryOperator::In {
+            self.prepare_property_key(left, right, true, span)?;
+        }
         let destination = self.register()?;
         self.emit(
             opcode,
@@ -566,6 +579,25 @@ impl Lowerer<'_> {
             span,
         )?;
         Ok(destination)
+    }
+
+    /// Converts one computed key in place after applying the operation's required base guard.
+    pub(in crate::bytecode) fn prepare_property_key(
+        &mut self,
+        key: RegisterId,
+        base: RegisterId,
+        for_in_operator: bool,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.emit(
+            if for_in_operator {
+                Opcode::ToPropertyKeyForIn
+            } else {
+                Opcode::ToPropertyKey
+            },
+            &[key.index(), key.index(), base.index()],
+            span,
+        )
     }
 
     /// Reads one update reference once and preserves the prefix/postfix result distinction.
@@ -632,6 +664,7 @@ impl Lowerer<'_> {
             HirAssignmentTarget::ComputedMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let property = self.expression(property)?;
+                self.prepare_property_key(property, receiver, false, span)?;
                 let old = self.register()?;
                 self.emit(
                     Opcode::GetByValue,
@@ -764,6 +797,9 @@ impl Lowerer<'_> {
         if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
             return self.method_call_expression(object, property, arguments, span);
         }
+        if let HirExpressionKind::ComputedMember { object, property } = &callee.kind {
+            return self.computed_method_call_expression(object, property, arguments, span);
+        }
         let callee_value = self.expression(callee)?;
         if arguments.is_empty() {
             let destination = self.register()?;
@@ -883,6 +919,44 @@ impl Lowerer<'_> {
         self.emit(
             Opcode::GetById,
             &[callee_slot.index(), call_base.index(), property],
+            span,
+        )?;
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Prepares one computed key while retaining its receiver in the contiguous method-call window.
+    pub(in crate::bytecode) fn computed_method_call_expression(
+        &mut self,
+        object: &HirExpression,
+        property: &HirExpression,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver = self.expression(object)?;
+        let property = self.expression(property)?;
+        self.prepare_property_key(property, receiver, false, span)?;
+        let call_base = self.register()?;
+        self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+        let callee = self.register()?;
+        self.emit(
+            Opcode::GetByValue,
+            &[callee.index(), call_base.index(), property.index()],
             span,
         )?;
         let mut argument_slots = Vec::with_capacity(arguments.len());

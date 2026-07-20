@@ -191,9 +191,13 @@ pub enum Opcode {
     BreakThroughFinally = 72,
     /// Transfers a continue completion through finalizers crossed by its target.
     ContinueThroughFinally = 73,
+    /// Prepares a computed key after checking that its base is coercible.
+    ToPropertyKey = 74,
+    /// Prepares an `in` key only after confirming that its right operand is an Object.
+    ToPropertyKeyForIn = 75,
 }
 
-pub(super) const OPCODE_COUNT: usize = 74;
+pub(super) const OPCODE_COUNT: usize = 76;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -269,10 +273,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // ResumeCompletion
     1, // BreakThroughFinally
     1, // ContinueThroughFinally
+    3, // ToPropertyKey
+    3, // ToPropertyKeyForIn
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::ContinueThroughFinally as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::ToPropertyKeyForIn as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -392,6 +398,8 @@ impl Opcode {
             7 => Some(Self::ResumeCompletion),
             8 => Some(Self::BreakThroughFinally),
             9 => Some(Self::ContinueThroughFinally),
+            10 => Some(Self::ToPropertyKey),
+            11 => Some(Self::ToPropertyKeyForIn),
             _ => None,
         }
     }

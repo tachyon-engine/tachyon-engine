@@ -583,6 +583,7 @@ impl Lowerer<'_> {
             HirAssignmentTarget::ComputedMember { object, property } => {
                 let receiver = self.expression(object)?;
                 let property = self.expression(property)?;
+                self.prepare_property_key(property, receiver, false, span)?;
                 self.emit(
                     Opcode::SetByValue,
                     &[receiver.index(), value.index(), property.index()],

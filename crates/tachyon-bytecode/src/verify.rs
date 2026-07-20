@@ -663,7 +663,9 @@ fn verify_instruction(
         | Opcode::DeleteByValue
         | Opcode::InstanceOf
         | Opcode::GetByValue
-        | Opcode::SetByValue => {
+        | Opcode::SetByValue
+        | Opcode::ToPropertyKey
+        | Opcode::ToPropertyKeyForIn => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
