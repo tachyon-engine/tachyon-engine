@@ -55,7 +55,7 @@ impl<T: ?Sized> Trace for WeakGcRef<T> {
 }
 
 /// One WeakMap-style key/value pair whose value becomes strong only while its key is live.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Ephemeron<K: ?Sized> {
     key: Option<RawHeapRef>,
     value: Value,
@@ -80,6 +80,17 @@ impl<K: ?Sized> Ephemeron<K> {
     #[must_use]
     pub const fn value(&self) -> Value {
         self.value
+    }
+
+    /// Replaces the conditional value while retaining the weak key identity.
+    pub fn replace_value(&mut self, value: Value) -> Value {
+        core::mem::replace(&mut self.value, value)
+    }
+
+    /// Clears both sides before a VM-private weak table reuses the slot.
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.value = Value::from_immediate(tachyon_value::Immediate::Undefined);
     }
 }
 
@@ -196,8 +207,21 @@ impl WeakOwners {
 
 #[cfg(test)]
 mod tests {
-    use super::{WeakOwner, WeakOwnerError, WeakOwners};
-    use crate::RawHeapRef;
+    use super::{Ephemeron, WeakOwner, WeakOwnerError, WeakOwners};
+    use crate::{GcRef, RawHeapRef};
+    use tachyon_value::Value;
+
+    #[test]
+    fn ephemeron_entry_updates_and_clears_without_changing_key_identity() {
+        let raw = RawHeapRef::new(7).unwrap();
+        let key = GcRef::<()>::from_raw(raw);
+        let mut entry = Ephemeron::new(key, Value::from_i32(1));
+        assert_eq!(entry.key().unwrap().raw(), raw);
+        assert_eq!(entry.replace_value(Value::from_i32(2)).as_i32(), Some(1));
+        assert_eq!(entry.value().as_i32(), Some(2));
+        entry.clear();
+        assert!(entry.key().is_none());
+    }
 
     #[test]
     fn weak_owner_growth_and_limit_are_explicit() {
