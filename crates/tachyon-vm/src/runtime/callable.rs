@@ -1121,6 +1121,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_)
+        | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
