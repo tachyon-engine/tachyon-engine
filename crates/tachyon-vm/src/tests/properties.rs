@@ -121,6 +121,15 @@ fn ordinary_property_replacement_and_update_work_for_every_dispatch_batch() {
 }
 
 #[test]
+fn deleted_properties_reinsert_at_the_end_for_every_dispatch_batch() {
+    assert_property_reinsert_batch::<1>();
+    assert_property_reinsert_batch::<2>();
+    assert_property_reinsert_batch::<4>();
+    assert_property_reinsert_batch::<8>();
+    assert_property_reinsert_batch::<16>();
+}
+
+#[test]
 fn computed_property_access_works_for_every_dispatch_batch() {
     assert_dynamic_property_batch::<1>();
     assert_dynamic_property_batch::<2>();
@@ -375,6 +384,80 @@ fn readding_a_live_deleted_symbol_restores_its_gc_edge() {
             .unwrap(),
         Some(symbol)
     );
+}
+
+#[test]
+fn readded_symbol_moves_after_surviving_symbols() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let first = isolate.allocate_symbol(None).unwrap();
+    isolate.fiber.registers.push(first);
+    let second = isolate.allocate_symbol(None).unwrap();
+    isolate.fiber.registers.push(second);
+    let first_key = isolate.property_key(first).unwrap();
+    let second_key = isolate.property_key(second).unwrap();
+    isolate
+        .set_own_data_property(object, first_key, Value::from_i32(1))
+        .unwrap();
+    isolate
+        .set_own_data_property(object, second_key, Value::from_i32(2))
+        .unwrap();
+    assert!(isolate.delete_own_data_property(object, first_key).unwrap());
+    isolate
+        .set_own_data_property(object, first_key, Value::from_i32(3))
+        .unwrap();
+
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    assert_eq!(
+        isolate
+            .shapes
+            .own_keys(snapshot.shape)
+            .unwrap()
+            .collect::<Vec<_>>(),
+        [second_key, first_key]
+    );
+}
+
+#[test]
+/// The old backing remains the root of copied values until compact replacement publication.
+fn structural_delete_preserves_retained_values_across_forced_major() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers.push(object);
+    let first = isolate.intern_intrinsic_name(b"first").unwrap();
+    let middle = isolate.intern_intrinsic_name(b"middle").unwrap();
+    let last = isolate.intern_intrinsic_name(b"last").unwrap();
+    let first_value = isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"one").unwrap())
+        .unwrap();
+    isolate
+        .set_own_data_property(object, first, first_value)
+        .unwrap();
+    isolate
+        .set_own_data_property(object, middle, Value::from_i32(2))
+        .unwrap();
+    let last_value = isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"three").unwrap())
+        .unwrap();
+    isolate
+        .set_own_data_property(object, last, last_value)
+        .unwrap();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+
+    assert!(isolate.delete_own_data_property(object, middle).unwrap());
+    assert_eq!(
+        isolate.get_data_property(object, first).unwrap(),
+        Some(first_value)
+    );
+    assert_eq!(
+        isolate.get_data_property(object, last).unwrap(),
+        Some(last_value)
+    );
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    assert_eq!(isolate.shapes.property_count(snapshot.shape), 2);
 }
 
 #[test]

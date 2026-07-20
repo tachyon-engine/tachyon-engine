@@ -2,6 +2,19 @@
 
 use super::{super::*, accessor::StoredProperty};
 
+#[derive(Clone, Copy)]
+struct RetainedProperty {
+    key: PropertyKey,
+    kind: PropertyKind,
+    attributes: PropertyAttributes,
+    value: Value,
+}
+
+struct CompactPropertyStorage {
+    slots: Box<[Value]>,
+    symbol_keys: Box<[SymbolPropertyKey]>,
+}
+
 impl Isolate {
     /// Checks one resolved slot's tombstone state without interpreting its data/accessor payload.
     pub(crate) fn property_is_present_from_snapshot(
@@ -91,17 +104,15 @@ impl Isolate {
             if !snapshot.extensible {
                 return Err(ExecutionError::NonExtensibleObject(receiver));
             }
-            let shape = self
-                .shapes
-                .transition_reconfigure_kind(
-                    snapshot.shape,
-                    key,
-                    PropertyKind::Data,
-                    PropertyAttributes::DEFAULT_DATA,
-                )
-                .map_err(ExecutionError::Shape)?;
-            self.update_property_slot(snapshot, key, property.slot, value)?;
-            return self.set_object_shape(object, shape);
+            self.remove_property_slot(object, snapshot, key)?;
+            let (object, snapshot) = self.object_snapshot(receiver)?;
+            return self.add_property_slot(
+                object,
+                snapshot,
+                key,
+                value,
+                PropertyAttributes::DEFAULT_DATA,
+            );
         }
         if self.is_function_metadata_property(receiver, key)? {
             return Err(ExecutionError::ReadOnlyProperty(receiver));
@@ -144,12 +155,24 @@ impl Isolate {
         if !property.attributes.configurable() {
             return Ok(false);
         }
-        self.update_property_slot(
-            snapshot,
-            key,
-            property.slot,
-            Value::from_immediate(Immediate::Hole),
-        )?;
+        if self
+            .raw_property_value_from_snapshot(snapshot, property)?
+            .is_none()
+        {
+            return Ok(true);
+        }
+        let suppress_virtual = self.is_function_metadata_property(receiver, key)?;
+        self.remove_property_slot(object, snapshot, key)?;
+        if suppress_virtual {
+            let (object, snapshot) = self.object_snapshot(receiver)?;
+            self.add_property_slot(
+                object,
+                snapshot,
+                key,
+                Value::from_immediate(Immediate::Hole),
+                PropertyAttributes::data(false, false, true),
+            )?;
+        }
         Ok(true)
     }
 
@@ -312,7 +335,99 @@ impl Isolate {
             (storage, roots.receiver)
         };
         let (object, _) = self.object_snapshot(receiver)?;
-        self.attach_property_storage(object, new_shape, storage)
+        self.replace_property_storage(object, new_shape, Some(storage))
+    }
+
+    /// Removes one structural property and publishes an exactly compacted replacement backing.
+    pub(super) fn remove_property_slot(
+        &mut self,
+        object: ObjectReceiver,
+        snapshot: OrdinaryObject,
+        removed: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        let storage = snapshot
+            .storage
+            .expect("a structural property always owns storage");
+        let keys = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        let retained_count = keys.len().saturating_sub(1);
+        let mut retained = Vec::new();
+        retained
+            .try_reserve_exact(retained_count)
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        self.heap.with_running_scope(|scope| {
+            let storage = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let storage = no_gc
+                    .borrow(storage, self.types.property_storage)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                for key in keys {
+                    if key == removed {
+                        continue;
+                    }
+                    let property = self
+                        .shapes
+                        .lookup(snapshot.shape, key)
+                        .expect("structural key resolves in its source shape");
+                    retained.push(RetainedProperty {
+                        key,
+                        kind: property.kind,
+                        attributes: property.attributes,
+                        value: storage.slots[property.slot as usize],
+                    });
+                }
+                Ok::<(), ExecutionError>(())
+            })
+        })?;
+        debug_assert_eq!(retained.len(), retained_count);
+        let new_shape = self.rebuild_shape(&retained)?;
+        if retained.is_empty() {
+            self.replace_property_storage(object, new_shape, None)?;
+            return Ok(());
+        }
+        let compact = compact_property_storage(&retained)?;
+        let receiver = object.value();
+        let (storage, receiver) = {
+            let mut roots = PropertyMutationRoots {
+                vm: VmRoots {
+                    fiber: &mut self.fiber,
+                    finalization_jobs: &mut self.finalization_jobs,
+                    realm: &mut self.realm,
+                    loaded_code: &mut self.loaded_code,
+                },
+                receiver,
+                value: receiver,
+                symbol_key: None,
+            };
+            let storage = self
+                .heap
+                .try_allocate_external_with_gc(
+                    self.types.property_storage,
+                    0,
+                    PropertyStorage::with_symbol_keys(compact.slots, compact.symbol_keys),
+                    AllocationSpace::Young,
+                    &mut roots,
+                )
+                .map_err(ExecutionError::HeapAllocation)?;
+            (storage, roots.receiver)
+        };
+        let (object, _) = self.object_snapshot(receiver)?;
+        self.replace_property_storage(object, new_shape, Some(storage))?;
+        Ok(())
+    }
+
+    /// Replays retained descriptors from the root so removal cannot leave stale lookup overlays.
+    fn rebuild_shape(&mut self, retained: &[RetainedProperty]) -> Result<ShapeId, ExecutionError> {
+        let mut shape = ShapeId::EMPTY;
+        for property in retained {
+            shape = self
+                .shapes
+                .transition_add_kind(shape, property.key, property.kind, property.attributes)
+                .map_err(ExecutionError::Shape)?;
+        }
+        Ok(shape)
     }
 
     /// Recovers the original Symbol value retained by one live own-key storage edge.
@@ -510,75 +625,95 @@ impl Isolate {
     }
 
     /// Publishes a replacement storage edge through the receiver's concrete typed payload.
-    fn attach_property_storage(
+    fn replace_property_storage(
         &mut self,
         receiver: ObjectReceiver,
         shape: ShapeId,
-        storage: GcRef<PropertyStorage>,
+        storage: Option<GcRef<PropertyStorage>>,
     ) -> Result<(), ExecutionError> {
         match receiver {
             ObjectReceiver::Ordinary(object) => self.heap.with_running_scope(|scope| {
                 let object = scope.root(object).map_err(ExecutionError::Root)?;
-                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let object = no_gc
                         .borrow_mut(object, self.types.ordinary_object)
                         .map_err(ExecutionError::NoGcBorrow)?;
                     object.shape = shape;
-                    object.storage = Some(storage);
+                    object.storage = storage;
                     Ok::<(), ExecutionError>(())
                 })?;
-                scope
-                    .write_barrier(object, storage_local)
-                    .map_err(ExecutionError::HeapReference)?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(object, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
                 Ok(())
             }),
             ObjectReceiver::Array(array) => self.heap.with_running_scope(|scope| {
                 let array = scope.root(array).map_err(ExecutionError::Root)?;
-                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let array = no_gc
                         .borrow_mut(array, self.types.array)
                         .map_err(ExecutionError::NoGcBorrow)?;
                     array.ordinary.shape = shape;
-                    array.ordinary.storage = Some(storage);
+                    array.ordinary.storage = storage;
                     Ok::<(), ExecutionError>(())
                 })?;
-                scope
-                    .write_barrier(array, storage_local)
-                    .map_err(ExecutionError::HeapReference)?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(array, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
                 Ok(())
             }),
             ObjectReceiver::Function(function) => self.heap.with_running_scope(|scope| {
                 let function = scope.root(function).map_err(ExecutionError::Root)?;
-                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let function = no_gc
                         .borrow_mut(function, self.types.function)
                         .map_err(ExecutionError::NoGcBorrow)?;
                     function.ordinary.shape = shape;
-                    function.ordinary.storage = Some(storage);
+                    function.ordinary.storage = storage;
                     Ok::<(), ExecutionError>(())
                 })?;
-                scope
-                    .write_barrier(function, storage_local)
-                    .map_err(ExecutionError::HeapReference)?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(function, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
                 Ok(())
             }),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
-                let storage_local = scope.root(storage).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let number = no_gc
                         .borrow_mut(number, self.types.number_object)
                         .map_err(ExecutionError::NoGcBorrow)?;
                     number.ordinary.shape = shape;
-                    number.ordinary.storage = Some(storage);
+                    number.ordinary.storage = storage;
                     Ok::<(), ExecutionError>(())
                 })?;
-                scope
-                    .write_barrier(number, storage_local)
-                    .map_err(ExecutionError::HeapReference)?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(number, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
                 Ok(())
             }),
         }
@@ -602,4 +737,40 @@ impl Isolate {
                 .checked_reference(raw, self.types.function)
                 .is_ok()
     }
+}
+
+/// Builds compact storage and reindexes live Symbol edges to their new physical slots.
+fn compact_property_storage(
+    retained: &[RetainedProperty],
+) -> Result<CompactPropertyStorage, ExecutionError> {
+    let mut slots = Vec::new();
+    slots
+        .try_reserve_exact(retained.len())
+        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+    let symbol_count = retained
+        .iter()
+        .filter(|property| property.key.symbol().is_some())
+        .count();
+    let mut symbol_keys = Vec::new();
+    symbol_keys
+        .try_reserve_exact(symbol_count)
+        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+    for (slot, property) in retained.iter().enumerate() {
+        slots.push(property.value);
+        if let Some(symbol) = property.key.symbol() {
+            symbol_keys.push(SymbolPropertyKey::new(
+                u32::try_from(slot).map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?,
+                symbol,
+                if property.value.as_immediate() == Some(Immediate::Hole) {
+                    Value::from_immediate(Immediate::Hole)
+                } else {
+                    symbol.value()
+                },
+            ));
+        }
+    }
+    Ok(CompactPropertyStorage {
+        slots: slots.into_boxed_slice(),
+        symbol_keys: symbol_keys.into_boxed_slice(),
+    })
 }

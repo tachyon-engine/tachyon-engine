@@ -492,7 +492,7 @@ impl Isolate {
         }
     }
 
-    /// Publishes a new property or overlays a retained deleted slot without changing its index.
+    /// Publishes a new property after removing any retained absence marker from chronology.
     fn publish_missing_property(
         &mut self,
         receiver: Value,
@@ -507,12 +507,10 @@ impl Isolate {
                 self.raw_property_value_from_snapshot(snapshot, property)?
                     .is_none()
             );
-            let shape = self
-                .shapes
-                .transition_reconfigure_kind(snapshot.shape, key, kind, attributes)
-                .map_err(ExecutionError::Shape)?;
-            self.update_property_slot(snapshot, key, property.slot, value)?;
-            return self.set_object_shape(object, shape);
+            self.remove_property_slot(object, snapshot, key)?;
+            let (object, snapshot) = self.object_snapshot(receiver)?;
+            return self
+                .add_property_slot_with_kind(object, snapshot, key, kind, value, attributes);
         }
         self.add_property_slot_with_kind(object, snapshot, key, kind, value, attributes)
     }

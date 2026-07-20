@@ -37,6 +37,42 @@ pub(in crate::tests) fn property_module() -> CompiledModule {
     .unwrap()
 }
 
+/// Builds add/add/delete/re-add so structural deletion chronology can be inspected by the caller.
+pub(in crate::tests) fn property_reinsert_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut builder = BytecodeBuilder::with_capacity(9, 0);
+    builder.emit(Opcode::CreateObject, &[0], span).unwrap();
+    builder.emit(Opcode::LoadImmediate, &[1, 1], span).unwrap();
+    builder.emit(Opcode::SetById, &[0, 1, 0], span).unwrap();
+    builder.emit(Opcode::LoadImmediate, &[2, 2], span).unwrap();
+    builder.emit(Opcode::SetById, &[0, 2, 1], span).unwrap();
+    builder.emit(Opcode::DeleteById, &[3, 0, 0], span).unwrap();
+    builder.emit(Opcode::LoadImmediate, &[4, 3], span).unwrap();
+    builder.emit(Opcode::SetById, &[0, 4, 0], span).unwrap();
+    builder.emit(Opcode::Return, &[0], span).unwrap();
+    let (bytecode, source_map, register_count) = builder.finish().unwrap();
+    let metadata = FunctionMetadata {
+        layout: FunctionLayout {
+            register_count,
+            ..FunctionLayout::default()
+        },
+        source_map,
+        ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+    };
+    CompiledModule::new(
+        Arc::from("property reinsert"),
+        Vec::new(),
+        vec![Arc::from("a"), Arc::from("b")],
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            bytecode,
+            metadata,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
 /// Builds a numeric-key write/read pair over one ordinary object.
 pub(in crate::tests) fn dynamic_property_module() -> CompiledModule {
     let span = SourceSpan { start: 0, end: 1 };

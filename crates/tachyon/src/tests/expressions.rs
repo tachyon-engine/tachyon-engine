@@ -445,4 +445,12 @@ fn delete_removes_supported_object_properties() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     ));
+    assert!(matches!(
+        execute_source(
+            170,
+            "let object = { a: 1, b: 2 }; delete object.a; object.a = 3; Object.keys(object).join(',') === 'b,a';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    ));
 }

@@ -621,6 +621,40 @@ pub(in crate::tests) fn assert_property_batch<const N: usize>() {
     }
 }
 
+pub(in crate::tests) fn assert_property_reinsert_batch<const N: usize>() {
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &property_reinsert_module(),
+            ExecutionBudget {
+                fuel: 16,
+                quantum: 16,
+            },
+        )
+        .unwrap();
+    let RunOutcome::Completed(object) = outcome else {
+        panic!("property reinsert fixture must complete");
+    };
+    let (_, snapshot) = isolate.object_snapshot(object).unwrap();
+    let keys = isolate
+        .shapes
+        .own_keys(snapshot.shape)
+        .unwrap()
+        .map(|key| key.atom().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    assert!(isolate.atoms.get(keys[0]).unwrap().equals_latin1(b"b"));
+    assert!(isolate.atoms.get(keys[1]).unwrap().equals_latin1(b"a"));
+    assert_eq!(
+        isolate.get_data_property(object, keys[0]).unwrap(),
+        Some(Value::from_i32(2))
+    );
+    assert_eq!(
+        isolate.get_data_property(object, keys[1]).unwrap(),
+        Some(Value::from_i32(3))
+    );
+}
+
 pub(in crate::tests) fn assert_dynamic_property_batch<const N: usize>() {
     for module in [
         dynamic_property_module(),
