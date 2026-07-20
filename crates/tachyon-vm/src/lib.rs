@@ -82,7 +82,8 @@ use iterator::{
 };
 use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
-    PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId, SymbolPropertyKey,
+    PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId, SymbolObject,
+    SymbolPropertyKey,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};

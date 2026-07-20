@@ -5,12 +5,37 @@ use crate::runtime::realm::RegisteredSymbol;
 
 impl Isolate {
     /// Returns the primitive Symbol receiver or rejects incompatible receivers before observable work.
-    fn this_symbol_value(&self, value: Value) -> Result<Value, ExecutionError> {
+    fn this_symbol_value(&mut self, value: Value) -> Result<Value, ExecutionError> {
         if self.is_symbol_value(value) {
-            Ok(value)
-        } else {
-            Err(ExecutionError::NotObject(value))
+            return Ok(value);
         }
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        let symbol = self
+            .heap
+            .checked_reference(raw, self.types.symbol_object)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        self.heap.with_running_scope(|scope| {
+            let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(symbol, self.types.symbol_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .symbol_data
+                    .ok_or(ExecutionError::NotObject(value))
+            })
+        })
+    }
+
+    /// Boxes a Symbol using the observable prototype of the active Symbol intrinsic.
+    pub(crate) fn box_symbol(&mut self, symbol: Value) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_symbol_value(symbol));
+        let prototype = self
+            .realm
+            .symbol_prototype
+            .expect("Symbol prototype initializes before Symbol boxing");
+        self.allocate_symbol_object(Some(symbol), prototype, AllocationSpace::Young)
     }
 
     /// Implements Symbol.prototype.toString using the primitive Symbol conversion path.
@@ -19,11 +44,11 @@ impl Isolate {
         self.primitive_string_value(Some(symbol))
     }
 
-    pub(crate) fn symbol_value_of(&self, receiver: Value) -> Result<Value, ExecutionError> {
+    pub(crate) fn symbol_value_of(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         self.this_symbol_value(receiver)
     }
 
-    pub(crate) fn symbol_to_primitive(&self, receiver: Value) -> Result<Value, ExecutionError> {
+    pub(crate) fn symbol_to_primitive(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         self.this_symbol_value(receiver)
     }
 

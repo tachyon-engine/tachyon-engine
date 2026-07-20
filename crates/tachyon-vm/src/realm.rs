@@ -554,12 +554,8 @@ impl Isolate {
         object_prototype: Value,
         function_prototype: Value,
     ) -> Result<(), ExecutionError> {
-        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
-            shape: ShapeId::EMPTY,
-            extensible: true,
-            storage: None,
-            prototype: object_prototype,
-        })?;
+        let prototype =
+            self.allocate_symbol_object(None, object_prototype, AllocationSpace::Old)?;
         self.realm.symbol_prototype = Some(prototype);
         self.set_function_prototype(symbol_constructor, prototype)?;
         let constructor = self.constructor_atom()?;

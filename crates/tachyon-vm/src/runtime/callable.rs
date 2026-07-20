@@ -595,10 +595,8 @@ impl NativeFunction {
             | Self::ArrayToString => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
-            Self::SymbolToString
-            | Self::SymbolValueOf
-            | Self::SymbolDescription
-            | Self::SymbolToPrimitive => 0,
+            Self::SymbolToString | Self::SymbolValueOf | Self::SymbolDescription => 0,
+            Self::SymbolToPrimitive => 1,
             Self::JsonParse => 1,
             Self::JsonStringify => 3,
         }
@@ -974,6 +972,7 @@ pub(crate) enum ObjectReceiver {
     Function(GcRef<FunctionObject>),
     Number(GcRef<NumberObject>),
     String(GcRef<StringObject>),
+    Symbol(GcRef<SymbolObject>),
     RegExp(GcRef<RegExpObject>),
     Map(GcRef<MapObject>),
     Set(GcRef<SetObject>),
@@ -992,6 +991,7 @@ impl ObjectReceiver {
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
+            Self::Symbol(symbol) => Value::from_heap_ref(symbol.raw()),
             Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
             Self::Map(map) => Value::from_heap_ref(map.raw()),
             Self::Set(set) => Value::from_heap_ref(set.raw()),
@@ -1120,6 +1120,7 @@ pub(crate) struct VmTypes {
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) string_object: GcType<StringObject>,
+    pub(crate) symbol_object: GcType<SymbolObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,

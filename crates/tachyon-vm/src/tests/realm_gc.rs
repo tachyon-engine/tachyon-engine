@@ -89,6 +89,34 @@ fn boxed_number_data_and_properties_survive_forced_major_allocations() {
 }
 
 #[test]
+/// Keeps Symbol wrapper data and its ordinary property backing alive across a full collection.
+fn boxed_symbol_data_and_properties_survive_forced_major_allocations() {
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let symbol = isolate.allocate_symbol(None).unwrap();
+    let boxed = isolate.box_symbol(symbol).unwrap();
+    isolate.fiber.registers.push(boxed);
+    let key = isolate.intern_intrinsic_name(b"field").unwrap();
+    isolate
+        .set_own_data_property(boxed, key, Value::from_i32(11))
+        .unwrap();
+    assert_eq!(isolate.symbol_value_of(boxed).unwrap(), symbol);
+    assert_eq!(
+        isolate
+            .get_data_property(boxed, key)
+            .unwrap()
+            .and_then(Value::as_i32),
+        Some(11)
+    );
+    assert_eq!(
+        isolate.object_snapshot(boxed).unwrap().1.prototype,
+        isolate.realm.symbol_prototype.unwrap()
+    );
+}
+
+#[test]
 /// Keeps a pending Symbol description live before allocation and through a later full major.
 fn symbol_description_survives_forced_major_allocations() {
     let mut isolate = test_isolate();

@@ -8,10 +8,13 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<Value, ExecutionError> {
-        if let Some(value) = self.call_argument(site, 0)?
-            && self.is_object_value(value)
-        {
-            return Ok(value);
+        if let Some(value) = self.call_argument(site, 0)? {
+            if self.is_object_value(value) {
+                return Ok(value);
+            }
+            if self.is_symbol_value(value) {
+                return self.box_symbol(value);
+            }
         }
         let object = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, object)?;

@@ -582,6 +582,17 @@ pub(crate) struct StringObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Ordinary wrapper carrying the specification's optional `[[SymbolData]]` slot.
+///
+/// `%Symbol.prototype%` is itself a Symbol exotic object with an absent slot, while values
+/// produced by `Object(symbol)` retain the primitive Symbol edge here.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct SymbolObject {
+    pub(crate) symbol_data: Option<Value>,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// RegExp state whose observable properties remain in the ordinary-object base.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -612,6 +623,14 @@ impl Trace for NumberObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.number_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for SymbolObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.symbol_data.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

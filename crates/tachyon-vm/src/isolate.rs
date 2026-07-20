@@ -104,6 +104,9 @@ impl Isolate {
             string_object: registry
                 .try_register("StringObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            symbol_object: registry
+                .try_register("SymbolObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             ordinary_object: registry
                 .try_register("OrdinaryObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -666,6 +669,41 @@ impl Isolate {
                 0,
                 StringObject {
                     string_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates a boxed Symbol while tracing its optional primitive data and object prototype.
+    pub(crate) fn allocate_symbol_object(
+        &mut self,
+        symbol_data: Option<Value>,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(symbol_data.is_none_or(|value| self.is_symbol_value(value)));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.symbol_object,
+                0,
+                0,
+                SymbolObject {
+                    symbol_data,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

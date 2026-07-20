@@ -533,6 +533,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::String(string), ordinary));
         }
+        if let Ok(symbol) = self.heap.checked_reference(raw, self.types.symbol_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(symbol, self.types.symbol_object)
+                        .map(|symbol| symbol.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Symbol(symbol), ordinary));
+        }
         if let Ok(regexp) = self.heap.checked_reference(raw, self.types.regexp_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
@@ -697,6 +709,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Symbol(symbol) => self.heap.with_running_scope(|scope| {
+                let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(symbol, self.types.symbol_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::RegExp(regexp) => self.heap.with_running_scope(|scope| {
                 let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -832,6 +855,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(string, self.types.string_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Symbol(symbol) => self.heap.with_running_scope(|scope| {
+                let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(symbol, self.types.symbol_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1031,6 +1065,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::Symbol(symbol) => self.heap.with_running_scope(|scope| {
+                let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let symbol = no_gc
+                        .borrow_mut(symbol, self.types.symbol_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    symbol.ordinary.shape = shape;
+                    symbol.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(symbol, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::RegExp(regexp) => self.heap.with_running_scope(|scope| {
                 let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1197,6 +1252,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.string_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.symbol_object)
                 .is_ok()
             || self
                 .heap
