@@ -794,7 +794,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             for property in properties.iter() {
                 count = checked_count_add(
                     count,
-                    expression_label_count(&property.value)?,
+                    object_property_label_count(&property.value)?,
                     "bytecode labels",
                 )?;
                 if let HirObjectPropertyKey::Computed(key) = &property.key {
@@ -884,5 +884,16 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             Ok(count)
         }
         _ => Ok(0),
+    }
+}
+
+fn object_property_label_count(
+    value: &crate::HirObjectPropertyValue,
+) -> Result<usize, CompileError> {
+    match value {
+        crate::HirObjectPropertyValue::Data(expression) => expression_label_count(expression),
+        crate::HirObjectPropertyValue::Getter(_) | crate::HirObjectPropertyValue::Setter(_) => {
+            Ok(0)
+        }
     }
 }

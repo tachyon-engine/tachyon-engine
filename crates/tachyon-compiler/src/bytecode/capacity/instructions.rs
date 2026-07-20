@@ -275,7 +275,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             for property in properties.iter() {
                 count = checked_count_add(
                     count,
-                    expression_instruction_count(&property.value)?,
+                    object_property_instruction_count(&property.value)?,
                     "bytecode instructions",
                 )?;
                 if let HirObjectPropertyKey::Computed(key) = &property.key {
@@ -428,6 +428,17 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             Ok(count)
         }
         _ => Ok(1),
+    }
+}
+
+fn object_property_instruction_count(
+    value: &crate::HirObjectPropertyValue,
+) -> Result<usize, CompileError> {
+    match value {
+        crate::HirObjectPropertyValue::Data(expression) => expression_instruction_count(expression),
+        crate::HirObjectPropertyValue::Getter(_) | crate::HirObjectPropertyValue::Setter(_) => {
+            Ok(1)
+        }
     }
 }
 

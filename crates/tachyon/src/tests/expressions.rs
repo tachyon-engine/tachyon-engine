@@ -114,6 +114,27 @@ fn object_literals_support_methods() {
 }
 
 #[test]
+/// Covers ordered object-literal accessor publication, pair merging, and the original receiver.
+fn object_literals_support_static_accessors() {
+    assert_eq!(
+        execute_source(
+            203,
+            "let object = { get answer() { return 42; } }; object.answer;"
+        )
+        .as_i32(),
+        Some(42),
+    );
+    assert_eq!(
+        execute_source(
+            202,
+            "let object = { value: 40, get answer() { return this.value + 2; }, set answer(value) { this.value = value; } }; let before = object.answer; object.answer = 7; let descriptor = Object.getOwnPropertyDescriptor(object, 'answer'); before === 42 && object.value === 7 && descriptor.enumerable && descriptor.configurable && descriptor.get.name === 'get answer' && descriptor.set.name === 'set answer';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Ensures void evaluates its operand for side effects and always completes undefined.
 fn void_evaluates_operand_and_returns_undefined() {
     assert_eq!(

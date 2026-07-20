@@ -197,9 +197,13 @@ pub enum Opcode {
     ToPropertyKeyForIn = 75,
     /// Assigns an inferred name to a newly-created anonymous function.
     SetFunctionName = 76,
+    /// Defines or updates the getter half of an object literal own accessor property.
+    DefineGetterById = 77,
+    /// Defines or updates the setter half of an object literal own accessor property.
+    DefineSetterById = 78,
 }
 
-pub(super) const OPCODE_COUNT: usize = 77;
+pub(super) const OPCODE_COUNT: usize = 79;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -278,10 +282,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // ToPropertyKey
     3, // ToPropertyKeyForIn
     2, // SetFunctionName
+    3, // DefineGetterById
+    3, // DefineSetterById
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::SetFunctionName as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefineSetterById as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -404,6 +410,8 @@ impl Opcode {
             10 => Some(Self::ToPropertyKey),
             11 => Some(Self::ToPropertyKeyForIn),
             12 => Some(Self::SetFunctionName),
+            13 => Some(Self::DefineGetterById),
+            14 => Some(Self::DefineSetterById),
             _ => None,
         }
     }

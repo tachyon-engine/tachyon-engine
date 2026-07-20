@@ -270,8 +270,58 @@ impl Lowerer<'_> {
                             (Opcode::SetByValue, key.index())
                         }
                     };
-                    let value = self.expression(&property.value)?;
-                    self.emit(opcode, &[object.index(), value.index(), key], property.span)?;
+                    match &property.value {
+                        HirObjectPropertyValue::Data(value) => {
+                            let value = self.expression(value)?;
+                            self.emit(
+                                opcode,
+                                &[object.index(), value.index(), key],
+                                property.span,
+                            )?;
+                        }
+                        HirObjectPropertyValue::Getter(function)
+                        | HirObjectPropertyValue::Setter(function) => {
+                            let value = self.register()?;
+                            let function = function
+                                .index()
+                                .checked_add(1)
+                                .ok_or(CompileError::RegisterOverflow)?;
+                            self.emit(
+                                Opcode::CreateClosure,
+                                &[value.index(), function],
+                                property.span,
+                            )?;
+                            let (opcode, prefix) = match &property.value {
+                                HirObjectPropertyValue::Getter(_) => {
+                                    (Opcode::DefineGetterById, "get ")
+                                }
+                                HirObjectPropertyValue::Setter(_) => {
+                                    (Opcode::DefineSetterById, "set ")
+                                }
+                                HirObjectPropertyValue::Data(_) => {
+                                    unreachable!("accessor arm selected")
+                                }
+                            };
+                            let HirObjectPropertyKey::Static(key_name) = &property.key else {
+                                return Err(self.unsupported(
+                                    property.span,
+                                    "computed object accessor bytecode",
+                                ));
+                            };
+                            let function_name = std::sync::Arc::from(format!("{prefix}{key_name}"));
+                            let function_name = self.scope_name(&function_name)?;
+                            self.emit(
+                                Opcode::SetFunctionName,
+                                &[value.index(), function_name],
+                                property.span,
+                            )?;
+                            self.emit(
+                                opcode,
+                                &[object.index(), value.index(), key],
+                                property.span,
+                            )?;
+                        }
+                    }
                 }
                 Ok(object)
             }

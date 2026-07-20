@@ -116,7 +116,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::GetByValue
         | Opcode::SetByValue
         | Opcode::ToPropertyKey
-        | Opcode::ToPropertyKeyForIn => write!(
+        | Opcode::ToPropertyKeyForIn
+        | Opcode::DefineGetterById
+        | Opcode::DefineSetterById => write!(
             output,
             " r{}, r{}, r{}",
             operands[0], operands[1], operands[2]

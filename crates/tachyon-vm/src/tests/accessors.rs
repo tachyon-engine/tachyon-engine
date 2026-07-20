@@ -55,6 +55,113 @@ fn compound_assignment_observes_getter_rhs_setter_order_for_every_dispatch_batch
 }
 
 #[test]
+fn literal_accessor_definition_opcodes_merge_pairs_for_every_dispatch_batch() {
+    assert_literal_accessor_definition_batch::<1>();
+    assert_literal_accessor_definition_batch::<2>();
+    assert_literal_accessor_definition_batch::<4>();
+    assert_literal_accessor_definition_batch::<8>();
+    assert_literal_accessor_definition_batch::<16>();
+}
+
+/// Runs the compiler-facing getter/setter definition opcode sequence through every dispatch batch.
+fn assert_literal_accessor_definition_batch<const N: usize>() {
+    let module = literal_accessor_definition_module();
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(42)));
+}
+
+/// Builds a getter/setter pair as emitted for `{ get value() {}, set value(_) {} }`.
+fn literal_accessor_definition_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::CreateObject, &[0], span).unwrap();
+    entry.emit(Opcode::CreateClosure, &[1, 1], span).unwrap();
+    entry
+        .emit(Opcode::DefineGetterById, &[0, 1, 0], span)
+        .unwrap();
+    entry.emit(Opcode::CreateClosure, &[2, 2], span).unwrap();
+    entry
+        .emit(Opcode::DefineSetterById, &[0, 2, 0], span)
+        .unwrap();
+    entry.emit(Opcode::LoadImmediate, &[3, 42], span).unwrap();
+    entry.emit(Opcode::SetById, &[0, 3, 0], span).unwrap();
+    entry.emit(Opcode::GetById, &[4, 0, 0], span).unwrap();
+    entry.emit(Opcode::Return, &[4], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::LoadThis, &[0], span).unwrap();
+    getter.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+    getter.emit(Opcode::Return, &[1], span).unwrap();
+    let (getter_bytecode, getter_map, getter_registers) = getter.finish().unwrap();
+
+    let mut setter = BytecodeBuilder::default();
+    setter.emit(Opcode::LoadThis, &[1], span).unwrap();
+    setter.emit(Opcode::SetById, &[1, 0, 1], span).unwrap();
+    setter.emit(Opcode::ReturnUndefined, &[], span).unwrap();
+    let (setter_bytecode, setter_map, setter_registers) = setter.finish().unwrap();
+
+    CompiledModule::new(
+        Arc::from("literal accessor definition"),
+        Vec::new(),
+        vec![Arc::from("value"), Arc::from("seen")],
+        vec![
+            CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                entry_bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count: entry_registers,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: entry_map,
+                    ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
+                },
+            ),
+            CompiledFunctionTemplate::new(
+                FunctionId::new(1),
+                getter_bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count: getter_registers,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: getter_map,
+                    ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                },
+            ),
+            CompiledFunctionTemplate::new(
+                FunctionId::new(2),
+                setter_bytecode,
+                FunctionMetadata {
+                    layout: FunctionLayout {
+                        register_count: setter_registers,
+                        argument_count: 1,
+                        ..FunctionLayout::default()
+                    },
+                    source_map: setter_map,
+                    ..FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default())
+                },
+            ),
+        ],
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
+#[test]
 fn property_descriptor_getters_survive_forced_major_for_every_dispatch_batch() {
     assert_property_descriptor_batches::<1>();
     assert_property_descriptor_batches::<2>();

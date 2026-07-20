@@ -12,9 +12,9 @@ use crate::hir::{
 use crate::{
     BindingId, CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
     HirForInitializer, HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator,
-    HirObjectPropertyKey, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
-    HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind, ScopeId, SourceName,
-    SourceSpan,
+    HirObjectPropertyKey, HirObjectPropertyValue, HirStatement, HirStatementKind, HirSwitchCase,
+    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
+    ScopeId, SourceName, SourceSpan,
 };
 
 use super::{EnvironmentPlans, GlobalLexicalPlan};

@@ -25,7 +25,15 @@ use super::{missing_semantic, source_span, to_scope_id, unsupported};
 pub struct HirObjectProperty {
     pub span: SourceSpan,
     pub key: HirObjectPropertyKey,
-    pub value: HirExpression,
+    pub value: HirObjectPropertyValue,
+}
+
+/// Owns the definition mode for one object or array literal property.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirObjectPropertyValue {
+    Data(HirExpression),
+    Getter(FunctionStencilId),
+    Setter(FunctionStencilId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,7 +233,9 @@ pub(super) fn lower_expression(
                     chunk_properties.push(HirObjectProperty {
                         span: source_span(element.span()),
                         key: HirObjectPropertyKey::Static(Arc::from(chunk_length.to_string())),
-                        value: lower_expression(value, source, semantic, functions)?,
+                        value: HirObjectPropertyValue::Data(lower_expression(
+                            value, source, semantic, functions,
+                        )?),
                     });
                     chunk_length += 1;
                     continue;
@@ -285,11 +295,11 @@ pub(super) fn lower_expression(
                     saw_spread = true;
                     continue;
                 };
-                if property.kind != PropertyKind::Init {
+                if property.kind != PropertyKind::Init && property.computed {
                     return Err(unsupported(
                         source.name(),
                         source_span(property.span),
-                        "object accessor",
+                        "computed object accessor",
                     ));
                 }
                 let key = if property.computed {
@@ -324,30 +334,51 @@ pub(super) fn lower_expression(
                     };
                     HirObjectPropertyKey::Static(key)
                 };
-                let value = if property.method {
-                    let Expression::FunctionExpression(function) = &property.value else {
-                        return Err(unsupported(
-                            source.name(),
-                            source_span(property.span),
-                            "object method value",
-                        ));
+                let value =
+                    if property.kind == PropertyKind::Get || property.kind == PropertyKind::Set {
+                        let Expression::FunctionExpression(function) = &property.value else {
+                            return Err(unsupported(
+                                source.name(),
+                                source_span(property.span),
+                                "object accessor value",
+                            ));
+                        };
+                        let function =
+                            lower_function_stencil(function, None, source, semantic, functions)?;
+                        if property.kind == PropertyKind::Get {
+                            HirObjectPropertyValue::Getter(function)
+                        } else {
+                            HirObjectPropertyValue::Setter(function)
+                        }
+                    } else if property.method {
+                        let Expression::FunctionExpression(function) = &property.value else {
+                            return Err(unsupported(
+                                source.name(),
+                                source_span(property.span),
+                                "object method value",
+                            ));
+                        };
+                        if function.id.is_some() {
+                            return Err(unsupported(
+                                source.name(),
+                                source_span(function.span),
+                                "named object method",
+                            ));
+                        }
+                        HirObjectPropertyValue::Data(HirExpression {
+                            span: source_span(function.span),
+                            kind: HirExpressionKind::Function(lower_function_stencil(
+                                function, None, source, semantic, functions,
+                            )?),
+                        })
+                    } else {
+                        HirObjectPropertyValue::Data(lower_expression(
+                            &property.value,
+                            source,
+                            semantic,
+                            functions,
+                        )?)
                     };
-                    if function.id.is_some() {
-                        return Err(unsupported(
-                            source.name(),
-                            source_span(function.span),
-                            "named object method",
-                        ));
-                    }
-                    HirExpression {
-                        span: source_span(function.span),
-                        kind: HirExpressionKind::Function(lower_function_stencil(
-                            function, None, source, semantic, functions,
-                        )?),
-                    }
-                } else {
-                    lower_expression(&property.value, source, semantic, functions)?
-                };
                 properties.push(HirObjectProperty {
                     span: source_span(property.span),
                     key,
@@ -568,10 +599,10 @@ fn lower_array_chunk(
     properties.push(HirObjectProperty {
         span,
         key: HirObjectPropertyKey::Static(Arc::from("length")),
-        value: HirExpression {
+        value: HirObjectPropertyValue::Data(HirExpression {
             span,
             kind: HirExpressionKind::Number((length as f64).to_bits()),
-        },
+        }),
     });
     HirExpression {
         span,

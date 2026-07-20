@@ -666,7 +666,9 @@ fn verify_instruction(
         | Opcode::GetByValue
         | Opcode::SetByValue
         | Opcode::ToPropertyKey
-        | Opcode::ToPropertyKeyForIn => {
+        | Opcode::ToPropertyKeyForIn
+        | Opcode::DefineGetterById
+        | Opcode::DefineSetterById => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(operands[2])?;
@@ -733,7 +735,9 @@ fn verify_instruction(
         Opcode::DeclareScope => Some(operands[0]),
         Opcode::DeclareGlobalLexical => Some(operands[0]),
         Opcode::InitializeGlobalLexical => Some(operands[1]),
-        Opcode::GetById | Opcode::SetById => Some(operands[2]),
+        Opcode::GetById | Opcode::SetById | Opcode::DefineGetterById | Opcode::DefineSetterById => {
+            Some(operands[2])
+        }
         _ => None,
     };
     if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {
