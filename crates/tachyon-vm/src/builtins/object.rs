@@ -48,6 +48,36 @@ impl Isolate {
         Ok(self.object_snapshot(target)?.1.prototype)
     }
 
+    /// Reports ordinary extensibility while preserving Reflect's object-only input boundary.
+    pub(crate) fn reflect_is_extensible(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<bool, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        Ok(self.object_snapshot(target)?.1.extensible)
+    }
+
+    /// Makes an ordinary object non-extensible and returns the internal-method boolean result.
+    pub(crate) fn reflect_prevent_extensions(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<bool, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        let (receiver, _) = self.object_snapshot(target)?;
+        self.set_object_extensible(receiver, false)?;
+        Ok(true)
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,

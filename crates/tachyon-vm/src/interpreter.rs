@@ -2280,6 +2280,14 @@ impl Isolate {
                     let prototype = self.reflect_get_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, prototype);
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectIsExtensible) => {
+                    let result = self.reflect_is_extensible(&site)?;
+                    return self.write(site.caller_base, site.destination, boolean_value(result));
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectPreventExtensions) => {
+                    let result = self.reflect_prevent_extensions(&site)?;
+                    return self.write(site.caller_base, site.destination, boolean_value(result));
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);

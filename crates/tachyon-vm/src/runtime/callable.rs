@@ -33,6 +33,8 @@ pub(crate) enum NativeFunction {
     ObjectPreventExtensions,
     ReflectOwnKeys,
     ReflectGetPrototypeOf,
+    ReflectIsExtensible,
+    ReflectPreventExtensions,
     StringConstructor,
     StringCharAt,
     StringCharCodeAt,
@@ -463,6 +465,8 @@ impl NativeFunction {
             | Self::ObjectPreventExtensions
             | Self::ReflectOwnKeys
             | Self::ReflectGetPrototypeOf
+            | Self::ReflectIsExtensible
+            | Self::ReflectPreventExtensions
             | Self::StringConstructor
             | Self::RegExpConstructor
             | Self::RegExpExec
@@ -638,6 +642,8 @@ impl NativeFunction {
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::ReflectOwnKeys => "ownKeys",
             Self::ReflectGetPrototypeOf => "getPrototypeOf",
+            Self::ReflectIsExtensible => "isExtensible",
+            Self::ReflectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
             Self::RegExpConstructor => "RegExp",
             Self::RegExpExec => "exec",

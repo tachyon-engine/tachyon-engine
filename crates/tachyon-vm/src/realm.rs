@@ -1691,7 +1691,33 @@ impl Isolate {
                     },
                 )?;
                 let key = self.intern_intrinsic_name(b"getPrototypeOf")?;
-                self.set_intrinsic_data_property(object, key, method, true)
+                self.set_intrinsic_data_property(object, key, method, true)?;
+                for (name, native) in [
+                    (
+                        b"isExtensible".as_slice(),
+                        NativeFunction::ReflectIsExtensible,
+                    ),
+                    (
+                        b"preventExtensions".as_slice(),
+                        NativeFunction::ReflectPreventExtensions,
+                    ),
+                ] {
+                    let method = self.allocate_native_function(
+                        native,
+                        OrdinaryObject {
+                            shape: ShapeId::EMPTY,
+                            extensible: true,
+                            storage: None,
+                            prototype: self
+                                .realm
+                                .function_prototype
+                                .expect("Function prototype initializes before Reflect"),
+                        },
+                    )?;
+                    let key = self.intern_intrinsic_name(name)?;
+                    self.set_intrinsic_data_property(object, key, method, true)?;
+                }
+                Ok(())
             })
     }
 
