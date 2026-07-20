@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+/// Drains standard Array iterables through the Map and Set constructor protocol.
+fn collection_constructors_consume_array_iterables() {
+    assert_eq!(
+        execute_source(
+            1_017,
+            "var map = new Map([[1, 2], [3, 4]]); var set = new Set([5, 6, 5]); map.get(1) === 2 && map.get(3) === 4 && set.size === 2 && set.has(6);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Preserves the cached iterator and adder call boundaries across bytecode callback frames.
+fn collection_constructors_resume_custom_iterators_and_adders() {
+    assert_eq!(
+        execute_source(
+            1_018,
+            "let calls = 0; let source = { [Symbol.iterator]() { let index = 0; return { next() { index += 1; return index === 1 ? { done: false, value: [7, 9] } : { done: true }; } }; } }; let original = Map.prototype.set; Map.prototype.set = function(key, value) { calls += 1; return original.call(this, key, value); }; let map = new Map(source); map.get(7) === 9 && calls === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Publishes `%String.prototype%` and routes primitive string length through its exotic boundary.
 fn primitive_string_length_and_prototype_are_available() {
     assert_eq!(

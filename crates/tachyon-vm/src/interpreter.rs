@@ -1298,6 +1298,9 @@ impl Isolate {
                     .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
                 1,
             ),
+            NativeContinuationKind::CollectionInitializer(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -1896,12 +1899,10 @@ impl Isolate {
                     return self.write(caller_base, destination, array);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
-                    let map = self.create_map_from_site(&site)?;
-                    return self.write(caller_base, destination, map);
+                    return self.begin_map_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SetConstructor) => {
-                    let set = self.create_set_from_site(&site)?;
-                    return self.write(caller_base, destination, set);
+                    return self.begin_set_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
@@ -2295,12 +2296,10 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, array);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
-                    let map = self.create_map_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, map);
+                    return self.begin_map_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SetConstructor) => {
-                    let set = self.create_set_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, set);
+                    return self.begin_set_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::MapGet) => {
                     let value = self.map_get(&site)?;
@@ -2952,6 +2951,11 @@ impl Isolate {
                     let assigned = continuation.second();
                     self.write(site.caller_base, site.destination, assigned)?;
                     self.finish_property_write(receiver, true)
+                }
+                NativeContinuationKind::CollectionInitializer(stage) => {
+                    let state =
+                        self.pending_collection_initializer_reference(continuation.first())?;
+                    self.resume_collection_initializer(site, state, stage, value)
                 }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")

@@ -300,6 +300,22 @@ pub(crate) enum PropertyCallbackMode {
     CopyDataProperties,
 }
 
+/// The observable operation that resumes one Map or Set iterable constructor step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum CollectionInitializerStage {
+    Adder,
+    IteratorMethod,
+    IteratorCall,
+    NextMethod,
+    NextCall,
+    ResultDone,
+    ResultValue,
+    EntryKey,
+    EntryValue,
+    AdderCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -309,6 +325,7 @@ pub(crate) enum NativeContinuationKind {
     },
     PropertyGet(PropertyCallbackMode),
     PropertySet,
+    CollectionInitializer(CollectionInitializerStage),
     ConversionCallRoot,
 }
 
@@ -377,6 +394,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertySet,
             first: receiver,
             second: value,
+        }
+    }
+
+    /// Roots collection-constructor state while one observable protocol operation executes.
+    #[inline]
+    pub(crate) const fn collection_initializer(
+        site: NativeContinuationSite,
+        stage: CollectionInitializerStage,
+        state: Value,
+        callee: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::CollectionInitializer(stage),
+            first: state,
+            second: callee,
         }
     }
 

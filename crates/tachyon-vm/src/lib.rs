@@ -61,7 +61,10 @@ use tachyon_value::{Immediate, Value};
 
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
-use collection::{MapObject, OrderedCollection, SetObject};
+use collection::{
+    CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionInitializer,
+    SetObject,
+};
 use conversion::{
     PendingNativePropertyKey, boolean_value, is_non_string_truthy, is_nullish, numeric_binary,
     numeric_binary_hot, numeric_binary_operation, numeric_bitwise_not, numeric_negate,
@@ -96,11 +99,11 @@ use runtime::{
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
         ActiveHandler, ArrayAllocationRoots, BuiltinPropertyKeyConsumer, CodeLoadRoots,
-        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        ConversionNativeFunction, Fiber, Frame, NativeContinuation, NativeContinuationKind,
-        NativeContinuationSite, PreferredType, PropertyCallbackMode, PropertyMutationRoots,
-        PrototypeInitializationRoots, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
-        next_to_primitive_stage,
+        CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
+        ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
+        NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
+        PropertyMutationRoots, PrototypeInitializationRoots, SymbolAllocationRoots,
+        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

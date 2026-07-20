@@ -5,7 +5,7 @@ use core::mem::size_of;
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::Value;
 
-use crate::object::OrdinaryObject;
+use crate::{object::OrdinaryObject, runtime::fiber::VmRoots};
 
 /// Map exotic private slots plus its ordinary named-property base.
 #[derive(Clone, Copy, Debug)]
@@ -29,6 +29,65 @@ impl Trace for MapObject {
 pub(crate) struct SetObject {
     pub(crate) ordinary: OrdinaryObject,
     pub(crate) storage: GcRef<OrderedCollection>,
+}
+
+/// The collection constructor whose adder and iterable protocol are in flight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum CollectionInitializerKind {
+    Map,
+    Set,
+}
+
+/// GC-owned state that survives every observable step of `new Map(iterable)` and `new Set(iterable)`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingCollectionInitializer {
+    pub(crate) target: Value,
+    pub(crate) iterable: Value,
+    pub(crate) iterator: Value,
+    pub(crate) next: Value,
+    pub(crate) result: Value,
+    pub(crate) key: Value,
+    pub(crate) adder: Value,
+    pub(crate) kind: CollectionInitializerKind,
+}
+
+impl Trace for PendingCollectionInitializer {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.target.trace(tracer);
+        self.iterable.trace(tracer);
+        self.iterator.trace(tracer);
+        self.next.trace(tracer);
+        self.result.trace(tracer);
+        self.key.trace(tracer);
+        self.adder.trace(tracer);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PendingCollectionInitializerSnapshot {
+    pub(crate) target: Value,
+    pub(crate) iterable: Value,
+    pub(crate) iterator: Value,
+    pub(crate) next: Value,
+    pub(crate) result: Value,
+    pub(crate) key: Value,
+    pub(crate) adder: Value,
+    pub(crate) kind: CollectionInitializerKind,
+}
+
+pub(crate) struct PendingCollectionInitializerRoots<'a> {
+    pub(crate) vm: VmRoots<'a>,
+    pub(crate) pending: PendingCollectionInitializer,
+}
+
+impl Trace for PendingCollectionInitializerRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
 }
 
 impl Trace for SetObject {

@@ -92,6 +92,9 @@ impl Isolate {
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_collection_initializer: registry
+                .try_register("PendingCollectionInitializer")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             regexp_object: registry
                 .try_register("RegExpObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

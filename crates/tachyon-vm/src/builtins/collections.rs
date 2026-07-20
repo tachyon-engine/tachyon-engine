@@ -1,7 +1,9 @@
 //! Map and Set private-slot operations over fixed-capacity ordered storage.
 
 use super::super::*;
-use crate::collection::CollectionEntry;
+use crate::collection::{
+    CollectionEntry, PendingCollectionInitializerRoots, PendingCollectionInitializerSnapshot,
+};
 
 struct CollectionReplacementRoots<'a> {
     vm: VmRoots<'a>,
@@ -37,34 +39,438 @@ impl Isolate {
         })
     }
 
-    /// Creates an empty Map; iterable initialization joins the resumable iterator-protocol slice.
-    pub(crate) fn create_map_from_site(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        if site.argument_count != 0 {
-            return Err(ExecutionError::UnsupportedCollectionInitializer);
-        }
-        self.allocate_map_object(
+    /// Starts Map construction, retaining its initialization record across iterable callbacks.
+    pub(crate) fn begin_map_from_site(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self.allocate_map_object(
             self.realm
                 .map_prototype
                 .expect("Map prototype initializes before Map construction"),
-        )
+        )?;
+        self.begin_collection_initializer(site, target, CollectionInitializerKind::Map)
     }
 
-    /// Creates an empty Set; iterable initialization joins the resumable iterator-protocol slice.
-    pub(crate) fn create_set_from_site(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        if site.argument_count != 0 {
-            return Err(ExecutionError::UnsupportedCollectionInitializer);
-        }
-        self.allocate_set_object(
+    /// Starts Set construction, retaining its initialization record across iterable callbacks.
+    pub(crate) fn begin_set_from_site(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self.allocate_set_object(
             self.realm
                 .set_prototype
                 .expect("Set prototype initializes before Set construction"),
+        )?;
+        self.begin_collection_initializer(site, target, CollectionInitializerKind::Set)
+    }
+
+    /// Runs the Map/Set constructor protocol without representing JavaScript calls on the Rust stack.
+    fn begin_collection_initializer(
+        &mut self,
+        site: &CallSite,
+        target: Value,
+        kind: CollectionInitializerKind,
+    ) -> Result<(), ExecutionError> {
+        let iterable = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if iterable.as_immediate() == Some(Immediate::Undefined) {
+            return self.write(site.caller_base, site.destination, target);
+        }
+        let state = self.allocate_pending_collection_initializer(PendingCollectionInitializer {
+            target,
+            iterable,
+            iterator: Value::from_immediate(Immediate::Undefined),
+            next: Value::from_immediate(Immediate::Undefined),
+            result: Value::from_immediate(Immediate::Undefined),
+            key: Value::from_immediate(Immediate::Undefined),
+            adder: Value::from_immediate(Immediate::Undefined),
+            kind,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.get_collection_initializer_property(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            state,
+            CollectionInitializerStage::Adder,
+            target,
+            if kind == CollectionInitializerKind::Map {
+                b"set"
+            } else {
+                b"add"
+            },
         )
+    }
+
+    /// Resumes one observable iterable-constructor protocol operation from its returned value.
+    pub(crate) fn resume_collection_initializer(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+        stage: CollectionInitializerStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        // The parent completion has been popped before this resume. Re-publish the state before
+        // any allocation so local GcRef/Value temporaries never become the only owner.
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        match stage {
+            CollectionInitializerStage::Adder => {
+                self.update_pending_collection_initializer(state, |pending| pending.adder = value)?;
+                self.resolve_function_object(value)?;
+                let iterable = self.pending_collection_initializer(state)?.iterable;
+                let iterator_symbol = self
+                    .realm
+                    .well_known_symbols
+                    .iterator
+                    .expect("Symbol.iterator initializes before collection construction");
+                let iterator_key = self.property_key(iterator_symbol)?;
+                self.get_collection_initializer_key(
+                    site,
+                    state,
+                    CollectionInitializerStage::IteratorMethod,
+                    iterable,
+                    iterator_key,
+                )
+            }
+            CollectionInitializerStage::IteratorMethod => {
+                self.resolve_function_object(value)?;
+                self.update_pending_collection_initializer(state, |pending| pending.next = value)?;
+                let pending = self.pending_collection_initializer(state)?;
+                self.call_collection_initializer(
+                    site,
+                    state,
+                    CollectionInitializerStage::IteratorCall,
+                    pending.next,
+                    pending.iterable,
+                    &[],
+                )
+            }
+            CollectionInitializerStage::IteratorCall => {
+                if !self.is_object_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
+                self.update_pending_collection_initializer(state, |pending| {
+                    pending.iterator = value
+                })?;
+                self.get_collection_initializer_property(
+                    site,
+                    state,
+                    CollectionInitializerStage::NextMethod,
+                    value,
+                    b"next",
+                )
+            }
+            CollectionInitializerStage::NextMethod => {
+                self.update_pending_collection_initializer(state, |pending| pending.next = value)?;
+                self.resolve_function_object(value)?;
+                self.call_collection_next(site, state)
+            }
+            CollectionInitializerStage::NextCall => {
+                if !self.is_object_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
+                self.update_pending_collection_initializer(state, |pending| {
+                    pending.result = value
+                })?;
+                self.get_collection_initializer_property(
+                    site,
+                    state,
+                    CollectionInitializerStage::ResultDone,
+                    value,
+                    b"done",
+                )
+            }
+            CollectionInitializerStage::ResultDone => {
+                if self.is_truthy_value(value)? {
+                    let target = self.pending_collection_initializer(state)?.target;
+                    return self.write(site.caller_base, site.destination, target);
+                }
+                let result = self.pending_collection_initializer(state)?.result;
+                self.get_collection_initializer_property(
+                    site,
+                    state,
+                    CollectionInitializerStage::ResultValue,
+                    result,
+                    b"value",
+                )
+            }
+            CollectionInitializerStage::ResultValue => {
+                let pending = self.pending_collection_initializer(state)?;
+                if pending.kind == CollectionInitializerKind::Set {
+                    self.update_pending_collection_initializer(state, |pending| {
+                        pending.result = value
+                    })?;
+                    let value = self.pending_collection_initializer(state)?.result;
+                    return self.call_collection_adder(site, state, &[value]);
+                }
+                if !self.is_object_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
+                self.update_pending_collection_initializer(state, |pending| {
+                    pending.result = value
+                })?;
+                self.get_collection_initializer_property(
+                    site,
+                    state,
+                    CollectionInitializerStage::EntryKey,
+                    value,
+                    b"0",
+                )
+            }
+            CollectionInitializerStage::EntryKey => {
+                self.update_pending_collection_initializer(state, |pending| pending.key = value)?;
+                let entry = self.pending_collection_initializer(state)?.result;
+                self.get_collection_initializer_property(
+                    site,
+                    state,
+                    CollectionInitializerStage::EntryValue,
+                    entry,
+                    b"1",
+                )
+            }
+            CollectionInitializerStage::EntryValue => {
+                self.update_pending_collection_initializer(state, |pending| {
+                    pending.result = value
+                })?;
+                let pending = self.pending_collection_initializer(state)?;
+                self.call_collection_adder(site, state, &[pending.key, pending.result])
+            }
+            CollectionInitializerStage::AdderCall => self.call_collection_next(site, state),
+        }
+    }
+
+    /// Calls the cached iterator `next` without re-reading the method between iterations.
+    fn call_collection_next(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.pending_collection_initializer(state)?;
+        self.call_collection_initializer(
+            site,
+            state,
+            CollectionInitializerStage::NextCall,
+            pending.next,
+            pending.iterator,
+            &[],
+        )
+    }
+
+    /// Calls the cached `set` or `add` exactly as the constructor's one-time adder lookup requires.
+    fn call_collection_adder(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+        arguments: &[Value],
+    ) -> Result<(), ExecutionError> {
+        let pending = self.pending_collection_initializer(state)?;
+        self.call_collection_initializer(
+            site,
+            state,
+            CollectionInitializerStage::AdderCall,
+            pending.adder,
+            pending.target,
+            arguments,
+        )
+    }
+
+    /// Reads one named protocol property and suspends only when it is an accessor callback.
+    fn get_collection_initializer_property(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+        stage: CollectionInitializerStage,
+        receiver: Value,
+        name: &[u8],
+    ) -> Result<(), ExecutionError> {
+        let key = PropertyKey::Atom(self.intern_intrinsic_name(name)?);
+        self.get_collection_initializer_key(site, state, stage, receiver, key)
+    }
+
+    /// Reads one arbitrary protocol key, preserving ordinary accessor receiver semantics.
+    fn get_collection_initializer_key(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+        stage: CollectionInitializerStage,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        match self.resolve_property_read(receiver, key)? {
+            PropertyRead::Data(value) => {
+                self.resume_collection_initializer(site, state, stage, value)
+            }
+            PropertyRead::Missing => self.resume_collection_initializer(
+                site,
+                state,
+                stage,
+                Value::from_immediate(Immediate::Undefined),
+            ),
+            PropertyRead::Accessor(callee)
+                if callee.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.resume_collection_initializer(
+                    site,
+                    state,
+                    stage,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+            }
+            PropertyRead::Accessor(callee) => {
+                self.call_collection_initializer(site, state, stage, callee, receiver, &[])
+            }
+        }
+    }
+
+    /// Publishes the collection state before a protocol call and handles immediate native results.
+    fn call_collection_initializer(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCollectionInitializer>,
+        stage: CollectionInitializerStage,
+        callee: Value,
+        receiver: Value,
+        arguments: &[Value],
+    ) -> Result<(), ExecutionError> {
+        let mut copied_arguments = Vec::new();
+        copied_arguments
+            .try_reserve_exact(arguments.len())
+            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+        copied_arguments.extend_from_slice(arguments);
+        let prefix = if copied_arguments.is_empty() {
+            None
+        } else {
+            Some(self.create_apply_argument_prefix(callee, receiver, copied_arguments)?)
+        };
+        let continuation = NativeContinuation::collection_initializer(
+            site,
+            stage,
+            Value::from_heap_ref(state.raw()),
+            callee,
+        );
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
+        let frame_depth = self.fiber.frames.len();
+        let call_result = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee,
+            argument_base: 0,
+            argument_prefix: prefix,
+            argument_prefix_offset: 0,
+            argument_prefix_count: u32::try_from(arguments.len())
+                .map_err(|_| ExecutionError::BoundArgumentCountOverflow)?,
+            argument_count: u32::try_from(arguments.len())
+                .map_err(|_| ExecutionError::BoundArgumentCountOverflow)?,
+            this_value: receiver,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        });
+        if let Err(error) = call_result {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("a collection protocol call publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(());
+        }
+        let returned = self.read(site.caller_base, site.destination)?;
+        let _continuation = self.pop_native_continuation()?;
+        self.resume_collection_initializer(site, state, stage, returned)
+    }
+
+    /// Allocates the small traced protocol record used by resumable collection construction.
+    fn allocate_pending_collection_initializer(
+        &mut self,
+        pending: PendingCollectionInitializer,
+    ) -> Result<GcRef<PendingCollectionInitializer>, ExecutionError> {
+        let mut roots = PendingCollectionInitializerRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.pending_collection_initializer,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    pub(crate) fn pending_collection_initializer_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<GcRef<PendingCollectionInitializer>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_collection_initializer)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    fn pending_collection_initializer(
+        &mut self,
+        state: GcRef<PendingCollectionInitializer>,
+    ) -> Result<PendingCollectionInitializerSnapshot, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_collection_initializer)
+                    .map(|pending| PendingCollectionInitializerSnapshot {
+                        target: pending.target,
+                        iterable: pending.iterable,
+                        iterator: pending.iterator,
+                        next: pending.next,
+                        result: pending.result,
+                        key: pending.key,
+                        adder: pending.adder,
+                        kind: pending.kind,
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn update_pending_collection_initializer(
+        &mut self,
+        state: GcRef<PendingCollectionInitializer>,
+        update: impl FnOnce(&mut PendingCollectionInitializer),
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_collection_initializer)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                update(pending);
+                Ok(())
+            })
+        })
     }
 
     /// Implements Map.prototype.get using SameValueZero over the exotic's private insertion list.
