@@ -13,6 +13,7 @@ mod array;
 mod atom;
 mod bound_function;
 mod builtins;
+mod collection;
 mod conversion;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
