@@ -531,12 +531,7 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         match left {
-            HirForInLeft::Assignment(pattern) => {
-                let target = pattern.assignment_target().ok_or_else(|| {
-                    self.unsupported(pattern.span, "destructuring pattern bytecode")
-                })?;
-                self.assign_existing_value(target, value, span)
-            }
+            HirForInLeft::Assignment(pattern) => self.assign_pattern(pattern, value, span),
             HirForInLeft::Variable(declaration) => {
                 let declarator = declaration
                     .declarators
@@ -602,6 +597,42 @@ impl Lowerer<'_> {
                     &[receiver.index(), value.index(), property.index()],
                     span,
                 )
+            }
+        }
+    }
+
+    /// Destructures one object assignment target while preserving computed-key evaluation order.
+    pub(in crate::bytecode) fn assign_pattern(
+        &mut self,
+        pattern: &crate::HirPattern,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            crate::HirPatternKind::Assignment(target) => {
+                self.assign_existing_value(target, value, span)
+            }
+            crate::HirPatternKind::Default {
+                target,
+                initializer,
+            } => {
+                let value = self.default_pattern_value(value, initializer)?;
+                self.assign_pattern(target, value, span)
+            }
+            crate::HirPatternKind::Object { properties, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
+                }
+                self.require_object_coercible(value, pattern.span)?;
+                for property in properties.iter() {
+                    let property_value =
+                        self.pattern_property(value, &property.key, property.span)?;
+                    self.assign_pattern(&property.target, property_value, span)?;
+                }
+                Ok(())
+            }
+            crate::HirPatternKind::Binding(_) | crate::HirPatternKind::Array { .. } => {
+                Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
             }
         }
     }

@@ -1174,6 +1174,12 @@ impl Isolate {
                 let receiver = if mode == PropertyCallbackMode::Descriptor {
                     let state = self.pending_property_descriptor_reference(receiver)?;
                     self.pending_property_descriptor_source(state)?
+                } else if matches!(
+                    mode,
+                    PropertyCallbackMode::ArrayIteratorLength
+                        | PropertyCallbackMode::ArrayIteratorElement
+                ) {
+                    continuation.second()
                 } else {
                     receiver
                 };
@@ -2120,8 +2126,33 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, iterator);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIteratorNext) => {
-                    let result = self.array_iterator_next(site.this_value)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    match self.array_iterator_next_start(site.this_value)? {
+                        ArrayIteratorNextAction::Done(result) => {
+                            return self.write(site.caller_base, site.destination, result);
+                        }
+                        ArrayIteratorNextAction::Get {
+                            iterator,
+                            receiver,
+                            callee,
+                            mode,
+                        } => {
+                            return self
+                                .dispatch_property_callback(
+                                    NativeContinuation::array_iterator_property_get(
+                                        NativeContinuationSite {
+                                            caller_base: site.caller_base,
+                                            destination: site.destination,
+                                            call_site: site.call_site,
+                                        },
+                                        mode,
+                                        iterator,
+                                        receiver,
+                                    ),
+                                    callee,
+                                )
+                                .map(|_| ());
+                        }
+                    }
                 }
                 FunctionExecutable::Native(NativeFunction::IteratorIdentity) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
@@ -2414,6 +2445,33 @@ impl Isolate {
                             Value::from_heap_ref(state.raw()),
                         )?;
                         self.resume_property_descriptor(site, state, value)
+                    } else if mode == PropertyCallbackMode::ArrayIteratorLength {
+                        match self.array_iterator_resume_length(continuation.first(), value)? {
+                            ArrayIteratorNextAction::Done(result) => {
+                                self.write(site.caller_base, site.destination, result)?;
+                                Ok(())
+                            }
+                            ArrayIteratorNextAction::Get {
+                                callee,
+                                mode,
+                                receiver,
+                                ..
+                            } => self
+                                .dispatch_property_callback(
+                                    NativeContinuation::array_iterator_property_get(
+                                        site,
+                                        mode,
+                                        continuation.first(),
+                                        receiver,
+                                    ),
+                                    callee,
+                                )
+                                .map(|_| ()),
+                        }
+                    } else if mode == PropertyCallbackMode::ArrayIteratorElement {
+                        let result =
+                            self.array_iterator_resume_element(continuation.first(), value)?;
+                        self.write(site.caller_base, site.destination, result)
                     } else {
                         self.write(site.caller_base, site.destination, value)
                     }

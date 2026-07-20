@@ -295,6 +295,8 @@ pub(crate) struct ConversionContinuation {
 pub(crate) enum PropertyCallbackMode {
     Ordinary,
     Descriptor,
+    ArrayIteratorLength,
+    ArrayIteratorElement,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -344,6 +346,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertyGet(mode),
             first: receiver,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots Array iterator state and the accessor receiver while a live `[[Get]]` suspends.
+    #[inline]
+    pub(crate) const fn array_iterator_property_get(
+        site: NativeContinuationSite,
+        mode: PropertyCallbackMode,
+        iterator: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(mode),
+            first: iterator,
+            second: receiver,
         }
     }
 

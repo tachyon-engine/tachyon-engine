@@ -891,3 +891,36 @@ fn loaded_code_and_global_binding_limits_are_explicit() {
         Err(ExecutionError::GlobalBindingLimit { limit: 1 })
     ));
 }
+
+#[test]
+/// Covers the synchronous object-pattern batch across declaration and assignment write modes.
+fn object_destructuring_preserves_nested_defaults_and_coercibility() {
+    assert_eq!(
+        execute_source(
+            905,
+            "let { a, nested: { b }, missing = 4, ['c']: c } = { a: 1, nested: { b: 2 }, c: 3 }; a + b + c + missing;",
+        )
+        .as_i32(),
+        Some(10)
+    );
+    assert_eq!(
+        execute_source(
+            906,
+            "let a = 0; let b = 0; ({ a, x: { b } } = { a: 5, x: { b: 7 } }); a + b;",
+        )
+        .as_i32(),
+        Some(12)
+    );
+    assert_eq!(
+        execute_source(907, "var { a, b = 3 } = { a: 2 }; a + b;").as_i32(),
+        Some(5)
+    );
+    assert_eq!(
+        execute_source(
+            908,
+            "let caught = false; try { const {} = null; } catch (error) { caught = error instanceof TypeError; } caught;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}

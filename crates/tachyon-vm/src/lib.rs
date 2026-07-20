@@ -68,7 +68,7 @@ use conversion::{
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;
-use iterator::{ArrayIterationKind, ArrayIteratorObject};
+use iterator::{ArrayIterationKind, ArrayIteratorNextAction, ArrayIteratorObject};
 use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
     PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,

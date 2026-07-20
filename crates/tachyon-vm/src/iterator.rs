@@ -7,7 +7,8 @@ use crate::{
     ExecutionError, Immediate, Isolate, ShapeId, VmRoots,
     array::MAX_SAFE_INTEGER,
     conversion::{numeric_value, safe_integer_value},
-    object::OrdinaryObject,
+    object::{OrdinaryObject, PropertyKey},
+    property::PropertyRead,
 };
 
 /// The result projection selected when an Array iterator is created.
@@ -21,6 +22,17 @@ pub(crate) enum ArrayIterationKind {
     Key,
     Value,
     KeyAndValue,
+}
+
+/// Result of one iterator step before an observable getter is entered.
+pub(crate) enum ArrayIteratorNextAction {
+    Done(Value),
+    Get {
+        iterator: Value,
+        receiver: Value,
+        callee: Value,
+        mode: crate::PropertyCallbackMode,
+    },
 }
 
 /// GC-managed Array iterator internal slots plus the ordinary object header.
@@ -118,37 +130,86 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
-    /// Advances one Array iterator and returns the ordinary `{ value, done }` result object.
-    pub(crate) fn array_iterator_next(
+    /// Starts `ArrayIterator.prototype.next`, suspending on a live length or element accessor.
+    #[allow(
+        dead_code,
+        reason = "iterator bytecode lowering will call this resumable entry point"
+    )]
+    pub(crate) fn array_iterator_next_start(
         &mut self,
         iterator_value: Value,
-    ) -> Result<Value, ExecutionError> {
-        let raw = iterator_value
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(iterator_value))?;
-        let reference = self
-            .heap
-            .checked_reference(raw, self.types.array_iterator)
-            .map_err(|_| ExecutionError::NotObject(iterator_value))?;
-        let snapshot = self.heap.with_running_scope(|scope| {
-            let iterator = scope.root(reference).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(iterator, self.types.array_iterator)
-                    .copied()
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })?;
+    ) -> Result<ArrayIteratorNextAction, ExecutionError> {
+        let reference = self.array_iterator_reference(iterator_value)?;
+        let snapshot = self.array_iterator_snapshot(reference)?;
         let Some(iterated_object) = snapshot.iterated_object else {
-            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+            return Ok(ArrayIteratorNextAction::Done(self.create_iterator_result(
+                Value::from_immediate(Immediate::Undefined),
+                true,
+            )?));
         };
-        let length_atom = self.length_atom()?;
-        let length_value = self
-            .get_data_property(iterated_object, length_atom)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        match self.resolve_property_read(iterated_object, length_key)? {
+            PropertyRead::Accessor(callee)
+                if callee.as_immediate() != Some(Immediate::Undefined) =>
+            {
+                Ok(ArrayIteratorNextAction::Get {
+                    iterator: iterator_value,
+                    receiver: iterated_object,
+                    callee,
+                    mode: crate::PropertyCallbackMode::ArrayIteratorLength,
+                })
+            }
+            PropertyRead::Data(value) => self.array_iterator_after_length(iterator_value, value),
+            PropertyRead::Accessor(_) | PropertyRead::Missing => self.array_iterator_after_length(
+                iterator_value,
+                Value::from_immediate(Immediate::Undefined),
+            ),
+        }
+    }
+
+    /// Resumes a length getter and either completes or enters the current element getter.
+    pub(crate) fn array_iterator_resume_length(
+        &mut self,
+        iterator: Value,
+        length: Value,
+    ) -> Result<ArrayIteratorNextAction, ExecutionError> {
+        self.array_iterator_after_length(iterator, length)
+    }
+
+    /// Resumes an element getter and materializes the iterator result record.
+    pub(crate) fn array_iterator_resume_element(
+        &mut self,
+        iterator: Value,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let reference = self.array_iterator_reference(iterator)?;
+        let snapshot = self.array_iterator_snapshot(reference)?;
+        self.create_iterator_result(
+            if snapshot.kind == ArrayIterationKind::Key {
+                safe_integer_value(snapshot.next_index.saturating_sub(1))
+            } else {
+                value
+            },
+            false,
+        )
+    }
+
+    fn array_iterator_after_length(
+        &mut self,
+        iterator: Value,
+        length_value: Value,
+    ) -> Result<ArrayIteratorNextAction, ExecutionError> {
+        let reference = self.array_iterator_reference(iterator)?;
+        let snapshot = self.array_iterator_snapshot(reference)?;
+        let Some(iterated_object) = snapshot.iterated_object else {
+            return Ok(ArrayIteratorNextAction::Done(self.create_iterator_result(
+                Value::from_immediate(Immediate::Undefined),
+                true,
+            )?));
+        };
         let number = self.convert_to_number(length_value)?;
-        let number =
-            numeric_value(number).ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
+        let number = numeric_value(number)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(length_value))?;
         let length = if number.is_nan() || number <= 0.0 {
             0
         } else if !number.is_finite() || number >= MAX_SAFE_INTEGER as f64 {
@@ -158,21 +219,64 @@ impl Isolate {
         };
         if snapshot.next_index >= length {
             self.finish_array_iterator(reference)?;
-            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+            return Ok(ArrayIteratorNextAction::Done(self.create_iterator_result(
+                Value::from_immediate(Immediate::Undefined),
+                true,
+            )?));
         }
         self.set_array_iterator_index(reference, snapshot.next_index + 1)?;
-        let value = match snapshot.kind {
-            ArrayIterationKind::Key => safe_integer_value(snapshot.next_index),
-            ArrayIterationKind::Value => {
-                let key = self.safe_integer_property_atom(snapshot.next_index)?;
-                self.get_data_property(iterated_object, key)?
-                    .unwrap_or(Value::from_immediate(Immediate::Undefined))
+        if snapshot.kind == ArrayIterationKind::Key {
+            return Ok(ArrayIteratorNextAction::Done(self.create_iterator_result(
+                safe_integer_value(snapshot.next_index),
+                false,
+            )?));
+        }
+        let key = PropertyKey::Atom(self.safe_integer_property_atom(snapshot.next_index)?);
+        match self.resolve_property_read(iterated_object, key)? {
+            PropertyRead::Data(value) => Ok(ArrayIteratorNextAction::Done(
+                self.create_iterator_result(value, false)?,
+            )),
+            PropertyRead::Accessor(callee)
+                if callee.as_immediate() != Some(Immediate::Undefined) =>
+            {
+                Ok(ArrayIteratorNextAction::Get {
+                    iterator,
+                    receiver: iterated_object,
+                    callee,
+                    mode: crate::PropertyCallbackMode::ArrayIteratorElement,
+                })
             }
-            ArrayIterationKind::KeyAndValue => {
-                return Err(ExecutionError::UnsupportedPropertyKey(iterator_value));
-            }
-        };
-        self.create_iterator_result(value, false)
+            PropertyRead::Accessor(_) | PropertyRead::Missing => Ok(ArrayIteratorNextAction::Done(
+                self.create_iterator_result(Value::from_immediate(Immediate::Undefined), false)?,
+            )),
+        }
+    }
+
+    fn array_iterator_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<tachyon_gc::GcRef<ArrayIteratorObject>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        self.heap
+            .checked_reference(raw, self.types.array_iterator)
+            .map_err(|_| ExecutionError::NotObject(value))
+    }
+
+    fn array_iterator_snapshot(
+        &mut self,
+        reference: tachyon_gc::GcRef<ArrayIteratorObject>,
+    ) -> Result<ArrayIteratorObject, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let iterator = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(iterator, self.types.array_iterator)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
     }
 
     /// Mutates only the numeric iterator cursor; no write barrier is required for this field.

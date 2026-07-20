@@ -6,7 +6,9 @@ use tachyon_bytecode::{
     HandlerKind, Label, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
-use crate::hir::{HirAssignmentOperator, HirAssignmentTarget, HirForInLeft};
+use crate::hir::{
+    HirAssignmentOperator, HirAssignmentTarget, HirForInLeft, HirPattern, HirPatternKind,
+};
 use crate::{
     BindingId, CompileError, HirBinaryOperator, HirCatchClause, HirExpression, HirExpressionKind,
     HirForInitializer, HirFunctionDeclaration, HirIdentifierReference, HirLogicalOperator,
@@ -55,6 +57,131 @@ pub(super) enum LocalStorage {
 }
 
 impl Lowerer<'_> {
+    /// Destructures one object binding into locals, preserving property and default evaluation order.
+    pub(super) fn bind_pattern(
+        &mut self,
+        pattern: &HirPattern,
+        value: RegisterId,
+        mutable: bool,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            HirPatternKind::Binding(binding) => self.add_local(binding, Some(value), mutable),
+            HirPatternKind::Default {
+                target,
+                initializer,
+            } => {
+                let value = self.default_pattern_value(value, initializer)?;
+                self.bind_pattern(target, value, mutable)
+            }
+            HirPatternKind::Object { properties, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
+                }
+                self.require_object_coercible(value, pattern.span)?;
+                for property in properties.iter() {
+                    let property_value =
+                        self.pattern_property(value, &property.key, property.span)?;
+                    self.bind_pattern(&property.target, property_value, mutable)?;
+                }
+                Ok(())
+            }
+            HirPatternKind::Assignment(_) | HirPatternKind::Array { .. } => {
+                Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
+            }
+        }
+    }
+
+    /// Emits the existing base guard without performing an observable property lookup.
+    fn require_object_coercible(
+        &mut self,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let key = self.load_undefined(span)?;
+        let prepared = self.register()?;
+        self.emit(
+            Opcode::ToPropertyKey,
+            &[prepared.index(), key.index(), value.index()],
+            span,
+        )
+    }
+
+    /// Reads one object pattern property using the canonical static or computed property opcode.
+    pub(super) fn pattern_property(
+        &mut self,
+        object: RegisterId,
+        key: &HirObjectPropertyKey,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let destination = self.register()?;
+        match key {
+            HirObjectPropertyKey::Static(property) => {
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::GetById,
+                    &[destination.index(), object.index(), property],
+                    span,
+                )?;
+            }
+            HirObjectPropertyKey::Computed(expression) => {
+                let property = self.expression(expression)?;
+                self.emit(
+                    Opcode::GetByValue,
+                    &[destination.index(), object.index(), property.index()],
+                    span,
+                )?;
+            }
+        }
+        Ok(destination)
+    }
+
+    /// Selects an object default initializer without changing the destination register identity.
+    pub(super) fn default_pattern_value(
+        &mut self,
+        value: RegisterId,
+        initializer: &HirExpression,
+    ) -> Result<RegisterId, CompileError> {
+        let undefined = self.load_undefined(initializer.span)?;
+        let is_undefined = self.register()?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[is_undefined.index(), value.index(), undefined.index()],
+            initializer.span,
+        )?;
+        let use_initializer = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .emit_jump_if_true(
+                is_undefined,
+                use_initializer,
+                tachyon_bytecode::SourceSpan {
+                    start: initializer.span.start,
+                    end: initializer.span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let result = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[result.index(), value.index()],
+            initializer.span,
+        )?;
+        self.emit_jump(end, initializer.span)?;
+        self.builder
+            .bind_label(use_initializer)
+            .map_err(CompileError::Builder)?;
+        let initialized = self.expression(initializer)?;
+        self.emit(
+            Opcode::Move,
+            &[result.index(), initialized.index()],
+            initializer.span,
+        )?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        Ok(result)
+    }
+
     /// Allocates a fresh register and emits one instruction with the HIR span copied into bytecode source metadata.
     pub(super) fn emit(
         &mut self,
@@ -179,7 +306,7 @@ impl Lowerer<'_> {
             });
         }
         for declarator in declaration.declarators.iter() {
-            let binding = self.simple_binding(&declarator.pattern)?.clone();
+            let binding = declarator.pattern.binding().cloned();
             let register = match declarator.initializer.as_ref() {
                 Some(initializer) => self.expression(initializer)?,
                 None if declaration.kind == HirVariableDeclarationKind::Let => {
@@ -193,7 +320,12 @@ impl Lowerer<'_> {
                     });
                 }
             };
-            if self.script_scope && binding.scope == self.root_scope {
+            if self.script_scope
+                && binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.scope == self.root_scope)
+            {
+                let binding = binding.as_ref().expect("checked above");
                 let lexical = self
                     .environments
                     .global_lexical(binding.id)
@@ -206,9 +338,9 @@ impl Lowerer<'_> {
                 )?;
                 continue;
             }
-            self.add_local(
-                &binding,
-                Some(register),
+            self.bind_pattern(
+                &declarator.pattern,
+                register,
                 declaration.kind == HirVariableDeclarationKind::Let,
             )?;
         }
@@ -221,25 +353,65 @@ impl Lowerer<'_> {
         declaration: &HirVariableDeclaration,
     ) -> Result<(), CompileError> {
         for declarator in declaration.declarators.iter() {
-            let binding = self.simple_binding(&declarator.pattern)?.clone();
             let Some(initializer) = declarator.initializer.as_ref() else {
                 continue;
             };
             let value = self.expression(initializer)?;
-            if let Some(local) = self.local_by_id(binding.id).cloned() {
-                self.write_local(&local, value, declarator.span)?;
-            } else if self.script_scope {
-                let scope_name = self.global_binding(&binding.name, true)?;
-                self.emit(
-                    Opcode::StoreScope,
-                    &[value.index(), scope_name],
-                    declarator.span,
-                )?;
-            } else {
-                return Err(self.unsupported(declarator.span, "uninstantiated var binding"));
-            }
+            self.initialize_var_pattern(&declarator.pattern, value)?;
         }
         Ok(())
+    }
+
+    /// Destructures one var initializer into bindings instantiated at function or script entry.
+    fn initialize_var_pattern(
+        &mut self,
+        pattern: &HirPattern,
+        value: RegisterId,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            HirPatternKind::Binding(binding) => {
+                self.write_var_binding(binding, value, pattern.span)
+            }
+            HirPatternKind::Default {
+                target,
+                initializer,
+            } => {
+                let value = self.default_pattern_value(value, initializer)?;
+                self.initialize_var_pattern(target, value)
+            }
+            HirPatternKind::Object { properties, rest } => {
+                if rest.is_some() {
+                    return Err(self.unsupported(pattern.span, "object rest bytecode"));
+                }
+                self.require_object_coercible(value, pattern.span)?;
+                for property in properties.iter() {
+                    let property_value =
+                        self.pattern_property(value, &property.key, property.span)?;
+                    self.initialize_var_pattern(&property.target, property_value)?;
+                }
+                Ok(())
+            }
+            HirPatternKind::Assignment(_) | HirPatternKind::Array { .. } => {
+                Err(self.unsupported(pattern.span, "destructuring pattern bytecode"))
+            }
+        }
+    }
+
+    /// Stores one already-instantiated var leaf without redeclaring its environment slot.
+    fn write_var_binding(
+        &mut self,
+        binding: &crate::HirBinding,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        if let Some(local) = self.local_by_id(binding.id).cloned() {
+            return self.write_local(&local, value, span);
+        }
+        if self.script_scope {
+            let scope_name = self.global_binding(&binding.name, true)?;
+            return self.emit(Opcode::StoreScope, &[value.index(), scope_name], span);
+        }
+        Err(self.unsupported(span, "uninstantiated var binding"))
     }
 
     #[inline(always)]

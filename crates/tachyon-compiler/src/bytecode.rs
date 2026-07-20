@@ -276,14 +276,16 @@ impl EnvironmentPlans {
                 continue;
             }
             for declarator in declaration.declarators.iter() {
-                let binding = simple_binding(source, &declarator.pattern)?;
-                if binding.scope == hir.root_scope() {
-                    global_lexicals.push(GlobalLexicalPlan {
-                        id: binding.id,
-                        name: binding.name.clone(),
-                        mutable: declaration.kind == HirVariableDeclarationKind::Let,
-                        span: declarator.span,
-                    });
+                let bindings = pattern_bindings(&declarator.pattern);
+                for binding in bindings {
+                    if binding.scope == hir.root_scope() {
+                        global_lexicals.push(GlobalLexicalPlan {
+                            id: binding.id,
+                            name: binding.name.clone(),
+                            mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                            span: declarator.span,
+                        });
+                    }
                 }
             }
         }
@@ -298,10 +300,12 @@ impl EnvironmentPlans {
                 })?;
             let mut slots = Vec::with_capacity(capacity);
             for parameter in function.parameters.iter() {
-                push_captured_slot(simple_binding(source, parameter)?, true, true, &mut slots)?;
+                for binding in pattern_bindings(parameter) {
+                    push_captured_slot(&binding, true, true, &mut slots)?;
+                }
             }
             if let Some(rest) = &function.rest_parameter {
-                simple_binding(source, rest)?;
+                let _ = pattern_bindings(rest);
             }
             collect_captured_slots(source, &function.body, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
@@ -431,6 +435,37 @@ fn simple_binding<'a>(
         })
 }
 
+/// Collects every declaration leaf from an owned recursive pattern.
+fn pattern_bindings(pattern: &crate::HirPattern) -> Vec<crate::HirBinding> {
+    let mut bindings = Vec::new();
+    collect_pattern_bindings(pattern, &mut bindings);
+    bindings
+}
+
+fn collect_pattern_bindings(pattern: &crate::HirPattern, bindings: &mut Vec<crate::HirBinding>) {
+    match &pattern.kind {
+        crate::HirPatternKind::Binding(binding) => bindings.push(binding.clone()),
+        crate::HirPatternKind::Default { target, .. } => collect_pattern_bindings(target, bindings),
+        crate::HirPatternKind::Array { elements, rest } => {
+            for element in elements.iter().flatten() {
+                collect_pattern_bindings(element, bindings);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_bindings(rest, bindings);
+            }
+        }
+        crate::HirPatternKind::Object { properties, rest } => {
+            for property in properties.iter() {
+                collect_pattern_bindings(&property.target, bindings);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_bindings(rest, bindings);
+            }
+        }
+        crate::HirPatternKind::Assignment(_) => {}
+    }
+}
+
 /// Walks activation-owned declarations while nested function bodies remain separate stencils.
 fn collect_captured_slots(
     source: &SourceText,
@@ -443,12 +478,9 @@ fn collect_captured_slots(
                 let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                 let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
-                    push_captured_slot(
-                        simple_binding(source, &declarator.pattern)?,
-                        mutable,
-                        initialized,
-                        slots,
-                    )?;
+                    for binding in pattern_bindings(&declarator.pattern) {
+                        push_captured_slot(&binding, mutable, initialized, slots)?;
+                    }
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
@@ -472,12 +504,9 @@ fn collect_captured_slots(
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(
-                            simple_binding(source, &declarator.pattern)?,
-                            mutable,
-                            initialized,
-                            slots,
-                        )?;
+                        for binding in pattern_bindings(&declarator.pattern) {
+                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                        }
                     }
                 }
                 collect_captured_slots(source, core::slice::from_ref(body), slots)?;
@@ -487,12 +516,9 @@ fn collect_captured_slots(
                     let mutable = declaration.kind != HirVariableDeclarationKind::Const;
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
-                        push_captured_slot(
-                            simple_binding(source, &declarator.pattern)?,
-                            mutable,
-                            initialized,
-                            slots,
-                        )?;
+                        for binding in pattern_bindings(&declarator.pattern) {
+                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                        }
                     }
                 }
                 collect_captured_slots(source, core::slice::from_ref(body), slots)?;
@@ -584,7 +610,7 @@ fn lower_function(
     };
     for parameter in function.parameters.iter() {
         let register = lowerer.register()?;
-        lowerer.add_local(simple_binding(source, parameter)?, Some(register), true)?;
+        lowerer.bind_pattern(parameter, register, true)?;
     }
     for (index, initializer) in function.parameter_initializers.iter().enumerate() {
         if let Some(initializer) = initializer {
@@ -814,14 +840,13 @@ fn push_var_declaration_bindings(
     bindings: &mut Vec<crate::HirBinding>,
 ) {
     for declarator in declaration.declarators.iter() {
-        let Some(declarator_binding) = declarator.pattern.binding() else {
-            continue;
-        };
-        if bindings
-            .iter()
-            .all(|binding| binding.id != declarator_binding.id)
-        {
-            bindings.push(declarator_binding.clone());
+        for declarator_binding in pattern_bindings(&declarator.pattern) {
+            if bindings
+                .iter()
+                .all(|binding| binding.id != declarator_binding.id)
+            {
+                bindings.push(declarator_binding);
+            }
         }
     }
 }

@@ -319,10 +319,21 @@ impl Lowerer<'_> {
                 target,
                 value,
             } => {
-                let target = target.assignment_target().ok_or_else(|| {
-                    self.unsupported(target.span, "destructuring pattern bytecode")
-                })?;
-                self.assignment_expression(*operator, target, value, expression.span)
+                if let HirPatternKind::Object { .. } = target.kind {
+                    if *operator != HirAssignmentOperator::Assign {
+                        return Err(
+                            self.unsupported(target.span, "destructuring compound assignment")
+                        );
+                    }
+                    let value = self.expression(value)?;
+                    self.assign_pattern(target, value, expression.span)?;
+                    Ok(value)
+                } else {
+                    let target = target.assignment_target().ok_or_else(|| {
+                        self.unsupported(target.span, "destructuring pattern bytecode")
+                    })?;
+                    self.assignment_expression(*operator, target, value, expression.span)
+                }
             }
             HirExpressionKind::Update {
                 operator,

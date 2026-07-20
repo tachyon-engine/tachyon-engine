@@ -802,3 +802,16 @@ fn math_family_and_number_globals_are_available() {
         Some(tachyon_value::Immediate::True)
     );
 }
+
+#[test]
+/// Verifies Array iterator creation and both completion paths remain resumable.
+fn array_iterator_next_completes_array_like_source() {
+    assert_eq!(
+        execute_source(
+            909,
+            "let stage = 0; try { let source = { length: 1, 0: 7 }; stage = 1; let iterator = Array.prototype.values.call(source); stage = 2; let first = iterator.next(); stage = 3; first.value; stage = 4; let second = iterator.next(); stage = 5; second.done; stage = 6; } catch (error) {} stage;",
+        )
+        .as_i32(),
+        Some(6)
+    );
+}
