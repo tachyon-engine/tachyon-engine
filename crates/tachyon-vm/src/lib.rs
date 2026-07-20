@@ -25,6 +25,7 @@ mod number;
 mod object;
 mod property;
 mod realm;
+mod regexp;
 mod runtime;
 mod string;
 mod tuning;
