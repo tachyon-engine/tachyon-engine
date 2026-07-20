@@ -53,6 +53,9 @@ impl Isolate {
             number_object: registry
                 .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            string_object: registry
+                .try_register("StringObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             ordinary_object: registry
                 .try_register("OrdinaryObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -544,6 +547,41 @@ impl Isolate {
                 0,
                 NumberObject {
                     number_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one boxed String and roots its primitive data and ordinary prototype together.
+    pub(crate) fn allocate_string_object(
+        &mut self,
+        string_data: Value,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_string_value(string_data));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.string_object,
+                0,
+                0,
+                StringObject {
+                    string_data,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

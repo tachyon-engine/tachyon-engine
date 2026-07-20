@@ -173,6 +173,19 @@ fn string_well_formed_methods_handle_unpaired_surrogates() {
 }
 
 #[test]
+/// Verifies that String construction creates a branded ordinary wrapper with its prototype chain.
+fn string_constructor_creates_a_wrapper_object() {
+    assert_eq!(
+        execute_source(
+            937,
+            "let value = new String('tachyon'); value instanceof String && value.toString() === 'tachyon' && value.valueOf() === 'tachyon';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

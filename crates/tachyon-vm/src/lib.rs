@@ -71,7 +71,7 @@ use interpreter::execute_verified_hot_instruction;
 use iterator::{ArrayIterationKind, ArrayIteratorNextAction, ArrayIteratorObject};
 use object::{
     NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup,
-    PropertyStorage, ShapeId, ShapeTable, SymbolId, SymbolPropertyKey,
+    PropertyStorage, ShapeId, ShapeTable, StringObject, SymbolId, SymbolPropertyKey,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};

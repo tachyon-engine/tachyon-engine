@@ -574,6 +574,22 @@ pub(crate) struct NumberObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Ordinary wrapper carrying the specification's private `[[StringData]]` slot.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct StringObject {
+    pub(crate) string_data: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for StringObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.string_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 impl Trace for NumberObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {

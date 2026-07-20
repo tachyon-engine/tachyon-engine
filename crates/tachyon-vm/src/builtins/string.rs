@@ -11,8 +11,41 @@ impl Isolate {
         if self.is_string_value(receiver) {
             Ok(receiver)
         } else {
-            Err(ExecutionError::NotObject(receiver))
+            let raw = receiver
+                .as_heap_ref()
+                .ok_or(ExecutionError::NotObject(receiver))?;
+            let string = self
+                .heap
+                .checked_reference(raw, self.types.string_object)
+                .map_err(|_| ExecutionError::NotObject(receiver))?;
+            self.heap.with_running_scope(|scope| {
+                let string = scope.root(string).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(string, self.types.string_object)
+                        .map(|string| string.string_data)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })
         }
+    }
+
+    /// Uses newTarget's prototype when constructing a String wrapper.
+    pub(crate) fn box_string_from_constructor(
+        &mut self,
+        string: Value,
+        new_target: Value,
+    ) -> Result<Value, ExecutionError> {
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(new_target, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .unwrap_or_else(|| {
+                self.realm
+                    .string_prototype
+                    .expect("String prototype initializes before construction")
+            });
+        self.allocate_string_object(string, prototype, AllocationSpace::Young)
     }
 
     /// Checks whether every UTF-16 surrogate belongs to a valid adjacent pair.

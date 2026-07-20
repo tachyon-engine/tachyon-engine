@@ -840,6 +840,7 @@ pub(crate) enum ObjectReceiver {
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
     Number(GcRef<NumberObject>),
+    String(GcRef<StringObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
 }
 
@@ -851,6 +852,7 @@ impl ObjectReceiver {
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
+            Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
@@ -966,6 +968,7 @@ pub(crate) struct VmTypes {
     pub(crate) for_in_iterator: GcType<ForInIterator>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) number_object: GcType<NumberObject>,
+    pub(crate) string_object: GcType<StringObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,

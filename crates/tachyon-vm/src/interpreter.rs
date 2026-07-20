@@ -1861,10 +1861,15 @@ impl Isolate {
                         true,
                     );
                 }
-                FunctionExecutable::Native(
-                    native @ (NativeFunction::StringConstructor
-                    | NativeFunction::BooleanConstructor),
-                ) => {
+                FunctionExecutable::Native(NativeFunction::StringConstructor) => {
+                    return self.dispatch_conversion_native(
+                        NativeFunction::StringConstructor,
+                        &site,
+                        true,
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::BooleanConstructor) => {
+                    let native = NativeFunction::BooleanConstructor;
                     let value = self.primitive_constructor_value(native, &site)?;
                     return self.write(caller_base, destination, value);
                 }

@@ -528,7 +528,14 @@ impl Isolate {
             });
         };
         match native {
-            NativeFunction::StringConstructor => self.primitive_string_value(argument),
+            NativeFunction::StringConstructor => {
+                let string = self.primitive_string_value(argument)?;
+                if matches!(consumer, ConversionConsumer::NativeConstruct(_)) {
+                    self.box_string_from_constructor(string, receiver)
+                } else {
+                    Ok(string)
+                }
+            }
             NativeFunction::NumberConstructor => {
                 let number = self.convert_to_number(argument.unwrap_or(Value::from_i32(0)))?;
                 if matches!(consumer, ConversionConsumer::NativeConstruct(_)) {
