@@ -57,11 +57,12 @@ pub(crate) struct PendingPropertyDescriptor {
     values: [Value; PROPERTY_DESCRIPTOR_FIELD_COUNT],
     present: u8,
     field: PropertyDescriptorField,
+    reflect_result: bool,
 }
 
 impl PendingPropertyDescriptor {
     #[inline]
-    fn new(target: Value, source: Value, key: PropertyKey) -> Self {
+    fn new(target: Value, source: Value, key: PropertyKey, reflect_result: bool) -> Self {
         Self {
             target,
             source,
@@ -69,6 +70,7 @@ impl PendingPropertyDescriptor {
             values: [Value::from_immediate(Immediate::Undefined); PROPERTY_DESCRIPTOR_FIELD_COUNT],
             present: 0,
             field: PropertyDescriptorField::FIRST,
+            reflect_result,
         }
     }
 
@@ -191,11 +193,12 @@ impl Isolate {
         target: Value,
         key: PropertyKey,
         source: Value,
+        reflect_result: bool,
     ) -> Result<(), ExecutionError> {
         if !self.is_object_value(source) {
             return Err(ExecutionError::NotObject(source));
         }
-        let mut pending = PendingPropertyDescriptor::new(target, source, key);
+        let mut pending = PendingPropertyDescriptor::new(target, source, key, reflect_result);
         loop {
             let field = pending.field;
             let atom = self.intern_intrinsic_name(field.name())?;
@@ -373,7 +376,19 @@ impl Isolate {
         pending: PendingPropertyDescriptor,
     ) -> Result<(), ExecutionError> {
         let descriptor = pending.finish(self)?;
-        self.define_property(pending.target, pending.key, descriptor)?;
-        self.write(site.caller_base, site.destination, pending.target)
+        let defined = match self.define_property(pending.target, pending.key, descriptor) {
+            Ok(()) => true,
+            Err(
+                ExecutionError::NonExtensibleObject(_)
+                | ExecutionError::InvalidPropertyRedefinition(_),
+            ) if pending.reflect_result => false,
+            Err(error) => return Err(error),
+        };
+        let result = if pending.reflect_result {
+            boolean_value(defined)
+        } else {
+            pending.target
+        };
+        self.write(site.caller_base, site.destination, result)
     }
 }

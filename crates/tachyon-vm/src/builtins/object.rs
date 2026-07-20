@@ -78,6 +78,149 @@ impl Isolate {
         Ok(true)
     }
 
+    /// Starts Reflect.defineProperty after its strict target check and resumable key conversion.
+    pub(crate) fn reflect_define_property(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let descriptor = self
+            .call_argument(site, 2)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectDefineProperty,
+            site,
+            target,
+            key,
+            descriptor,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Starts Reflect.deleteProperty after its strict target check and resumable key conversion.
+    pub(crate) fn reflect_delete_property(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectDeleteProperty,
+            site,
+            target,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Starts Reflect.getOwnPropertyDescriptor with its object-only target boundary.
+    pub(crate) fn reflect_get_own_property_descriptor(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectGetOwnPropertyDescriptor,
+            site,
+            target,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Starts Reflect.has after its strict target check and resumable key conversion.
+    pub(crate) fn reflect_has(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectHas,
+            site,
+            target,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Starts Reflect.get while keeping its target lookup and accessor receiver distinct.
+    pub(crate) fn reflect_get(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let receiver = self.call_argument(site, 2)?.unwrap_or(target);
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectGet,
+            site,
+            target,
+            key,
+            receiver,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Starts Reflect.set while retaining value and receiver through object-key conversion.
+    pub(crate) fn reflect_set(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let value = self
+            .call_argument(site, 2)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let receiver = self.call_argument(site, 3)?.unwrap_or(target);
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        self.dispatch_builtin_property_key(
+            BuiltinPropertyKeyConsumer::ReflectSet,
+            site,
+            target,
+            key,
+            value,
+            receiver,
+        )
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,
@@ -116,6 +259,7 @@ impl Isolate {
             object,
             key,
             descriptor,
+            Value::from_immediate(Immediate::Undefined),
         )
     }
 
@@ -142,6 +286,7 @@ impl Isolate {
             object,
             key,
             Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
         )
     }
 
@@ -159,6 +304,7 @@ impl Isolate {
             site.this_value,
             key,
             Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
         )
     }
 
@@ -175,6 +321,7 @@ impl Isolate {
             site,
             site.this_value,
             key,
+            Value::from_immediate(Immediate::Undefined),
             Value::from_immediate(Immediate::Undefined),
         )
     }
@@ -198,6 +345,7 @@ impl Isolate {
             site,
             object,
             key,
+            Value::from_immediate(Immediate::Undefined),
             Value::from_immediate(Immediate::Undefined),
         )
     }

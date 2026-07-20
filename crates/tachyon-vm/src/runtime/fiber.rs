@@ -114,10 +114,16 @@ pub(crate) enum ConversionCallbackStage {
 #[repr(u8)]
 pub(crate) enum BuiltinPropertyKeyConsumer {
     DefineProperty,
+    ReflectDefineProperty,
     GetOwnPropertyDescriptor,
+    ReflectGetOwnPropertyDescriptor,
     HasOwnProperty,
     PropertyIsEnumerable,
     HasOwn,
+    ReflectDeleteProperty,
+    ReflectHas,
+    ReflectGet,
+    ReflectSet,
 }
 
 const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
@@ -300,6 +306,12 @@ pub(crate) enum PropertyCallbackMode {
     CopyDataProperties,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PropertyWriteMode {
+    Assignment,
+    Reflect,
+}
+
 /// The observable operation that resumes one Map or Set iterable constructor step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -324,7 +336,7 @@ pub(crate) enum NativeContinuationKind {
         callback_stage: ConversionCallbackStage,
     },
     PropertyGet(PropertyCallbackMode),
-    PropertySet,
+    PropertySet(PropertyWriteMode),
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
     MapGetOrInsertComputed,
@@ -393,7 +405,21 @@ impl NativeContinuation {
     ) -> Self {
         Self {
             site,
-            kind: NativeContinuationKind::PropertySet,
+            kind: NativeContinuationKind::PropertySet(PropertyWriteMode::Assignment),
+            first: receiver,
+            second: value,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn reflect_property_set(
+        site: NativeContinuationSite,
+        receiver: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect),
             first: receiver,
             second: value,
         }

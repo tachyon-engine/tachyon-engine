@@ -1651,7 +1651,7 @@ impl Isolate {
         self.set_intrinsic_data_property(object, stringify_atom, stringify, true)
     }
 
-    /// Installs Reflect's ordinary-own-key consumer before Proxy internal methods are available.
+    /// Installs the ordinary-internal-method Reflect subset before Proxy dispatch is available.
     fn initialize_reflect_intrinsics(&mut self) -> Result<(), ExecutionError> {
         let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
@@ -1663,62 +1663,52 @@ impl Isolate {
                 .expect("Object prototype initializes before Reflect"),
         })?;
         self.realm.reflect_object = Some(object);
-        let method = self.allocate_native_function(
-            NativeFunction::ReflectOwnKeys,
-            OrdinaryObject {
-                shape: ShapeId::EMPTY,
-                extensible: true,
-                storage: None,
-                prototype: self
-                    .realm
-                    .function_prototype
-                    .expect("Function prototype initializes before Reflect"),
-            },
-        )?;
-        let key = self.intern_intrinsic_name(b"ownKeys")?;
-        self.set_intrinsic_data_property(object, key, method, true)
-            .and_then(|()| {
-                let method = self.allocate_native_function(
-                    NativeFunction::ReflectGetPrototypeOf,
-                    OrdinaryObject {
-                        shape: ShapeId::EMPTY,
-                        extensible: true,
-                        storage: None,
-                        prototype: self
-                            .realm
-                            .function_prototype
-                            .expect("Function prototype initializes before Reflect"),
-                    },
-                )?;
-                let key = self.intern_intrinsic_name(b"getPrototypeOf")?;
-                self.set_intrinsic_data_property(object, key, method, true)?;
-                for (name, native) in [
-                    (
-                        b"isExtensible".as_slice(),
-                        NativeFunction::ReflectIsExtensible,
-                    ),
-                    (
-                        b"preventExtensions".as_slice(),
-                        NativeFunction::ReflectPreventExtensions,
-                    ),
-                ] {
-                    let method = self.allocate_native_function(
-                        native,
-                        OrdinaryObject {
-                            shape: ShapeId::EMPTY,
-                            extensible: true,
-                            storage: None,
-                            prototype: self
-                                .realm
-                                .function_prototype
-                                .expect("Function prototype initializes before Reflect"),
-                        },
-                    )?;
-                    let key = self.intern_intrinsic_name(name)?;
-                    self.set_intrinsic_data_property(object, key, method, true)?;
-                }
-                Ok(())
-            })
+        for (name, native) in [
+            (b"ownKeys".as_slice(), NativeFunction::ReflectOwnKeys),
+            (
+                b"defineProperty".as_slice(),
+                NativeFunction::ReflectDefineProperty,
+            ),
+            (
+                b"deleteProperty".as_slice(),
+                NativeFunction::ReflectDeleteProperty,
+            ),
+            (
+                b"getOwnPropertyDescriptor".as_slice(),
+                NativeFunction::ReflectGetOwnPropertyDescriptor,
+            ),
+            (b"get".as_slice(), NativeFunction::ReflectGet),
+            (
+                b"getPrototypeOf".as_slice(),
+                NativeFunction::ReflectGetPrototypeOf,
+            ),
+            (b"has".as_slice(), NativeFunction::ReflectHas),
+            (
+                b"isExtensible".as_slice(),
+                NativeFunction::ReflectIsExtensible,
+            ),
+            (
+                b"preventExtensions".as_slice(),
+                NativeFunction::ReflectPreventExtensions,
+            ),
+            (b"set".as_slice(), NativeFunction::ReflectSet),
+        ] {
+            let method = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: self
+                        .realm
+                        .function_prototype
+                        .expect("Function prototype initializes before Reflect"),
+                },
+            )?;
+            let key = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(object, key, method, true)?;
+        }
+        Ok(())
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.

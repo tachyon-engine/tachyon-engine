@@ -1233,6 +1233,42 @@ impl Isolate {
         }
     }
 
+    /// Executes Reflect.get with the target used for lookup and receiver used for an accessor call.
+    pub(crate) fn dispatch_reflect_property_read(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.resolve_property_read_from(target, key)? {
+            PropertyRead::Missing => self
+                .write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+                .map(|()| None),
+            PropertyRead::Data(value) => self
+                .write(site.caller_base, site.destination, value)
+                .map(|()| None),
+            PropertyRead::Accessor(getter)
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+                .map(|()| None)
+            }
+            PropertyRead::Accessor(callee) => self.dispatch_property_callback(
+                NativeContinuation::property_get(site, PropertyCallbackMode::Ordinary, receiver),
+                callee,
+            ),
+        }
+    }
+
     /// Applies assignment rejection at the strict boundary or suspends on one setter callback.
     fn dispatch_property_write(
         &mut self,
@@ -1258,6 +1294,26 @@ impl Isolate {
                     receiver,
                     value,
                 ),
+                callee,
+            ),
+        }
+    }
+
+    /// Executes Reflect.set without converting false ordinary-set results into strict errors.
+    pub(crate) fn dispatch_reflect_property_write(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match self.resolve_reflect_property_write(target, receiver, key, value)? {
+            PropertyWrite::Complete(success) => self
+                .write(site.caller_base, site.destination, boolean_value(success))
+                .map(|()| None),
+            PropertyWrite::Setter(callee) => self.dispatch_property_callback(
+                NativeContinuation::reflect_property_set(site, receiver, value),
                 callee,
             ),
         }
@@ -1291,7 +1347,7 @@ impl Isolate {
                 };
                 (receiver, 0, 0)
             }
-            NativeContinuationKind::PropertySet => (
+            NativeContinuationKind::PropertySet(_) => (
                 continuation.first(),
                 site.caller_base
                     .checked_add(site.destination)
@@ -2276,9 +2332,27 @@ impl Isolate {
                     let keys = self.reflect_own_keys(&site)?;
                     return self.write(site.caller_base, site.destination, keys);
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectDefineProperty) => {
+                    return self.reflect_define_property(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectDeleteProperty) => {
+                    return self.reflect_delete_property(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectGetOwnPropertyDescriptor) => {
+                    return self.reflect_get_own_property_descriptor(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectGet) => {
+                    return self.reflect_get(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ReflectGetPrototypeOf) => {
                     let prototype = self.reflect_get_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, prototype);
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectHas) => {
+                    return self.reflect_has(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ReflectSet) => {
+                    return self.reflect_set(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectIsExtensible) => {
                     let result = self.reflect_is_extensible(&site)?;
@@ -3158,11 +3232,14 @@ impl Isolate {
                         self.write(site.caller_base, site.destination, value)
                     }
                 }
-                NativeContinuationKind::PropertySet => {
+                NativeContinuationKind::PropertySet(PropertyWriteMode::Assignment) => {
                     let receiver = continuation.first();
                     let assigned = continuation.second();
                     self.write(site.caller_base, site.destination, assigned)?;
                     self.finish_property_write(receiver, true)
+                }
+                NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect) => {
+                    self.write(site.caller_base, site.destination, boolean_value(true))
                 }
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =

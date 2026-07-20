@@ -74,7 +74,11 @@ fn builtin_property_key_roots_fresh_symbol_during_forced_major() {
                 call_site: WordOffset::new(0),
             },
             BuiltinPropertyKeyConsumer::DefineProperty,
-            PendingNativePropertyKey::new(target, descriptor),
+            PendingNativePropertyKey::new(
+                target,
+                descriptor,
+                Value::from_immediate(Immediate::Undefined),
+            ),
             symbol,
         )
         .unwrap();

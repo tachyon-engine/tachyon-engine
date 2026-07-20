@@ -411,7 +411,10 @@ mod tests {
         assert_eq!(get.second(), undefined());
 
         let set = NativeContinuation::property_set(site, receiver, assigned);
-        assert_eq!(set.kind(), NativeContinuationKind::PropertySet);
+        assert_eq!(
+            set.kind(),
+            NativeContinuationKind::PropertySet(crate::PropertyWriteMode::Assignment)
+        );
         assert_eq!(set.first(), receiver);
         assert_eq!(set.second(), assigned);
         let call_root = NativeContinuation::conversion_call_root(site, receiver, assigned);

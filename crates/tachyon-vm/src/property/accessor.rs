@@ -50,7 +50,16 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<PropertyRead, ExecutionError> {
-        if let Some(raw) = receiver.as_heap_ref()
+        self.resolve_property_read_from(receiver, key)
+    }
+
+    /// Resolves a property from one target; callers retain the accessor receiver independently.
+    pub(crate) fn resolve_property_read_from(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<PropertyRead, ExecutionError> {
+        if let Some(raw) = target.as_heap_ref()
             && self
                 .heap
                 .checked_reference(raw, self.types.regexp_object)
@@ -58,7 +67,7 @@ impl Isolate {
         {
             let source = self.intern_intrinsic_name(b"source")?;
             let flags = self.intern_intrinsic_name(b"flags")?;
-            let (regexp_source, regexp_flags) = self.regexp_data(receiver)?;
+            let (regexp_source, regexp_flags) = self.regexp_data(target)?;
             if key == PropertyKey::Atom(source) {
                 return Ok(PropertyRead::Data(regexp_source));
             }
@@ -77,7 +86,7 @@ impl Isolate {
             ] {
                 let atom = self.intern_intrinsic_name(name)?;
                 if key == PropertyKey::Atom(atom) {
-                    return self.regexp_flag_enabled(receiver, flag).map(|enabled| {
+                    return self.regexp_flag_enabled(target, flag).map(|enabled| {
                         PropertyRead::Data(Value::from_immediate(if enabled {
                             Immediate::True
                         } else {
@@ -87,10 +96,10 @@ impl Isolate {
                 }
             }
         }
-        let mut current = if self.is_string_value(receiver) || self.is_string_wrapper(receiver) {
+        let mut current = if self.is_string_value(target) || self.is_string_wrapper(target) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {
-                return self.string_value_length(receiver).and_then(|length| {
+                return self.string_value_length(target).and_then(|length| {
                     i32::try_from(length)
                         .map(Value::from_i32)
                         .map(PropertyRead::Data)
@@ -102,9 +111,9 @@ impl Isolate {
                     .atoms
                     .get(atom)
                     .and_then(|name| crate::property::keys::array_index(name.as_view()))
-                && (index as usize) < self.string_value_length(receiver)?
+                && (index as usize) < self.string_value_length(target)?
             {
-                let string_receiver = self.string_primitive_value(receiver)?;
+                let string_receiver = self.string_primitive_value(target)?;
                 let raw = string_receiver
                     .as_heap_ref()
                     .expect("primitive String identity has a managed reference");
@@ -131,16 +140,16 @@ impl Isolate {
             self.realm
                 .string_prototype
                 .expect("String prototype initializes before primitive String access")
-        } else if numeric_value(receiver).is_some() {
+        } else if numeric_value(target).is_some() {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
-        } else if self.is_symbol_value(receiver) {
+        } else if self.is_symbol_value(target) {
             self.realm
                 .symbol_prototype
                 .expect("Symbol prototype initializes before property access")
         } else {
-            receiver
+            target
         };
         loop {
             let (_, snapshot) = self.object_snapshot(current)?;
@@ -241,6 +250,81 @@ impl Isolate {
                 return Err(ExecutionError::NotObject(snapshot.prototype));
             }
             current = snapshot.prototype;
+        }
+    }
+
+    /// Runs OrdinarySet with a distinct target and receiver for Reflect.set's observable path.
+    pub(crate) fn resolve_reflect_property_write(
+        &mut self,
+        target: Value,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWrite, ExecutionError> {
+        let mut current = target;
+        loop {
+            let descriptor = self.complete_own_property_descriptor(current, key)?;
+            match descriptor {
+                Some(PropertyDescriptor::Data(descriptor)) => {
+                    if !descriptor.writable.unwrap_or(false) {
+                        return Ok(PropertyWrite::Complete(false));
+                    }
+                    return self.write_reflect_receiver(receiver, key, value);
+                }
+                Some(PropertyDescriptor::Accessor(descriptor)) => {
+                    return Ok(match descriptor.setter {
+                        Some(setter) if setter.as_immediate() != Some(Immediate::Undefined) => {
+                            PropertyWrite::Setter(setter)
+                        }
+                        _ => PropertyWrite::Complete(false),
+                    });
+                }
+                Some(PropertyDescriptor::Generic(_)) => {
+                    return Err(ExecutionError::InvalidPropertyDescriptor(current));
+                }
+                None => {
+                    let prototype = self.object_snapshot(current)?.1.prototype;
+                    if prototype.as_immediate() == Some(Immediate::Null) {
+                        return self.write_reflect_receiver(receiver, key, value);
+                    }
+                    if !self.is_object_value(prototype) {
+                        return Err(ExecutionError::NotObject(prototype));
+                    }
+                    current = prototype;
+                }
+            }
+        }
+    }
+
+    /// Applies OrdinarySet's receiver-own descriptor rules without invoking a setter twice.
+    fn write_reflect_receiver(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWrite, ExecutionError> {
+        if !self.is_object_value(receiver) {
+            return Ok(PropertyWrite::Complete(false));
+        }
+        match self.complete_own_property_descriptor(receiver, key)? {
+            Some(PropertyDescriptor::Data(descriptor)) if !descriptor.writable.unwrap_or(false) => {
+                Ok(PropertyWrite::Complete(false))
+            }
+            // OrdinarySet reaches this helper only from a writable data descriptor. A receiver
+            // accessor blocks the data write; its setter is not invoked on this branch.
+            Some(PropertyDescriptor::Accessor(_)) => Ok(PropertyWrite::Complete(false)),
+            Some(PropertyDescriptor::Generic(_)) => {
+                Err(ExecutionError::InvalidPropertyDescriptor(receiver))
+            }
+            Some(PropertyDescriptor::Data(_)) | None => match self
+                .set_own_data_property(receiver, key, value)
+            {
+                Ok(()) => Ok(PropertyWrite::Complete(true)),
+                Err(
+                    ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_),
+                ) => Ok(PropertyWrite::Complete(false)),
+                Err(error) => Err(error),
+            },
         }
     }
 

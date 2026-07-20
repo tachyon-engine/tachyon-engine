@@ -2,17 +2,22 @@
 
 use super::super::*;
 
-/// Two builtin operands retained only while an object key executes JavaScript conversion code.
+/// Builtin operands retained only while an object key executes JavaScript conversion code.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingNativePropertyKey {
     first: Value,
     second: Value,
+    third: Value,
 }
 
 impl PendingNativePropertyKey {
     #[inline]
-    pub(crate) const fn new(first: Value, second: Value) -> Self {
-        Self { first, second }
+    pub(crate) const fn new(first: Value, second: Value, third: Value) -> Self {
+        Self {
+            first,
+            second,
+            third,
+        }
     }
 }
 
@@ -21,10 +26,11 @@ impl Trace for PendingNativePropertyKey {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.first.trace(tracer);
         self.second.trace(tracer);
+        self.third.trace(tracer);
     }
 }
 
-const _: [(); 16] = [(); core::mem::size_of::<PendingNativePropertyKey>()];
+const _: [(); 24] = [(); core::mem::size_of::<PendingNativePropertyKey>()];
 
 struct PendingNativePropertyKeyRoots<'a> {
     vm: VmRoots<'a>,
@@ -50,13 +56,14 @@ impl Isolate {
         first: Value,
         key: Value,
         second: Value,
+        third: Value,
     ) -> Result<(), ExecutionError> {
         let native_site = NativeContinuationSite {
             caller_base: site.caller_base,
             destination: site.destination,
             call_site: site.call_site,
         };
-        let pending = PendingNativePropertyKey::new(first, second);
+        let pending = PendingNativePropertyKey::new(first, second, third);
         if !self.is_object_value(key) {
             return self.finish_builtin_property_key(native_site, consumer, pending, key);
         }
@@ -83,9 +90,15 @@ impl Isolate {
         let key = self.property_key(primitive)?;
         match consumer {
             BuiltinPropertyKeyConsumer::DefineProperty => {
-                self.begin_property_descriptor(site, pending.first, key, pending.second)
+                self.begin_property_descriptor(site, pending.first, key, pending.second, false)
+            }
+            BuiltinPropertyKeyConsumer::ReflectDefineProperty => {
+                self.begin_property_descriptor(site, pending.first, key, pending.second, true)
             }
             BuiltinPropertyKeyConsumer::GetOwnPropertyDescriptor => {
+                self.finish_get_own_property_descriptor(site, pending.first, key)
+            }
+            BuiltinPropertyKeyConsumer::ReflectGetOwnPropertyDescriptor => {
                 self.finish_get_own_property_descriptor(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::HasOwnProperty => {
@@ -97,6 +110,32 @@ impl Isolate {
             BuiltinPropertyKeyConsumer::HasOwn => {
                 self.finish_builtin_has_own(site, pending.first, key)
             }
+            BuiltinPropertyKeyConsumer::ReflectDeleteProperty => {
+                let deleted = self.delete_own_data_property(pending.first, key)?;
+                self.write(site.caller_base, site.destination, boolean_value(deleted))
+            }
+            BuiltinPropertyKeyConsumer::ReflectHas => {
+                let present = !matches!(
+                    self.resolve_property_read(pending.first, key)?,
+                    PropertyRead::Missing
+                );
+                self.write(site.caller_base, site.destination, boolean_value(present))
+            }
+            BuiltinPropertyKeyConsumer::ReflectGet => self
+                .dispatch_reflect_property_read(site, pending.first, pending.second, key)
+                .map(|_| ()),
+            BuiltinPropertyKeyConsumer::ReflectSet => self
+                .write(site.caller_base, site.destination, pending.second)
+                .and_then(|()| {
+                    self.dispatch_reflect_property_write(
+                        site,
+                        pending.first,
+                        pending.third,
+                        key,
+                        pending.second,
+                    )
+                    .map(|_| ())
+                }),
         }
     }
 

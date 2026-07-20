@@ -32,7 +32,13 @@ pub(crate) enum NativeFunction {
     ObjectIsExtensible,
     ObjectPreventExtensions,
     ReflectOwnKeys,
+    ReflectDefineProperty,
+    ReflectDeleteProperty,
+    ReflectGetOwnPropertyDescriptor,
+    ReflectGet,
     ReflectGetPrototypeOf,
+    ReflectHas,
+    ReflectSet,
     ReflectIsExtensible,
     ReflectPreventExtensions,
     StringConstructor,
@@ -445,12 +451,17 @@ impl NativeFunction {
             return function.length();
         }
         match self {
-            Self::ObjectDefineProperty => 3,
+            Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
             | Self::ObjectCreate
-            | Self::ObjectGetOwnPropertyDescriptor => 2,
+            | Self::ObjectGetOwnPropertyDescriptor
+            | Self::ReflectDeleteProperty
+            | Self::ReflectGetOwnPropertyDescriptor
+            | Self::ReflectHas => 2,
+            Self::ReflectGet => 2,
+            Self::ReflectSet => 3,
             Self::ObjectConstructor
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
@@ -641,7 +652,13 @@ impl NativeFunction {
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::ReflectOwnKeys => "ownKeys",
+            Self::ReflectDefineProperty => "defineProperty",
+            Self::ReflectDeleteProperty => "deleteProperty",
+            Self::ReflectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
+            Self::ReflectGet => "get",
             Self::ReflectGetPrototypeOf => "getPrototypeOf",
+            Self::ReflectHas => "has",
+            Self::ReflectSet => "set",
             Self::ReflectIsExtensible => "isExtensible",
             Self::ReflectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
