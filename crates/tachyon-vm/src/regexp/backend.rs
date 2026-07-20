@@ -29,7 +29,12 @@ pub(crate) struct RegExpMatch {
 impl CompiledRegExp {
     /// Compiles one already-validated ECMAScript pattern without exposing the backend API.
     pub(crate) fn compile(pattern: &str) -> Result<Self, String> {
-        Regex::new(pattern)
+        Self::compile_with_flags(pattern, "")
+    }
+
+    /// Compiles a pattern with ECMAScript flags after the VM has validated duplicate handling.
+    pub(crate) fn compile_with_flags(pattern: &str, flags: &str) -> Result<Self, String> {
+        Regex::with_flags(pattern, flags)
             .map(|regex| Self { regex })
             .map_err(|error| error.to_string())
     }

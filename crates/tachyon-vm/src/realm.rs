@@ -379,6 +379,33 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(string_prototype, atom, method, true)?;
         }
+        let regexp_constructor = allocate(self, NativeFunction::RegExpConstructor)?;
+        self.realm.regexp_constructor = Some(regexp_constructor);
+        let regexp_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before RegExp prototype"),
+        })?;
+        self.realm.regexp_prototype = Some(regexp_prototype);
+        self.set_function_prototype(regexp_constructor, regexp_prototype)?;
+        self.set_intrinsic_data_property(
+            regexp_prototype,
+            constructor_atom,
+            regexp_constructor,
+            true,
+        )?;
+        for (native, name) in [
+            (NativeFunction::RegExpExec, b"exec".as_slice()),
+            (NativeFunction::RegExpTest, b"test".as_slice()),
+        ] {
+            let method = allocate(self, native)?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(regexp_prototype, atom, method, true)?;
+        }
         let symbol_constructor = allocate(self, NativeFunction::SymbolConstructor)?;
         self.realm.symbol_constructor = Some(symbol_constructor);
         self.initialize_to_primitive_symbol(symbol_constructor)?;
@@ -607,6 +634,7 @@ impl Isolate {
             array: self.intern_intrinsic_name(b"Array")?,
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
+            regexp: self.intern_intrinsic_name(b"RegExp")?,
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
@@ -1139,6 +1167,13 @@ impl Isolate {
             self.realm
                 .string_constructor
                 .expect("String initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.regexp,
+            self.realm
+                .regexp_constructor
+                .expect("RegExp initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

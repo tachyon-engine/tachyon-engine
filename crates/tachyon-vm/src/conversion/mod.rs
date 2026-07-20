@@ -53,7 +53,10 @@ impl Isolate {
     }
 
     /// Converts one already-primitive String constructor argument into its canonical string value.
-    fn primitive_string_value(&mut self, argument: Option<Value>) -> Result<Value, ExecutionError> {
+    pub(crate) fn primitive_string_value(
+        &mut self,
+        argument: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
         let Some(argument) = argument else {
             return self.allocate_runtime_string(
                 JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,

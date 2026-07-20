@@ -35,6 +35,32 @@ fn primitive_string_indexed_properties_follow_string_exotic_rules() {
 }
 
 #[test]
+/// Exercises RegExp construction, result metadata, and global-state advancement end to end.
+fn regexp_constructor_exec_and_global_last_index_are_available() {
+    assert_eq!(
+        execute_source(
+            947,
+            "let r = new RegExp('a', 'g'); let first = r.exec('baab'); let second = r.exec('baab'); first[0] === 'a' && first.index === 1 && first.input === 'baab' && second.index === 2 && r.lastIndex === 3;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
+fn regexp_test_observes_sticky_last_index_and_failure_reset() {
+    assert_eq!(
+        execute_source(
+            948,
+            "let r = new RegExp('a', 'y'); r.lastIndex = 1; r.test('ba') && r.lastIndex === 2 && !r.test('ba') && r.lastIndex === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Exercises String character methods against primitive UTF-16 code units and out-of-range values.
 fn string_character_methods_preserve_utf16_and_numeric_boundaries() {
     assert_eq!(

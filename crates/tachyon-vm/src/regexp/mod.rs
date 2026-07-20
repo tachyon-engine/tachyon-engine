@@ -1,3 +1,3 @@
 //! Internal ECMAScript-pattern backend boundary.
 
-mod backend;
+pub(super) mod backend;

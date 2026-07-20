@@ -129,6 +129,25 @@ impl Isolate {
         )
     }
 
+    /// Defines a fresh ordinary data slot with the intrinsic attributes required by an exotic.
+    pub(crate) fn define_fresh_data_property(
+        &mut self,
+        receiver: Value,
+        key: impl Into<PropertyKey>,
+        value: Value,
+        attributes: PropertyAttributes,
+    ) -> Result<(), ExecutionError> {
+        let key = key.into();
+        let (object, snapshot) = self.object_snapshot(receiver)?;
+        if self.shapes.lookup(snapshot.shape, key).is_some() {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+        if !snapshot.extensible {
+            return Err(ExecutionError::NonExtensibleObject(receiver));
+        }
+        self.add_property_slot(object, snapshot, key, value, attributes)
+    }
+
     /// Marks one own data property as deleted while retaining append-only shape metadata.
     pub(crate) fn delete_own_data_property(
         &mut self,
@@ -514,6 +533,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::String(string), ordinary));
         }
+        if let Ok(regexp) = self.heap.checked_reference(raw, self.types.regexp_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(regexp, self.types.regexp_object)
+                        .map(|regexp| regexp.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::RegExp(regexp), ordinary));
+        }
         if let Ok(iterator) = self.heap.checked_reference(raw, self.types.array_iterator) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(iterator).map_err(ExecutionError::Root)?;
@@ -603,6 +634,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::RegExp(regexp) => self.heap.with_running_scope(|scope| {
+                let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(regexp, self.types.regexp_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -672,6 +714,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(string, self.types.string_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::RegExp(regexp) => self.heap.with_running_scope(|scope| {
+                let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(regexp, self.types.regexp_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -805,6 +858,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::RegExp(regexp) => self.heap.with_running_scope(|scope| {
+                let regexp = scope.root(regexp).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let regexp = no_gc
+                        .borrow_mut(regexp, self.types.regexp_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    regexp.ordinary.shape = shape;
+                    regexp.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(regexp, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -845,6 +919,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.string_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.regexp_object)
                 .is_ok()
             || self
                 .heap

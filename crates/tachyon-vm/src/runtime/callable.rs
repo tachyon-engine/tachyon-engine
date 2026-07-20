@@ -55,6 +55,9 @@ pub(crate) enum NativeFunction {
     StringTrim,
     StringTrimStart,
     StringTrimEnd,
+    RegExpConstructor,
+    RegExpExec,
+    RegExpTest,
     SymbolConstructor,
     NumberConstructor,
     NumberIsNaN,
@@ -374,6 +377,7 @@ impl NativeFunction {
             self,
             Self::ObjectConstructor
                 | Self::StringConstructor
+                | Self::RegExpConstructor
                 | Self::NumberConstructor
                 | Self::BooleanConstructor
                 | Self::FunctionConstructor
@@ -409,6 +413,9 @@ impl NativeFunction {
             | Self::ObjectIsExtensible
             | Self::ObjectPreventExtensions
             | Self::StringConstructor
+            | Self::RegExpConstructor
+            | Self::RegExpExec
+            | Self::RegExpTest
             | Self::StringCharAt
             | Self::StringCharCodeAt
             | Self::StringAt
@@ -544,6 +551,9 @@ impl NativeFunction {
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
+            Self::RegExpConstructor => "RegExp",
+            Self::RegExpExec => "exec",
+            Self::RegExpTest => "test",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
             Self::StringAt => "at",
@@ -841,6 +851,7 @@ pub(crate) enum ObjectReceiver {
     Function(GcRef<FunctionObject>),
     Number(GcRef<NumberObject>),
     String(GcRef<StringObject>),
+    RegExp(GcRef<RegExpObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
 }
 
@@ -853,6 +864,7 @@ impl ObjectReceiver {
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
+            Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
@@ -973,6 +985,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
+    pub(crate) regexp_object: GcType<RegExpObject>,
     pub(crate) property_storage: GcType<PropertyStorage>,
     pub(crate) string: GcType<JsString>,
     pub(crate) symbol: GcType<SymbolValue>,
@@ -997,6 +1010,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) array: AtomId,
     pub(crate) object: AtomId,
     pub(crate) string: AtomId,
+    pub(crate) regexp: AtomId,
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
     pub(crate) boolean: AtomId,
@@ -1009,7 +1023,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        13 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        14 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -1042,6 +1056,9 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }
         | ExecutionError::InvalidJsonText => Some(NativeErrorKind::Syntax),
+        ExecutionError::InvalidRegExpFlags | ExecutionError::InvalidRegExpPattern => {
+            Some(NativeErrorKind::Syntax)
+        }
         ExecutionError::InvalidNumberRadix(_)
         | ExecutionError::InvalidNumberPrecision(_)
         | ExecutionError::InvalidStringLength

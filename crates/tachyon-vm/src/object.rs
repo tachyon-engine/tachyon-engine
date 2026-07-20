@@ -582,6 +582,24 @@ pub(crate) struct StringObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// RegExp state whose observable properties remain in the ordinary-object base.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct RegExpObject {
+    pub(crate) source: Value,
+    pub(crate) flags: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for RegExpObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.source.trace(tracer);
+        self.flags.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 impl Trace for StringObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {

@@ -1868,6 +1868,10 @@ impl Isolate {
                         true,
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
+                    let regexp = self.create_regexp_from_site(&site)?;
+                    return self.write(caller_base, destination, regexp);
+                }
                 FunctionExecutable::Native(NativeFunction::BooleanConstructor) => {
                     let native = NativeFunction::BooleanConstructor;
                     let value = self.primitive_constructor_value(native, &site)?;
@@ -2118,6 +2122,18 @@ impl Isolate {
                     | NativeFunction::NumberToString
                     | NativeFunction::NumberConstructor),
                 ) => return self.dispatch_conversion_native(native, &site, false),
+                FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
+                    let regexp = self.create_regexp_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, regexp);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpExec) => {
+                    let result = self.regexp_exec(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpTest) => {
+                    let result = self.regexp_test(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);

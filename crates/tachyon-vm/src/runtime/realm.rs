@@ -146,6 +146,8 @@ pub(crate) struct Realm {
     pub(crate) object_prevent_extensions: Option<Value>,
     pub(crate) string_constructor: Option<Value>,
     pub(crate) string_prototype: Option<Value>,
+    pub(crate) regexp_constructor: Option<Value>,
+    pub(crate) regexp_prototype: Option<Value>,
     pub(crate) symbol_constructor: Option<Value>,
     pub(crate) number_constructor: Option<Value>,
     pub(crate) number_prototype: Option<Value>,
@@ -236,6 +238,8 @@ impl Realm {
             object_prevent_extensions: None,
             string_constructor: None,
             string_prototype: None,
+            regexp_constructor: None,
+            regexp_prototype: None,
             symbol_constructor: None,
             number_constructor: None,
             number_prototype: None,
@@ -556,6 +560,8 @@ impl Trace for Realm {
         self.object_is_extensible.trace(tracer);
         self.object_prevent_extensions.trace(tracer);
         self.string_constructor.trace(tracer);
+        self.regexp_constructor.trace(tracer);
+        self.regexp_prototype.trace(tracer);
         self.symbol_constructor.trace(tracer);
         self.number_constructor.trace(tracer);
         self.number_prototype.trace(tracer);

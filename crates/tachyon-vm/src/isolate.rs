@@ -68,6 +68,9 @@ impl Isolate {
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            regexp_object: registry
+                .try_register("RegExpObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             property_storage: registry
                 .try_register("PropertyStorage")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -611,6 +614,41 @@ impl Isolate {
                     },
                 },
                 space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates a RegExp object after pattern validation has produced source and flag strings.
+    pub(crate) fn allocate_regexp_object(
+        &mut self,
+        source: Value,
+        flags: Value,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.regexp_object,
+                0,
+                0,
+                RegExpObject {
+                    source,
+                    flags,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                AllocationSpace::Young,
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
