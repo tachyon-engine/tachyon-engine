@@ -45,6 +45,45 @@ impl Isolate {
             map: site.this_value,
             key,
             callback,
+            weak: false,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.call_map_upsert_callback(continuation_site, state)
+    }
+
+    /// Validates a weak key and starts the same callback continuation over ephemeron storage.
+    pub(crate) fn begin_weak_map_get_or_insert_computed(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let storage = self.weak_map_storage(site.this_value)?;
+        let key = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let key = self.weak_key(key)?;
+        let callback = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.resolve_function_object(callback)?;
+        let storage = storage.ok_or(ExecutionError::IncompatibleCollectionReceiver(
+            site.this_value,
+        ))?;
+        if let Some(index) = self.weak_collection_find(storage, key)? {
+            return self
+                .weak_collection_entry(storage, index)?
+                .map(|entry| self.write(site.caller_base, site.destination, entry.value()))
+                .transpose()?
+                .ok_or(ExecutionError::CollectionStorageAllocationFailed);
+        }
+        let state = self.allocate_pending_map_upsert(PendingMapGetOrInsertComputed {
+            map: site.this_value,
+            key,
+            callback,
+            weak: true,
         })?;
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -62,12 +101,19 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let pending = self.pending_map_upsert(state)?;
-        let storage = self.map_storage(pending.map)?;
-        if let Some(index) = self.collection_find(storage, pending.key)? {
-            self.collection_update(storage, index, value)?;
+        if pending.weak {
+            let storage = self
+                .weak_map_storage(pending.map)?
+                .ok_or(ExecutionError::IncompatibleCollectionReceiver(pending.map))?;
+            self.weak_collection_set(pending.map, storage, pending.key, value, true)?;
         } else {
-            let storage = self.ensure_map_capacity(pending.map, storage)?;
-            self.collection_append(storage, pending.key, value)?;
+            let storage = self.map_storage(pending.map)?;
+            if let Some(index) = self.collection_find(storage, pending.key)? {
+                self.collection_update(storage, index, value)?;
+            } else {
+                let storage = self.ensure_map_capacity(pending.map, storage)?;
+                self.collection_append(storage, pending.key, value)?;
+            }
         }
         self.write(site.caller_base, site.destination, value)
     }

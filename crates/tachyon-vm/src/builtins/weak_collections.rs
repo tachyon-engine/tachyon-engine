@@ -128,7 +128,7 @@ impl Isolate {
         Ok(true)
     }
 
-    fn weak_key(&mut self, value: Value) -> Result<Value, ExecutionError> {
+    pub(crate) fn weak_key(&mut self, value: Value) -> Result<Value, ExecutionError> {
         if self.is_weak_key(value)? {
             Ok(value)
         } else {
@@ -148,7 +148,7 @@ impl Isolate {
             .map(|registered| !registered)
     }
 
-    fn weak_map_storage(
+    pub(crate) fn weak_map_storage(
         &mut self,
         receiver: Value,
     ) -> Result<Option<GcRef<WeakCollection>>, ExecutionError> {
@@ -189,7 +189,7 @@ impl Isolate {
         })
     }
 
-    fn weak_collection_find(
+    pub(crate) fn weak_collection_find(
         &mut self,
         storage: GcRef<WeakCollection>,
         key: Value,
@@ -211,7 +211,7 @@ impl Isolate {
         Ok(None)
     }
 
-    fn weak_collection_set(
+    pub(crate) fn weak_collection_set(
         &mut self,
         receiver: Value,
         storage: GcRef<WeakCollection>,
@@ -246,7 +246,7 @@ impl Isolate {
         })
     }
 
-    fn weak_collection_entry(
+    pub(crate) fn weak_collection_entry(
         &mut self,
         storage: GcRef<WeakCollection>,
         index: usize,

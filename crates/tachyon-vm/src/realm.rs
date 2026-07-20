@@ -1441,6 +1441,10 @@ impl Isolate {
                 b"getOrInsert".as_slice(),
                 NativeFunction::WeakMapGetOrInsert,
             ),
+            (
+                b"getOrInsertComputed".as_slice(),
+                NativeFunction::WeakMapGetOrInsertComputed,
+            ),
         ] {
             self.install_collection_method(weak_map_prototype, function_prototype, name, native)?;
         }

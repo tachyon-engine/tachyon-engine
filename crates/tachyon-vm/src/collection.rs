@@ -72,6 +72,7 @@ pub(crate) struct PendingMapGetOrInsertComputed {
     pub(crate) map: Value,
     pub(crate) key: Value,
     pub(crate) callback: Value,
+    pub(crate) weak: bool,
 }
 
 impl Trace for PendingMapGetOrInsertComputed {
