@@ -7,8 +7,8 @@ mod statement;
 
 pub use expression::{
     HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirExpression,
-    HirExpressionKind, HirLogicalOperator, HirObjectProperty, HirObjectPropertyKey,
-    HirObjectPropertyValue, HirUnaryOperator, HirUpdateOperator,
+    HirExpressionKind, HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty,
+    HirObjectPropertyKey, HirObjectPropertyValue, HirUnaryOperator, HirUpdateOperator,
 };
 pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
 pub(crate) use program::lower;

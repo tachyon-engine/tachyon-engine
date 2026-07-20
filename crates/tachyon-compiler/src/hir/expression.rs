@@ -16,7 +16,7 @@ use crate::{CompileError, SourceSpan, SourceText};
 
 use super::pattern::{HirPattern, lower_assignment_pattern, new_binding};
 use super::program::{
-    BindingId, FunctionStencilId, HirFunction, HirIdentifierReference, ReferenceId, ScopeId,
+    BindingId, FunctionStencilId, HirFunction, HirIdentifierReference, ReferenceId,
 };
 use super::statement::{lower_arrow_function_stencil, lower_function_stencil};
 use super::{missing_semantic, source_span, to_scope_id, unsupported};
@@ -26,6 +26,13 @@ pub struct HirObjectProperty {
     pub span: SourceSpan,
     pub key: HirObjectPropertyKey,
     pub value: HirObjectPropertyValue,
+}
+
+/// One ordered object-literal item retained when a literal contains a spread expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirObjectExpressionPart {
+    Property(HirObjectProperty),
+    Spread(HirExpression),
 }
 
 /// Owns the definition mode for one object or array literal property.
@@ -80,6 +87,7 @@ pub enum HirExpressionKind {
     NewTarget,
     Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
+    ObjectSpread(Arc<[HirObjectExpressionPart]>),
     Array(Arc<[HirObjectProperty]>),
     StaticMember {
         object: Box<HirExpression>,
@@ -276,26 +284,18 @@ pub(super) fn lower_expression(
         }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());
-            let mut sources = Vec::new();
             let mut saw_spread = false;
             for property in &expression.properties {
                 let ObjectPropertyKind::ObjectProperty(property) = property else {
-                    if !properties.is_empty() {
-                        sources.push(HirExpression {
-                            span,
-                            kind: HirExpressionKind::Object(properties.into()),
-                        });
-                        properties = Vec::new();
-                    }
                     let ObjectPropertyKind::SpreadProperty(spread) = property else {
                         unreachable!("object property pattern is exhaustive");
                     };
-                    sources.push(lower_expression(
+                    properties.push(HirObjectExpressionPart::Spread(lower_expression(
                         &spread.argument,
                         source,
                         semantic,
                         functions,
-                    )?);
+                    )?));
                     saw_spread = true;
                     continue;
                 };
@@ -377,51 +377,25 @@ pub(super) fn lower_expression(
                         functions,
                     )?)
                 };
-                properties.push(HirObjectProperty {
+                properties.push(HirObjectExpressionPart::Property(HirObjectProperty {
                     span: source_span(property.span),
                     key,
                     value,
-                });
+                }));
             }
             if !saw_spread {
+                let properties = properties
+                    .into_iter()
+                    .map(|part| match part {
+                        HirObjectExpressionPart::Property(property) => property,
+                        HirObjectExpressionPart::Spread(_) => {
+                            unreachable!("spread flag tracks parts")
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 HirExpressionKind::Object(properties.into())
             } else {
-                if !properties.is_empty() {
-                    sources.push(HirExpression {
-                        span,
-                        kind: HirExpressionKind::Object(properties.into()),
-                    });
-                }
-                let target = HirExpression {
-                    span,
-                    kind: HirExpressionKind::Object(Arc::from([])),
-                };
-                let object = HirExpression {
-                    span,
-                    kind: HirExpressionKind::Identifier(HirIdentifierReference {
-                        id: ReferenceId(0),
-                        scope: ScopeId(0),
-                        binding: None,
-                        binding_scope: None,
-                        name: Arc::from("Object"),
-                        read: true,
-                        write: false,
-                    }),
-                };
-                let callee = HirExpression {
-                    span,
-                    kind: HirExpressionKind::StaticMember {
-                        object: Box::new(object),
-                        property: Arc::from("assign"),
-                    },
-                };
-                let mut arguments = Vec::with_capacity(sources.len() + 1);
-                arguments.push(target);
-                arguments.extend(sources);
-                HirExpressionKind::Call {
-                    callee: Box::new(callee),
-                    arguments: arguments.into(),
-                }
+                HirExpressionKind::ObjectSpread(properties.into())
             }
         }
         Expression::StaticMemberExpression(expression) if !expression.optional => {

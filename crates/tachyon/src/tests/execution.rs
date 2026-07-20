@@ -93,6 +93,27 @@ fn computed_object_accessors_preserve_runtime_key_order_and_names() {
 }
 
 #[test]
+/// Ensures object spread uses CopyDataProperties order instead of Object.assign target-set semantics.
+fn object_spread_preserves_source_order_and_accessor_values() {
+    assert_eq!(
+        execute_source(
+            160,
+            "let source = { a: 1 }; let object = { ...source, b: 2 }; object.a + object.b;"
+        )
+        .as_i32(),
+        Some(3)
+    );
+    assert_eq!(
+        execute_source(
+            161,
+            "let calls = 0; let source = { get a() { calls++; return 2; } }; let object = { ...source, a: 4 }; object.a + calls;",
+        )
+        .as_i32(),
+        Some(5)
+    );
+}
+
+#[test]
 fn sequence_expression_preserves_side_effects_and_last_value() {
     assert_eq!(
         execute_source(

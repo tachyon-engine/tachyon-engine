@@ -290,6 +290,32 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             }
             Ok(count)
         }
+        HirExpressionKind::ObjectSpread(parts) => {
+            let mut count = 2;
+            for part in parts.iter() {
+                let nested = match part {
+                    crate::hir::HirObjectExpressionPart::Property(property) => {
+                        let mut count = object_property_instruction_count(&property.value)?;
+                        if let HirObjectPropertyKey::Computed(key) = &property.key {
+                            count = checked_count_add(
+                                count,
+                                expression_instruction_count(key)?,
+                                "bytecode instructions",
+                            )?;
+                            count = checked_count_add(count, 1, "bytecode instructions")?;
+                        }
+                        checked_count_add(count, 1, "bytecode instructions")?
+                    }
+                    crate::hir::HirObjectExpressionPart::Spread(source) => checked_count_add(
+                        expression_instruction_count(source)?,
+                        1,
+                        "bytecode instructions",
+                    )?,
+                };
+                count = checked_count_add(count, nested, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Binary {
             operator,
             left,

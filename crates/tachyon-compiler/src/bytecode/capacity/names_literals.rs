@@ -266,6 +266,29 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::ObjectSpread(parts) => {
+            let mut count = 0;
+            for part in parts.iter() {
+                let nested = match part {
+                    crate::hir::HirObjectExpressionPart::Property(property) => {
+                        let mut count = object_property_scope_name_count(&property.value)?;
+                        if let HirObjectPropertyKey::Computed(key) = &property.key {
+                            count = checked_count_add(
+                                count,
+                                expression_scope_name_count(key)?,
+                                "scope names",
+                            )?;
+                        }
+                        count
+                    }
+                    crate::hir::HirObjectExpressionPart::Spread(source) => {
+                        expression_scope_name_count(source)?
+                    }
+                };
+                count = checked_count_add(count, nested, "scope names")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::StaticMember { object, .. } => {
             checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
         }
@@ -595,6 +618,29 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                         "bytecode constants",
                     )?;
                 }
+            }
+            Ok(count)
+        }
+        HirExpressionKind::ObjectSpread(parts) => {
+            let mut count = 0;
+            for part in parts.iter() {
+                let nested = match part {
+                    crate::hir::HirObjectExpressionPart::Property(property) => {
+                        let mut count = object_property_literal_count(&property.value)?;
+                        if let HirObjectPropertyKey::Computed(key) = &property.key {
+                            count = checked_count_add(
+                                count,
+                                expression_literal_count(key)?,
+                                "bytecode constants",
+                            )?;
+                        }
+                        count
+                    }
+                    crate::hir::HirObjectExpressionPart::Spread(source) => {
+                        expression_literal_count(source)?
+                    }
+                };
+                count = checked_count_add(count, nested, "bytecode constants")?;
             }
             Ok(count)
         }

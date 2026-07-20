@@ -230,7 +230,7 @@ fn hir_owns_plain_object_literal_properties() {
             .first(),
         Some(HirStatement {
             kind: HirStatementKind::Expression(HirExpression {
-                kind: HirExpressionKind::Call { .. },
+                kind: HirExpressionKind::ObjectSpread(_),
                 ..
             }),
             ..

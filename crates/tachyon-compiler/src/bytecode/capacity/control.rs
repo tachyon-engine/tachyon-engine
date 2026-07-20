@@ -804,6 +804,29 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             }
             Ok(count)
         }
+        HirExpressionKind::ObjectSpread(parts) => {
+            let mut count = 0;
+            for part in parts.iter() {
+                let nested = match part {
+                    crate::hir::HirObjectExpressionPart::Property(property) => {
+                        let mut count = object_property_label_count(&property.value)?;
+                        if let HirObjectPropertyKey::Computed(key) = &property.key {
+                            count = checked_count_add(
+                                count,
+                                expression_label_count(key)?,
+                                "bytecode labels",
+                            )?;
+                        }
+                        count
+                    }
+                    crate::hir::HirObjectExpressionPart::Spread(source) => {
+                        expression_label_count(source)?
+                    }
+                };
+                count = checked_count_add(count, nested, "bytecode labels")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_label_count(left)?,
             expression_label_count(right)?,

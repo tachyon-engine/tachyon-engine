@@ -6,6 +6,7 @@ use tachyon_bytecode::{
     HandlerKind, Label, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
 };
 
+use crate::hir::HirObjectExpressionPart;
 use crate::hir::{
     HirAssignmentOperator, HirAssignmentTarget, HirForInLeft, HirPattern, HirPatternKind,
 };

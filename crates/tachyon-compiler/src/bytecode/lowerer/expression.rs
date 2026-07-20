@@ -343,6 +343,54 @@ impl Lowerer<'_> {
                 }
                 Ok(object)
             }
+            HirExpressionKind::ObjectSpread(parts) => {
+                let object = self.register()?;
+                self.emit(Opcode::CreateObject, &[object.index()], expression.span)?;
+                let exclusions = self.create_exclusion_list(0, expression.span)?;
+                for part in parts.iter() {
+                    match part {
+                        HirObjectExpressionPart::Spread(source) => {
+                            let span = source.span;
+                            let source = self.expression(source)?;
+                            self.emit(
+                                Opcode::CopyDataProperties,
+                                &[object.index(), source.index(), exclusions.index()],
+                                span,
+                            )?;
+                        }
+                        HirObjectExpressionPart::Property(property) => {
+                            let (opcode, key) = match &property.key {
+                                HirObjectPropertyKey::Static(key) => {
+                                    (Opcode::SetById, self.scope_name(key)?)
+                                }
+                                HirObjectPropertyKey::Computed(key) => {
+                                    let key = self.expression(key)?;
+                                    self.prepare_property_key(key, object, false, property.span)?;
+                                    (Opcode::SetByValue, key.index())
+                                }
+                            };
+                            match &property.value {
+                                HirObjectPropertyValue::Data(value) => {
+                                    let value = self.expression(value)?;
+                                    self.emit(
+                                        opcode,
+                                        &[object.index(), value.index(), key],
+                                        property.span,
+                                    )?;
+                                }
+                                HirObjectPropertyValue::Getter(_)
+                                | HirObjectPropertyValue::Setter(_) => {
+                                    return Err(self.unsupported(
+                                        property.span,
+                                        "object spread with accessor property",
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(object)
+            }
             HirExpressionKind::StaticMember { object, property } => {
                 if self.function_scope.is_some()
                     && property.as_ref() == "length"
