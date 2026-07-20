@@ -633,9 +633,7 @@ impl Isolate {
                     .shapes
                     .lookup(snapshot.shape, key)
                     .expect("own key resolves in its source shape");
-                if self
-                    .property_value_from_snapshot(snapshot, property)?
-                    .is_some()
+                if self.property_is_present_from_snapshot(snapshot, property)?
                     && keys.insert(key)
                     && property.attributes.enumerable()
                 {

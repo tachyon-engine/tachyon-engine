@@ -253,28 +253,32 @@ impl Isolate {
             .map_err(ExecutionError::Shape)?;
         let mut output_index = 0_i32;
         for key in keys {
-            if !self
+            let property = self
                 .shapes
                 .lookup(snapshot.shape, key)
-                .expect("own key resolves in its source shape")
-                .attributes
-                .enumerable()
+                .expect("own key resolves in its source shape");
+            if !property.attributes.enumerable()
+                || !self.property_is_present_from_snapshot(snapshot, property)?
             {
                 continue;
             }
             let Some(key_atom) = key.atom() else {
                 continue;
             };
+            if native == NativeFunction::ObjectKeys {
+                let key_value = self.atom_string_value(key_atom)?;
+                self.append_object_enumeration_item(result, output_index, key_value, native)?;
+                output_index = output_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
+                continue;
+            }
             let Some(value) = self.data_property_from_snapshot(snapshot, key)? else {
                 continue;
             };
             match native {
                 NativeFunction::ObjectEntries => {
                     self.append_object_entry(result, output_index, key_atom, value)?;
-                }
-                NativeFunction::ObjectKeys => {
-                    let key_value = self.atom_string_value(key_atom)?;
-                    self.append_object_enumeration_item(result, output_index, key_value, native)?;
                 }
                 NativeFunction::ObjectValues => {
                     self.append_object_enumeration_item(result, output_index, value, native)?;
@@ -318,12 +322,16 @@ impl Isolate {
             .map_err(ExecutionError::Shape)?;
         let mut output_index = 0_u64;
         for key in keys {
+            let property = self
+                .shapes
+                .lookup(snapshot.shape, key)
+                .expect("own key resolves in its source shape");
+            if !self.property_is_present_from_snapshot(snapshot, property)? {
+                continue;
+            }
             let Some(key) = key.atom() else {
                 continue;
             };
-            if self.data_property_from_snapshot(snapshot, key)?.is_none() {
-                continue;
-            }
             let name = self.atom_string_value(key)?;
             let output_key = self.safe_integer_property_atom(output_index)?;
             self.set_own_data_property(result, output_key, name)?;

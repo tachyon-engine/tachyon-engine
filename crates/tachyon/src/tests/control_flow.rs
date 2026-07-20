@@ -67,6 +67,35 @@ fn for_in_enumerates_visible_string_keys() {
 }
 
 #[test]
+/// Accessor keys enumerate from metadata without invoking getters or losing tombstone shadowing.
+fn accessor_key_enumeration_is_value_independent() {
+    assert_eq!(
+        execute_source(
+            180,
+            "let calls = 0; let proto = {}; Object.defineProperty(proto, 'shadowed', { get() { calls++; return 1; }, enumerable: true, configurable: true }); let object = Object.create(proto); Object.defineProperty(object, 'shadowed', { get() { calls++; return 2; }, enumerable: false, configurable: true }); let before = ''; for (let key in object) before += key; delete object.shadowed; let after = ''; for (let key in object) after += key; before === '' && after === 'shadowed' && calls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            181,
+            "let calls = 0; let object = {}; Object.defineProperty(object, 'visible', { get() { calls++; return 1; }, enumerable: true }); Object.defineProperty(object, 'hidden', { get() { calls++; return 2; }, enumerable: false }); Object.keys(object); calls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            182,
+            "let calls = 0; let object = {}; Object.defineProperty(object, 'visible', { get() { calls++; return 1; }, enumerable: true }); Object.defineProperty(object, 'hidden', { get() { calls++; return 2; }, enumerable: false }); Object.getOwnPropertyNames(object); calls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Exercises continue/break destinations plus nullish and string primitive enumeration.
 fn for_in_preserves_control_flow_and_primitive_boundaries() {
     assert_eq!(

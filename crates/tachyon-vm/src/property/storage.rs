@@ -3,6 +3,16 @@
 use super::{super::*, accessor::StoredProperty};
 
 impl Isolate {
+    /// Checks one resolved slot's tombstone state without interpreting its data/accessor payload.
+    pub(crate) fn property_is_present_from_snapshot(
+        &mut self,
+        snapshot: OrdinaryObject,
+        property: PropertyLookup,
+    ) -> Result<bool, ExecutionError> {
+        self.raw_property_value_from_snapshot(snapshot, property)
+            .map(|value| value.is_some())
+    }
+
     /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
     pub(crate) fn data_property_from_snapshot(
         &mut self,

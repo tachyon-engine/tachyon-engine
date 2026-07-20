@@ -1,6 +1,50 @@
 use super::{fixtures::*, *};
 
 #[test]
+/// Calls the key-only builtin directly so accessor storage cannot hide behind facade errors.
+fn object_keys_reads_accessor_metadata_without_loading_its_value() {
+    let mut isolate = test_isolate();
+    let object = isolate.create_ordinary_object().unwrap();
+    let visible = isolate.intern_intrinsic_name(b"visible").unwrap();
+    isolate
+        .define_property(
+            object,
+            visible.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(isolate.realm.object_constructor.unwrap()),
+                setter: None,
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    isolate.fiber.registers = vec![object, Value::from_immediate(Immediate::Undefined)];
+    let result = isolate
+        .object_enumeration(
+            &CallSite {
+                caller_base: 0,
+                destination: 1,
+                callee: isolate.realm.object_keys.unwrap(),
+                argument_base: 0,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 1,
+                this_value: Value::from_immediate(Immediate::Undefined),
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: WordOffset::new(0),
+            },
+            NativeFunction::ObjectKeys,
+        )
+        .unwrap();
+    let zero = isolate.property_key_atom(Value::from_i32(0)).unwrap();
+    let key = isolate.get_data_property(result, zero).unwrap().unwrap();
+    let expected = isolate.atom_string_value(visible).unwrap();
+    assert!(isolate.strict_equal_values(key, expected).unwrap());
+}
+
+#[test]
 fn array_push_updates_existing_indexed_storage_and_length() {
     let mut isolate = test_isolate();
     let prototype = isolate.realm.array_prototype.unwrap();
