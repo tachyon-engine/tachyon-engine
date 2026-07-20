@@ -2023,6 +2023,10 @@ impl Isolate {
                     let value = self.string_slice(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringSubstring) => {
+                    let value = self.string_substring(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
                     | NativeFunction::NumberToExponential

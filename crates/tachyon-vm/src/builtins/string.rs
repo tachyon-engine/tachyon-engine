@@ -42,6 +42,25 @@ impl Isolate {
         )
     }
 
+    /// Implements String.prototype.substring with clamped, source-order-independent positions.
+    pub(crate) fn string_substring(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let units = self.string_receiver_units(site.this_value)?;
+        let length = units.len();
+        let start_value = self.call_argument(site, 0)?;
+        let end_value = self.call_argument(site, 1)?;
+        let start = self.string_substring_index(start_value, length, 0)?;
+        let end = self.string_substring_index(end_value, length, length)?;
+        let (start, end) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        self.allocate_runtime_string(
+            JsString::try_from_utf16(&units[start..end])
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Reads one primitive receiver unit after the currently supported ToIntegerOrInfinity conversion.
     fn string_code_unit_at(&mut self, site: &CallSite) -> Result<Option<u16>, ExecutionError> {
         let receiver = site.this_value;
@@ -136,5 +155,32 @@ impl Isolate {
             return Ok((integer as usize).min(length));
         }
         Ok(length.saturating_sub((-integer) as usize))
+    }
+
+    /// Applies String.prototype.substring's ToIntegerOrInfinity clamping rules.
+    fn string_substring_index(
+        &mut self,
+        value: Option<Value>,
+        length: usize,
+        default: usize,
+    ) -> Result<usize, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(default);
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        let integer = if number.is_nan() || number == 0.0 {
+            0.0
+        } else {
+            number.trunc()
+        };
+        if integer <= 0.0 {
+            return Ok(0);
+        }
+        if integer.is_infinite() {
+            return Ok(length);
+        }
+        Ok((integer as usize).min(length))
     }
 }

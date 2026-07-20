@@ -61,6 +61,19 @@ fn string_slice_uses_relative_utf16_code_unit_indices() {
 }
 
 #[test]
+/// Verifies String.prototype.substring clamps negatives and swaps reversed endpoints.
+fn string_substring_clamps_and_reorders_positions() {
+    assert_eq!(
+        execute_source(
+            929,
+            "'tachyon'.substring(1, -1) === 't' && 'tachyon'.substring(5, 2) === 'chy' && 'tachyon'.substring(NaN, 2) === 'ta';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(
