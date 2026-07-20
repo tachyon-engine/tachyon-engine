@@ -716,6 +716,17 @@ impl Isolate {
             Opcode::LooseEqual | Opcode::LooseNotEqual => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
+                if self.is_object_value(left) || self.is_object_value(right) {
+                    self.dispatch_object_loose_equality(
+                        opcode,
+                        base,
+                        operands[0],
+                        left,
+                        right,
+                        instruction_offset,
+                    )?;
+                    return Ok(None);
+                }
                 let equal = self.loose_equal_values(left, right)?;
                 let result = if opcode == Opcode::LooseEqual {
                     equal

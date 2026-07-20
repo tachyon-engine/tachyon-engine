@@ -343,6 +343,30 @@ fn loose_equality_converts_supported_primitives() {
         execute_source(164, "'0' !== 0;").as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            197,
+            "let symbol = Symbol('value'); !(1 == symbol) && !(true == symbol) && symbol != 1 && symbol != false;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            195,
+            "let calls = 0; let object = { [Symbol.toPrimitive](hint) { calls++; return hint === 'default' && this === object ? 1 : 0; } }; let same = {}; let left = object == true; let right = true == object; let nullish = object == null || undefined == object; let objects = same == same && !(same == {}); left && right && !nullish && objects && calls === 2;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+    assert_eq!(
+        execute_source(
+            196,
+            "let order = 0; let ordinary = { valueOf() { order = order * 10 + 1; return {}; }, toString() { order = order * 10 + 2; return '7'; } }; let abrupt = false; try { 1 != ({ [Symbol.toPrimitive]() { throw 42; } }); } catch (error) { abrupt = error === 42; } let objectResult = false; try { 1 == ({ [Symbol.toPrimitive]() { return {}; } }); } catch (error) { objectResult = error instanceof TypeError; } ordinary == 7 && 7 == ordinary && order === 1212 && abrupt && objectResult;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
 }
 
 #[test]

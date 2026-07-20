@@ -1,5 +1,12 @@
 use super::{fixtures::test_isolate, *};
 
+#[derive(Clone, Copy)]
+enum ExoticOperation {
+    Add,
+    LooseEqual,
+    LooseNotEqual,
+}
+
 #[test]
 fn exotic_getter_and_method_resume_for_every_dispatch_batch() {
     assert_exotic_conversion_batch::<1>();
@@ -10,33 +17,54 @@ fn exotic_getter_and_method_resume_for_every_dispatch_batch() {
 }
 
 #[test]
+fn exotic_equality_resumes_for_every_dispatch_batch() {
+    assert_exotic_equality_batch::<1>();
+    assert_exotic_equality_batch::<2>();
+    assert_exotic_equality_batch::<4>();
+    assert_exotic_equality_batch::<8>();
+    assert_exotic_equality_batch::<16>();
+}
+
+#[test]
 /// The exotic getter call needs one parent entry and its returned callable needs one child root.
 fn exotic_conversion_respects_two_entry_completion_limit() {
-    for (limit, expected) in [(1, false), (2, true)] {
-        let module = exotic_conversion_module();
-        let mut isolate = test_isolate();
-        install_exotic_getter(&mut isolate, &module, false);
-        isolate.stack_limits = StackLimits::new(64, 4_096).with_max_completions(limit);
-        let result = isolate.execute_with_batch::<8>(
-            &module,
-            ExecutionBudget {
-                fuel: 64,
-                quantum: 64,
-            },
-        );
-        if expected {
-            assert!(
-                matches!(result, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(42))
+    for operation in [ExoticOperation::Add, ExoticOperation::LooseEqual] {
+        for limit in [1, 2] {
+            let module = exotic_conversion_module(operation);
+            let mut isolate = test_isolate();
+            install_exotic_getter(&mut isolate, &module, false);
+            isolate.stack_limits = StackLimits::new(64, 4_096).with_max_completions(limit);
+            let result = isolate.execute_with_batch::<8>(
+                &module,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
             );
-        } else {
-            assert_eq!(
-                result,
-                Err(ExecutionError::CompletionStackLimit {
-                    limit: 1,
-                    requested: 2,
-                })
-            );
-            assert_eq!(isolate.fiber.completions.len(), 0);
+            if limit == 2 {
+                match operation {
+                    ExoticOperation::Add => assert!(
+                        matches!(result, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(42))
+                    ),
+                    ExoticOperation::LooseEqual => assert!(matches!(
+                        result,
+                        Ok(RunOutcome::Completed(value))
+                            if value.as_immediate() == Some(Immediate::True)
+                    )),
+                    ExoticOperation::LooseNotEqual => {
+                        unreachable!("limit fixture omits inequality")
+                    }
+                }
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ExecutionError::CompletionStackLimit {
+                        limit: 1,
+                        requested: 2,
+                    })
+                );
+                assert_eq!(isolate.fiber.completions.len(), 0);
+            }
         }
     }
 }
@@ -44,7 +72,7 @@ fn exotic_conversion_respects_two_entry_completion_limit() {
 /// Runs an own and inherited symbol getter whose fresh closure consumes the exact default hint.
 fn assert_exotic_conversion_batch<const N: usize>() {
     for inherited in [false, true] {
-        let module = exotic_conversion_module();
+        let module = exotic_conversion_module(ExoticOperation::Add);
         let mut isolate = test_isolate();
         install_exotic_getter(&mut isolate, &module, inherited);
         isolate
@@ -60,6 +88,32 @@ fn assert_exotic_conversion_batch<const N: usize>() {
             )
             .unwrap();
         assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)));
+    }
+}
+
+/// Exercises both equality opcodes after a fresh exotic callable and two forced collections.
+fn assert_exotic_equality_batch<const N: usize>() {
+    for operation in [ExoticOperation::LooseEqual, ExoticOperation::LooseNotEqual] {
+        let module = exotic_conversion_module(operation);
+        let mut isolate = test_isolate();
+        install_exotic_getter(&mut isolate, &module, true);
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &module,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ));
     }
 }
 
@@ -133,13 +187,20 @@ fn allocate_test_function(isolate: &mut Isolate, code: CodeId, function: Functio
         .unwrap()
 }
 
-/// Builds `40 + target`, a getter returning a fresh closure, and a method validating hint plus this.
-fn exotic_conversion_module() -> CompiledModule {
+/// Builds one exotic operation, a fresh getter closure, and a method validating hint plus this.
+fn exotic_conversion_module(operation: ExoticOperation) -> CompiledModule {
     let span = SourceSpan { start: 0, end: 1 };
     let mut entry = BytecodeBuilder::with_capacity(4, 0);
-    entry.emit(Opcode::LoadImmediate, &[0, 40], span).unwrap();
+    let (opcode, primitive) = match operation {
+        ExoticOperation::Add => (Opcode::Add, 40),
+        ExoticOperation::LooseEqual => (Opcode::LooseEqual, 2),
+        ExoticOperation::LooseNotEqual => (Opcode::LooseNotEqual, 3),
+    };
+    entry
+        .emit(Opcode::LoadImmediate, &[0, primitive], span)
+        .unwrap();
     entry.emit(Opcode::LoadScope, &[1, 0], span).unwrap();
-    entry.emit(Opcode::Add, &[2, 0, 1], span).unwrap();
+    entry.emit(opcode, &[2, 0, 1], span).unwrap();
     entry.emit(Opcode::Return, &[2], span).unwrap();
     let (entry_code, entry_map, entry_registers) = entry.finish().unwrap();
 

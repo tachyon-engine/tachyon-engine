@@ -1,5 +1,6 @@
 //! Primitive conversion, ToPrimitive continuation, and equality semantics.
 
+mod equality;
 mod exotic;
 mod numeric;
 
@@ -489,6 +490,14 @@ impl Isolate {
                 ConversionConsumer::RelationalLeft(_) | ConversionConsumer::RelationalRight(_) => {
                     unreachable!("relational consumers finish inside the conversion state machine")
                 }
+                ConversionConsumer::Equality(opcode) => {
+                    let equal = self.loose_equal_values(argument, receiver)?;
+                    Value::from_immediate(if equal == (opcode == Opcode::LooseEqual) {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    })
+                }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }
@@ -870,40 +879,6 @@ impl Isolate {
                 Ok(left == right)
             })
         })
-    }
-
-    /// Implements the supported primitive subset of Abstract Equality Comparison.
-    pub(crate) fn loose_equal_values(
-        &mut self,
-        left: Value,
-        right: Value,
-    ) -> Result<bool, ExecutionError> {
-        if self.strict_equal_values(left, right)? {
-            return Ok(true);
-        }
-        let left_immediate = left.as_immediate();
-        let right_immediate = right.as_immediate();
-        let left_nullish = matches!(left_immediate, Some(Immediate::Undefined | Immediate::Null));
-        let right_nullish = matches!(
-            right_immediate,
-            Some(Immediate::Undefined | Immediate::Null)
-        );
-        if left_nullish || right_nullish {
-            return Ok(left_nullish && right_nullish);
-        }
-        let left_number = numeric_value(left);
-        let right_number = numeric_value(right);
-        if left_number.is_some() && right_number.is_some() {
-            return Ok(left_number == right_number);
-        }
-        let left_boolean = matches!(left_immediate, Some(Immediate::True | Immediate::False));
-        let right_boolean = matches!(right_immediate, Some(Immediate::True | Immediate::False));
-        if left_boolean || right_boolean || left_number.is_some() || right_number.is_some() {
-            let left = self.convert_to_number(left)?;
-            let right = self.convert_to_number(right)?;
-            return Ok(numeric_value(left) == numeric_value(right));
-        }
-        Ok(false)
     }
 
     #[inline(always)]

@@ -123,6 +123,7 @@ pub(crate) enum ConversionConsumer {
     AddRight,
     RelationalLeft(Opcode),
     RelationalRight(Opcode),
+    Equality(Opcode),
 }
 
 impl ConversionConsumer {
@@ -138,7 +139,8 @@ impl ConversionConsumer {
             | Self::AddLeft
             | Self::AddRight
             | Self::RelationalLeft(_)
-            | Self::RelationalRight(_) => None,
+            | Self::RelationalRight(_)
+            | Self::Equality(_) => None,
         }
     }
 
@@ -151,7 +153,7 @@ impl ConversionConsumer {
     pub(crate) const fn preferred_type(self) -> PreferredType {
         if self.uses_string_hint() {
             PreferredType::String
-        } else if matches!(self, Self::AddLeft | Self::AddRight) {
+        } else if matches!(self, Self::AddLeft | Self::AddRight | Self::Equality(_)) {
             PreferredType::Default
         } else {
             PreferredType::Number
@@ -171,6 +173,7 @@ impl ConversionConsumer {
                 | Self::AddRight
                 | Self::RelationalLeft(_)
                 | Self::RelationalRight(_)
+                | Self::Equality(_)
         )
     }
 }
