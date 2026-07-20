@@ -2,5 +2,6 @@
 
 mod array;
 mod global;
+mod json;
 mod math;
 mod object;
