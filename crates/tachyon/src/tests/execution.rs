@@ -951,6 +951,19 @@ fn array_destructuring_reads_values_in_iterator_order() {
 }
 
 #[test]
+/// Collects the remaining values from the shared synchronous iterator into a fresh array.
+fn array_destructuring_rest_collects_the_iterator_tail() {
+    assert_eq!(
+        execute_source(
+            208,
+            "let [first, ...rest] = [1, 2, 3]; first + rest[0] + rest[1];"
+        )
+        .as_i32(),
+        Some(6),
+    );
+}
+
+#[test]
 /// Assigns inferred names to anonymous function defaults without changing ordinary name writes.
 fn destructuring_defaults_infer_anonymous_function_names() {
     assert_eq!(

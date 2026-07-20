@@ -96,9 +96,6 @@ impl Lowerer<'_> {
                 Ok(())
             }
             HirPatternKind::Array { elements, rest } => {
-                if rest.is_some() {
-                    return Err(self.unsupported(pattern.span, "array rest bytecode"));
-                }
                 let iterator = self.get_sync_iterator(value, pattern.span)?;
                 for element in elements.iter() {
                     let next = self.iterator_next(iterator, pattern.span)?;
@@ -145,6 +142,50 @@ impl Lowerer<'_> {
                     if let (Some(element), Some(selected)) = (element, selected) {
                         self.bind_pattern(element, selected, mutable)?;
                     }
+                }
+                if let Some(rest) = rest {
+                    let array = self.register()?;
+                    self.emit(Opcode::CreateArray, &[array.index()], pattern.span)?;
+                    let index = self.load_immediate(0, pattern.span)?;
+                    let loop_start = self.builder.new_label().map_err(CompileError::Builder)?;
+                    let end = self.builder.new_label().map_err(CompileError::Builder)?;
+                    self.builder
+                        .bind_label(loop_start)
+                        .map_err(CompileError::Builder)?;
+                    let next = self.iterator_next(iterator, pattern.span)?;
+                    self.builder
+                        .emit_jump_if_true(
+                            iterator.done,
+                            end,
+                            tachyon_bytecode::SourceSpan {
+                                start: pattern.span.start,
+                                end: pattern.span.end,
+                            },
+                        )
+                        .map_err(CompileError::Builder)?;
+                    let item = self.pattern_property(
+                        next,
+                        &HirObjectPropertyKey::Static("value".into()),
+                        pattern.span,
+                    )?;
+                    self.emit(
+                        Opcode::SetByValue,
+                        &[array.index(), item.index(), index.index()],
+                        pattern.span,
+                    )?;
+                    let one = self.load_immediate(1, pattern.span)?;
+                    let next_index =
+                        self.emit_binary(HirBinaryOperator::Add, index, one, pattern.span)?;
+                    self.emit(
+                        Opcode::Move,
+                        &[index.index(), next_index.index()],
+                        pattern.span,
+                    )?;
+                    self.emit_jump(loop_start, pattern.span)?;
+                    self.builder
+                        .bind_label(end)
+                        .map_err(CompileError::Builder)?;
+                    self.bind_pattern(rest, array, mutable)?;
                 }
                 self.close_iterator_normally(iterator, pattern.span)
             }
