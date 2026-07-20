@@ -565,6 +565,9 @@ impl Isolate {
             let symbol = self.allocate_symbol(Some(description))?;
             let property = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
+            if name == b"toStringTag" {
+                self.realm.well_known_symbols.to_string_tag = Some(symbol);
+            }
         }
         Ok(())
     }
@@ -1269,6 +1272,7 @@ impl Isolate {
             function_prototype,
             constructor_atom,
         )?;
+        self.install_collection_to_string_tags(map_prototype, set_prototype)?;
         let iterator_symbol = self
             .realm
             .well_known_symbols
@@ -1354,6 +1358,51 @@ impl Isolate {
             },
         )?;
         let _ = (map_keys, map_values, set_entries);
+        Ok(())
+    }
+
+    /// Defines the standard configurable `Symbol.toStringTag` properties for collection prototypes.
+    fn install_collection_to_string_tags(
+        &mut self,
+        map_prototype: Value,
+        set_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before collections");
+        let key = self.property_key(symbol)?;
+        for (prototype, tag) in [
+            (map_prototype, b"Map".as_slice()),
+            (set_prototype, b"Set".as_slice()),
+            (
+                self.realm
+                    .weak_map_prototype
+                    .expect("WeakMap prototype initializes before tag publication"),
+                b"WeakMap".as_slice(),
+            ),
+            (
+                self.realm
+                    .weak_set_prototype
+                    .expect("WeakSet prototype initializes before tag publication"),
+                b"WeakSet".as_slice(),
+            ),
+        ] {
+            let value = self.allocate_runtime_string(
+                JsString::try_from_latin1(tag).map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            self.define_data_property(
+                prototype,
+                key,
+                DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(false),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
+            )?;
+        }
         Ok(())
     }
 

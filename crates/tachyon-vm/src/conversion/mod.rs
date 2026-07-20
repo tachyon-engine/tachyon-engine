@@ -616,6 +616,9 @@ impl Isolate {
             output.extend(printed.bytes().map(u16::from));
             return Ok(());
         }
+        if self.is_symbol_value(value) {
+            return self.append_symbol_string_units(value, output);
+        }
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::UnsupportedPrimitiveStringConversion(value))?;
@@ -646,6 +649,39 @@ impl Isolate {
                 Ok(())
             })
         })
+    }
+
+    /// Appends the canonical `Symbol(description)` form without allocating a temporary JS string.
+    fn append_symbol_string_units(
+        &mut self,
+        value: Value,
+        output: &mut Vec<u16>,
+    ) -> Result<(), ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .expect("symbol values always carry a logical heap reference");
+        let symbol = self
+            .heap
+            .checked_reference(raw, self.types.symbol)
+            .map_err(ExecutionError::HeapReference)?;
+        let description = self.heap.with_running_scope(|scope| {
+            let symbol = scope.root(symbol).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(symbol, self.types.symbol)
+                    .map(|symbol| symbol.description)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        output
+            .try_reserve(8)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        output.extend(b"Symbol(".iter().map(|&byte| u16::from(byte)));
+        if let Some(description) = description {
+            self.append_primitive_string_units(description, output)?;
+        }
+        output.push(u16::from(b')'));
+        Ok(())
     }
 
     /// Computes the exact code-unit count used by primitive string conversion without allocating.
