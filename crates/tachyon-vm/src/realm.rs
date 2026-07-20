@@ -1714,6 +1714,25 @@ impl Isolate {
             let key = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(object, key, method, true)?;
         }
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Reflect");
+        let tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Reflect").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let key = self.property_key(symbol)?;
+        self.define_data_property(
+            object,
+            key,
+            DataPropertyDescriptor {
+                value: Some(tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         Ok(())
     }
 
