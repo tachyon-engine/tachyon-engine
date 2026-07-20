@@ -793,4 +793,12 @@ fn math_family_and_number_globals_are_available() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            904,
+            "new EvalError() instanceof EvalError && new URIError() instanceof URIError;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
