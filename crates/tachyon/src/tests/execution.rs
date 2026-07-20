@@ -973,6 +973,22 @@ fn object_destructuring_rest_copies_only_non_excluded_own_properties() {
         .as_i32(),
         Some(7)
     );
+    assert_eq!(
+        execute_source(
+            916,
+            "let calls = 0; let source = { get a() { calls++; return 3; }, b: 4 }; let { ...rest } = source; rest.a + rest.b + calls;",
+        )
+        .as_i32(),
+        Some(8)
+    );
+    assert_eq!(
+        execute_source(
+            917,
+            "let calls = 0; let source = { get a() { calls++; return 3; }, b: 4 }; let { a, ...rest } = source; a + rest.b + calls;",
+        )
+        .as_i32(),
+        Some(8)
+    );
 }
 
 #[test]

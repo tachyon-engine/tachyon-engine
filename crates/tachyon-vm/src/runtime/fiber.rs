@@ -297,6 +297,7 @@ pub(crate) enum PropertyCallbackMode {
     Descriptor,
     ArrayIteratorLength,
     ArrayIteratorElement,
+    CopyDataProperties,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -376,6 +377,17 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertySet,
             first: receiver,
             second: value,
+        }
+    }
+
+    /// Roots object-rest copy state while an enumerable source getter runs.
+    #[inline]
+    pub(crate) const fn copy_data_properties(site: NativeContinuationSite, state: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::CopyDataProperties),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

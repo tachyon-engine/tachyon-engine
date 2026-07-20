@@ -917,7 +917,16 @@ impl Isolate {
                 let target = self.read(base, operands[0])?;
                 let source = self.read(base, operands[1])?;
                 let exclusions = self.read(base, operands[2])?;
-                self.copy_data_properties(target, source, exclusions)?;
+                return self.begin_copy_data_properties(
+                    NativeContinuationSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        call_site: instruction_offset,
+                    },
+                    target,
+                    source,
+                    exclusions,
+                );
             }
             Opcode::CreateForInIterator => {
                 let source = self.read(base, operands[1])?;
@@ -1260,6 +1269,10 @@ impl Isolate {
                         | PropertyCallbackMode::ArrayIteratorElement
                 ) {
                     continuation.second()
+                } else if mode == PropertyCallbackMode::CopyDataProperties {
+                    let state =
+                        self.pending_copy_data_properties_reference(continuation.first())?;
+                    self.pending_copy_data_properties_source(state)?
                 } else {
                     receiver
                 };
@@ -2568,6 +2581,11 @@ impl Isolate {
                         let result =
                             self.array_iterator_resume_element(continuation.first(), value)?;
                         self.write(site.caller_base, site.destination, result)
+                    } else if mode == PropertyCallbackMode::CopyDataProperties {
+                        let state =
+                            self.pending_copy_data_properties_reference(continuation.first())?;
+                        self.resume_copy_data_properties(site, state, value)
+                            .map(|_| ())
                     } else {
                         self.write(site.caller_base, site.destination, value)
                     }

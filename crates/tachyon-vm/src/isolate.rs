@@ -62,6 +62,9 @@ impl Isolate {
             pending_native_property_key: registry
                 .try_register("PendingNativePropertyKey")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_copy_data_properties: registry
+                .try_register("PendingCopyDataProperties")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             property_storage: registry
                 .try_register("PropertyStorage")
                 .map_err(IsolateCreationError::TypeRegistration)?,
