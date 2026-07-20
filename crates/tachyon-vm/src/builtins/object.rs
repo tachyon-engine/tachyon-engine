@@ -34,6 +34,20 @@ impl Isolate {
         Ok(result)
     }
 
+    /// Returns an ordinary target's current prototype and rejects primitive Reflect targets.
+    pub(crate) fn reflect_get_prototype_of(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        Ok(self.object_snapshot(target)?.1.prototype)
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,

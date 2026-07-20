@@ -2276,6 +2276,10 @@ impl Isolate {
                     let keys = self.reflect_own_keys(&site)?;
                     return self.write(site.caller_base, site.destination, keys);
                 }
+                FunctionExecutable::Native(NativeFunction::ReflectGetPrototypeOf) => {
+                    let prototype = self.reflect_get_prototype_of(&site)?;
+                    return self.write(site.caller_base, site.destination, prototype);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);

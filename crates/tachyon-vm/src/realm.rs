@@ -1677,6 +1677,22 @@ impl Isolate {
         )?;
         let key = self.intern_intrinsic_name(b"ownKeys")?;
         self.set_intrinsic_data_property(object, key, method, true)
+            .and_then(|()| {
+                let method = self.allocate_native_function(
+                    NativeFunction::ReflectGetPrototypeOf,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: self
+                            .realm
+                            .function_prototype
+                            .expect("Function prototype initializes before Reflect"),
+                    },
+                )?;
+                let key = self.intern_intrinsic_name(b"getPrototypeOf")?;
+                self.set_intrinsic_data_property(object, key, method, true)
+            })
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.
