@@ -87,6 +87,19 @@ fn regexp_exec_materializes_named_groups() {
 }
 
 #[test]
+/// Accepts boxed String values through the same private StringData conversion as String methods.
+fn regexp_accepts_string_wrapper_pattern_flags_and_input() {
+    assert_eq!(
+        execute_source(
+            954,
+            "let regexp = RegExp(new String('a'), new String('g')); regexp.test(new String('a')) && regexp.lastIndex === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(

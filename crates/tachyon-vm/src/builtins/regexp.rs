@@ -251,6 +251,9 @@ impl Isolate {
     /// Converts the currently supported primitive inputs while rejecting observable object conversion.
     fn regexp_string_argument(&mut self, value: Option<Value>) -> Result<Value, ExecutionError> {
         let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_string_wrapper(value) {
+            return self.string_primitive_value(value);
+        }
         if self.is_object_value(value) {
             return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
         }
