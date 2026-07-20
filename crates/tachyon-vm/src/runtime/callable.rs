@@ -16,6 +16,7 @@ pub(crate) enum NativeFunction {
     ObjectDefineProperty,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetOwnPropertyNames,
+    ObjectGetOwnPropertySymbols,
     ObjectHasOwnProperty,
     ObjectPropertyIsEnumerable,
     ObjectToString,
@@ -448,6 +449,7 @@ impl NativeFunction {
             | Self::ObjectGetOwnPropertyDescriptor => 2,
             Self::ObjectConstructor
             | Self::ObjectGetOwnPropertyNames
+            | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
             | Self::ObjectPropertyIsEnumerable
             | Self::ObjectKeys
@@ -615,6 +617,7 @@ impl NativeFunction {
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
             Self::ObjectGetOwnPropertyNames => "getOwnPropertyNames",
+            Self::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
             Self::ObjectHasOwnProperty => "hasOwnProperty",
             Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
             Self::ObjectToString => "toString",

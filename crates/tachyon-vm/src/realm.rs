@@ -100,6 +100,22 @@ impl Isolate {
             get_own_property_names,
             true,
         )?;
+        let get_own_property_symbols = self.allocate_native_function(
+            NativeFunction::ObjectGetOwnPropertySymbols,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let get_own_symbols_atom = self.intern_intrinsic_name(b"getOwnPropertySymbols")?;
+        self.set_intrinsic_data_property(
+            constructor,
+            get_own_symbols_atom,
+            get_own_property_symbols,
+            true,
+        )?;
         let has_own_property = self.allocate_native_function(
             NativeFunction::ObjectHasOwnProperty,
             OrdinaryObject {

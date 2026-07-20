@@ -2211,6 +2211,10 @@ impl Isolate {
                     let result = self.object_get_own_property_names(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertySymbols) => {
+                    let result = self.object_get_own_property_symbols(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwnProperty) => {
                     return self.object_has_own_property(&site);
                 }

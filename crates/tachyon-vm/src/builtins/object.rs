@@ -334,6 +334,45 @@ impl Isolate {
         Ok(result)
     }
 
+    /// Materializes all present own Symbol keys in insertion order, excluding every string key.
+    pub(crate) fn object_get_own_property_symbols(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if matches!(
+            source.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        if !self.is_object_value(source) {
+            return Ok(result);
+        }
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let keys = self.ordinary_own_property_keys(source, snapshot)?;
+        let mut output_index = 0_u64;
+        for key in keys {
+            let Some(symbol) = key.symbol() else {
+                continue;
+            };
+            let output_key = self.safe_integer_property_atom(output_index)?;
+            self.set_own_data_property(result, output_key, symbol.value())?;
+            output_index = output_index
+                .checked_add(1)
+                .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        }
+        let length = self.length_atom()?;
+        self.set_own_data_property(result, length, safe_integer_value(output_index))?;
+        Ok(result)
+    }
+
     /// Returns Object.getPrototypeOf for the first call argument.
     pub(crate) fn object_get_prototype_of(
         &mut self,
