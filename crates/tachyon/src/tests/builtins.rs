@@ -48,6 +48,19 @@ fn regexp_constructor_exec_and_global_last_index_are_available() {
 }
 
 #[test]
+/// Distinguishes RegExp's absent-argument semantics from ordinary String conversion.
+fn regexp_constructor_defaults_to_the_canonical_empty_pattern() {
+    assert_eq!(
+        execute_source(
+            950,
+            "let omitted = RegExp(); let undefinedPattern = RegExp(undefined); let empty = RegExp(''); omitted.source === '(?:)' && undefinedPattern.source === '(?:)' && empty.source === '(?:)' && omitted.test('x') && undefinedPattern.test('x');",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Keeps sticky matching anchored at `lastIndex` and resets state on a failed execution.
 fn regexp_test_observes_sticky_last_index_and_failure_reset() {
     assert_eq!(

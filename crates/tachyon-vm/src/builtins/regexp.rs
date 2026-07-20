@@ -47,8 +47,31 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let pattern_argument = self.call_argument(site, 0)?;
         let flags_argument = self.call_argument(site, 1)?;
-        let pattern = self.regexp_string_argument(pattern_argument)?;
-        let flags = self.regexp_string_argument(flags_argument)?;
+        let mut pattern = if pattern_argument.is_none()
+            || pattern_argument
+                .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined))
+        {
+            self.allocate_runtime_string(
+                JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+            )?
+        } else {
+            self.regexp_string_argument(pattern_argument)?
+        };
+        if self.regexp_string_units(pattern)?.is_empty() {
+            pattern = self.allocate_runtime_string(
+                JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+            )?;
+        }
+        let flags = if flags_argument.is_none()
+            || flags_argument
+                .is_some_and(|value| value.as_immediate() == Some(Immediate::Undefined))
+        {
+            self.allocate_runtime_string(
+                JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
+            )?
+        } else {
+            self.regexp_string_argument(flags_argument)?
+        };
         let source_units = self.regexp_string_units(pattern)?;
         let source =
             String::from_utf16(&source_units).map_err(|_| ExecutionError::InvalidRegExpPattern)?;
@@ -57,15 +80,20 @@ impl Isolate {
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
         CompiledRegExp::compile_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
-        let prototype_atom = self.prototype_atom()?;
-        let prototype = self
-            .get_data_property(site.new_target, prototype_atom)?
-            .filter(|value| self.is_object_value(*value))
-            .unwrap_or_else(|| {
-                self.realm
-                    .regexp_prototype
-                    .expect("RegExp prototype initializes before construction")
-            });
+        let prototype = if self.is_object_value(site.new_target) {
+            let prototype_atom = self.prototype_atom()?;
+            self.get_data_property(site.new_target, prototype_atom)?
+                .filter(|value| self.is_object_value(*value))
+                .unwrap_or_else(|| {
+                    self.realm
+                        .regexp_prototype
+                        .expect("RegExp prototype initializes before construction")
+                })
+        } else {
+            self.realm
+                .regexp_prototype
+                .expect("RegExp prototype initializes before construction")
+        };
         let regexp = self.allocate_regexp_object(pattern, flags, prototype)?;
         let last_index = self.intern_intrinsic_name(b"lastIndex")?;
         self.define_fresh_data_property(
