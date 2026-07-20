@@ -186,6 +186,37 @@ fn string_constructor_creates_a_wrapper_object() {
 }
 
 #[test]
+/// Routes String wrapper length through its retained UTF-16 primitive data.
+fn string_wrapper_length_uses_string_exotic_data() {
+    assert_eq!(
+        execute_source(938, "new String('tachyon').length === 7;").as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Reuses primitive UTF-16 builtins after extracting a String wrapper's private data.
+fn string_wrapper_methods_use_the_private_string_data() {
+    assert_eq!(
+        execute_source(
+            939,
+            "let value = new String('tachyon'); value.charAt(1) === 'a' && value.slice(1, 4) === 'ach' && value.includes('chy');",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Reads canonical String exotic indices from a wrapper's private UTF-16 backing.
+fn string_wrapper_indexed_properties_read_private_string_data() {
+    assert_eq!(
+        execute_source(940, "new String('tachyon')[2] === 'c';").as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers JSON namespace publication, nested UTF-16 materialization, duplicate keys, and syntax errors.
 fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(

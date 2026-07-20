@@ -32,7 +32,7 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<Value>, ExecutionError> {
         let key = key.into();
-        let mut current = if self.is_string_value(receiver) {
+        let mut current = if self.is_string_value(receiver) || self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {
                 let length = self.string_value_length(receiver)?;

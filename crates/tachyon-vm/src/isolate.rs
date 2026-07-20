@@ -403,6 +403,15 @@ impl Isolate {
     }
 
     #[inline(always)]
+    pub(crate) fn is_string_wrapper(&self, value: Value) -> bool {
+        value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.string_object)
+                .is_ok()
+        })
+    }
+
+    #[inline(always)]
     pub(crate) fn is_symbol_value(&self, value: Value) -> bool {
         value
             .as_heap_ref()
@@ -413,6 +422,18 @@ impl Isolate {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::UnsupportedStringValue(value))?;
+        if let Ok(wrapper) = self.heap.checked_reference(raw, self.types.string_object) {
+            let string_data = self.heap.with_running_scope(|scope| {
+                let wrapper = scope.root(wrapper).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(wrapper, self.types.string_object)
+                        .map(|wrapper| wrapper.string_data)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return self.string_value_length(string_data);
+        }
         let string = self
             .heap
             .checked_reference(raw, self.types.string)

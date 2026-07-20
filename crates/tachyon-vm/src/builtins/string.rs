@@ -474,10 +474,7 @@ impl Isolate {
 
     /// Reads one primitive receiver unit after the currently supported ToIntegerOrInfinity conversion.
     fn string_code_unit_at(&mut self, site: &CallSite) -> Result<Option<u16>, ExecutionError> {
-        let receiver = site.this_value;
-        if !self.is_string_value(receiver) {
-            return Err(ExecutionError::NotObject(receiver));
-        }
+        let receiver = self.string_primitive_value(site.this_value)?;
         let position = self
             .call_argument(site, 0)?
             .map(|value| self.convert_to_number(value))
@@ -511,9 +508,7 @@ impl Isolate {
 
     /// Collects one primitive String's exact code units before an allocating builtin result is made.
     fn string_receiver_units(&mut self, receiver: Value) -> Result<Vec<u16>, ExecutionError> {
-        if !self.is_string_value(receiver) {
-            return Err(ExecutionError::NotObject(receiver));
-        }
+        let receiver = self.string_primitive_value(receiver)?;
         let raw = receiver.as_heap_ref().expect("primitive String is managed");
         let string = self
             .heap

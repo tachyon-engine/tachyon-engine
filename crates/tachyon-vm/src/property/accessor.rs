@@ -50,7 +50,7 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<PropertyRead, ExecutionError> {
-        let mut current = if self.is_string_value(receiver) {
+        let mut current = if self.is_string_value(receiver) || self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {
                 return self.string_value_length(receiver).and_then(|length| {
@@ -67,7 +67,8 @@ impl Isolate {
                     .and_then(|name| crate::property::keys::array_index(name.as_view()))
                 && (index as usize) < self.string_value_length(receiver)?
             {
-                let raw = receiver
+                let string_receiver = self.string_primitive_value(receiver)?;
+                let raw = string_receiver
                     .as_heap_ref()
                     .expect("primitive String identity has a managed reference");
                 let string = self
