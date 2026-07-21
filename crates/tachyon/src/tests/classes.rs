@@ -111,3 +111,13 @@ fn class_super_property_semantics() {
         );
     }
 }
+
+#[test]
+/// Publishes explicit class-expression names without leaking a lexical binding to the outer scope.
+fn non_referential_named_class_expression() {
+    let source = "var value = class Hidden { method() { return 1; } }; value.name === 'Hidden' && value.prototype.method() === 1 && typeof Hidden === 'undefined';";
+    assert_eq!(
+        execute_source(1_082, source).as_immediate(),
+        Some(Immediate::True),
+    );
+}

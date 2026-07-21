@@ -631,6 +631,54 @@ fn compiler_freezes_class_method_kind_and_definition_contracts() {
 }
 
 #[test]
+/// Accepts non-referential named class expressions while keeping recursive names explicit.
+fn compiler_handles_named_class_expression_without_leaking_binding() {
+    let class_source = source(
+        MediaType::JavaScript,
+        "var value = class Hidden { method() { return 1; } }; value.name;",
+    );
+    let hir = Compiler
+        .lower_to_hir(class_source.clone(), CompileOptions::default())
+        .unwrap();
+    assert!(hir.statements().iter().any(|statement| {
+        matches!(
+            &statement.kind,
+            HirStatementKind::VariableDeclaration(declaration)
+                if declaration.declarators.iter().any(|declarator| {
+                    matches!(
+                        declarator.initializer.as_ref().map(|initializer| &initializer.kind),
+                        Some(HirExpressionKind::Class(class))
+                            if class.name.as_deref() == Some("Hidden")
+                    )
+                })
+        )
+    }));
+    let module = Compiler
+        .compile(class_source, CompileOptions::default())
+        .unwrap();
+    assert!(
+        tachyon_bytecode::disassemble(&module.functions()[0])
+            .unwrap()
+            .contains("SetFunctionName")
+    );
+
+    let error = Compiler.lower_to_hir(
+        source(
+            MediaType::JavaScript,
+            "var value = class Hidden { method() { return Hidden; } }; value;",
+        ),
+        CompileOptions::default(),
+    );
+    assert!(matches!(
+        error,
+        Err(CompileError::UnsupportedSyntax {
+            syntax: "named class expression environment",
+            ..
+        })
+    ));
+}
+
+#[test]
 /// Freezes the synthetic default-derived constructor as explicit forwarding bytecode.
 fn compiler_emits_default_derived_constructor_forwarding() {
     let source = source(

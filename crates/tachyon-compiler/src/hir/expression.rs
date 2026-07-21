@@ -677,7 +677,7 @@ pub(super) fn lower_expression(
     Ok(HirExpression { span, kind })
 }
 
-/// Copies one base/derived constructor and static-name methods while rejecting unsupported elements.
+/// Copies one base/derived constructor and methods while preserving supported class-name semantics.
 pub(super) fn lower_class(
     class: &oxc::ast::ast::Class<'_>,
     declaration_name: Option<Arc<str>>,
@@ -697,13 +697,28 @@ pub(super) fn lower_class(
             "decorated or TypeScript class",
         ));
     }
-    if declaration_name.is_none() && class.id.is_some() {
-        return Err(unsupported(
-            source.name(),
-            source_span(class.span),
-            "named class expression",
-        ));
-    }
+    let class_name = match (&declaration_name, &class.id) {
+        (Some(name), _) => Some(name.clone()),
+        (None, Some(identifier)) => {
+            let symbol = identifier.symbol_id.get().ok_or_else(|| {
+                missing_semantic(source, source_span(identifier.span), "class name symbol")
+            })?;
+            if semantic
+                .scoping()
+                .get_resolved_references(symbol)
+                .next()
+                .is_some()
+            {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(class.span),
+                    "named class expression environment",
+                ));
+            }
+            Some(Arc::from(identifier.name.as_str()))
+        }
+        (None, None) => None,
+    };
     let mut constructor = None;
     let mut methods = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
@@ -765,7 +780,7 @@ pub(super) fn lower_class(
                 }
                 constructor = Some(lower_function_stencil(
                     &method.value,
-                    declaration_name.clone(),
+                    class_name.clone(),
                     None,
                     source,
                     semantic,
@@ -831,7 +846,7 @@ pub(super) fn lower_class(
             functions.push(HirFunction {
                 id,
                 span: source_span(class.span),
-                name: declaration_name.clone(),
+                name: class_name.clone(),
                 self_binding: None,
                 parameters: Arc::from([]),
                 parameter_initializers: Arc::from([]),
@@ -860,7 +875,7 @@ pub(super) fn lower_class(
     }
     stencil.strict = true;
     Ok(HirClass {
-        name: declaration_name,
+        name: class_name,
         super_class: class
             .super_class
             .as_ref()
