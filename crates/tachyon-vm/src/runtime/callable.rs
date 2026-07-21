@@ -1167,6 +1167,7 @@ pub(crate) struct VmTypes {
     pub(crate) symbol_object: GcType<SymbolObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
+    pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,

@@ -116,6 +116,9 @@ impl Isolate {
             pending_property_descriptor: registry
                 .try_register("PendingPropertyDescriptor")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_argument_list: registry
+                .try_register("PendingArgumentList")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_native_property_key: registry
                 .try_register("PendingNativePropertyKey")
                 .map_err(IsolateCreationError::TypeRegistration)?,

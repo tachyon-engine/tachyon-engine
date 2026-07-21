@@ -1342,6 +1342,9 @@ impl Isolate {
                     let state =
                         self.pending_copy_data_properties_reference(continuation.first())?;
                     self.pending_copy_data_properties_source(state)?
+                } else if mode == PropertyCallbackMode::ArgumentList {
+                    let state = self.pending_argument_list_reference(continuation.first())?;
+                    self.pending_argument_list_source(state)?
                 } else {
                     receiver
                 };
@@ -1907,7 +1910,7 @@ impl Isolate {
     }
 
     /// Drives a pre-built construct call site through bound forwarding and receiver allocation.
-    fn construct_site(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
+    pub(crate) fn construct_site(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         loop {
             let callable = self
                 .resolve_function_object(site.callee)
@@ -2409,15 +2412,28 @@ impl Isolate {
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let argument_list = self.call_argument(&site, 1)?;
-                    let (prefix, argument_count) =
-                        self.apply_argument_prefix(site.this_value, this_value, argument_list)?;
-                    site.callee = site.this_value;
-                    site.this_value = this_value;
-                    site.argument_base = 0;
-                    site.argument_prefix = Some(prefix);
-                    site.argument_prefix_offset = 0;
-                    site.argument_prefix_count = argument_count;
-                    site.argument_count = argument_count;
+                    let Some(argument_list) = argument_list else {
+                        site.callee = site.this_value;
+                        site.this_value = this_value;
+                        site.argument_base = 0;
+                        site.argument_prefix = None;
+                        site.argument_prefix_offset = 0;
+                        site.argument_prefix_count = 0;
+                        site.argument_count = 0;
+                        continue;
+                    };
+                    if !self.is_object_value(argument_list) {
+                        return Err(ExecutionError::NotObject(argument_list));
+                    }
+                    self.resolve_function_object(site.this_value)?;
+                    return self.begin_argument_list(
+                        &site,
+                        argument_list,
+                        site.this_value,
+                        this_value,
+                        Value::from_immediate(Immediate::Undefined),
+                        ArgumentListOperation::FunctionApply,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectApply) => {
                     let target = self
@@ -2434,15 +2450,15 @@ impl Isolate {
                     if !self.is_object_value(argument_list) {
                         return Err(ExecutionError::NotObject(argument_list));
                     }
-                    let (prefix, argument_count) =
-                        self.apply_argument_prefix(target, this_value, Some(argument_list))?;
-                    site.callee = target;
-                    site.this_value = this_value;
-                    site.argument_base = 0;
-                    site.argument_prefix = Some(prefix);
-                    site.argument_prefix_offset = 0;
-                    site.argument_prefix_count = argument_count;
-                    site.argument_count = argument_count;
+                    self.resolve_function_object(target)?;
+                    return self.begin_argument_list(
+                        &site,
+                        argument_list,
+                        target,
+                        this_value,
+                        Value::from_immediate(Immediate::Undefined),
+                        ArgumentListOperation::ReflectApply,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectConstruct) => {
                     let target = self
@@ -2458,25 +2474,17 @@ impl Isolate {
                     if !self.is_constructor_value(new_target)? {
                         return Err(ExecutionError::NonConstructor(new_target));
                     }
-                    let (prefix, count) = self.apply_argument_prefix(
+                    if !self.is_constructor_value(target)? {
+                        return Err(ExecutionError::NonConstructor(target));
+                    }
+                    return self.begin_argument_list(
+                        &site,
+                        arguments,
                         target,
                         Value::from_immediate(Immediate::Undefined),
-                        Some(arguments),
-                    )?;
-                    return self.construct_site(CallSite {
-                        caller_base: site.caller_base,
-                        destination: site.destination,
-                        callee: target,
-                        argument_base: 0,
-                        argument_prefix: Some(prefix),
-                        argument_prefix_offset: 0,
-                        argument_prefix_count: count,
-                        argument_count: count,
-                        this_value: Value::from_immediate(Immediate::Undefined),
                         new_target,
-                        construct_receiver: None,
-                        call_site: site.call_site,
-                    });
+                        ArgumentListOperation::ReflectConstruct,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototypeBind) => {
                     let bound = self.create_bound_function(&site)?;
@@ -3034,42 +3042,6 @@ impl Isolate {
         Ok(arguments)
     }
 
-    /// Materializes the ordinary-Array subset of CreateListFromArrayLike for `Function.prototype.apply`.
-    fn apply_argument_prefix(
-        &mut self,
-        target: Value,
-        this_value: Value,
-        argument_list: Option<Value>,
-    ) -> Result<(GcRef<BoundFunctionData>, u32), ExecutionError> {
-        let Some(argument_list) = argument_list else {
-            let prefix = self.create_apply_argument_prefix(target, this_value, Vec::new())?;
-            return Ok((prefix, 0));
-        };
-        if !self.is_array_value(argument_list)? {
-            return Err(ExecutionError::NotObject(argument_list));
-        }
-        let length_atom = self.length_atom()?;
-        let length = self
-            .get_data_property(argument_list, length_atom)?
-            .and_then(|value| value.as_i32())
-            .filter(|length| *length >= 0)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(argument_list))?;
-        let count = u32::try_from(length).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
-        let mut arguments = Vec::new();
-        arguments
-            .try_reserve_exact(length as usize)
-            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
-        for index in 0..length {
-            let key = self.safe_integer_property_atom(index as u64)?;
-            arguments.push(
-                self.get_data_property(argument_list, key)?
-                    .unwrap_or(Value::from_immediate(Immediate::Undefined)),
-            );
-        }
-        let prefix = self.create_apply_argument_prefix(target, this_value, arguments)?;
-        Ok((prefix, count))
-    }
-
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.
     fn push_call_frame(
         &mut self,
@@ -3311,6 +3283,9 @@ impl Isolate {
                             self.pending_copy_data_properties_reference(continuation.first())?;
                         self.resume_copy_data_properties(site, state, value)
                             .map(|_| ())
+                    } else if mode == PropertyCallbackMode::ArgumentList {
+                        let state = self.pending_argument_list_reference(continuation.first())?;
+                        self.resume_argument_list(site, state, value)
                     } else {
                         self.write(site.caller_base, site.destination, value)
                     }

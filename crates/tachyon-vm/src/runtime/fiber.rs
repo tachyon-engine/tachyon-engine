@@ -303,6 +303,7 @@ pub(crate) enum PropertyCallbackMode {
     Descriptor,
     ArrayIteratorLength,
     ArrayIteratorElement,
+    ArgumentList,
     CopyDataProperties,
 }
 
@@ -477,6 +478,17 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::CopyDataProperties),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots one pending argument list while `Get(length)` or `Get(index)` executes JavaScript.
+    #[inline]
+    pub(crate) const fn argument_list_get(site: NativeContinuationSite, state: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::ArgumentList),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
         }

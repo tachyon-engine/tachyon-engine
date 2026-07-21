@@ -9,6 +9,7 @@
 //!
 //! This crate intentionally has no host I/O surface.
 
+mod argument_list;
 mod array;
 mod atom;
 mod bound_function;
@@ -61,6 +62,7 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
+use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
 use collection::{
