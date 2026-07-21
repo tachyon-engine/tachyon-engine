@@ -742,6 +742,9 @@ fn verify_instruction(
         | Opcode::DefineSetterByValue
         | Opcode::DefineClassGetterById
         | Opcode::DefineClassSetterById
+        | Opcode::DefineClassMethodByValue
+        | Opcode::DefineClassGetterByValue
+        | Opcode::DefineClassSetterByValue
         | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -756,6 +759,10 @@ fn verify_instruction(
                     operand: operands[2],
                 });
             }
+        }
+        Opcode::SetFunctionNameByValue => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
         Opcode::GetById | Opcode::SetById | Opcode::DefineClassMethodById => {

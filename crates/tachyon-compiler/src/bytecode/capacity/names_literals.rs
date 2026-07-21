@@ -241,7 +241,16 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             if class.name.is_some() {
                 count = checked_count_add(count, 1, "scope names")?;
             }
-            count = checked_count_add(count, class.methods.len(), "scope names")?;
+            for method in class.methods.iter() {
+                count = checked_count_add(
+                    count,
+                    match &method.key {
+                        HirObjectPropertyKey::Static(_) => 1,
+                        HirObjectPropertyKey::Computed(key) => expression_scope_name_count(key)?,
+                    },
+                    "scope names",
+                )?;
+            }
             Ok(count)
         }
         HirExpressionKind::Sequence(expressions) => {
@@ -618,6 +627,24 @@ fn declaration_literal_count(declaration: &HirVariableDeclaration) -> Result<usi
 
 fn expression_literal_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Class(class) => {
+            let mut count = class
+                .super_class
+                .as_deref()
+                .map(expression_literal_count)
+                .transpose()?
+                .unwrap_or(0);
+            for method in class.methods.iter() {
+                if let HirObjectPropertyKey::Computed(key) = &method.key {
+                    count = checked_count_add(
+                        count,
+                        expression_literal_count(key)?,
+                        "bytecode constants",
+                    )?;
+                }
+            }
+            Ok(count)
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

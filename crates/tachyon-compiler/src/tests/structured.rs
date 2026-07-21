@@ -732,6 +732,33 @@ fn compiler_freezes_class_accessor_contracts() {
     assert_eq!(entry.matches("DefineClassSetterById").count(), 1);
 }
 
+#[test]
+/// Preserves computed class-key expressions and emits runtime naming/value-definition opcodes.
+fn compiler_freezes_computed_class_method_contracts() {
+    let source = source(
+        MediaType::JavaScript,
+        "var key = 'value'; class A { [key]() { return 1; } static get [key]() { return 2; } } A;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let methods: Vec<_> = hir
+        .functions()
+        .iter()
+        .filter(|function| function.kind == HirFunctionKind::ClassMethod)
+        .collect();
+    assert_eq!(methods.len(), 2);
+    assert!(methods.iter().all(|function| function.name.is_none()));
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("ToPropertyKey").count(), 2);
+    assert_eq!(entry.matches("SetFunctionNameByValue").count(), 1);
+    assert_eq!(entry.matches("SetAccessorFunctionName").count(), 1);
+    assert_eq!(entry.matches("DefineClassMethodByValue").count(), 1);
+    assert_eq!(entry.matches("DefineClassGetterByValue").count(), 1);
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

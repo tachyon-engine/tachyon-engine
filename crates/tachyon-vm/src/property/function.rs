@@ -10,9 +10,32 @@ impl Isolate {
         key: PropertyKey,
         is_getter: bool,
     ) -> Result<(), ExecutionError> {
+        self.set_computed_function_name(receiver, key, Some(is_getter))
+    }
+
+    /// Materializes an ordinary method name after its computed key becomes a PropertyKey.
+    pub(crate) fn set_method_function_name(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        self.set_computed_function_name(receiver, key, None)
+    }
+
+    /// Builds the exact string or `[description]` name with an optional accessor prefix.
+    fn set_computed_function_name(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        accessor: Option<bool>,
+    ) -> Result<(), ExecutionError> {
         const GET_PREFIX: &[u8] = b"get ";
         const SET_PREFIX: &[u8] = b"set ";
-        let prefix = if is_getter { GET_PREFIX } else { SET_PREFIX };
+        let prefix = match accessor {
+            Some(true) => GET_PREFIX,
+            Some(false) => SET_PREFIX,
+            None => &[],
+        };
         let function = self
             .resolve_function_object(receiver)
             .map_err(|_| ExecutionError::NonCallable(receiver))?;
@@ -78,15 +101,11 @@ impl Isolate {
             .map_err(ExecutionError::PropertyKeyString)?;
         let name = self.allocate_runtime_string(name)?;
         let name_key = self.name_atom()?;
-        self.define_data_property(
+        self.define_fresh_data_property(
             receiver,
             name_key,
-            DataPropertyDescriptor {
-                value: Some(name),
-                writable: Some(false),
-                enumerable: Some(false),
-                configurable: Some(true),
-            },
+            name,
+            PropertyAttributes::data(false, false, true),
         )
     }
 

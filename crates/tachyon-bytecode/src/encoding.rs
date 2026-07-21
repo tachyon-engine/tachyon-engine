@@ -235,9 +235,17 @@ pub enum Opcode {
     DefineClassGetterById = 94,
     /// Defines one non-enumerable class setter from a compiled closure.
     DefineClassSetterById = 95,
+    /// Assigns an inferred function name from one normalized runtime PropertyKey.
+    SetFunctionNameByValue = 96,
+    /// Defines one non-enumerable class method with a normalized runtime PropertyKey.
+    DefineClassMethodByValue = 97,
+    /// Defines one non-enumerable class getter with a normalized runtime PropertyKey.
+    DefineClassGetterByValue = 98,
+    /// Defines one non-enumerable class setter with a normalized runtime PropertyKey.
+    DefineClassSetterByValue = 99,
 }
 
-pub(super) const OPCODE_COUNT: usize = 96;
+pub(super) const OPCODE_COUNT: usize = 100;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -335,10 +343,14 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // CreateBaseClass
     3, // DefineClassGetterById
     3, // DefineClassSetterById
+    2, // SetFunctionNameByValue
+    3, // DefineClassMethodByValue
+    3, // DefineClassGetterByValue
+    3, // DefineClassSetterByValue
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassSetterById as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassSetterByValue as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -480,6 +492,10 @@ impl Opcode {
             29 => Some(Self::CreateBaseClass),
             30 => Some(Self::DefineClassGetterById),
             31 => Some(Self::DefineClassSetterById),
+            32 => Some(Self::SetFunctionNameByValue),
+            33 => Some(Self::DefineClassMethodByValue),
+            34 => Some(Self::DefineClassGetterByValue),
+            35 => Some(Self::DefineClassSetterByValue),
             _ => None,
         }
     }

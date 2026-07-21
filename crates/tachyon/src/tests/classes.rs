@@ -61,3 +61,24 @@ fn class_accessor_semantics_and_descriptors() {
         Some(Immediate::True),
     );
 }
+
+#[test]
+/// Preserves source order, inferred names, Symbol spelling, and class descriptors for computed keys.
+fn computed_class_element_semantics() {
+    for (source_id, source) in [
+        (
+            1_076,
+            "var order = ''; function key(name) { order = order + name; return name; } class A { [key('a')]() { return 1; } static [key('b')]() { return 2; } get [key('c')]() { return this._c; } set [key('c')](value) { this._c = value; } } var instance = new A(); instance.c = 3; var descriptor = Object.getOwnPropertyDescriptor(A.prototype, 'c'); order === 'abcc' && instance.a() === 1 && A.b() === 2 && instance.c === 3 && A.prototype.a.name === 'a' && A.b.name === 'b' && descriptor.get.name === 'get c' && descriptor.set.name === 'set c' && descriptor.enumerable === false;",
+        ),
+        (
+            1_077,
+            "var key = Symbol('method'); class A { [key]() { return 1; } } A.prototype[key].name === '[method]' && A.prototype[key]() === 1;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

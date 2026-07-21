@@ -157,8 +157,12 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineClassMethodById,
                 Opcode::DefineClassGetterById,
                 Opcode::DefineClassSetterById,
+                Opcode::DefineClassMethodByValue,
+                Opcode::DefineClassGetterByValue,
+                Opcode::DefineClassSetterByValue,
             ],
         ),
+        (2, &[Opcode::SetFunctionNameByValue]),
         (2, &[Opcode::CreateBaseClass]),
     ];
     let mut seen = [false; OPCODE_COUNT];

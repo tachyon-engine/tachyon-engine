@@ -153,6 +153,16 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " target=r{}, closure=r{}, name={}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::SetFunctionNameByValue => {
+            write!(output, " closure=r{}, key=r{}", operands[0], operands[1])?
+        }
+        Opcode::DefineClassMethodByValue
+        | Opcode::DefineClassGetterByValue
+        | Opcode::DefineClassSetterByValue => write!(
+            output,
+            " target=r{}, closure=r{}, key=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::Jump | Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
             write!(output, " pc={}", operands[0])?
         }

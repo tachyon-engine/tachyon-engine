@@ -65,7 +65,8 @@ pub struct HirClass {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirClassMethod {
-    pub name: Arc<str>,
+    pub span: SourceSpan,
+    pub key: HirObjectPropertyKey,
     pub function: FunctionStencilId,
     pub is_static: bool,
     pub kind: HirClassMethodKind,
@@ -696,8 +697,7 @@ pub(super) fn lower_class(
                 "class fields or static blocks",
             ));
         };
-        if method.computed
-            || !method.decorators.is_empty()
+        if !method.decorators.is_empty()
             || method.accessibility.is_some()
             || method.r#override
             || method.optional
@@ -705,27 +705,37 @@ pub(super) fn lower_class(
             return Err(unsupported(
                 source.name(),
                 source_span(method.span),
-                "computed or TypeScript class method",
+                "TypeScript class method",
             ));
         }
-        let name: Arc<str> = match &method.key {
-            PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
-            PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
-            PropertyKey::NumericLiteral(literal) => {
-                let mut buffer = ryu_js::Buffer::new();
-                Arc::from(if literal.value == 0.0 {
-                    "0"
-                } else {
-                    buffer.format(literal.value)
-                })
-            }
-            _ => {
-                return Err(unsupported(
-                    source.name(),
-                    source_span(method.key.span()),
-                    "class method key",
-                ));
-            }
+        let key = if method.computed {
+            HirObjectPropertyKey::Computed(lower_expression(
+                method.key.to_expression(),
+                source,
+                semantic,
+                functions,
+            )?)
+        } else {
+            let name: Arc<str> = match &method.key {
+                PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
+                PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+                PropertyKey::NumericLiteral(literal) => {
+                    let mut buffer = ryu_js::Buffer::new();
+                    Arc::from(if literal.value == 0.0 {
+                        "0"
+                    } else {
+                        buffer.format(literal.value)
+                    })
+                }
+                _ => {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(method.key.span()),
+                        "class method key",
+                    ));
+                }
+            };
+            HirObjectPropertyKey::Static(name)
         };
         match method.kind {
             oxc::ast::ast::MethodDefinitionKind::Constructor => {
@@ -756,14 +766,21 @@ pub(super) fn lower_class(
                         unreachable!("constructor arm handled above")
                     }
                 };
-                let function_name = match kind {
-                    HirClassMethodKind::Method => name.clone(),
-                    HirClassMethodKind::Getter => Arc::from(format!("get {name}")),
-                    HirClassMethodKind::Setter => Arc::from(format!("set {name}")),
+                let function_name = match (&key, kind) {
+                    (HirObjectPropertyKey::Computed(_), _) => None,
+                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Method) => {
+                        Some(name.clone())
+                    }
+                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Getter) => {
+                        Some(Arc::from(format!("get {name}")))
+                    }
+                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Setter) => {
+                        Some(Arc::from(format!("set {name}")))
+                    }
                 };
                 let function = lower_function_stencil(
                     &method.value,
-                    Some(function_name),
+                    function_name,
                     None,
                     source,
                     semantic,
@@ -775,7 +792,8 @@ pub(super) fn lower_class(
                 stencil.strict = true;
                 stencil.kind = super::program::HirFunctionKind::ClassMethod;
                 methods.push(HirClassMethod {
-                    name,
+                    span: source_span(method.span),
+                    key,
                     function,
                     is_static: method.r#static,
                     kind,

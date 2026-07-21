@@ -53,6 +53,20 @@ instance.value = 7;
 instance.value === 7 && A.answer === 42;
 "#;
 
+const COMPUTED_CLASS_SOURCE: &str = r#"
+var order = "";
+function key(name) { order = order + name; return name; }
+class A {
+  [key("a")]() { return 1; }
+  static [key("b")]() { return 2; }
+  get [key("c")]() { return this._c; }
+  set [key("c")](value) { this._c = value; }
+}
+var instance = new A();
+instance.c = 3;
+order === "abcc" && instance.a() === 1 && A.b() === 2 && instance.c === 3;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -87,6 +101,15 @@ fn class_accessors_execute_for_every_dispatch_batch() {
     assert_class_accessor_batch::<4>();
     assert_class_accessor_batch::<8>();
     assert_class_accessor_batch::<16>();
+}
+
+#[test]
+fn computed_class_elements_execute_for_every_dispatch_batch() {
+    assert_computed_class_batch::<1>();
+    assert_computed_class_batch::<2>();
+    assert_computed_class_batch::<4>();
+    assert_computed_class_batch::<8>();
+    assert_computed_class_batch::<16>();
 }
 
 #[test]
@@ -144,6 +167,24 @@ fn class_accessors_survive_forced_major_collections() {
     assert_forced_major_source(CLASS_ACCESSOR_SOURCE, 39);
 }
 
+#[test]
+fn computed_class_elements_survive_forced_major_collections() {
+    for (source, source_id) in [
+        ("class A { ['a']() { return 1; } } true;", 40),
+        (
+            "function key(value) { return value; } class A { [key('a')]() { return 1; } } true;",
+            41,
+        ),
+        (
+            "class A { get ['a']() { return 1; } set ['a'](value) {} } true;",
+            42,
+        ),
+        (COMPUTED_CLASS_SOURCE, 43),
+    ] {
+        assert_forced_major_source(source, source_id);
+    }
+}
+
 /// Executes a focused class fixture with collection before every managed allocation.
 fn assert_forced_major_source(source: &str, source_id: u32) {
     let module = compile_source(source, source_id);
@@ -159,7 +200,7 @@ fn assert_forced_major_source(source: &str, source_id: u32) {
                 quantum: 2_048,
             },
         )
-        .expect("forced-major class fixture executes");
+        .unwrap_or_else(|error| panic!("forced-major class fixture failed: {error:?}; {source}"));
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "forced-major class fixture returned {outcome:?}"
@@ -236,6 +277,25 @@ fn assert_class_accessor_batch<const N: usize>() {
             },
         )
         .expect("class accessor fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes source-ordered computed keys, runtime names, and definitions with each batch size.
+fn assert_computed_class_batch<const N: usize>() {
+    let module = compile_source(COMPUTED_CLASS_SOURCE, 90 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 768,
+                quantum: 768,
+            },
+        )
+        .expect("computed class fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

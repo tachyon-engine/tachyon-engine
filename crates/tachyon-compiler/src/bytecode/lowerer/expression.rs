@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+enum LoweredClassKey {
+    Static(u32),
+    Computed(RegisterId),
+}
+
 impl Lowerer<'_> {
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     pub(in crate::bytecode) fn expression(
@@ -547,7 +553,6 @@ impl Lowerer<'_> {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
         }
-        let instance_methods = class.methods.iter().filter(|method| !method.is_static);
         let instance_target = if class.methods.iter().any(|method| !method.is_static) {
             let target = self.register()?;
             self.emit(
@@ -559,49 +564,86 @@ impl Lowerer<'_> {
         } else {
             None
         };
-        for method in instance_methods {
-            let closure = self.register()?;
-            let function = method
-                .function
-                .index()
-                .checked_add(1)
-                .ok_or(CompileError::RegisterOverflow)?;
-            self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
-            let name = self.scope_name(&method.name)?;
-            let opcode = match method.kind {
-                crate::HirClassMethodKind::Method => Opcode::DefineClassMethodById,
-                crate::HirClassMethodKind::Getter => Opcode::DefineClassGetterById,
-                crate::HirClassMethodKind::Setter => Opcode::DefineClassSetterById,
+        for method in class.methods.iter() {
+            let target = if method.is_static {
+                destination
+            } else {
+                instance_target.expect("instance target exists when an instance method was counted")
             };
-            self.emit(
-                opcode,
-                &[
-                    instance_target
-                        .expect("instance method target is allocated before method lowering")
-                        .index(),
-                    closure.index(),
-                    name,
-                ],
-                span,
-            )?;
-        }
-        for method in class.methods.iter().filter(|method| method.is_static) {
-            let closure = self.register()?;
-            let function = method
-                .function
-                .index()
-                .checked_add(1)
-                .ok_or(CompileError::RegisterOverflow)?;
-            self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
-            let name = self.scope_name(&method.name)?;
-            let opcode = match method.kind {
-                crate::HirClassMethodKind::Method => Opcode::DefineClassMethodById,
-                crate::HirClassMethodKind::Getter => Opcode::DefineClassGetterById,
-                crate::HirClassMethodKind::Setter => Opcode::DefineClassSetterById,
-            };
-            self.emit(opcode, &[destination.index(), closure.index(), name], span)?;
+            self.define_class_method(method, target)?;
         }
         Ok(destination)
+    }
+
+    /// Evaluates one class key in source order, names its closure, and installs its descriptor.
+    fn define_class_method(
+        &mut self,
+        method: &crate::HirClassMethod,
+        target: RegisterId,
+    ) -> Result<(), CompileError> {
+        let key = match &method.key {
+            HirObjectPropertyKey::Static(name) => LoweredClassKey::Static(self.scope_name(name)?),
+            HirObjectPropertyKey::Computed(expression) => {
+                let key = self.expression(expression)?;
+                self.prepare_property_key(key, target, false, expression.span)?;
+                LoweredClassKey::Computed(key)
+            }
+        };
+        let closure = self.register()?;
+        let function = method
+            .function
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CreateClosure,
+            &[closure.index(), function],
+            method.span,
+        )?;
+        if let LoweredClassKey::Computed(key) = key {
+            match method.kind {
+                crate::HirClassMethodKind::Method => self.emit(
+                    Opcode::SetFunctionNameByValue,
+                    &[closure.index(), key.index()],
+                    method.span,
+                )?,
+                crate::HirClassMethodKind::Getter | crate::HirClassMethodKind::Setter => self
+                    .emit(
+                        Opcode::SetAccessorFunctionName,
+                        &[
+                            closure.index(),
+                            key.index(),
+                            u32::from(method.kind == crate::HirClassMethodKind::Getter),
+                        ],
+                        method.span,
+                    )?,
+            }
+        }
+        let opcode = match (method.kind, key) {
+            (crate::HirClassMethodKind::Method, LoweredClassKey::Static(_)) => {
+                Opcode::DefineClassMethodById
+            }
+            (crate::HirClassMethodKind::Getter, LoweredClassKey::Static(_)) => {
+                Opcode::DefineClassGetterById
+            }
+            (crate::HirClassMethodKind::Setter, LoweredClassKey::Static(_)) => {
+                Opcode::DefineClassSetterById
+            }
+            (crate::HirClassMethodKind::Method, LoweredClassKey::Computed(_)) => {
+                Opcode::DefineClassMethodByValue
+            }
+            (crate::HirClassMethodKind::Getter, LoweredClassKey::Computed(_)) => {
+                Opcode::DefineClassGetterByValue
+            }
+            (crate::HirClassMethodKind::Setter, LoweredClassKey::Computed(_)) => {
+                Opcode::DefineClassSetterByValue
+            }
+        };
+        let key = match key {
+            LoweredClassKey::Static(name) => name,
+            LoweredClassKey::Computed(key) => key.index(),
+        };
+        self.emit(opcode, &[target.index(), closure.index(), key], method.span)
     }
 
     /// Evaluates super arguments into one verified contiguous window before construction.

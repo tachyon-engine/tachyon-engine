@@ -918,6 +918,11 @@ impl Isolate {
                 let key = self.property_key(self.read(base, operands[1])?)?;
                 self.set_accessor_function_name(function, key, operands[2] != 0)?;
             }
+            Opcode::SetFunctionNameByValue => {
+                let function = self.read(base, operands[0])?;
+                let key = self.property_key(self.read(base, operands[1])?)?;
+                self.set_method_function_name(function, key)?;
+            }
             Opcode::CreateObject => {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
@@ -1034,10 +1039,14 @@ impl Isolate {
                     instruction_offset,
                 );
             }
-            Opcode::DefineClassMethodById => {
+            Opcode::DefineClassMethodById | Opcode::DefineClassMethodByValue => {
                 let target = self.read(base, operands[0])?;
                 let method = self.read(base, operands[1])?;
-                let key = self.scope_atom(code, operands[2])?;
+                let key = if opcode == Opcode::DefineClassMethodById {
+                    self.scope_atom(code, operands[2])?.into()
+                } else {
+                    self.property_key(self.read(base, operands[2])?)?
+                };
                 self.define_data_property(
                     target,
                     key,
@@ -1049,11 +1058,24 @@ impl Isolate {
                     },
                 )?;
             }
-            Opcode::DefineClassGetterById | Opcode::DefineClassSetterById => {
+            Opcode::DefineClassGetterById
+            | Opcode::DefineClassSetterById
+            | Opcode::DefineClassGetterByValue
+            | Opcode::DefineClassSetterByValue => {
                 let receiver = self.read(base, operands[0])?;
                 let function = self.read(base, operands[1])?;
-                let key = self.scope_atom(code, operands[2])?;
-                let descriptor = if opcode == Opcode::DefineClassGetterById {
+                let key = if matches!(
+                    opcode,
+                    Opcode::DefineClassGetterById | Opcode::DefineClassSetterById
+                ) {
+                    self.scope_atom(code, operands[2])?.into()
+                } else {
+                    self.property_key(self.read(base, operands[2])?)?
+                };
+                let descriptor = if matches!(
+                    opcode,
+                    Opcode::DefineClassGetterById | Opcode::DefineClassGetterByValue
+                ) {
                     AccessorPropertyDescriptor {
                         getter: Some(function),
                         setter: None,
@@ -1068,11 +1090,7 @@ impl Isolate {
                         configurable: Some(true),
                     }
                 };
-                self.define_property(
-                    receiver,
-                    key.into(),
-                    PropertyDescriptor::Accessor(descriptor),
-                )?;
+                self.define_property(receiver, key, PropertyDescriptor::Accessor(descriptor))?;
             }
             Opcode::DefineGetterById | Opcode::DefineSetterById => {
                 let receiver = self.read(base, operands[0])?;
