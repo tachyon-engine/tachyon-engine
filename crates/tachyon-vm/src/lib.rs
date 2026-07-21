@@ -112,9 +112,9 @@ use runtime::{
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
         PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,
-        ProxyContinuationStage, ProxyHasStage, ProxyInternalMethod, ProxySetPrototypeMode,
-        ProxySetPrototypeStage, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
-        next_to_primitive_stage,
+        ProxyContinuationStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyHasStage,
+        ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage, SymbolAllocationRoots,
+        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

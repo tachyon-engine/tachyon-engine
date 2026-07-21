@@ -96,18 +96,68 @@ impl Isolate {
                 self.begin_property_descriptor(site, pending.first, key, pending.second, true)
             }
             BuiltinPropertyKeyConsumer::GetOwnPropertyDescriptor => {
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_get_own(
+                            site,
+                            pending.first,
+                            primitive,
+                            ProxyGetOwnMode::Descriptor,
+                        )
+                        .map(|_| ());
+                }
                 self.finish_get_own_property_descriptor(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::ReflectGetOwnPropertyDescriptor => {
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_get_own(
+                            site,
+                            pending.first,
+                            primitive,
+                            ProxyGetOwnMode::Descriptor,
+                        )
+                        .map(|_| ());
+                }
                 self.finish_get_own_property_descriptor(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::HasOwnProperty => {
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_get_own(
+                            site,
+                            pending.first,
+                            primitive,
+                            ProxyGetOwnMode::HasOwn,
+                        )
+                        .map(|_| ());
+                }
                 self.finish_builtin_has_own(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::PropertyIsEnumerable => {
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_get_own(
+                            site,
+                            pending.first,
+                            primitive,
+                            ProxyGetOwnMode::Enumerable,
+                        )
+                        .map(|_| ());
+                }
                 self.finish_property_is_enumerable(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::HasOwn => {
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_get_own(
+                            site,
+                            pending.first,
+                            primitive,
+                            ProxyGetOwnMode::HasOwn,
+                        )
+                        .map(|_| ());
+                }
                 self.finish_builtin_has_own(site, pending.first, key)
             }
             BuiltinPropertyKeyConsumer::ReflectDeleteProperty => {

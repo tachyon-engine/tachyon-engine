@@ -15,6 +15,14 @@ enum PropertyDescriptorField {
     Set,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum PropertyDescriptorConsumer {
+    Define,
+    ReflectDefine,
+    ProxyGetOwn(ProxyGetOwnMode),
+}
+
 impl PropertyDescriptorField {
     const FIRST: Self = Self::Enumerable;
 
@@ -57,12 +65,17 @@ pub(crate) struct PendingPropertyDescriptor {
     values: [Value; PROPERTY_DESCRIPTOR_FIELD_COUNT],
     present: u8,
     field: PropertyDescriptorField,
-    reflect_result: bool,
+    consumer: PropertyDescriptorConsumer,
 }
 
 impl PendingPropertyDescriptor {
     #[inline]
-    fn new(target: Value, source: Value, key: PropertyKey, reflect_result: bool) -> Self {
+    fn new(
+        target: Value,
+        source: Value,
+        key: PropertyKey,
+        consumer: PropertyDescriptorConsumer,
+    ) -> Self {
         Self {
             target,
             source,
@@ -70,7 +83,7 @@ impl PendingPropertyDescriptor {
             values: [Value::from_immediate(Immediate::Undefined); PROPERTY_DESCRIPTOR_FIELD_COUNT],
             present: 0,
             field: PropertyDescriptorField::FIRST,
-            reflect_result,
+            consumer,
         }
     }
 
@@ -198,21 +211,56 @@ impl Isolate {
         if !self.is_object_value(source) {
             return Err(ExecutionError::NotObject(source));
         }
-        let mut pending = PendingPropertyDescriptor::new(target, source, key, reflect_result);
+        let consumer = if reflect_result {
+            PropertyDescriptorConsumer::ReflectDefine
+        } else {
+            PropertyDescriptorConsumer::Define
+        };
+        let mut pending = PendingPropertyDescriptor::new(target, source, key, consumer);
+        self.scan_property_descriptor(site, &mut pending)
+    }
+
+    /// Starts resumable ToPropertyDescriptor for one Proxy trap result.
+    pub(crate) fn begin_proxy_property_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        mode: ProxyGetOwnMode,
+        key: PropertyKey,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(source) {
+            return Err(ExecutionError::ProxyInvariantViolation);
+        }
+        let mut pending = PendingPropertyDescriptor::new(
+            Value::from_heap_ref(state.raw()),
+            source,
+            key,
+            PropertyDescriptorConsumer::ProxyGetOwn(mode),
+        );
+        self.scan_property_descriptor(site, &mut pending)
+    }
+
+    /// Scans six descriptor fields in specification order and suspends only on accessor callbacks.
+    fn scan_property_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: &mut PendingPropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
         loop {
             let field = pending.field;
             let atom = self.intern_intrinsic_name(field.name())?;
-            match self.resolve_property_read(source, atom.into())? {
+            match self.resolve_property_read(pending.source, atom.into())? {
                 PropertyRead::Missing => {
                     let Some(next) = field.next() else {
-                        return self.finish_pending_property_descriptor(site, pending);
+                        return self.finish_pending_property_descriptor(site, *pending);
                     };
                     pending.field = next;
                 }
                 PropertyRead::Data(value) => {
                     pending.record(field, value);
                     if field.next().is_none() {
-                        return self.finish_pending_property_descriptor(site, pending);
+                        return self.finish_pending_property_descriptor(site, *pending);
                     }
                 }
                 PropertyRead::Accessor(getter)
@@ -220,11 +268,11 @@ impl Isolate {
                 {
                     pending.record(field, Value::from_immediate(Immediate::Undefined));
                     if field.next().is_none() {
-                        return self.finish_pending_property_descriptor(site, pending);
+                        return self.finish_pending_property_descriptor(site, *pending);
                     }
                 }
                 PropertyRead::Accessor(callee) => {
-                    let state = self.allocate_pending_property_descriptor(pending)?;
+                    let state = self.allocate_pending_property_descriptor(*pending)?;
                     self.write(
                         site.caller_base,
                         site.destination,
@@ -376,15 +424,24 @@ impl Isolate {
         pending: PendingPropertyDescriptor,
     ) -> Result<(), ExecutionError> {
         let descriptor = pending.finish(self)?;
+        if let PropertyDescriptorConsumer::ProxyGetOwn(mode) = pending.consumer {
+            let state = self.native_call_state_reference(pending.target)?;
+            return self.finish_proxy_get_own_descriptor_parse(
+                site,
+                mode,
+                state,
+                descriptor.complete(),
+            );
+        }
         let defined = match self.define_property(pending.target, pending.key, descriptor) {
             Ok(()) => true,
             Err(
                 ExecutionError::NonExtensibleObject(_)
                 | ExecutionError::InvalidPropertyRedefinition(_),
-            ) if pending.reflect_result => false,
+            ) if pending.consumer == PropertyDescriptorConsumer::ReflectDefine => false,
             Err(error) => return Err(error),
         };
-        let result = if pending.reflect_result {
+        let result = if pending.consumer == PropertyDescriptorConsumer::ReflectDefine {
             boolean_value(defined)
         } else {
             pending.target

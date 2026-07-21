@@ -1,5 +1,7 @@
 use super::{fixtures::test_isolate, *};
 
+mod get_own;
+
 fn proxy_call_site(isolate: &Isolate, argument_count: u32) -> CallSite {
     CallSite {
         caller_base: 0,

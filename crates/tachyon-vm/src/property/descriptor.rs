@@ -11,11 +11,36 @@ impl PropertyDescriptor {
         }
     }
 
-    fn configurable(self) -> Option<bool> {
+    pub(crate) fn configurable(self) -> Option<bool> {
         match self {
             Self::Generic(descriptor) => descriptor.configurable,
             Self::Data(descriptor) => descriptor.configurable,
             Self::Accessor(descriptor) => descriptor.configurable,
+        }
+    }
+
+    /// Applies CompletePropertyDescriptor defaults before Proxy invariants or public materialization.
+    pub(crate) fn complete(self) -> Self {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        match self {
+            Self::Generic(descriptor) => Self::Data(DataPropertyDescriptor {
+                value: Some(undefined),
+                writable: Some(false),
+                enumerable: Some(descriptor.enumerable.unwrap_or(false)),
+                configurable: Some(descriptor.configurable.unwrap_or(false)),
+            }),
+            Self::Data(descriptor) => Self::Data(DataPropertyDescriptor {
+                value: Some(descriptor.value.unwrap_or(undefined)),
+                writable: Some(descriptor.writable.unwrap_or(false)),
+                enumerable: Some(descriptor.enumerable.unwrap_or(false)),
+                configurable: Some(descriptor.configurable.unwrap_or(false)),
+            }),
+            Self::Accessor(descriptor) => Self::Accessor(AccessorPropertyDescriptor {
+                getter: Some(descriptor.getter.unwrap_or(undefined)),
+                setter: Some(descriptor.setter.unwrap_or(undefined)),
+                enumerable: Some(descriptor.enumerable.unwrap_or(false)),
+                configurable: Some(descriptor.configurable.unwrap_or(false)),
+            }),
         }
     }
 

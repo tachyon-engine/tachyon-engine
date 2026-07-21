@@ -1398,6 +1398,22 @@ impl Isolate {
                 match stage {
                     ProxyHasStage::TrapGetter => (handler, 0, None, 0),
                     ProxyHasStage::TrapCall => (handler, 0, Some(state), 2),
+                    ProxyHasStage::TargetGetOwn | ProxyHasStage::TargetIsExtensible => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
+                }
+            }
+            NativeContinuationKind::ProxyGetOwn { stage, .. } => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let proxy = pending.values[PROXY_ACTIVE_OBJECT];
+                let handler = self.proxy_snapshot(proxy)?.handler;
+                match stage {
+                    ProxyGetOwnStage::TrapGetter => (handler, 0, None, 0),
+                    ProxyGetOwnStage::TrapCall => (handler, 0, Some(state), 2),
+                    ProxyGetOwnStage::TargetGetOwn | ProxyGetOwnStage::TargetIsExtensible => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
                 }
             }
             NativeContinuationKind::CollectionInitializer(_) => {
@@ -3492,6 +3508,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxyHas(stage) => self
                     .resume_proxy_has(continuation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyGetOwn { mode, stage } => self
+                    .resume_proxy_get_own(continuation, mode, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =

@@ -353,6 +353,25 @@ pub(crate) enum ProxySetPrototypeStage {
 pub(crate) enum ProxyHasStage {
     TrapGetter,
     TrapCall,
+    TargetGetOwn,
+    TargetIsExtensible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyGetOwnStage {
+    TrapGetter,
+    TrapCall,
+    TargetGetOwn,
+    TargetIsExtensible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyGetOwnMode {
+    Descriptor,
+    HasOwn,
+    Enumerable,
 }
 
 /// The observable operation that resumes one Map or Set iterable constructor step.
@@ -389,6 +408,10 @@ pub(crate) enum NativeContinuationKind {
         stage: ProxySetPrototypeStage,
     },
     ProxyHas(ProxyHasStage),
+    ProxyGetOwn {
+        mode: ProxyGetOwnMode,
+        stage: ProxyGetOwnStage,
+    },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
     MapGetOrInsertComputed,
@@ -555,6 +578,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ProxyHas(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn proxy_get_own(
+        site: NativeContinuationSite,
+        mode: ProxyGetOwnMode,
+        stage: ProxyGetOwnStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxyGetOwn { mode, stage },
             first: state,
             second: retained,
         }
