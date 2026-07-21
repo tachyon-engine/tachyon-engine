@@ -41,6 +41,37 @@ fn native_error_constructor_hierarchy_survives_forced_major() {
 }
 
 #[test]
+/// Keeps the Error brand live through collection and rejects prototype-chain impersonation.
+fn native_error_brand_survives_forced_major_and_cannot_be_forged() {
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let error = isolate
+        .create_native_error(NativeErrorKind::Range, None)
+        .unwrap();
+    isolate.fiber.registers.push(error);
+    isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"collect").unwrap())
+        .unwrap();
+    assert_eq!(
+        isolate.native_error_kind(error).unwrap(),
+        Some(NativeErrorKind::Range)
+    );
+
+    let prototype = isolate
+        .realm
+        .error_intrinsics
+        .get(NativeErrorKind::Error)
+        .prototype
+        .unwrap();
+    let fake = isolate
+        .create_ordinary_object_with_prototype(prototype)
+        .unwrap();
+    assert_eq!(isolate.native_error_kind(fake).unwrap(), None);
+}
+
+#[test]
 fn native_function_intrinsics_survive_forced_major_before_forwarding() {
     let mut isolate = test_isolate();
     isolate

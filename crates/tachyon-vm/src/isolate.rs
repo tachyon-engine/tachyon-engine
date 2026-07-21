@@ -101,6 +101,9 @@ impl Isolate {
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            error_object: registry
+                .try_register("ErrorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             number_object: registry
                 .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -200,27 +203,26 @@ impl Isolate {
         self.execution_profile = ExecutionProfile::default();
     }
 
-    /// Classifies a managed error through its intrinsic prototype chain without exposing heap IDs.
+    /// Classifies an unforgeably branded managed Error without exposing heap identities.
     pub fn native_error_kind(
         &mut self,
         value: Value,
     ) -> Result<Option<NativeErrorKind>, ExecutionError> {
-        let mut current = value;
-        loop {
-            for kind in NativeErrorKind::ALL {
-                if self.realm.error_intrinsics.get(kind).prototype == Some(current) {
-                    return Ok(Some(kind));
-                }
-            }
-            if !self.is_object_value(current) {
-                return Ok(None);
-            }
-            let (_, snapshot) = self.object_snapshot(current)?;
-            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
-                return Ok(None);
-            }
-            current = snapshot.prototype;
-        }
+        let Some(raw) = value.as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(error) = self.heap.checked_reference(raw, self.types.error_object) else {
+            return Ok(None);
+        };
+        self.heap.with_running_scope(|scope| {
+            let error = scope.root(error).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(error, self.types.error_object)
+                    .map(|error| Some(error.kind))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
     }
 
     pub(crate) fn allocate_intrinsic_ordinary_object(
@@ -1198,35 +1200,6 @@ impl Isolate {
             || Ok(Value::from_immediate(Immediate::Undefined)),
             |key| self.atom_string_value(key),
         )
-    }
-
-    /// Allocates one ordinary native error and defines a string message only when supplied.
-    pub(crate) fn create_native_error(
-        &mut self,
-        kind: NativeErrorKind,
-        message: Option<Value>,
-    ) -> Result<Value, ExecutionError> {
-        let prototype = self
-            .realm
-            .error_intrinsics
-            .get(kind)
-            .prototype
-            .expect("native Error prototypes initialize before execution");
-        let error = self.create_ordinary_object_with_prototype(prototype)?;
-        let Some(message) =
-            message.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
-        else {
-            return Ok(error);
-        };
-        let raw = message
-            .as_heap_ref()
-            .ok_or(ExecutionError::UnsupportedErrorMessage(message))?;
-        self.heap
-            .checked_reference(raw, self.types.string)
-            .map_err(|_| ExecutionError::UnsupportedErrorMessage(message))?;
-        let message_atom = self.message_atom()?;
-        self.set_own_data_property(error, message_atom, message)?;
-        Ok(error)
     }
 }
 

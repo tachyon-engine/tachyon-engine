@@ -2512,6 +2512,20 @@ impl Isolate {
                     let error = self.create_native_error(kind, message)?;
                     return self.write(site.caller_base, site.destination, error);
                 }
+                FunctionExecutable::Native(NativeFunction::ErrorIsError) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.native_error_kind(value)?.is_some();
+                    return self.write(site.caller_base, site.destination, boolean_value(result));
+                }
+                FunctionExecutable::Native(NativeFunction::ErrorToString) => {
+                    if !self.is_object_value(site.this_value) {
+                        return Err(ExecutionError::NotObject(site.this_value));
+                    }
+                    let result = self.error_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);

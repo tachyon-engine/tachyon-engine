@@ -17,6 +17,7 @@ mod builtins;
 mod collection;
 mod collection_for_each;
 mod conversion;
+mod error;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
 mod finalization;
@@ -75,6 +76,7 @@ use conversion::{
     numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
     strict_equal_hot,
 };
+use error::ErrorObject;
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;

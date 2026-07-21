@@ -99,6 +99,8 @@ pub(crate) enum NativeFunction {
     FunctionPrototypeBind,
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
+    ErrorIsError,
+    ErrorToString,
     ArrayConstructor,
     ArrayIsArray,
     ArrayConcat,
@@ -524,6 +526,7 @@ impl NativeFunction {
             | Self::FunctionPrototypeBind
             | Self::FunctionConstructor
             | Self::ErrorConstructor(_)
+            | Self::ErrorIsError
             | Self::ArrayConstructor
             | Self::ArrayIsArray
             | Self::ArrayConcat
@@ -620,6 +623,7 @@ impl NativeFunction {
             | Self::GlobalParseFloat
             | Self::GlobalParseInt => unreachable!(),
             Self::ObjectToString
+            | Self::ErrorToString
             | Self::SymbolConstructor
             | Self::NumberValueOf
             | Self::FunctionPrototype
@@ -735,6 +739,8 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
             Self::ErrorConstructor(NativeErrorKind::Range) => "RangeError",
             Self::ErrorConstructor(NativeErrorKind::Uri) => "URIError",
+            Self::ErrorIsError => "isError",
+            Self::ErrorToString => "toString",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -1018,6 +1024,7 @@ pub(crate) enum ObjectReceiver {
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
+    Error(GcRef<ErrorObject>),
     Number(GcRef<NumberObject>),
     String(GcRef<StringObject>),
     Symbol(GcRef<SymbolObject>),
@@ -1038,6 +1045,7 @@ impl ObjectReceiver {
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
+            Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::Symbol(symbol) => Value::from_heap_ref(symbol.raw()),
@@ -1168,6 +1176,7 @@ pub(crate) struct VmTypes {
     pub(crate) weak_map_object: GcType<WeakMapObject>,
     pub(crate) weak_set_object: GcType<WeakSetObject>,
     pub(crate) function: GcType<FunctionObject>,
+    pub(crate) error_object: GcType<ErrorObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) string_object: GcType<StringObject>,
     pub(crate) symbol_object: GcType<SymbolObject>,

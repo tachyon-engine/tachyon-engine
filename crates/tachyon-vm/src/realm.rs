@@ -860,6 +860,41 @@ impl Isolate {
             self.realm.error_intrinsics.get_mut(kind).constructor = Some(constructor);
             self.set_function_prototype(constructor, prototype)?;
             self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+            let name = self.allocate_runtime_string(
+                JsString::try_from_latin1(kind.as_str().as_bytes())
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let name_atom = self.intern_intrinsic_name(b"name")?;
+            self.set_intrinsic_data_property(prototype, name_atom, name, true)?;
+            let message = self.allocate_runtime_string(
+                JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let message_atom = self.message_atom()?;
+            self.set_intrinsic_data_property(prototype, message_atom, message, true)?;
+            if kind == NativeErrorKind::Error {
+                let is_error = self.allocate_native_function(
+                    NativeFunction::ErrorIsError,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                )?;
+                let is_error_atom = self.intern_intrinsic_name(b"isError")?;
+                self.set_intrinsic_data_property(constructor, is_error_atom, is_error, true)?;
+                let to_string = self.allocate_native_function(
+                    NativeFunction::ErrorToString,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                )?;
+                let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+                self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)?;
+            }
         }
         Ok(())
     }

@@ -689,6 +689,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::CollectionIterator(iterator), ordinary));
         }
+        if let Ok(error) = self.heap.checked_reference(raw, self.types.error_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let error = scope.root(error).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(error, self.types.error_object)
+                        .map(|error| error.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Error(error), ordinary));
+        }
         let function = self
             .heap
             .checked_reference(raw, self.types.function)
@@ -749,6 +761,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Error(error) => self.heap.with_running_scope(|scope| {
+                let error = scope.root(error).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(error, self.types.error_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .extensible = extensible;
@@ -912,6 +935,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Error(error) => self.heap.with_running_scope(|scope| {
+                let error = scope.root(error).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(error, self.types.error_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1119,6 +1153,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(function, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::Error(error) => self.heap.with_running_scope(|scope| {
+                let error = scope.root(error).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let error = no_gc
+                        .borrow_mut(error, self.types.error_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    error.ordinary.shape = shape;
+                    error.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(error, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -1384,6 +1439,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.function)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.error_object)
                 .is_ok()
             || self
                 .heap
