@@ -362,6 +362,7 @@ impl Isolate {
                 &mut VmRoots {
                     fiber: &mut self.fiber,
                     finalization_jobs: &mut self.finalization_jobs,
+                    promise_jobs: &mut self.promise_jobs,
                     realm: &mut self.realm,
                     loaded_code: &mut self.loaded_code,
                 },

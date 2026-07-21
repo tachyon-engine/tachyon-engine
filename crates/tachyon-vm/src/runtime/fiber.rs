@@ -6,6 +6,7 @@ use super::completion::CompletionStack;
 pub(crate) struct VmRoots<'a> {
     pub(crate) fiber: &'a mut Fiber,
     pub(crate) finalization_jobs: &'a mut finalization::FinalizationJobs,
+    pub(crate) promise_jobs: &'a mut PromiseJobQueue,
     pub(crate) realm: &'a mut Realm,
     pub(crate) loaded_code: &'a mut Vec<LoadedCode>,
 }
@@ -71,6 +72,7 @@ impl Trace for VmRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
+        self.promise_jobs.trace(tracer);
         self.realm.trace(tracer);
         for code in self.loaded_code.iter_mut() {
             code.trace(tracer);

@@ -30,6 +30,7 @@ impl Isolate {
         self.initialize_json_intrinsics()?;
         self.initialize_reflect_intrinsics()?;
         self.initialize_proxy_intrinsics()?;
+        self.initialize_promise_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -733,6 +734,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -826,6 +828,7 @@ impl Isolate {
             json: self.intern_intrinsic_name(b"JSON")?,
             reflect: self.intern_intrinsic_name(b"Reflect")?,
             proxy: self.intern_intrinsic_name(b"Proxy")?,
+            promise: self.intern_intrinsic_name(b"Promise")?,
             global_numbers: [
                 self.intern_intrinsic_name(b"isFinite")?,
                 self.intern_intrinsic_name(b"isNaN")?,
@@ -1833,6 +1836,60 @@ impl Isolate {
         Ok(())
     }
 
+    /// Installs the Promise identity and the first allocation-only static operations.
+    fn initialize_promise_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Promise");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Promise");
+        let constructor = self.allocate_native_function(
+            NativeFunction::PromiseConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.promise_constructor = Some(constructor);
+        self.realm.promise_prototype = Some(prototype);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        for (name, native) in [
+            (b"resolve".as_slice(), NativeFunction::PromiseResolve),
+            (b"reject".as_slice(), NativeFunction::PromiseReject),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(constructor, atom, function, true)?;
+            if native == NativeFunction::PromiseResolve {
+                self.realm.promise_resolve = Some(function);
+            } else {
+                self.realm.promise_reject = Some(function);
+            }
+        }
+        Ok(())
+    }
+
     /// Publishes all mandatory names without charging the host quota for user-created globals.
     fn publish_realm_intrinsic_bindings(
         &mut self,
@@ -1977,6 +2034,13 @@ impl Isolate {
             self.realm
                 .proxy_constructor
                 .expect("Proxy initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.promise,
+            self.realm
+                .promise_constructor
+                .expect("Promise initializes before global publication"),
             true,
         )?;
         for (atom, value) in atoms

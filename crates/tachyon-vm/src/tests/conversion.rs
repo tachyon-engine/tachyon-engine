@@ -331,6 +331,7 @@ fn allocate_test_function(isolate: &mut Isolate, code: CodeId, function: Functio
     let roots = &mut VmRoots {
         fiber: &mut isolate.fiber,
         finalization_jobs: &mut isolate.finalization_jobs,
+        promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
     };

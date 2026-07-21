@@ -104,6 +104,9 @@ pub(crate) enum NativeFunction {
     ErrorToString,
     ProxyConstructor,
     ProxyRevocable,
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
     ArrayConstructor,
     ArrayIsArray,
     ArrayConcat,
@@ -445,6 +448,7 @@ impl NativeFunction {
                 | Self::FunctionConstructor
                 | Self::ErrorConstructor(_)
                 | Self::ProxyConstructor
+                | Self::PromiseConstructor
                 | Self::ArrayConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
@@ -485,6 +489,9 @@ impl NativeFunction {
             Self::ReflectSet => 3,
             Self::ReflectSetPrototypeOf => 2,
             Self::ObjectConstructor
+            | Self::PromiseConstructor
+            | Self::PromiseResolve
+            | Self::PromiseReject
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
@@ -756,6 +763,9 @@ impl NativeFunction {
             Self::ErrorToString => "toString",
             Self::ProxyConstructor => "Proxy",
             Self::ProxyRevocable => "revocable",
+            Self::PromiseConstructor => "Promise",
+            Self::PromiseResolve => "resolve",
+            Self::PromiseReject => "reject",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -1045,6 +1055,7 @@ pub(crate) enum ObjectReceiver {
     String(GcRef<StringObject>),
     Symbol(GcRef<SymbolObject>),
     RegExp(GcRef<RegExpObject>),
+    Promise(GcRef<PromiseObject>),
     Map(GcRef<MapObject>),
     Set(GcRef<SetObject>),
     WeakMap(GcRef<WeakMapObject>),
@@ -1066,6 +1077,7 @@ impl ObjectReceiver {
             Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::Symbol(symbol) => Value::from_heap_ref(symbol.raw()),
             Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
+            Self::Promise(promise) => Value::from_heap_ref(promise.raw()),
             Self::Map(map) => Value::from_heap_ref(map.raw()),
             Self::Set(set) => Value::from_heap_ref(set.raw()),
             Self::WeakMap(map) => Value::from_heap_ref(map.raw()),
@@ -1225,6 +1237,9 @@ pub(crate) struct VmTypes {
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_proxy_define: GcType<PendingProxyDefine>,
+    pub(crate) promise_object: GcType<PromiseObject>,
+    #[allow(dead_code, reason = "allocated by the Promise.then reaction slice")]
+    pub(crate) promise_reaction: GcType<PromiseReaction>,
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) native_call_state: GcType<NativeCallState>,
@@ -1271,13 +1286,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) json: AtomId,
     pub(crate) reflect: AtomId,
     pub(crate) proxy: AtomId,
+    pub(crate) promise: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        20 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        21 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {

@@ -354,6 +354,7 @@ impl Isolate {
                 vm: VmRoots {
                     fiber: &mut self.fiber,
                     finalization_jobs: &mut self.finalization_jobs,
+                    promise_jobs: &mut self.promise_jobs,
                     realm: &mut self.realm,
                     loaded_code: &mut self.loaded_code,
                 },
@@ -436,6 +437,7 @@ impl Isolate {
                 vm: VmRoots {
                     fiber: &mut self.fiber,
                     finalization_jobs: &mut self.finalization_jobs,
+                    promise_jobs: &mut self.promise_jobs,
                     realm: &mut self.realm,
                     loaded_code: &mut self.loaded_code,
                 },
@@ -594,6 +596,18 @@ impl Isolate {
                 })
             })?;
             return Ok((ObjectReceiver::RegExp(regexp), ordinary));
+        }
+        if let Ok(promise) = self.heap.checked_reference(raw, self.types.promise_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let promise = scope.root(promise).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(promise, self.types.promise_object)
+                        .map(|promise| promise.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Promise(promise), ordinary));
         }
         if let Ok(map) = self.heap.checked_reference(raw, self.types.map_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
@@ -803,6 +817,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
+                let promise = scope.root(promise).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(promise, self.types.promise_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Map(map) => self.heap.with_running_scope(|scope| {
                 let map = scope.root(map).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -971,6 +996,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(regexp, self.types.regexp_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
+                let promise = scope.root(promise).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(promise, self.types.promise_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1243,6 +1279,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
+                let promise = scope.root(promise).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let promise = no_gc
+                        .borrow_mut(promise, self.types.promise_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    promise.ordinary.shape = shape;
+                    promise.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(promise, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::Map(map) => self.heap.with_running_scope(|scope| {
                 let map = scope.root(map).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1400,6 +1457,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.promise_object)
                 .is_ok()
             || self
                 .heap

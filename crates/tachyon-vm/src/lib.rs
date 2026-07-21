@@ -27,6 +27,7 @@ mod isolate;
 mod iterator;
 mod number;
 mod object;
+mod promise;
 mod property;
 mod proxy;
 mod realm;
@@ -90,6 +91,7 @@ use object::{
     PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId,
     SymbolObject, SymbolPropertyKey,
 };
+use promise::{PromiseJobQueue, PromiseObject, PromiseReaction, PromiseState};
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
 use proxy::{

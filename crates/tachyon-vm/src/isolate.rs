@@ -36,6 +36,7 @@ impl Trace for WeakCollectionAllocationRoots<'_> {
 pub struct Isolate {
     pub(crate) fiber: Fiber,
     pub(crate) finalization_jobs: finalization::FinalizationJobs,
+    pub(crate) promise_jobs: PromiseJobQueue,
     pub(crate) atoms: AtomTable,
     pub(crate) shapes: ShapeTable,
     pub(crate) realm: Realm,
@@ -141,6 +142,12 @@ impl Isolate {
             pending_proxy_define: registry
                 .try_register("PendingProxyDefine")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            promise_object: registry
+                .try_register("PromiseObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            promise_reaction: registry
+                .try_register("PromiseReaction")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_argument_list: registry
                 .try_register("PendingArgumentList")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -186,6 +193,7 @@ impl Isolate {
         let mut isolate = Self {
             fiber: Fiber::default(),
             finalization_jobs: finalization::FinalizationJobs::new(),
+            promise_jobs: PromiseJobQueue::new(),
             atoms: AtomTable::new(config.atom_table),
             shapes,
             realm: Realm::new(config.realm_limits, typeof_strings, primitive_hint_strings),
@@ -257,6 +265,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -289,6 +298,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -359,6 +369,7 @@ impl Isolate {
             let roots = &mut VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             };
@@ -386,6 +397,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -423,6 +435,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -624,6 +637,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -655,6 +669,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -689,6 +704,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -724,6 +740,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -759,6 +776,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -793,6 +811,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -827,6 +846,7 @@ impl Isolate {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             },
@@ -875,6 +895,7 @@ impl Isolate {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             },
@@ -923,6 +944,7 @@ impl Isolate {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             },
@@ -971,6 +993,7 @@ impl Isolate {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             },
@@ -1037,6 +1060,7 @@ impl Isolate {
             vm: VmRoots {
                 fiber: &mut self.fiber,
                 finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
             },
@@ -1082,6 +1106,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };

@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+/// Publishes Promise and preserves intrinsic Promise.resolve identity without running jobs.
+fn promise_static_resolution_allocates_branded_objects() {
+    for (source_id, source) in [
+        (
+            1_022,
+            "let p = Promise.resolve(1); Promise.resolve(p) === p;",
+        ),
+        (1_023, "Promise.resolve(1) !== Promise.reject(2);"),
+        (
+            1_024,
+            "Object.getPrototypeOf(Promise.resolve(1)) === Promise.prototype;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(tachyon_value::Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Drains standard Array iterables through the Map and Set constructor protocol.
 fn collection_constructors_consume_array_iterables() {
     assert_eq!(

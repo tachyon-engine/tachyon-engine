@@ -850,6 +850,7 @@ fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
     let roots = &mut VmRoots {
         fiber: &mut isolate.fiber,
         finalization_jobs: &mut isolate.finalization_jobs,
+        promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
     };
@@ -899,6 +900,7 @@ fn collect_major(isolate: &mut Isolate) {
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
         finalization_jobs: &mut isolate.finalization_jobs,
+        promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
     };
@@ -909,6 +911,7 @@ fn collect_minor(isolate: &mut Isolate) {
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
         finalization_jobs: &mut isolate.finalization_jobs,
+        promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
     };

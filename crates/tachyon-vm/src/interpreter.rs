@@ -32,6 +32,7 @@ impl Isolate {
     pub fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
         self.finalization_jobs.trace(tracer);
+        self.promise_jobs.trace(tracer);
         self.realm.trace(tracer);
         for code in &mut self.loaded_code {
             code.trace(tracer);
@@ -114,6 +115,7 @@ impl Isolate {
                         vm: VmRoots {
                             fiber: &mut self.fiber,
                             finalization_jobs: &mut self.finalization_jobs,
+                            promise_jobs: &mut self.promise_jobs,
                             realm: &mut self.realm,
                             loaded_code: &mut self.loaded_code,
                         },
@@ -1841,6 +1843,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -1957,6 +1960,7 @@ impl Isolate {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
@@ -2696,9 +2700,40 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
                     return Err(ExecutionError::ProxyConstructorRequiresNew);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::ProxyRevocable) => {
                     let result = self.create_revocable_proxy_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::PromiseResolve) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if let Ok(snapshot) = self.promise_snapshot(value) {
+                        let intrinsic_promise = matches!(
+                            snapshot.state,
+                            PromiseState::Pending
+                                | PromiseState::Fulfilled
+                                | PromiseState::Rejected
+                        );
+                        if intrinsic_promise
+                            && site.this_value
+                                == self.realm.promise_constructor.expect("initialized")
+                        {
+                            return self.write(site.caller_base, site.destination, value);
+                        }
+                    }
+                    let promise = self.create_promise(PromiseState::Fulfilled, value)?;
+                    return self.write(site.caller_base, site.destination, promise);
+                }
+                FunctionExecutable::Native(NativeFunction::PromiseReject) => {
+                    let reason = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let promise = self.create_promise(PromiseState::Rejected, reason)?;
+                    return self.write(site.caller_base, site.destination, promise);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;

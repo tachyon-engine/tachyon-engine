@@ -194,6 +194,10 @@ pub(crate) struct Realm {
     pub(crate) json_object: Option<Value>,
     pub(crate) reflect_object: Option<Value>,
     pub(crate) proxy_constructor: Option<Value>,
+    pub(crate) promise_constructor: Option<Value>,
+    pub(crate) promise_prototype: Option<Value>,
+    pub(crate) promise_resolve: Option<Value>,
+    pub(crate) promise_reject: Option<Value>,
     pub(crate) json_parse: Option<Value>,
     pub(crate) json_stringify: Option<Value>,
     pub(crate) math_pow: Option<Value>,
@@ -302,6 +306,10 @@ impl Realm {
             json_object: None,
             reflect_object: None,
             proxy_constructor: None,
+            promise_constructor: None,
+            promise_prototype: None,
+            promise_resolve: None,
+            promise_reject: None,
             json_parse: None,
             json_stringify: None,
             math_pow: None,
@@ -643,6 +651,10 @@ impl Trace for Realm {
         self.math_object.trace(tracer);
         self.reflect_object.trace(tracer);
         self.proxy_constructor.trace(tracer);
+        self.promise_constructor.trace(tracer);
+        self.promise_prototype.trace(tracer);
+        self.promise_resolve.trace(tracer);
+        self.promise_reject.trace(tracer);
         self.math_pow.trace(tracer);
         self.math_functions.trace(tracer);
         self.global_number_functions.trace(tracer);
