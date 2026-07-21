@@ -299,7 +299,24 @@ impl Isolate {
             prevent_extensions_atom,
             prevent_extensions,
             true,
-        )
+        )?;
+        for (name, native) in [
+            (b"seal".as_slice(), NativeFunction::ObjectSeal),
+            (b"freeze".as_slice(), NativeFunction::ObjectFreeze),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(constructor, atom, function, true)?;
+        }
+        Ok(())
     }
 
     /// Builds primitive conversion constructors with the shared callable prototype.

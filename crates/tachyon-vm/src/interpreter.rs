@@ -2335,6 +2335,20 @@ impl Isolate {
                     let value = self.object_prevent_extensions(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectSeal) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let value = self.object_set_integrity_level(value, false)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectFreeze) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let value = self.object_set_integrity_level(value, true)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ReflectOwnKeys) => {
                     let keys = self.reflect_own_keys(&site)?;
                     return self.write(site.caller_base, site.destination, keys);

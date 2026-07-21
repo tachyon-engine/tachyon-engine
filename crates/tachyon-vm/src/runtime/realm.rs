@@ -169,6 +169,8 @@ pub(crate) struct Realm {
     pub(crate) object_is_prototype_of: Option<Value>,
     pub(crate) object_is_extensible: Option<Value>,
     pub(crate) object_prevent_extensions: Option<Value>,
+    pub(crate) object_seal: Option<Value>,
+    pub(crate) object_freeze: Option<Value>,
     pub(crate) string_constructor: Option<Value>,
     pub(crate) string_prototype: Option<Value>,
     pub(crate) regexp_constructor: Option<Value>,
@@ -274,6 +276,8 @@ impl Realm {
             object_is_prototype_of: None,
             object_is_extensible: None,
             object_prevent_extensions: None,
+            object_seal: None,
+            object_freeze: None,
             string_constructor: None,
             string_prototype: None,
             regexp_constructor: None,
@@ -610,6 +614,8 @@ impl Trace for Realm {
         self.object_is_prototype_of.trace(tracer);
         self.object_is_extensible.trace(tracer);
         self.object_prevent_extensions.trace(tracer);
+        self.object_seal.trace(tracer);
+        self.object_freeze.trace(tracer);
         self.string_constructor.trace(tracer);
         self.regexp_constructor.trace(tracer);
         self.regexp_prototype.trace(tracer);

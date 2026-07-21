@@ -3,6 +3,43 @@
 use super::super::*;
 
 impl Isolate {
+    /// Applies the ordinary-object portion of SetIntegrityLevel without rebuilding storage.
+    pub(crate) fn object_set_integrity_level(
+        &mut self,
+        value: Value,
+        freeze: bool,
+    ) -> Result<Value, ExecutionError> {
+        if !self.is_object_value(value) {
+            return Ok(value);
+        }
+        let (_, snapshot) = self.object_snapshot(value)?;
+        let keys = self.ordinary_own_property_keys(value, snapshot)?;
+        for key in keys {
+            let Some(descriptor) = self.complete_own_property_descriptor(value, key)? else {
+                continue;
+            };
+            let descriptor = match descriptor {
+                PropertyDescriptor::Data(_) => PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: None,
+                    writable: freeze.then_some(false),
+                    enumerable: None,
+                    configurable: Some(false),
+                }),
+                PropertyDescriptor::Accessor(_) => {
+                    PropertyDescriptor::Generic(GenericPropertyDescriptor {
+                        enumerable: None,
+                        configurable: Some(false),
+                    })
+                }
+                PropertyDescriptor::Generic(_) => continue,
+            };
+            self.define_property(value, key, descriptor)?;
+        }
+        let (receiver, _) = self.object_snapshot(value)?;
+        self.set_object_extensible(receiver, false)?;
+        Ok(value)
+    }
+
     /// Materializes every own String and Symbol key in the specified ordinary order.
     pub(crate) fn reflect_own_keys(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let target = self

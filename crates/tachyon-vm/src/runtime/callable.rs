@@ -31,6 +31,8 @@ pub(crate) enum NativeFunction {
     ObjectIsPrototypeOf,
     ObjectIsExtensible,
     ObjectPreventExtensions,
+    ObjectSeal,
+    ObjectFreeze,
     ReflectApply,
     ReflectConstruct,
     ReflectOwnKeys,
@@ -480,6 +482,8 @@ impl NativeFunction {
             | Self::ObjectIsPrototypeOf
             | Self::ObjectIsExtensible
             | Self::ObjectPreventExtensions
+            | Self::ObjectSeal
+            | Self::ObjectFreeze
             | Self::ReflectOwnKeys
             | Self::ReflectGetPrototypeOf
             | Self::ReflectIsExtensible
@@ -657,6 +661,8 @@ impl NativeFunction {
             Self::ObjectIsPrototypeOf => "isPrototypeOf",
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
+            Self::ObjectSeal => "seal",
+            Self::ObjectFreeze => "freeze",
             Self::ReflectOwnKeys => "ownKeys",
             Self::ReflectApply => "apply",
             Self::ReflectConstruct => "construct",
