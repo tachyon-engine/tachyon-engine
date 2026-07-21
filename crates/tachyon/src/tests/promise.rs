@@ -43,6 +43,27 @@ fn promise_static_resolution_allocates_branded_objects() {
 }
 
 #[test]
+/// Uses the receiver constructor and validates both captured functions for generic rejection.
+fn promise_static_reject_builds_generic_capabilities() {
+    for (source_id, source) in [
+        (
+            1_054,
+            "function C(executor) { executor(function() {}, function(reason) { if (reason !== 7) throw 91; }); return { marker: 8 }; } var result = Promise.reject.call(C, 7); result.marker === 8;",
+        ),
+        (
+            1_055,
+            "function C(executor) { executor(undefined, function() {}); return {}; } var threw = false; try { Promise.reject.call(C, 1); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(tachyon_value::Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Calls Promise executors synchronously and converts executor throws into rejection.
 fn promise_constructor_uses_resolving_functions_and_consumes_executor_throw() {
     for (source_id, source) in [

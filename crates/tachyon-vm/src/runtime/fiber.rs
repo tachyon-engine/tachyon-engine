@@ -336,8 +336,10 @@ pub(crate) enum PromiseThenStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum PromiseStaticResolveStage {
-    Constructor,
-    Resolve,
+    ResolveConstructor,
+    ResolveCallback,
+    RejectConstructor,
+    RejectCallback,
 }
 
 /// One observable boundary in an Array.prototype.forEach iteration.
@@ -795,7 +797,7 @@ impl NativeContinuation {
         }
     }
 
-    /// Roots generic Promise.resolve state across constructor and resolver callbacks.
+    /// Roots generic Promise static state across constructor and settlement callbacks.
     #[inline]
     pub(crate) const fn promise_static_resolve(
         site: NativeContinuationSite,

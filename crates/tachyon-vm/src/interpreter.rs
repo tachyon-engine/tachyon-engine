@@ -2950,6 +2950,10 @@ impl Isolate {
                     let reason = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let intrinsic = self.realm.promise_constructor.expect("initialized");
+                    if site.this_value != intrinsic {
+                        return self.begin_generic_promise_reject(&site, site.this_value, reason);
+                    }
                     let promise = self.create_promise(PromiseState::Rejected, reason)?;
                     return self.write(site.caller_base, site.destination, promise);
                 }

@@ -26,6 +26,42 @@ impl Isolate {
         constructor: Value,
         resolution: Value,
     ) -> Result<(), ExecutionError> {
+        self.begin_generic_promise_static(
+            site,
+            constructor,
+            resolution,
+            PromiseStaticResolveStage::ResolveConstructor,
+        )
+    }
+
+    /// Runs generic NewPromiseCapability for Promise.reject without recursing into bytecode.
+    pub(crate) fn begin_generic_promise_reject(
+        &mut self,
+        site: &CallSite,
+        constructor: Value,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        self.begin_generic_promise_static(
+            site,
+            constructor,
+            reason,
+            PromiseStaticResolveStage::RejectConstructor,
+        )
+    }
+
+    /// Publishes shared capability state before any constructor-prefix allocation can collect.
+    fn begin_generic_promise_static(
+        &mut self,
+        site: &CallSite,
+        constructor: Value,
+        argument: Value,
+        stage: PromiseStaticResolveStage,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(matches!(
+            stage,
+            PromiseStaticResolveStage::ResolveConstructor
+                | PromiseStaticResolveStage::RejectConstructor
+        ));
         if !self.is_constructor_value(constructor)? {
             return Err(ExecutionError::NonConstructor(constructor));
         }
@@ -34,7 +70,7 @@ impl Isolate {
         let state = self.allocate_promise_static_resolve_state(NativeCallState {
             values: [
                 Value::from_heap_ref(capability.raw()),
-                resolution,
+                argument,
                 executor,
                 undefined,
                 undefined,
@@ -56,7 +92,7 @@ impl Isolate {
             .completions
             .push_native(NativeContinuation::promise_static_resolve(
                 continuation_site,
-                PromiseStaticResolveStage::Constructor,
+                stage,
                 Value::from_heap_ref(state.raw()),
             ))
             .map_err(Isolate::completion_stack_error)?;
@@ -104,11 +140,7 @@ impl Isolate {
         }
         let continuation = self.pop_native_continuation()?;
         let promise = self.read(site.caller_base, site.destination)?;
-        self.resume_generic_promise_resolve(
-            continuation,
-            PromiseStaticResolveStage::Constructor,
-            promise,
-        )
+        self.resume_generic_promise_resolve(continuation, stage, promise)
     }
 
     /// Resumes generic Promise.resolve after either the constructor or resolve callback returns.
@@ -119,18 +151,25 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         match stage {
-            PromiseStaticResolveStage::Constructor => {
-                self.finish_generic_resolve_constructor(continuation, value)
+            PromiseStaticResolveStage::ResolveConstructor => {
+                self.finish_generic_static_constructor(continuation, value, false)
             }
-            PromiseStaticResolveStage::Resolve => self.finish_generic_promise_resolve(continuation),
+            PromiseStaticResolveStage::RejectConstructor => {
+                self.finish_generic_static_constructor(continuation, value, true)
+            }
+            PromiseStaticResolveStage::ResolveCallback
+            | PromiseStaticResolveStage::RejectCallback => {
+                self.finish_generic_promise_resolve(continuation)
+            }
         }
     }
 
-    /// Validates constructor capture and invokes its resolve callback with the source value.
-    fn finish_generic_resolve_constructor(
+    /// Validates constructor capture and invokes the selected settlement callback.
+    fn finish_generic_static_constructor(
         &mut self,
         continuation: NativeContinuation,
         promise: Value,
+        reject: bool,
     ) -> Result<(), ExecutionError> {
         if !self.is_object_value(promise) {
             return Err(ExecutionError::NotObject(promise));
@@ -141,6 +180,11 @@ impl Isolate {
         let snapshot = self.promise_capability_snapshot(capability)?;
         self.resolve_function_object(snapshot.resolve)?;
         self.resolve_function_object(snapshot.reject)?;
+        let callback = if reject {
+            snapshot.reject
+        } else {
+            snapshot.resolve
+        };
         self.set_promise_capability_promise(capability, promise)?;
         let arguments = self.allocate_promise_job_arguments(pending.values[STATIC_RESOLUTION])?;
         let completion_depth = self.fiber.completions.len();
@@ -148,7 +192,11 @@ impl Isolate {
             .completions
             .push_native(NativeContinuation::promise_static_resolve(
                 continuation.site(),
-                PromiseStaticResolveStage::Resolve,
+                if reject {
+                    PromiseStaticResolveStage::RejectCallback
+                } else {
+                    PromiseStaticResolveStage::ResolveCallback
+                },
                 continuation.first(),
             ))
             .map_err(Isolate::completion_stack_error)?;
@@ -156,7 +204,7 @@ impl Isolate {
         if let Err(error) = self.call(CallSite {
             caller_base: continuation.site().caller_base,
             destination: continuation.site().destination,
-            callee: snapshot.resolve,
+            callee: callback,
             argument_base: 0,
             argument_source: Some(arguments),
             argument_prefix: None,
