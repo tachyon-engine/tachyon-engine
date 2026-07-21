@@ -749,21 +749,17 @@ impl Isolate {
                 )?;
             }
             Opcode::HasProperty => {
-                let key = self.property_key(self.read(base, operands[1])?)?;
+                let key_value = self.read(base, operands[1])?;
                 let receiver = self.read(base, operands[2])?;
-                let result = !matches!(
-                    self.resolve_property_read(receiver, key)?,
-                    PropertyRead::Missing
+                return self.dispatch_has_property(
+                    NativeContinuationSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        call_site: instruction_offset,
+                    },
+                    receiver,
+                    key_value,
                 );
-                self.write(
-                    base,
-                    operands[0],
-                    Value::from_immediate(if result {
-                        Immediate::True
-                    } else {
-                        Immediate::False
-                    }),
-                )?;
             }
             Opcode::ToPropertyKey | Opcode::ToPropertyKeyForIn => {
                 self.dispatch_to_property_key(
@@ -1394,6 +1390,16 @@ impl Isolate {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             },
+            NativeContinuationKind::ProxyHas(stage) => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let proxy = pending.values[PROXY_ACTIVE_OBJECT];
+                let handler = self.proxy_snapshot(proxy)?.handler;
+                match stage {
+                    ProxyHasStage::TrapGetter => (handler, 0, None, 0),
+                    ProxyHasStage::TrapCall => (handler, 0, Some(state), 2),
+                }
+            }
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -3483,6 +3489,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxySetPrototype { mode, stage } => self
                     .resume_proxy_set_prototype(continuation, mode, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyHas(stage) => self
+                    .resume_proxy_has(continuation, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =

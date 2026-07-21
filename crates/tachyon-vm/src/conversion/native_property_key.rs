@@ -114,13 +114,9 @@ impl Isolate {
                 let deleted = self.delete_own_data_property(pending.first, key)?;
                 self.write(site.caller_base, site.destination, boolean_value(deleted))
             }
-            BuiltinPropertyKeyConsumer::ReflectHas => {
-                let present = !matches!(
-                    self.resolve_property_read(pending.first, key)?,
-                    PropertyRead::Missing
-                );
-                self.write(site.caller_base, site.destination, boolean_value(present))
-            }
+            BuiltinPropertyKeyConsumer::ReflectHas => self
+                .dispatch_has_property(site, pending.first, primitive)
+                .map(|_| ()),
             BuiltinPropertyKeyConsumer::ReflectGet => self
                 .dispatch_reflect_property_read(site, pending.first, pending.second, key)
                 .map(|_| ()),

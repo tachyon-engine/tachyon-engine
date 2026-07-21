@@ -144,6 +144,210 @@ fn proxy_set_prototype_arguments_resume_for_every_dispatch_batch() {
     assert_proxy_set_prototype_batch::<16>();
 }
 
+#[test]
+fn proxy_has_arguments_resume_for_every_dispatch_batch() {
+    assert_proxy_has_batch::<1>();
+    assert_proxy_has_batch::<2>();
+    assert_proxy_has_batch::<4>();
+    assert_proxy_has_batch::<8>();
+    assert_proxy_has_batch::<16>();
+}
+
+#[test]
+fn proxy_has_missing_and_nullish_traps_forward_while_noncallable_rejects() {
+    let mut isolate = test_isolate();
+    let key_atom = isolate.intern_intrinsic_name(b"visible").unwrap();
+    let key = isolate.atom_string_value(key_atom).unwrap();
+    let target = isolate.create_ordinary_object().unwrap();
+    isolate
+        .set_own_data_property(target, key_atom, Value::from_i32(1))
+        .unwrap();
+    let inner_handler = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers = vec![target, inner_handler];
+    let inner = isolate
+        .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+        .unwrap();
+    let outer_handler = isolate.create_ordinary_object().unwrap();
+    let has_atom = isolate.intern_intrinsic_name(b"has").unwrap();
+    isolate
+        .set_own_data_property(
+            outer_handler,
+            has_atom,
+            Value::from_immediate(Immediate::Null),
+        )
+        .unwrap();
+    isolate.fiber.registers = vec![inner, outer_handler];
+    let outer = isolate
+        .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+        .unwrap();
+    isolate.fiber.registers = vec![Value::from_immediate(Immediate::Undefined)];
+    isolate
+        .dispatch_proxy_has(
+            NativeContinuationSite {
+                caller_base: 0,
+                destination: 0,
+                call_site: WordOffset::new(0),
+            },
+            outer,
+            key,
+        )
+        .unwrap();
+    assert_eq!(
+        isolate.fiber.registers[0].as_immediate(),
+        Some(Immediate::True)
+    );
+    let child = isolate
+        .create_ordinary_object_with_prototype(outer)
+        .unwrap();
+    isolate
+        .dispatch_has_property(
+            NativeContinuationSite {
+                caller_base: 0,
+                destination: 0,
+                call_site: WordOffset::new(0),
+            },
+            child,
+            key,
+        )
+        .unwrap();
+    assert_eq!(
+        isolate.fiber.registers[0].as_immediate(),
+        Some(Immediate::True)
+    );
+
+    isolate
+        .set_own_data_property(
+            outer_handler,
+            has_atom,
+            Value::from_immediate(Immediate::True),
+        )
+        .unwrap();
+    assert!(matches!(
+        isolate.dispatch_proxy_has(
+            NativeContinuationSite {
+                caller_base: 0,
+                destination: 0,
+                call_site: WordOffset::new(0),
+            },
+            outer,
+            key,
+        ),
+        Err(ExecutionError::NonCallable(value))
+            if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
+#[test]
+fn proxy_has_false_rejects_nonconfigurable_and_nonextensible_target_properties() {
+    for nonconfigurable in [true, false] {
+        let module = proxy_has_false_module();
+        let mut isolate = test_isolate();
+        let code = isolate.load_module(&module).unwrap();
+        let trap = allocate_proxy_test_function(&mut isolate, code, FunctionId::new(1));
+        let target = isolate.create_ordinary_object().unwrap();
+        let key_atom = isolate.intern_intrinsic_name(b"visible").unwrap();
+        isolate
+            .define_property(
+                target,
+                key_atom.into(),
+                PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(Value::from_i32(1)),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(!nonconfigurable),
+                }),
+            )
+            .unwrap();
+        if !nonconfigurable {
+            let receiver = isolate.object_snapshot(target).unwrap().0;
+            isolate.set_object_extensible(receiver, false).unwrap();
+        }
+        let handler = isolate.create_ordinary_object().unwrap();
+        let has_atom = isolate.intern_intrinsic_name(b"has").unwrap();
+        isolate
+            .set_own_data_property(handler, has_atom, trap)
+            .unwrap();
+        isolate.fiber.registers = vec![target, handler];
+        let proxy = isolate
+            .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+            .unwrap();
+        let key = isolate.atom_string_value(key_atom).unwrap();
+        for (name, value) in [(b"proxy".as_slice(), proxy), (b"key".as_slice(), key)] {
+            let atom = isolate.intern_intrinsic_name(name).unwrap();
+            isolate.realm.set(atom, value).unwrap();
+        }
+        let outcome = isolate
+            .execute_with_batch::<8>(
+                &module,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::Thrown(value)
+                if isolate.native_error_kind(value).unwrap() == Some(NativeErrorKind::Type)
+        ));
+    }
+}
+
+/// Verifies accessor lookup, handler `this`, `(target, key)` arguments, and forced-major rooting.
+fn assert_proxy_has_batch<const N: usize>() {
+    let module = proxy_has_module();
+    let mut isolate = test_isolate();
+    let code = isolate.load_module(&module).unwrap();
+    let getter = allocate_proxy_test_function(&mut isolate, code, FunctionId::new(1));
+    let trap = allocate_proxy_test_function(&mut isolate, code, FunctionId::new(2));
+    let target = isolate.create_ordinary_object().unwrap();
+    let handler = isolate.create_ordinary_object().unwrap();
+    let has = isolate.intern_intrinsic_name(b"has").unwrap();
+    isolate
+        .define_property(
+            handler,
+            has.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: None,
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    isolate.fiber.registers = vec![target, handler];
+    let proxy = isolate
+        .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+        .unwrap();
+    let expected_key = isolate.atom_string_value(has).unwrap();
+    for (name, value) in [
+        (b"proxy".as_slice(), proxy),
+        (b"trap".as_slice(), trap),
+        (b"expectedTarget".as_slice(), target),
+        (b"expectedKey".as_slice(), expected_key),
+        (b"expectedHandler".as_slice(), handler),
+    ] {
+        let atom = isolate.intern_intrinsic_name(name).unwrap();
+        isolate.realm.set(atom, value).unwrap();
+    }
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 96,
+                quantum: 96,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
 /// Verifies the traced native argument source, handler receiver, and invariant after forced major GC.
 fn assert_proxy_set_prototype_batch<const N: usize>() {
     let module = proxy_set_prototype_module();
@@ -400,6 +604,119 @@ fn proxy_set_prototype_module() -> CompiledModule {
             Arc::from("expectedHandler"),
         ],
         templates,
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
+/// Builds an accessor-backed `Reflect.has(proxy, key)` argument and receiver identity check.
+fn proxy_has_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+    entry.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+    entry.emit(Opcode::LoadScope, &[2, 2], span).unwrap();
+    entry.emit(Opcode::LoadScope, &[3, 3], span).unwrap();
+    entry.emit(Opcode::Move, &[4, 0], span).unwrap();
+    entry.emit(Opcode::Move, &[5, 1], span).unwrap();
+    entry.emit(Opcode::Move, &[6, 2], span).unwrap();
+    entry.emit(Opcode::Move, &[7, 3], span).unwrap();
+    entry
+        .emit(Opcode::CallWithReceiver, &[8, 4, 2], span)
+        .unwrap();
+    entry.emit(Opcode::Return, &[8], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::LoadScope, &[0, 4], span).unwrap();
+    getter.emit(Opcode::Return, &[0], span).unwrap();
+    let (getter_bytecode, getter_map, getter_registers) = getter.finish().unwrap();
+    let mut trap = BytecodeBuilder::default();
+    trap.emit(Opcode::LoadThis, &[2], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[3, 5], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[4, 0, 3], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[5, 6], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[6, 1, 5], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[7, 7], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[8, 2, 7], span).unwrap();
+    trap.emit(Opcode::BitwiseAnd, &[9, 4, 6], span).unwrap();
+    trap.emit(Opcode::BitwiseAnd, &[10, 9, 8], span).unwrap();
+    trap.emit(Opcode::Return, &[10], span).unwrap();
+    let (trap_bytecode, trap_map, trap_registers) = trap.finish().unwrap();
+    let templates = vec![
+        proxy_test_template(
+            FunctionId::new(0),
+            entry_bytecode,
+            entry_map,
+            entry_registers,
+            0,
+        ),
+        proxy_test_template(
+            FunctionId::new(1),
+            getter_bytecode,
+            getter_map,
+            getter_registers,
+            0,
+        ),
+        proxy_test_template(
+            FunctionId::new(2),
+            trap_bytecode,
+            trap_map,
+            trap_registers,
+            2,
+        ),
+    ];
+    CompiledModule::new(
+        Arc::from("proxy has continuation"),
+        Vec::new(),
+        vec![
+            Arc::from("Reflect"),
+            Arc::from("has"),
+            Arc::from("proxy"),
+            Arc::from("expectedKey"),
+            Arc::from("trap"),
+            Arc::from("expectedTarget"),
+            Arc::from("expectedKey"),
+            Arc::from("expectedHandler"),
+        ],
+        templates,
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
+/// Builds `key in proxy` with a false-returning trap for exact invariant checks.
+fn proxy_has_false_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+    entry.emit(Opcode::LoadScope, &[1, 1], span).unwrap();
+    entry.emit(Opcode::HasProperty, &[2, 1, 0], span).unwrap();
+    entry.emit(Opcode::Return, &[2], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+    let mut trap = BytecodeBuilder::default();
+    trap.emit(Opcode::LoadFalse, &[2], span).unwrap();
+    trap.emit(Opcode::Return, &[2], span).unwrap();
+    let (trap_bytecode, trap_map, trap_registers) = trap.finish().unwrap();
+    CompiledModule::new(
+        Arc::from("proxy has false invariant"),
+        Vec::new(),
+        vec![Arc::from("proxy"), Arc::from("key")],
+        vec![
+            proxy_test_template(
+                FunctionId::new(0),
+                entry_bytecode,
+                entry_map,
+                entry_registers,
+                0,
+            ),
+            proxy_test_template(
+                FunctionId::new(1),
+                trap_bytecode,
+                trap_map,
+                trap_registers,
+                2,
+            ),
+        ],
         FunctionId::new(0),
     )
     .unwrap()
