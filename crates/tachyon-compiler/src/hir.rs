@@ -6,10 +6,10 @@ mod program;
 mod statement;
 
 pub use expression::{
-    HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirClass, HirClassMethod,
-    HirClassMethodKind, HirExpression, HirExpressionKind, HirLogicalOperator,
-    HirObjectExpressionPart, HirObjectProperty, HirObjectPropertyKey, HirObjectPropertyValue,
-    HirUnaryOperator, HirUpdateOperator,
+    HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirClass, HirClassElement,
+    HirClassField, HirClassMethod, HirClassMethodKind, HirExpression, HirExpressionKind,
+    HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty, HirObjectPropertyKey,
+    HirObjectPropertyValue, HirUnaryOperator, HirUpdateOperator,
 };
 pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
 pub(crate) use program::lower;

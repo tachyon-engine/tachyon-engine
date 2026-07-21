@@ -149,6 +149,7 @@ pub enum HirFunctionKind {
     BaseClassConstructor,
     DefaultBaseConstructor,
     ClassMethod,
+    ClassFieldInitializer,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.

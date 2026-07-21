@@ -152,6 +152,19 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " receiver=r{}, value=r{}, name={}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::DefineFieldById => write!(
+            output,
+            " target=r{}, value=r{}, name={}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::DefineFieldByValue => write!(
+            output,
+            " target=r{}, value=r{}, key=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::SetFunctionHomeObject => {
+            write!(output, " function=r{}, home=r{}", operands[0], operands[1])?
+        }
         Opcode::GetSuperById => write!(output, " r{}, name={}", operands[0], operands[1])?,
         Opcode::GetSuperByValue => write!(
             output,

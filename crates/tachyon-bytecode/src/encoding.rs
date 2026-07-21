@@ -255,9 +255,15 @@ pub enum Opcode {
     InitializeClassEnvironment = 104,
     /// Restores the lexical environment active before class evaluation.
     LeaveClassEnvironment = 105,
+    /// Publishes the dynamic home object used by a hidden class-field initializer.
+    SetFunctionHomeObject = 106,
+    /// Defines one public field using a compile-time property name.
+    DefineFieldById = 107,
+    /// Defines one public field using an already-normalized runtime PropertyKey.
+    DefineFieldByValue = 108,
 }
 
-pub(super) const OPCODE_COUNT: usize = 106;
+pub(super) const OPCODE_COUNT: usize = 109;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -365,10 +371,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // EnterClassEnvironment
     1, // InitializeClassEnvironment
     0, // LeaveClassEnvironment
+    2, // SetFunctionHomeObject
+    3, // DefineFieldById
+    3, // DefineFieldByValue
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::LeaveClassEnvironment as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefineFieldByValue as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -520,6 +529,9 @@ impl Opcode {
             39 => Some(Self::EnterClassEnvironment),
             40 => Some(Self::InitializeClassEnvironment),
             41 => Some(Self::LeaveClassEnvironment),
+            42 => Some(Self::SetFunctionHomeObject),
+            43 => Some(Self::DefineFieldById),
+            44 => Some(Self::DefineFieldByValue),
             _ => None,
         }
     }

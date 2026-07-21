@@ -152,3 +152,36 @@ fn named_class_expression_environment() {
         );
     }
 }
+
+#[test]
+/// Delays static field initializers until all keys exist while preserving class execution context.
+fn public_static_field_semantics() {
+    for (source_id, source) in [
+        (
+            1_089,
+            "var index = 0; function next() { var key = 'k' + index; index = index + 1; return key; } class A { static [next()] = index; static [next()] = index; } index === 2 && A.k0 === 2 && A.k1 === 2;",
+        ),
+        (
+            1_090,
+            "class Base {} Base.base = 4; class Derived extends Base { static self = this; static value = super.base + 1; static owner = Derived; } Derived.self === Derived && Derived.value === 5 && Derived.owner === Derived;",
+        ),
+        (
+            1_091,
+            "class A { static field = 7; static empty; static named = function() {}; } var descriptor = Object.getOwnPropertyDescriptor(A, 'field'); A.field === 7 && A.empty === undefined && A.named.name === 'named' && descriptor.writable === true && descriptor.enumerable === true && descriptor.configurable === true;",
+        ),
+        (
+            1_092,
+            "var threw = false; try { class C { [typeof C]() {} } } catch (error) { threw = error instanceof ReferenceError; } threw;",
+        ),
+        (
+            1_093,
+            "var saved; function outer(parameter) { let lexical = 1; var variable = 2; class C { static value = parameter + lexical + variable; static self = C; method() { return C; } } saved = function() { return C; }; return C; } var C = outer(3); C.value === 6 && C.self === C && new C().method() === C && saved() === C;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

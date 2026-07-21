@@ -241,10 +241,14 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             if class.name.is_some() {
                 count = checked_count_add(count, 1, "scope names")?;
             }
-            for method in class.methods.iter() {
+            for element in class.elements.iter() {
+                let key = match element {
+                    crate::HirClassElement::Method(method) => &method.key,
+                    crate::HirClassElement::PublicField(field) => &field.key,
+                };
                 count = checked_count_add(
                     count,
-                    match &method.key {
+                    match key {
                         HirObjectPropertyKey::Static(_) => 1,
                         HirObjectPropertyKey::Computed(key) => expression_scope_name_count(key)?,
                     },
@@ -636,8 +640,12 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 .map(expression_literal_count)
                 .transpose()?
                 .unwrap_or(0);
-            for method in class.methods.iter() {
-                if let HirObjectPropertyKey::Computed(key) = &method.key {
+            for element in class.elements.iter() {
+                let key = match element {
+                    crate::HirClassElement::Method(method) => &method.key,
+                    crate::HirClassElement::PublicField(field) => &field.key,
+                };
+                if let HirObjectPropertyKey::Computed(key) = key {
                     count = checked_count_add(
                         count,
                         expression_literal_count(key)?,

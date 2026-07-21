@@ -199,8 +199,12 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>
             if let Some(super_class) = &class.super_class {
                 collect_expression(super_class, bindings);
             }
-            for method in class.methods.iter() {
-                if let HirObjectPropertyKey::Computed(key) = &method.key {
+            for element in class.elements.iter() {
+                let key = match element {
+                    crate::HirClassElement::Method(method) => &method.key,
+                    crate::HirClassElement::PublicField(field) => &field.key,
+                };
+                if let HirObjectPropertyKey::Computed(key) = key {
                     collect_expression(key, bindings);
                 }
             }

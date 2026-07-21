@@ -2,6 +2,7 @@
 
 mod capacity;
 mod class_environment;
+mod field_initializer;
 mod lowerer;
 
 use lowerer::Lowerer;
@@ -301,6 +302,13 @@ impl EnvironmentPlans {
                 }
             }
         }
+        let class_bindings = class_environment::collect(hir);
+        let mut forced_captures = field_initializer::forced_captures(hir);
+        forced_captures.retain(|binding| {
+            !class_bindings
+                .iter()
+                .any(|class_binding| class_binding.id == *binding)
+        });
         let mut functions = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
             let parameter_binding_count = function
@@ -331,21 +339,21 @@ impl EnvironmentPlans {
             }
             for parameter in function.parameters.iter() {
                 for binding in pattern_bindings(parameter) {
-                    push_captured_slot(&binding, true, true, &mut slots)?;
+                    push_captured_slot(&binding, true, true, &forced_captures, &mut slots)?;
                 }
             }
             if let Some(rest) = &function.rest_parameter {
                 for binding in pattern_bindings(rest) {
-                    push_captured_slot(&binding, true, true, &mut slots)?;
+                    push_captured_slot(&binding, true, true, &forced_captures, &mut slots)?;
                 }
             }
-            collect_captured_slots(source, &function.body, &mut slots)?;
+            collect_captured_slots(source, &function.body, &forced_captures, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
                 slots,
             });
         }
-        let classes = class_environment::collect(hir)
+        let classes = class_bindings
             .into_iter()
             .map(|binding| ClassEnvironmentPlan {
                 scope: binding.scope,
@@ -389,30 +397,31 @@ impl EnvironmentPlans {
         current_scope: ScopeId,
         binding: BindingId,
     ) -> Option<(u32, &CapturedSlot, bool)> {
-        let (target_scope, slot, class_environment) = self.slot_for_binding(binding)?;
         let mut cursor = if self.scope_has_environment(current_scope) {
             current_scope
         } else {
             self.nearest_environment_parent(current_scope)?
         };
         let mut depth = 0_u32;
-        while cursor != target_scope {
+        loop {
+            if let Some(class) = self
+                .classes
+                .iter()
+                .find(|class| class.scope == cursor && class.slot.id == binding)
+            {
+                return Some((depth, &class.slot, true));
+            }
+            if let Some(slot) = self
+                .functions
+                .iter()
+                .find(|function| function.scope == cursor)
+                .and_then(|function| function.slots.iter().find(|slot| slot.id == binding))
+            {
+                return Some((depth, slot, false));
+            }
             cursor = self.nearest_environment_parent(cursor)?;
             depth = depth.checked_add(1)?;
         }
-        Some((depth, slot, class_environment))
-    }
-
-    fn slot_for_binding(&self, binding: BindingId) -> Option<(ScopeId, &CapturedSlot, bool)> {
-        for function in &self.functions {
-            if let Some(slot) = function.slots.iter().find(|slot| slot.id == binding) {
-                return Some((function.scope, slot, false));
-            }
-        }
-        self.classes
-            .iter()
-            .find(|class| class.slot.id == binding)
-            .map(|class| (class.scope, &class.slot, true))
     }
 
     fn scope_has_environment(&self, scope: ScopeId) -> bool {
@@ -438,9 +447,12 @@ fn push_captured_slot(
     binding: &crate::HirBinding,
     mutable: bool,
     initialized: bool,
+    forced_captures: &[BindingId],
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
-    if !binding.captured || slots.iter().any(|slot| slot.id == binding.id) {
+    if (!binding.captured && !forced_captures.contains(&binding.id))
+        || slots.iter().any(|slot| slot.id == binding.id)
+    {
         return Ok(());
     }
     let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
@@ -523,6 +535,7 @@ fn collect_pattern_bindings(pattern: &crate::HirPattern, bindings: &mut Vec<crat
 fn collect_captured_slots(
     source: &SourceText,
     statements: &[HirStatement],
+    forced_captures: &[BindingId],
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
     for statement in statements {
@@ -532,22 +545,34 @@ fn collect_captured_slots(
                 let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
                     for binding in pattern_bindings(&declarator.pattern) {
-                        push_captured_slot(&binding, mutable, initialized, slots)?;
+                        push_captured_slot(&binding, mutable, initialized, forced_captures, slots)?;
                     }
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
-                push_captured_slot(&declaration.binding, true, true, slots)?;
+                push_captured_slot(&declaration.binding, true, true, forced_captures, slots)?;
             }
-            HirStatementKind::Block(body) => collect_captured_slots(source, body, slots)?,
+            HirStatementKind::Block(body) => {
+                collect_captured_slots(source, body, forced_captures, slots)?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
                 ..
             } => {
-                collect_captured_slots(source, core::slice::from_ref(consequent), slots)?;
+                collect_captured_slots(
+                    source,
+                    core::slice::from_ref(consequent),
+                    forced_captures,
+                    slots,
+                )?;
                 if let Some(alternate) = alternate {
-                    collect_captured_slots(source, core::slice::from_ref(alternate), slots)?;
+                    collect_captured_slots(
+                        source,
+                        core::slice::from_ref(alternate),
+                        forced_captures,
+                        slots,
+                    )?;
                 }
             }
             HirStatementKind::For {
@@ -558,11 +583,22 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
-                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                            push_captured_slot(
+                                &binding,
+                                mutable,
+                                initialized,
+                                forced_captures,
+                                slots,
+                            )?;
                         }
                     }
                 }
-                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
+                collect_captured_slots(
+                    source,
+                    core::slice::from_ref(body),
+                    forced_captures,
+                    slots,
+                )?;
             }
             HirStatementKind::ForIn { left, body, .. } => {
                 if let HirForInLeft::Variable(declaration) = left {
@@ -570,11 +606,22 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
-                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                            push_captured_slot(
+                                &binding,
+                                mutable,
+                                initialized,
+                                forced_captures,
+                                slots,
+                            )?;
                         }
                     }
                 }
-                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
+                collect_captured_slots(
+                    source,
+                    core::slice::from_ref(body),
+                    forced_captures,
+                    slots,
+                )?;
             }
             HirStatementKind::ForOf { left, body, .. } => {
                 if let HirForInLeft::Variable(declaration) = left {
@@ -582,18 +629,34 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
-                            push_captured_slot(&binding, mutable, initialized, slots)?;
+                            push_captured_slot(
+                                &binding,
+                                mutable,
+                                initialized,
+                                forced_captures,
+                                slots,
+                            )?;
                         }
                     }
                 }
-                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
+                collect_captured_slots(
+                    source,
+                    core::slice::from_ref(body),
+                    forced_captures,
+                    slots,
+                )?;
             }
             HirStatementKind::Loop { body, .. } => {
-                collect_captured_slots(source, core::slice::from_ref(body), slots)?;
+                collect_captured_slots(
+                    source,
+                    core::slice::from_ref(body),
+                    forced_captures,
+                    slots,
+                )?;
             }
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
-                    collect_captured_slots(source, &case.consequent, slots)?;
+                    collect_captured_slots(source, &case.consequent, forced_captures, slots)?;
                 }
             }
             HirStatementKind::Try {
@@ -601,15 +664,21 @@ fn collect_captured_slots(
                 handler,
                 finalizer,
             } => {
-                collect_captured_slots(source, block, slots)?;
+                collect_captured_slots(source, block, forced_captures, slots)?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
-                        push_captured_slot(simple_binding(source, parameter)?, true, false, slots)?;
+                        push_captured_slot(
+                            simple_binding(source, parameter)?,
+                            true,
+                            false,
+                            forced_captures,
+                            slots,
+                        )?;
                     }
-                    collect_captured_slots(source, &handler.body, slots)?;
+                    collect_captured_slots(source, &handler.body, forced_captures, slots)?;
                 }
                 if let Some(finalizer) = finalizer {
-                    collect_captured_slots(source, finalizer, slots)?;
+                    collect_captured_slots(source, finalizer, forced_captures, slots)?;
                 }
             }
             HirStatementKind::Expression(_)
@@ -791,6 +860,7 @@ fn lower_function(
                     FunctionKind::BaseClassConstructor
                 }
                 HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
+                HirFunctionKind::ClassFieldInitializer => FunctionKind::ClassFieldInitializer,
             },
             strictness: if function.strict {
                 FunctionStrictness::Strict

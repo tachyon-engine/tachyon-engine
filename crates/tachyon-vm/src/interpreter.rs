@@ -923,6 +923,30 @@ impl Isolate {
                 let key = self.property_key(self.read(base, operands[1])?)?;
                 self.set_method_function_name(function, key)?;
             }
+            Opcode::SetFunctionHomeObject => {
+                let function = self.read(base, operands[0])?;
+                let home_object = self.read(base, operands[1])?;
+                self.set_function_home_object(function, home_object)?;
+            }
+            Opcode::DefineFieldById | Opcode::DefineFieldByValue => {
+                let target = self.read(base, operands[0])?;
+                let value = self.read(base, operands[1])?;
+                let key = if opcode == Opcode::DefineFieldById {
+                    self.scope_atom(code, operands[2])?.into()
+                } else {
+                    self.property_key(self.read(base, operands[2])?)?
+                };
+                self.define_data_property(
+                    target,
+                    key,
+                    DataPropertyDescriptor {
+                        value: Some(value),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                    },
+                )?;
+            }
             Opcode::CreateObject => {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
@@ -2656,7 +2680,10 @@ impl Isolate {
                         .function(function)
                         .ok_or(ExecutionError::MissingEntryFunction(function))?
                         .kind();
-                    if kind == FunctionKind::ClassMethod {
+                    if matches!(
+                        kind,
+                        FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+                    ) {
                         return Err(ExecutionError::NonConstructor(site.callee));
                     }
                     break kind == FunctionKind::DerivedClassConstructor;
@@ -3755,12 +3782,16 @@ impl Isolate {
             FunctionExecutable::PromiseResolver { .. } => false,
             FunctionExecutable::PromiseCapabilityExecutor(_) => false,
             FunctionExecutable::Bytecode { code, function, .. } => {
-                self.loaded_code(code)?
+                let kind = self
+                    .loaded_code(code)?
                     .module
                     .function(function)
                     .ok_or(ExecutionError::MissingEntryFunction(function))?
-                    .kind()
-                    != FunctionKind::ClassMethod
+                    .kind();
+                !matches!(
+                    kind,
+                    FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+                )
             }
         })
     }
@@ -4017,7 +4048,10 @@ impl Isolate {
             self.write(callee_base, index, value)?;
         }
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
-        let receiver_or_home_object = if target.kind == FunctionKind::ClassMethod {
+        let receiver_or_home_object = if matches!(
+            target.kind,
+            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+        ) {
             Some(self.function_home_object(site.callee)?)
         } else {
             site.construct_receiver

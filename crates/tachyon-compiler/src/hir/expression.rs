@@ -58,12 +58,18 @@ pub struct HirExpression {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirClass {
     pub name: Option<Arc<str>>,
-    /// The private immutable binding created only for a named class expression.
+    /// The immutable inner binding created for a class declaration or named expression.
     pub name_binding: Option<super::program::HirBinding>,
     pub scope: super::program::ScopeId,
     pub super_class: Option<Box<HirExpression>>,
     pub constructor: FunctionStencilId,
-    pub methods: Arc<[HirClassMethod]>,
+    pub elements: Arc<[HirClassElement]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirClassElement {
+    Method(HirClassMethod),
+    PublicField(HirClassField),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,6 +79,15 @@ pub struct HirClassMethod {
     pub function: FunctionStencilId,
     pub is_static: bool,
     pub kind: HirClassMethodKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirClassField {
+    pub span: SourceSpan,
+    pub key: HirObjectPropertyKey,
+    pub initializer: Option<FunctionStencilId>,
+    pub is_static: bool,
+    pub infer_name: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,7 +695,7 @@ pub(super) fn lower_expression(
     Ok(HirExpression { span, kind })
 }
 
-/// Copies one base/derived constructor and methods while preserving supported class-name semantics.
+/// Copies one class into ordered elements and independent field-initializer stencils.
 pub(super) fn lower_class(
     class: &oxc::ast::ast::Class<'_>,
     declaration_name: Option<Arc<str>>,
@@ -700,17 +715,11 @@ pub(super) fn lower_class(
             "decorated or TypeScript class",
         ));
     }
-    let name_binding = declaration_name
-        .is_none()
-        .then(|| {
-            class
-                .id
-                .as_ref()
-                .map(|identifier| new_binding(identifier, source, semantic))
-                .transpose()
-        })
-        .transpose()?
-        .flatten();
+    let name_binding = class
+        .id
+        .as_ref()
+        .map(|identifier| new_binding(identifier, source, semantic))
+        .transpose()?;
     let class_name = declaration_name
         .clone()
         .or_else(|| name_binding.as_ref().map(|binding| binding.name.clone()));
@@ -719,118 +728,29 @@ pub(super) fn lower_class(
         .get()
         .ok_or_else(|| missing_semantic(source, source_span(class.span), "class scope"))?;
     let mut constructor = None;
-    let mut methods = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
         let oxc::ast::ast::ClassElement::MethodDefinition(method) = element else {
-            return Err(unsupported(
-                source.name(),
-                source_span(class.body.span),
-                "class fields or static blocks",
-            ));
+            continue;
         };
-        if !method.decorators.is_empty()
-            || method.accessibility.is_some()
-            || method.r#override
-            || method.optional
-        {
+        if method.kind != oxc::ast::ast::MethodDefinitionKind::Constructor {
+            continue;
+        }
+        validate_class_method(method, source)?;
+        if method.r#static || constructor.is_some() {
             return Err(unsupported(
                 source.name(),
                 source_span(method.span),
-                "TypeScript class method",
+                "duplicate or static constructor",
             ));
         }
-        let key = if method.computed {
-            HirObjectPropertyKey::Computed(lower_expression(
-                method.key.to_expression(),
-                source,
-                semantic,
-                functions,
-            )?)
-        } else {
-            let name: Arc<str> = match &method.key {
-                PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
-                PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
-                PropertyKey::NumericLiteral(literal) => {
-                    let mut buffer = ryu_js::Buffer::new();
-                    Arc::from(if literal.value == 0.0 {
-                        "0"
-                    } else {
-                        buffer.format(literal.value)
-                    })
-                }
-                _ => {
-                    return Err(unsupported(
-                        source.name(),
-                        source_span(method.key.span()),
-                        "class method key",
-                    ));
-                }
-            };
-            HirObjectPropertyKey::Static(name)
-        };
-        match method.kind {
-            oxc::ast::ast::MethodDefinitionKind::Constructor => {
-                if method.r#static || constructor.is_some() {
-                    return Err(unsupported(
-                        source.name(),
-                        source_span(method.span),
-                        "duplicate or static constructor",
-                    ));
-                }
-                constructor = Some(lower_function_stencil(
-                    &method.value,
-                    class_name.clone(),
-                    None,
-                    source,
-                    semantic,
-                    functions,
-                )?);
-            }
-            oxc::ast::ast::MethodDefinitionKind::Method
-            | oxc::ast::ast::MethodDefinitionKind::Get
-            | oxc::ast::ast::MethodDefinitionKind::Set => {
-                let kind = match method.kind {
-                    oxc::ast::ast::MethodDefinitionKind::Method => HirClassMethodKind::Method,
-                    oxc::ast::ast::MethodDefinitionKind::Get => HirClassMethodKind::Getter,
-                    oxc::ast::ast::MethodDefinitionKind::Set => HirClassMethodKind::Setter,
-                    oxc::ast::ast::MethodDefinitionKind::Constructor => {
-                        unreachable!("constructor arm handled above")
-                    }
-                };
-                let function_name = match (&key, kind) {
-                    (HirObjectPropertyKey::Computed(_), _) => None,
-                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Method) => {
-                        Some(name.clone())
-                    }
-                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Getter) => {
-                        Some(Arc::from(format!("get {name}")))
-                    }
-                    (HirObjectPropertyKey::Static(name), HirClassMethodKind::Setter) => {
-                        Some(Arc::from(format!("set {name}")))
-                    }
-                };
-                let function = lower_function_stencil(
-                    &method.value,
-                    function_name,
-                    None,
-                    source,
-                    semantic,
-                    functions,
-                )?;
-                let stencil = functions
-                    .get_mut(function.index() as usize)
-                    .expect("new class method stencil is published at its stable index");
-                stencil.strict = true;
-                stencil.kind = super::program::HirFunctionKind::ClassMethod;
-                methods.push(HirClassMethod {
-                    span: source_span(method.span),
-                    key,
-                    function,
-                    is_static: method.r#static,
-                    kind,
-                });
-            }
-        }
+        constructor = Some(lower_function_stencil(
+            &method.value,
+            class_name.clone(),
+            None,
+            source,
+            semantic,
+            functions,
+        )?);
     }
     let constructor = match constructor {
         Some(constructor) => constructor,
@@ -873,6 +793,139 @@ pub(super) fn lower_class(
         };
     }
     stencil.strict = true;
+    let mut elements = Vec::with_capacity(class.body.body.len());
+    for element in &class.body.body {
+        match element {
+            oxc::ast::ast::ClassElement::MethodDefinition(method) => {
+                if method.kind == oxc::ast::ast::MethodDefinitionKind::Constructor {
+                    continue;
+                }
+                validate_class_method(method, source)?;
+                let key = lower_class_key(
+                    &method.key,
+                    method.computed,
+                    "class method key",
+                    source,
+                    semantic,
+                    functions,
+                )?;
+                let kind = match method.kind {
+                    oxc::ast::ast::MethodDefinitionKind::Method => HirClassMethodKind::Method,
+                    oxc::ast::ast::MethodDefinitionKind::Get => HirClassMethodKind::Getter,
+                    oxc::ast::ast::MethodDefinitionKind::Set => HirClassMethodKind::Setter,
+                    oxc::ast::ast::MethodDefinitionKind::Constructor => unreachable!(),
+                };
+                let function_name = class_method_name(&key, kind);
+                let function = lower_function_stencil(
+                    &method.value,
+                    function_name,
+                    None,
+                    source,
+                    semantic,
+                    functions,
+                )?;
+                let stencil = functions
+                    .get_mut(function.index() as usize)
+                    .expect("new class method stencil is published at its stable index");
+                stencil.strict = true;
+                stencil.kind = super::program::HirFunctionKind::ClassMethod;
+                elements.push(HirClassElement::Method(HirClassMethod {
+                    span: source_span(method.span),
+                    key,
+                    function,
+                    is_static: method.r#static,
+                    kind,
+                }));
+            }
+            oxc::ast::ast::ClassElement::PropertyDefinition(field) => {
+                if !field.r#static {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(field.span),
+                        "instance class field",
+                    ));
+                }
+                if field.r#type.is_abstract()
+                    || !field.decorators.is_empty()
+                    || field.type_annotation.is_some()
+                    || field.declare
+                    || field.r#override
+                    || field.optional
+                    || field.definite
+                    || field.readonly
+                    || field.accessibility.is_some()
+                {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(field.span),
+                        "TypeScript class field",
+                    ));
+                }
+                let key = lower_class_key(
+                    &field.key,
+                    field.computed,
+                    "class field key",
+                    source,
+                    semantic,
+                    functions,
+                )?;
+                let infer_name = field
+                    .value
+                    .as_ref()
+                    .is_some_and(oxc::ast::ast::Expression::is_anonymous_function_definition);
+                let initializer = field
+                    .value
+                    .as_ref()
+                    .map(|value| {
+                        let value = lower_expression(value, source, semantic, functions)?;
+                        let id = FunctionStencilId(
+                            u32::try_from(functions.len())
+                                .map_err(|_| CompileError::BindingOverflow)?,
+                        );
+                        functions.push(HirFunction {
+                            id,
+                            span: source_span(field.span),
+                            name: None,
+                            self_binding: None,
+                            parameters: Arc::from([]),
+                            parameter_initializers: Arc::from([]),
+                            rest_parameter: None,
+                            body: Arc::from([super::statement::HirStatement {
+                                span: source_span(field.span),
+                                completion: super::program::StatementCompletion::Empty,
+                                kind: super::statement::HirStatementKind::Return(Some(value)),
+                            }]),
+                            scope: to_scope_id(class_scope),
+                            strict: true,
+                            kind: super::program::HirFunctionKind::ClassFieldInitializer,
+                        });
+                        Ok(id)
+                    })
+                    .transpose()?;
+                elements.push(HirClassElement::PublicField(HirClassField {
+                    span: source_span(field.span),
+                    key,
+                    initializer,
+                    is_static: true,
+                    infer_name,
+                }));
+            }
+            oxc::ast::ast::ClassElement::StaticBlock(block) => {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(block.span),
+                    "class static block",
+                ));
+            }
+            _ => {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(element.span()),
+                    "private class element",
+                ));
+            }
+        }
+    }
     Ok(HirClass {
         name: class_name,
         name_binding,
@@ -885,8 +938,72 @@ pub(super) fn lower_class(
             })
             .transpose()?,
         constructor,
-        methods: methods.into(),
+        elements: elements.into(),
     })
+}
+
+fn validate_class_method(
+    method: &oxc::ast::ast::MethodDefinition<'_>,
+    source: &SourceText,
+) -> Result<(), CompileError> {
+    if method.r#type.is_abstract()
+        || !method.decorators.is_empty()
+        || method.accessibility.is_some()
+        || method.r#override
+        || method.optional
+    {
+        return Err(unsupported(
+            source.name(),
+            source_span(method.span),
+            "TypeScript class method",
+        ));
+    }
+    Ok(())
+}
+
+fn lower_class_key(
+    key: &PropertyKey<'_>,
+    computed: bool,
+    syntax: &'static str,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirObjectPropertyKey, CompileError> {
+    if computed {
+        return Ok(HirObjectPropertyKey::Computed(lower_expression(
+            key.to_expression(),
+            source,
+            semantic,
+            functions,
+        )?));
+    }
+    let name: Arc<str> = match key {
+        PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
+        PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+        PropertyKey::NumericLiteral(literal) => {
+            let mut buffer = ryu_js::Buffer::new();
+            Arc::from(if literal.value == 0.0 {
+                "0"
+            } else {
+                buffer.format(literal.value)
+            })
+        }
+        _ => return Err(unsupported(source.name(), source_span(key.span()), syntax)),
+    };
+    Ok(HirObjectPropertyKey::Static(name))
+}
+
+fn class_method_name(key: &HirObjectPropertyKey, kind: HirClassMethodKind) -> Option<Arc<str>> {
+    match (key, kind) {
+        (HirObjectPropertyKey::Computed(_), _) => None,
+        (HirObjectPropertyKey::Static(name), HirClassMethodKind::Method) => Some(name.clone()),
+        (HirObjectPropertyKey::Static(name), HirClassMethodKind::Getter) => {
+            Some(Arc::from(format!("get {name}")))
+        }
+        (HirObjectPropertyKey::Static(name), HirClassMethodKind::Setter) => {
+            Some(Arc::from(format!("set {name}")))
+        }
+    }
 }
 
 /// Builds one owned array chunk used by spread lowering and sparse-element preservation.

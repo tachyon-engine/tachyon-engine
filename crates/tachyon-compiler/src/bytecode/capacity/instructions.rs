@@ -260,13 +260,19 @@ fn declaration_instruction_count(
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Class(class) => {
-            let mut method_instructions = 0;
-            for method in class.methods.iter() {
-                method_instructions =
-                    checked_count_add(method_instructions, 2, "bytecode instructions")?;
-                if let HirObjectPropertyKey::Computed(key) = &method.key {
-                    method_instructions = checked_count_add(
-                        method_instructions,
+            let mut element_instructions = 0;
+            for element in class.elements.iter() {
+                let (key, fixed) = match element {
+                    crate::HirClassElement::Method(method) => (&method.key, 2),
+                    crate::HirClassElement::PublicField(field) => {
+                        (&field.key, if field.initializer.is_some() { 7 } else { 2 })
+                    }
+                };
+                element_instructions =
+                    checked_count_add(element_instructions, fixed, "bytecode instructions")?;
+                if let HirObjectPropertyKey::Computed(key) = key {
+                    element_instructions = checked_count_add(
+                        element_instructions,
                         checked_count_add(
                             expression_instruction_count(key)?,
                             2,
@@ -281,10 +287,12 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 class_create_instructions
                     + usize::from(class.name.is_some())
                     + usize::from(class.name_binding.is_some()) * 3,
-                usize::from(class.methods.iter().any(|method| !method.is_static)),
+                usize::from(class.elements.iter().any(|element| {
+                    matches!(element, crate::HirClassElement::Method(method) if !method.is_static)
+                })),
                 "bytecode instructions",
             )?;
-            let fixed = checked_count_add(fixed, method_instructions, "bytecode instructions")?;
+            let fixed = checked_count_add(fixed, element_instructions, "bytecode instructions")?;
             checked_count_add(
                 class
                     .super_class

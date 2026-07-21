@@ -108,6 +108,28 @@ var instance = new value();
 value.self() === value && instance.method() === value && Outer === 7 && typeof Inner === "undefined";
 "#;
 
+const STATIC_FIELD_SOURCE: &str = r#"
+var index = 0;
+function next() { var key = "k" + index; index = index + 1; return key; }
+class Base { static base = 4; }
+class Derived extends Base {
+  static [next()] = index;
+  static self = this;
+  static value = super.base + index;
+  static [next()] = index;
+}
+var saved;
+function outer(parameter) {
+  let lexical = 1;
+  var variable = 2;
+  class Captured { static value = parameter + lexical + variable; static self = Captured; }
+  saved = function() { return Captured; };
+  return Captured;
+}
+var Captured = outer(3);
+index === 2 && Derived.k0 === 2 && Derived.k1 === 2 && Derived.self === Derived && Derived.value === 6 && Captured.value === 6 && Captured.self === Captured && saved() === Captured;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -169,6 +191,20 @@ fn named_class_environments_execute_for_every_dispatch_batch() {
     assert_named_class_environment_batch::<4>();
     assert_named_class_environment_batch::<8>();
     assert_named_class_environment_batch::<16>();
+}
+
+#[test]
+fn static_fields_execute_for_every_dispatch_batch() {
+    assert_static_field_batch::<1>();
+    assert_static_field_batch::<2>();
+    assert_static_field_batch::<4>();
+    assert_static_field_batch::<8>();
+    assert_static_field_batch::<16>();
+}
+
+#[test]
+fn static_fields_survive_forced_major_collections() {
+    assert_forced_major_source(STATIC_FIELD_SOURCE, 49);
 }
 
 #[test]
@@ -412,6 +448,25 @@ fn assert_named_class_environment_batch<const N: usize>() {
             },
         )
         .expect("named class environment fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes delayed static field records with one tuned dispatch batch.
+fn assert_static_field_batch<const N: usize>() {
+    let module = compile_source(STATIC_FIELD_SOURCE, 140 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 2_048,
+                quantum: 2_048,
+            },
+        )
+        .expect("static field fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

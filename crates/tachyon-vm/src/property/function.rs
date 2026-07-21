@@ -293,7 +293,12 @@ impl Isolate {
                     .loaded_code(code)
                     .ok()
                     .and_then(|code| code.module.function(function))
-                    .is_some_and(|metadata| metadata.kind() != FunctionKind::ClassMethod),
+                    .is_some_and(|metadata| {
+                        !matches!(
+                            metadata.kind(),
+                            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+                        )
+                    }),
                 FunctionExecutable::Native(native) => native.has_default_prototype(),
                 FunctionExecutable::Bound(_)
                 | FunctionExecutable::ProxyRevoker(_)
@@ -449,7 +454,10 @@ impl Isolate {
             .function(function_id)
             .ok_or(ExecutionError::MissingEntryFunction(function_id))?
             .kind();
-        if kind != FunctionKind::ClassMethod {
+        if !matches!(
+            kind,
+            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+        ) {
             return Err(ExecutionError::NonCallable(function));
         }
         self.set_function_prototype(function, home_object)

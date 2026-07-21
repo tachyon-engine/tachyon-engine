@@ -280,6 +280,7 @@ pub enum FunctionKind {
     DerivedClassConstructor,
     BaseClassConstructor,
     ClassMethod,
+    ClassFieldInitializer,
     Generator,
     Async,
     AsyncGenerator,
@@ -305,6 +306,7 @@ impl EnvironmentRecordKind {
             | FunctionKind::DerivedClassConstructor
             | FunctionKind::BaseClassConstructor
             | FunctionKind::ClassMethod
+            | FunctionKind::ClassFieldInitializer
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,
@@ -433,6 +435,7 @@ impl FunctionMetadata {
                 | FunctionKind::DerivedClassConstructor
                 | FunctionKind::BaseClassConstructor
                 | FunctionKind::ClassMethod
+                | FunctionKind::ClassFieldInitializer
         ) {
             FunctionStrictness::Strict
         } else {
@@ -777,6 +780,7 @@ impl CompiledModule {
                     | FunctionKind::DerivedClassConstructor
                     | FunctionKind::BaseClassConstructor
                     | FunctionKind::ClassMethod
+                    | FunctionKind::ClassFieldInitializer
             ) && template.metadata.strictness != FunctionStrictness::Strict
             {
                 return Err(ModuleBuildError::InvalidFunctionStrictness {

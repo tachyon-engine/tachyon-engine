@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        ForStatementInit, ForStatementLeft, Statement, VariableDeclaration, VariableDeclarationKind,
+        Expression, ForStatementInit, ForStatementLeft, Statement, VariableDeclaration,
+        VariableDeclarationKind,
     },
     semantic::{ScopeFlags as OxcScopeFlags, Semantic},
     span::GetSpan,
@@ -828,14 +829,32 @@ fn lower_variable_declaration(
     let mut declarators = Vec::with_capacity(declaration.declarations.len());
     for declarator in &declaration.declarations {
         let pattern = lower_binding_pattern(&declarator.id, source, semantic, functions)?;
+        let initializer = declarator
+            .init
+            .as_ref()
+            .map(|initializer| {
+                if let Expression::ClassExpression(class) = initializer
+                    && class.id.is_none()
+                    && let Some(binding) = pattern.binding()
+                {
+                    return Ok(HirExpression {
+                        span: source_span(class.span),
+                        kind: HirExpressionKind::Class(lower_class(
+                            class,
+                            Some(binding.name.clone()),
+                            source,
+                            semantic,
+                            functions,
+                        )?),
+                    });
+                }
+                lower_expression(initializer, source, semantic, functions)
+            })
+            .transpose()?;
         declarators.push(HirVariableDeclarator {
             span: source_span(declarator.span),
             pattern,
-            initializer: declarator
-                .init
-                .as_ref()
-                .map(|initializer| lower_expression(initializer, source, semantic, functions))
-                .transpose()?,
+            initializer,
         });
     }
     Ok(HirVariableDeclaration {

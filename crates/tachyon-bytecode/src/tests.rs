@@ -164,9 +164,17 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineClassGetterByValue,
                 Opcode::DefineClassSetterByValue,
                 Opcode::GetSuperByValue,
+                Opcode::DefineFieldById,
+                Opcode::DefineFieldByValue,
             ],
         ),
-        (2, &[Opcode::SetFunctionNameByValue]),
+        (
+            2,
+            &[
+                Opcode::SetFunctionNameByValue,
+                Opcode::SetFunctionHomeObject,
+            ],
+        ),
         (2, &[Opcode::GetSuperById]),
         (1, &[Opcode::LoadSuperBase]),
         (2, &[Opcode::CreateBaseClass]),

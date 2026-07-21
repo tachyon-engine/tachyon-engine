@@ -6,6 +6,14 @@ enum LoweredClassKey {
     Computed(RegisterId),
 }
 
+#[derive(Clone, Copy)]
+struct PendingStaticField {
+    key: LoweredClassKey,
+    initializer: Option<RegisterId>,
+    infer_name: bool,
+    span: SourceSpan,
+}
+
 impl Lowerer<'_> {
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     pub(in crate::bytecode) fn expression(
@@ -585,14 +593,9 @@ impl Lowerer<'_> {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
         }
-        if class.name_binding.is_some() {
-            self.emit(
-                Opcode::InitializeClassEnvironment,
-                &[destination.index()],
-                span,
-            )?;
-        }
-        let instance_target = if class.methods.iter().any(|method| !method.is_static) {
+        let instance_target = if class.elements.iter().any(|element| {
+            matches!(element, crate::HirClassElement::Method(method) if !method.is_static)
+        }) {
             let target = self.register()?;
             self.emit(
                 Opcode::GetById,
@@ -603,13 +606,68 @@ impl Lowerer<'_> {
         } else {
             None
         };
-        for method in class.methods.iter() {
-            let target = if method.is_static {
-                destination
-            } else {
-                instance_target.expect("instance target exists when an instance method was counted")
-            };
-            self.define_class_method(method, target)?;
+        let static_field_count = class
+            .elements
+            .iter()
+            .filter(|element| matches!(element, crate::HirClassElement::PublicField(_)))
+            .count();
+        let mut static_fields = Vec::with_capacity(static_field_count);
+        for element in class.elements.iter() {
+            match element {
+                crate::HirClassElement::Method(method) => {
+                    let target = if method.is_static {
+                        destination
+                    } else {
+                        instance_target
+                            .expect("instance target exists when an instance method was counted")
+                    };
+                    self.define_class_method(method, target)?;
+                }
+                crate::HirClassElement::PublicField(field) => {
+                    debug_assert!(
+                        field.is_static,
+                        "instance fields are rejected by HIR lowering"
+                    );
+                    let key = self.lower_class_key(&field.key, destination)?;
+                    let initializer = field
+                        .initializer
+                        .map(|initializer| {
+                            let closure = self.register()?;
+                            let function = initializer
+                                .index()
+                                .checked_add(1)
+                                .ok_or(CompileError::RegisterOverflow)?;
+                            self.emit(
+                                Opcode::CreateClosure,
+                                &[closure.index(), function],
+                                field.span,
+                            )?;
+                            self.emit(
+                                Opcode::SetFunctionHomeObject,
+                                &[closure.index(), destination.index()],
+                                field.span,
+                            )?;
+                            Ok::<RegisterId, CompileError>(closure)
+                        })
+                        .transpose()?;
+                    static_fields.push(PendingStaticField {
+                        key,
+                        initializer,
+                        infer_name: field.infer_name,
+                        span: field.span,
+                    });
+                }
+            }
+        }
+        if class.name_binding.is_some() {
+            self.emit(
+                Opcode::InitializeClassEnvironment,
+                &[destination.index()],
+                span,
+            )?;
+        }
+        for field in static_fields {
+            self.initialize_static_field(destination, field)?;
         }
         if class.name_binding.is_some() {
             self.emit(Opcode::LeaveClassEnvironment, &[], span)?;
@@ -628,14 +686,7 @@ impl Lowerer<'_> {
         method: &crate::HirClassMethod,
         target: RegisterId,
     ) -> Result<(), CompileError> {
-        let key = match &method.key {
-            HirObjectPropertyKey::Static(name) => LoweredClassKey::Static(self.scope_name(name)?),
-            HirObjectPropertyKey::Computed(expression) => {
-                let key = self.expression(expression)?;
-                self.prepare_property_key(key, target, false, expression.span)?;
-                LoweredClassKey::Computed(key)
-            }
-        };
+        let key = self.lower_class_key(&method.key, target)?;
         let closure = self.register()?;
         let function = method
             .function
@@ -691,6 +742,82 @@ impl Lowerer<'_> {
             LoweredClassKey::Computed(key) => key.index(),
         };
         self.emit(opcode, &[target.index(), closure.index(), key], method.span)
+    }
+
+    /// Evaluates a computed class key exactly once while its class-definition environment is active.
+    fn lower_class_key(
+        &mut self,
+        key: &HirObjectPropertyKey,
+        target: RegisterId,
+    ) -> Result<LoweredClassKey, CompileError> {
+        match key {
+            HirObjectPropertyKey::Static(name) => {
+                Ok(LoweredClassKey::Static(self.scope_name(name)?))
+            }
+            HirObjectPropertyKey::Computed(expression) => {
+                let key = self.expression(expression)?;
+                self.prepare_property_key(key, target, false, expression.span)?;
+                Ok(LoweredClassKey::Computed(key))
+            }
+        }
+    }
+
+    /// Calls one hidden static-field initializer only after every class key has been evaluated.
+    fn initialize_static_field(
+        &mut self,
+        target: RegisterId,
+        field: PendingStaticField,
+    ) -> Result<(), CompileError> {
+        let value = if let Some(initializer) = field.initializer {
+            let receiver = self.register()?;
+            let callee = self.register()?;
+            debug_assert_eq!(callee.index(), receiver.index() + 1);
+            self.emit(
+                Opcode::Move,
+                &[receiver.index(), target.index()],
+                field.span,
+            )?;
+            self.emit(
+                Opcode::Move,
+                &[callee.index(), initializer.index()],
+                field.span,
+            )?;
+            let value = self.register()?;
+            self.emit(
+                Opcode::CallWithReceiver,
+                &[value.index(), receiver.index(), 0],
+                field.span,
+            )?;
+            value
+        } else {
+            self.load_undefined(field.span)?
+        };
+        if field.infer_name {
+            match field.key {
+                LoweredClassKey::Static(name) => {
+                    self.emit(Opcode::SetFunctionName, &[value.index(), name], field.span)?;
+                }
+                LoweredClassKey::Computed(key) => {
+                    self.emit(
+                        Opcode::SetFunctionNameByValue,
+                        &[value.index(), key.index()],
+                        field.span,
+                    )?;
+                }
+            }
+        }
+        match field.key {
+            LoweredClassKey::Static(name) => self.emit(
+                Opcode::DefineFieldById,
+                &[target.index(), value.index(), name],
+                field.span,
+            ),
+            LoweredClassKey::Computed(key) => self.emit(
+                Opcode::DefineFieldByValue,
+                &[target.index(), value.index(), key.index()],
+                field.span,
+            ),
+        }
     }
 
     /// Evaluates super arguments into one verified contiguous window before construction.

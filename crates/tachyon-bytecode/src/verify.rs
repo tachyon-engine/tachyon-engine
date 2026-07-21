@@ -357,6 +357,7 @@ pub(super) fn validate_class_instructions(
         ) && !matches!(
             kind,
             FunctionKind::ClassMethod
+                | FunctionKind::ClassFieldInitializer
                 | FunctionKind::DerivedClassConstructor
                 | FunctionKind::BaseClassConstructor
         ) {
@@ -888,6 +889,7 @@ fn verify_instruction(
         | Opcode::DefineClassMethodByValue
         | Opcode::DefineClassGetterByValue
         | Opcode::DefineClassSetterByValue
+        | Opcode::DefineFieldByValue
         | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -914,7 +916,11 @@ fn verify_instruction(
             check_register(operands[2])?;
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
-        Opcode::GetById | Opcode::SetById | Opcode::DefineClassMethodById => {
+        Opcode::GetById
+        | Opcode::SetById
+        | Opcode::DefineClassMethodById
+        | Opcode::DefineFieldById
+        | Opcode::SetFunctionHomeObject => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
@@ -995,7 +1001,8 @@ fn verify_instruction(
         | Opcode::DefineSetterById
         | Opcode::DefineClassMethodById
         | Opcode::DefineClassGetterById
-        | Opcode::DefineClassSetterById => Some(operands[2]),
+        | Opcode::DefineClassSetterById
+        | Opcode::DefineFieldById => Some(operands[2]),
         _ => None,
     };
     if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {
