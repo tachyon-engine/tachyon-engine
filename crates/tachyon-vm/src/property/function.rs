@@ -242,7 +242,7 @@ impl Isolate {
         self.resolve_function_object(receiver)
             .is_ok_and(|function| match function.executable {
                 FunctionExecutable::Bytecode { .. } => true,
-                FunctionExecutable::Native(native) => native.is_constructor(),
+                FunctionExecutable::Native(native) => native.has_default_prototype(),
                 FunctionExecutable::Bound(_) => false,
             })
     }

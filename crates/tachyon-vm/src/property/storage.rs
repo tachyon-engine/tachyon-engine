@@ -1446,6 +1446,10 @@ impl Isolate {
                 .is_ok()
             || self
                 .heap
+                .checked_reference(raw, self.types.proxy_object)
+                .is_ok()
+            || self
+                .heap
                 .checked_reference(raw, self.types.array_iterator)
                 .is_ok()
             || self

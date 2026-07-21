@@ -101,6 +101,7 @@ pub(crate) enum NativeFunction {
     ErrorConstructor(NativeErrorKind),
     ErrorIsError,
     ErrorToString,
+    ProxyConstructor,
     ArrayConstructor,
     ArrayIsArray,
     ArrayConcat,
@@ -441,12 +442,19 @@ impl NativeFunction {
                 | Self::BooleanConstructor
                 | Self::FunctionConstructor
                 | Self::ErrorConstructor(_)
+                | Self::ProxyConstructor
                 | Self::ArrayConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
                 | Self::WeakMapConstructor
                 | Self::WeakSetConstructor
         )
+    }
+
+    /// Distinguishes constructibility from constructors that expose a default prototype object.
+    #[inline(always)]
+    pub(crate) const fn has_default_prototype(self) -> bool {
+        self.is_constructor() && !matches!(self, Self::ProxyConstructor)
     }
 
     #[inline(always)]
@@ -461,6 +469,7 @@ impl NativeFunction {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
+            Self::ProxyConstructor => 2,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
@@ -741,6 +750,7 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Uri) => "URIError",
             Self::ErrorIsError => "isError",
             Self::ErrorToString => "toString",
+            Self::ProxyConstructor => "Proxy",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -1177,6 +1187,7 @@ pub(crate) struct VmTypes {
     pub(crate) weak_set_object: GcType<WeakSetObject>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) error_object: GcType<ErrorObject>,
+    pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) string_object: GcType<StringObject>,
     pub(crate) symbol_object: GcType<SymbolObject>,
@@ -1226,13 +1237,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) math: AtomId,
     pub(crate) json: AtomId,
     pub(crate) reflect: AtomId,
+    pub(crate) proxy: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize =
-        19 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+        20 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -1260,6 +1272,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidPropertyRedefinition(_)
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_)
+        | ExecutionError::ProxyConstructorRequiresNew
         | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)

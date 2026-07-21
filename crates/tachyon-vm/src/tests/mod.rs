@@ -21,4 +21,5 @@ mod finally;
 mod fixtures;
 mod properties;
 mod property_keys;
+mod proxy;
 mod realm_gc;

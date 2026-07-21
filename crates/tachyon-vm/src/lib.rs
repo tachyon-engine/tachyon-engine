@@ -28,6 +28,7 @@ mod iterator;
 mod number;
 mod object;
 mod property;
+mod proxy;
 mod realm;
 mod regexp;
 mod runtime;
@@ -91,6 +92,7 @@ use object::{
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};
+use proxy::ProxyObject;
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{
@@ -311,6 +313,7 @@ pub enum ExecutionError {
     InvalidRegExpPattern,
     InvalidJsonCircularStructure,
     UnsupportedDynamicFunctionConstructor,
+    ProxyConstructorRequiresNew,
     NonExtensibleObject(Value),
     ReadOnlyProperty(Value),
     InvalidPropertyDescriptor(Value),

@@ -104,6 +104,9 @@ impl Isolate {
             error_object: registry
                 .try_register("ErrorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            proxy_object: registry
+                .try_register("ProxyObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             number_object: registry
                 .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

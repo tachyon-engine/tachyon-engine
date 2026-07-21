@@ -1965,6 +1965,10 @@ impl Isolate {
                     let error = self.create_native_error(kind, message)?;
                     return self.write(site.caller_base, site.destination, error);
                 }
+                FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
+                    let proxy = self.create_proxy_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, proxy);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -2525,6 +2529,9 @@ impl Isolate {
                     }
                     let result = self.error_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
+                    return Err(ExecutionError::ProxyConstructorRequiresNew);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;

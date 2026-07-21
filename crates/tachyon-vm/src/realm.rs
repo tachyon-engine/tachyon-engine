@@ -29,6 +29,7 @@ impl Isolate {
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
         self.initialize_reflect_intrinsics()?;
+        self.initialize_proxy_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -813,6 +814,7 @@ impl Isolate {
             math: self.intern_intrinsic_name(b"Math")?,
             json: self.intern_intrinsic_name(b"JSON")?,
             reflect: self.intern_intrinsic_name(b"Reflect")?,
+            proxy: self.intern_intrinsic_name(b"Proxy")?,
             global_numbers: [
                 self.intern_intrinsic_name(b"isFinite")?,
                 self.intern_intrinsic_name(b"isNaN")?,
@@ -1788,6 +1790,24 @@ impl Isolate {
         Ok(())
     }
 
+    /// Creates the construct-only Proxy intrinsic without an ordinary default prototype property.
+    fn initialize_proxy_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let constructor = self.allocate_native_function(
+            NativeFunction::ProxyConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: self
+                    .realm
+                    .function_prototype
+                    .expect("Function prototype initializes before Proxy"),
+            },
+        )?;
+        self.realm.proxy_constructor = Some(constructor);
+        Ok(())
+    }
+
     /// Publishes all mandatory names without charging the host quota for user-created globals.
     fn publish_realm_intrinsic_bindings(
         &mut self,
@@ -1925,6 +1945,13 @@ impl Isolate {
             self.realm
                 .reflect_object
                 .expect("Reflect initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.proxy,
+            self.realm
+                .proxy_constructor
+                .expect("Proxy initializes before global publication"),
             true,
         )?;
         for (atom, value) in atoms
