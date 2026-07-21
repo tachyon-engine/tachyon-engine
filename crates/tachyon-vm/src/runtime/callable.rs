@@ -1014,6 +1014,7 @@ pub(crate) enum FunctionExecutable {
         function: FunctionId,
         environment: Option<GcRef<Environment>>,
     },
+    ClassBytecode(GcRef<ClassConstructorData>),
     Native(NativeFunction),
     Bound(GcRef<BoundFunctionData>),
     ProxyRevoker(Value),
@@ -1219,6 +1220,9 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::Bytecode { environment, .. } = &mut self.executable {
             environment.trace(tracer);
         }
+        if let FunctionExecutable::ClassBytecode(data) = &mut self.executable {
+            data.trace(tracer);
+        }
         if let FunctionExecutable::Bound(data) = &mut self.executable {
             data.trace(tracer);
         }
@@ -1244,6 +1248,9 @@ pub(crate) struct VmTypes {
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
     pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
+    pub(crate) class_constructor_data: GcType<ClassConstructorData>,
+    pub(crate) class_field_plan: GcType<ClassFieldPlan>,
+    pub(crate) pending_instance_elements: GcType<PendingInstanceElements>,
     pub(crate) environment: GcType<Environment>,
     pub(crate) exclusion_list: GcType<ExclusionList>,
     pub(crate) for_in_iterator: GcType<ForInIterator>,

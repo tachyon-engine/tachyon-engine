@@ -117,6 +117,7 @@ fn lower_entry(
         script_scope: true,
         root_scope: hir.root_scope(),
         function_scope: None,
+        initialize_instance_elements: false,
         active_scope: hir.root_scope(),
         environments,
     };
@@ -734,6 +735,7 @@ fn lower_function(
         script_scope: false,
         root_scope,
         function_scope: Some(function.scope),
+        initialize_instance_elements: function.initialize_instance_elements,
         active_scope: function.scope,
         environments,
     };
@@ -749,6 +751,13 @@ fn lower_function(
             function.span,
         )?;
         lowerer.emit(Opcode::InitializeThis, &[result.index()], function.span)?;
+        if function.initialize_instance_elements {
+            lowerer.emit(
+                Opcode::InitializeInstanceElements,
+                &[result.index()],
+                function.span,
+            )?;
+        }
         lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
         true
     } else if function.kind == HirFunctionKind::DefaultBaseConstructor {
@@ -756,6 +765,14 @@ fn lower_function(
         debug_assert!(function.parameter_initializers.is_empty());
         debug_assert!(function.rest_parameter.is_none());
         debug_assert!(function.body.is_empty());
+        if function.initialize_instance_elements {
+            let scratch = lowerer.register()?;
+            lowerer.emit(
+                Opcode::InitializeInstanceElements,
+                &[scratch.index()],
+                function.span,
+            )?;
+        }
         lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
         true
     } else {
@@ -764,8 +781,21 @@ fn lower_function(
     if let Some(binding) = &function.self_binding {
         lowerer.add_local(binding, None, false)?;
     }
-    for parameter in function.parameters.iter() {
-        let register = lowerer.register()?;
+    let mut parameter_registers = Vec::with_capacity(function.parameters.len());
+    for _ in function.parameters.iter() {
+        parameter_registers.push(lowerer.register()?);
+    }
+    if function.initialize_instance_elements
+        && function.kind == HirFunctionKind::BaseClassConstructor
+    {
+        let scratch = lowerer.register()?;
+        lowerer.emit(
+            Opcode::InitializeInstanceElements,
+            &[scratch.index()],
+            function.span,
+        )?;
+    }
+    for (parameter, register) in function.parameters.iter().zip(parameter_registers) {
         lowerer.bind_pattern(parameter, register, true)?;
     }
     if let Some(rest) = &function.rest_parameter {

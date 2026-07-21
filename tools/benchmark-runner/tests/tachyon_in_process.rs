@@ -103,7 +103,7 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
     ));
 
     let mut unsupported = request(script, MeasurementMode::PrecompiledExecute);
-    unsupported.source = Arc::from("class Unsupported { field = 1; }");
+    unsupported.source = Arc::from("class Unsupported { static {} }");
     assert!(matches!(
         adapter.prepare(&unsupported),
         Err(AdapterError::Setup(message)) if message.contains("compile failed")
@@ -127,7 +127,7 @@ fn parse_compile_mode_keeps_compile_failures_inside_the_sample_boundary() {
         .unwrap();
     let mut adapter = adapter(&config);
     let mut request = request(script, MeasurementMode::ParseCompileExecute);
-    request.source = Arc::from("class Unsupported { field = 1; }");
+    request.source = Arc::from("class Unsupported { static {} }");
 
     adapter.prepare(&request).unwrap();
     assert!(matches!(

@@ -276,7 +276,8 @@ impl BytecodeBuilder {
             | Opcode::InitializeThis
             | Opcode::SuperConstructForwardAll
             | Opcode::CheckConstructor
-            | Opcode::LoadSuperBase => &[0],
+            | Opcode::LoadSuperBase
+            | Opcode::InitializeInstanceElements => &[0],
             Opcode::Move
             | Opcode::Not
             | Opcode::Negate
@@ -356,6 +357,23 @@ impl BytecodeBuilder {
                 return Ok(());
             }
             Opcode::CreateClass => &[0, 2],
+            Opcode::AttachInstanceFields => {
+                self.note_register(operands[0])?;
+                let count = operands[2];
+                if count != 0 {
+                    self.note_register(
+                        operands[1]
+                            .checked_add(
+                                count
+                                    .checked_mul(3)
+                                    .ok_or(BuilderError::RegisterCountOverflow)?,
+                            )
+                            .and_then(|end| end.checked_sub(1))
+                            .ok_or(BuilderError::RegisterCountOverflow)?,
+                    )?;
+                }
+                return Ok(());
+            }
             Opcode::CallWithReceiver => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {

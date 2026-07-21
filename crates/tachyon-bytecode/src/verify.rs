@@ -351,6 +351,19 @@ pub(super) fn validate_class_instructions(
                 opcode: instruction.opcode,
             });
         }
+        if instruction.opcode == Opcode::InitializeInstanceElements
+            && !matches!(
+                kind,
+                FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+            )
+        {
+            return Err(ModuleBuildError::InvalidClassInstruction {
+                function,
+                kind,
+                offset: word_offset,
+                opcode: instruction.opcode,
+            });
+        }
         if matches!(
             instruction.opcode,
             Opcode::LoadSuperBase | Opcode::GetSuperById | Opcode::GetSuperByValue
@@ -916,6 +929,7 @@ fn verify_instruction(
             check_register(operands[2])?;
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
+        Opcode::InitializeInstanceElements => check_register(operands[0])?,
         Opcode::GetById
         | Opcode::SetById
         | Opcode::DefineClassMethodById
@@ -977,6 +991,26 @@ fn verify_instruction(
                         register_count: context.register_count,
                     })?,
             )?;
+        }
+        Opcode::AttachInstanceFields => {
+            check_register(operands[0])?;
+            if operands[2] != 0 {
+                let last = operands[1]
+                    .checked_add(operands[2].checked_mul(3).ok_or(
+                        VerifyError::RegisterOutOfRange {
+                            offset,
+                            register: u32::MAX,
+                            register_count: context.register_count,
+                        },
+                    )?)
+                    .and_then(|end| end.checked_sub(1))
+                    .ok_or(VerifyError::RegisterOutOfRange {
+                        offset,
+                        register: u32::MAX,
+                        register_count: context.register_count,
+                    })?;
+                check_register(last)?;
+            }
         }
         Opcode::StoreScope | Opcode::StoreResolvedScope | Opcode::InitializeGlobalLexical => {
             check_register(operands[0])?

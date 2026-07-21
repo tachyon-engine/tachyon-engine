@@ -185,3 +185,48 @@ fn public_static_field_semantics() {
         );
     }
 }
+
+#[test]
+/// Initializes public instance fields at the base/derived specification points with own data slots.
+fn public_instance_field_semantics() {
+    for (source_id, source) in [
+        (
+            1_094,
+            "var order = ''; class C { field = (order = order + 'f', 1); constructor(value = (order = order + 'p', 2)) { order = order + 'b'; this.value = value; } } var instance = new C(); var descriptor = Object.getOwnPropertyDescriptor(instance, 'field'); order === 'fpb' && instance.field === 1 && instance.value === 2 && descriptor.writable === true && descriptor.enumerable === true && descriptor.configurable === true;",
+        ),
+        (
+            1_095,
+            "class Base { set field(value) { throw 1; } } Base.prototype.source = 4; class Derived extends Base { field = 7; fromSuper = super.source + 1; named = function() {}; constructor() { super(); } } var instance = new Derived(); instance.field === 7 && instance.fromSuper === 5 && instance.named.name === 'named';",
+        ),
+        (
+            1_096,
+            "var keys = 0; function key() { keys = keys + 1; return 'field'; } class C { [key()] = keys; } var first = new C(); var second = new C(); keys === 1 && first.field === 1 && second.field === 1;",
+        ),
+        (
+            1_097,
+            "var definitions = 0; class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { definitions = definitions + 1; return Reflect.defineProperty(target, key, descriptor); } }); } } class Derived extends Base { field = 7; } var instance = new Derived(); definitions === 1 && instance.field === 7;",
+        ),
+        (
+            1_098,
+            "class Base { constructor() { return Object.preventExtensions({}); } } class Derived extends Base { field = 1; } var threw = false; try { new Derived(); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_099,
+            "var order = ''; function fail() { order = order + 'b'; throw 9; } class Base {} class Derived extends Base { a = (order = order + 'a', 1); b = fail(); c = (order = order + 'c', 3); constructor() { try { super(); } catch (error) { this.caught = error === 9 && this.a === 1 && !Object.hasOwn(this, 'b'); } } } var instance = new Derived(); order === 'ab' && instance.caught === true && !Object.hasOwn(instance, 'c');",
+        ),
+        (
+            1_100,
+            "var baseRuns = 0; var fieldRuns = 0; class Base { constructor() { baseRuns = baseRuns + 1; } } class Derived extends Base { field = (fieldRuns = fieldRuns + 1, 1); constructor() { super(); try { super(); } catch (error) { this.second = error instanceof ReferenceError; } } } var instance = new Derived(); baseRuns === 2 && fieldRuns === 1 && instance.field === 1 && instance.second === true;",
+        ),
+        (
+            1_101,
+            "var fieldRuns = 0; class Base {} class Derived extends Base { field = (fieldRuns = fieldRuns + 1, 1); constructor() { return {}; } } var instance = new Derived(); fieldRuns === 0 && !Object.hasOwn(instance, 'field');",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

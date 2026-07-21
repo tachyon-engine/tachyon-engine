@@ -166,6 +166,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::GetSuperByValue,
                 Opcode::DefineFieldById,
                 Opcode::DefineFieldByValue,
+                Opcode::AttachInstanceFields,
             ],
         ),
         (
@@ -176,7 +177,10 @@ fn operand_count_table_covers_every_opcode_once() {
             ],
         ),
         (2, &[Opcode::GetSuperById]),
-        (1, &[Opcode::LoadSuperBase]),
+        (
+            1,
+            &[Opcode::LoadSuperBase, Opcode::InitializeInstanceElements],
+        ),
         (2, &[Opcode::CreateBaseClass]),
     ];
     let mut seen = [false; OPCODE_COUNT];

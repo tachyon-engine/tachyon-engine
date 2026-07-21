@@ -778,6 +778,7 @@ pub(super) fn lower_class(
                 } else {
                     super::program::HirFunctionKind::DefaultBaseConstructor
                 },
+                initialize_instance_elements: false,
             });
             id
         }
@@ -838,13 +839,6 @@ pub(super) fn lower_class(
                 }));
             }
             oxc::ast::ast::ClassElement::PropertyDefinition(field) => {
-                if !field.r#static {
-                    return Err(unsupported(
-                        source.name(),
-                        source_span(field.span),
-                        "instance class field",
-                    ));
-                }
                 if field.r#type.is_abstract()
                     || !field.decorators.is_empty()
                     || field.type_annotation.is_some()
@@ -898,6 +892,7 @@ pub(super) fn lower_class(
                             scope: to_scope_id(class_scope),
                             strict: true,
                             kind: super::program::HirFunctionKind::ClassFieldInitializer,
+                            initialize_instance_elements: false,
                         });
                         Ok(id)
                     })
@@ -906,7 +901,7 @@ pub(super) fn lower_class(
                     span: source_span(field.span),
                     key,
                     initializer,
-                    is_static: true,
+                    is_static: field.r#static,
                     infer_name,
                 }));
             }
@@ -925,6 +920,15 @@ pub(super) fn lower_class(
                 ));
             }
         }
+    }
+    if elements
+        .iter()
+        .any(|element| matches!(element, HirClassElement::PublicField(field) if !field.is_static))
+    {
+        functions
+            .get_mut(constructor.index() as usize)
+            .expect("class constructor stencil remains at its stable index")
+            .initialize_instance_elements = true;
     }
     Ok(HirClass {
         name: class_name,

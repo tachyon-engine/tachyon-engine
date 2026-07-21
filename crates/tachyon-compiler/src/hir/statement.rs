@@ -721,6 +721,7 @@ pub(super) fn lower_function_stencil(
             .scope_flags(oxc_scope)
             .contains(OxcScopeFlags::StrictMode),
         kind: super::program::HirFunctionKind::Ordinary,
+        initialize_instance_elements: false,
     });
     Ok(id)
 }
@@ -815,6 +816,7 @@ pub(super) fn lower_arrow_function_stencil(
             .scope_flags(oxc_scope)
             .contains(OxcScopeFlags::StrictMode),
         kind: super::program::HirFunctionKind::Ordinary,
+        initialize_instance_elements: false,
     });
     Ok(id)
 }

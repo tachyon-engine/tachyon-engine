@@ -53,6 +53,22 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    /// Copies one class constructor header without retaining a borrow across VM work.
+    pub(crate) fn class_constructor_snapshot(
+        &mut self,
+        data: GcRef<ClassConstructorData>,
+    ) -> Result<ClassConstructorData, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.class_constructor_data)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Copies one fixed native argument state through a checked no-GC borrow.
     pub(crate) fn native_call_state_snapshot(
         &mut self,
@@ -90,6 +106,15 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             bound_function: registry
                 .try_register("BoundFunctionData")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            class_constructor_data: registry
+                .try_register("ClassConstructorData")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            class_field_plan: registry
+                .try_register("ClassFieldPlan")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_instance_elements: registry
+                .try_register("PendingInstanceElements")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             environment: registry
                 .try_register("Environment")
@@ -1189,7 +1214,7 @@ impl Isolate {
                     | FunctionExecutable::ProxyRevoker(_)
                     | FunctionExecutable::PromiseResolver { .. }
                     | FunctionExecutable::PromiseCapabilityExecutor(_) => 2,
-                    FunctionExecutable::Bytecode { .. } => 3,
+                    FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_) => 3,
                 },
                 Err(_) => 0,
             };

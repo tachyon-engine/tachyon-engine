@@ -14,6 +14,14 @@ struct PendingStaticField {
     span: SourceSpan,
 }
 
+#[derive(Clone, Copy)]
+struct PendingInstanceField {
+    key: LoweredClassKey,
+    initializer: Option<RegisterId>,
+    infer_name: bool,
+    span: SourceSpan,
+}
+
 impl Lowerer<'_> {
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     pub(in crate::bytecode) fn expression(
@@ -593,8 +601,9 @@ impl Lowerer<'_> {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
         }
-        let instance_target = if class.elements.iter().any(|element| {
-            matches!(element, crate::HirClassElement::Method(method) if !method.is_static)
+        let instance_target = if class.elements.iter().any(|element| match element {
+            crate::HirClassElement::Method(method) => !method.is_static,
+            crate::HirClassElement::PublicField(field) => !field.is_static,
         }) {
             let target = self.register()?;
             self.emit(
@@ -609,9 +618,19 @@ impl Lowerer<'_> {
         let static_field_count = class
             .elements
             .iter()
-            .filter(|element| matches!(element, crate::HirClassElement::PublicField(_)))
+            .filter(|element| {
+                matches!(element, crate::HirClassElement::PublicField(field) if field.is_static)
+            })
             .count();
         let mut static_fields = Vec::with_capacity(static_field_count);
+        let instance_field_count = class
+            .elements
+            .iter()
+            .filter(|element| {
+                matches!(element, crate::HirClassElement::PublicField(field) if !field.is_static)
+            })
+            .count();
+        let mut instance_fields = Vec::with_capacity(instance_field_count);
         for element in class.elements.iter() {
             match element {
                 crate::HirClassElement::Method(method) => {
@@ -624,10 +643,6 @@ impl Lowerer<'_> {
                     self.define_class_method(method, target)?;
                 }
                 crate::HirClassElement::PublicField(field) => {
-                    debug_assert!(
-                        field.is_static,
-                        "instance fields are rejected by HIR lowering"
-                    );
                     let key = self.lower_class_key(&field.key, destination)?;
                     let initializer = field
                         .initializer
@@ -644,20 +659,41 @@ impl Lowerer<'_> {
                             )?;
                             self.emit(
                                 Opcode::SetFunctionHomeObject,
-                                &[closure.index(), destination.index()],
+                                &[
+                                    closure.index(),
+                                    if field.is_static {
+                                        destination.index()
+                                    } else {
+                                        instance_target
+                                            .expect("instance field requires class prototype")
+                                            .index()
+                                    },
+                                ],
                                 field.span,
                             )?;
                             Ok::<RegisterId, CompileError>(closure)
                         })
                         .transpose()?;
-                    static_fields.push(PendingStaticField {
-                        key,
-                        initializer,
-                        infer_name: field.infer_name,
-                        span: field.span,
-                    });
+                    if field.is_static {
+                        static_fields.push(PendingStaticField {
+                            key,
+                            initializer,
+                            infer_name: field.infer_name,
+                            span: field.span,
+                        });
+                    } else {
+                        instance_fields.push(PendingInstanceField {
+                            key,
+                            initializer,
+                            infer_name: field.infer_name,
+                            span: field.span,
+                        });
+                    }
                 }
             }
+        }
+        if !instance_fields.is_empty() {
+            self.attach_instance_fields(destination, &instance_fields, span)?;
         }
         if class.name_binding.is_some() {
             self.emit(
@@ -820,6 +856,93 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Freezes key/initializer/name triples into one verified contiguous constructor record window.
+    fn attach_instance_fields(
+        &mut self,
+        constructor: RegisterId,
+        fields: &[PendingInstanceField],
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let count = u32::try_from(fields.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        let register_count = count.checked_mul(3).ok_or(CompileError::RegisterOverflow)?;
+        let record_base = self.register()?;
+        for _ in 1..register_count {
+            self.register()?;
+        }
+        for (index, field) in fields.iter().enumerate() {
+            let offset = u32::try_from(index)
+                .map_err(|_| CompileError::RegisterOverflow)?
+                .checked_mul(3)
+                .ok_or(CompileError::RegisterOverflow)?;
+            let key_slot = record_base
+                .index()
+                .checked_add(offset)
+                .ok_or(CompileError::RegisterOverflow)?;
+            let initializer_slot = key_slot
+                .checked_add(1)
+                .ok_or(CompileError::RegisterOverflow)?;
+            let infer_name_slot = key_slot
+                .checked_add(2)
+                .ok_or(CompileError::RegisterOverflow)?;
+            let key = self.class_key_value(field.key, field.span)?;
+            self.emit(Opcode::Move, &[key_slot, key.index()], field.span)?;
+            let initializer = match field.initializer {
+                Some(initializer) => initializer,
+                None => self.load_undefined(field.span)?,
+            };
+            self.emit(
+                Opcode::Move,
+                &[initializer_slot, initializer.index()],
+                field.span,
+            )?;
+            self.emit(
+                if field.infer_name {
+                    Opcode::LoadTrue
+                } else {
+                    Opcode::LoadFalse
+                },
+                &[infer_name_slot],
+                field.span,
+            )?;
+        }
+        self.emit(
+            Opcode::AttachInstanceFields,
+            &[constructor.index(), record_base.index(), count],
+            span,
+        )
+    }
+
+    /// Materializes a static class key as the same string Value shape produced by ToPropertyKey.
+    fn class_key_value(
+        &mut self,
+        key: LoweredClassKey,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let LoweredClassKey::Static(name) = key else {
+            let LoweredClassKey::Computed(key) = key else {
+                unreachable!("class key variants are exhaustive")
+            };
+            return Ok(key);
+        };
+        let name = self
+            .scope_names
+            .get(name as usize)
+            .expect("lowered scope-name index remains published")
+            .clone();
+        let mut code_units = Vec::new();
+        code_units
+            .try_reserve_exact(name.encode_utf16().count())
+            .map_err(|_| CompileError::ConstantAllocationFailed)?;
+        code_units.extend(name.encode_utf16());
+        let constant =
+            u32::try_from(self.constants.len()).map_err(|_| CompileError::ConstantOverflow)?;
+        self.constants
+            .push(BytecodeConstant::string_from_utf16(code_units));
+        let destination = self.register()?;
+        self.emit(Opcode::LoadConstant, &[destination.index(), constant], span)?;
+        Ok(destination)
+    }
+
     /// Evaluates super arguments into one verified contiguous window before construction.
     fn super_call_expression(
         &mut self,
@@ -843,6 +966,13 @@ impl Lowerer<'_> {
             span,
         )?;
         self.emit(Opcode::InitializeThis, &[destination.index()], span)?;
+        if self.initialize_instance_elements {
+            self.emit(
+                Opcode::InitializeInstanceElements,
+                &[destination.index()],
+                span,
+            )?;
+        }
         Ok(destination)
     }
 

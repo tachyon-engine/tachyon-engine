@@ -264,9 +264,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             for element in class.elements.iter() {
                 let (key, fixed) = match element {
                     crate::HirClassElement::Method(method) => (&method.key, 2),
-                    crate::HirClassElement::PublicField(field) => {
-                        (&field.key, if field.initializer.is_some() { 7 } else { 2 })
-                    }
+                    crate::HirClassElement::PublicField(field) => (&field.key, 7),
                 };
                 element_instructions =
                     checked_count_add(element_instructions, fixed, "bytecode instructions")?;
@@ -287,8 +285,9 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 class_create_instructions
                     + usize::from(class.name.is_some())
                     + usize::from(class.name_binding.is_some()) * 3,
-                usize::from(class.elements.iter().any(|element| {
-                    matches!(element, crate::HirClassElement::Method(method) if !method.is_static)
+                usize::from(class.elements.iter().any(|element| match element {
+                    crate::HirClassElement::Method(method) => !method.is_static,
+                    crate::HirClassElement::PublicField(field) => !field.is_static,
                 })),
                 "bytecode instructions",
             )?;
@@ -342,7 +341,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             Ok(count)
         }
         HirExpressionKind::ObjectSpread(parts) => {
-            let mut count = 2;
+            let mut count = 3;
             for part in parts.iter() {
                 let nested = match part {
                     crate::hir::HirObjectExpressionPart::Property(property) => {

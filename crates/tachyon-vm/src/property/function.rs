@@ -39,7 +39,10 @@ impl Isolate {
         let function = self
             .resolve_function_object(receiver)
             .map_err(|_| ExecutionError::NonCallable(receiver))?;
-        if !matches!(function.executable, FunctionExecutable::Bytecode { .. }) {
+        if !matches!(
+            function.executable,
+            FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_)
+        ) {
             return Ok(());
         }
 
@@ -191,37 +194,50 @@ impl Isolate {
                 self.allocate_runtime_string(name).map(Some)
             }
             FunctionExecutable::Bytecode { code, function, .. } => {
-                let is_length = key == self.length_atom()?;
-                let is_name = !is_length && key == self.name_atom()?;
-                if !is_length && !is_name {
-                    return Ok(None);
-                }
-                let template = self
-                    .loaded_code(code)?
-                    .module
-                    .function(function)
-                    .ok_or(ExecutionError::MissingEntryFunction(function))?;
-                if is_length {
-                    return Ok(Some(Value::from_i32(
-                        i32::try_from(template.layout().function_length).unwrap_or(i32::MAX),
-                    )));
-                }
-                let name = template
-                    .layout()
-                    .name_scope
-                    .and_then(|scope| {
-                        self.loaded_code(code)
-                            .ok()?
-                            .module
-                            .scope_names()
-                            .get(scope as usize)
-                    })
-                    .map_or("", AsRef::as_ref);
-                let name =
-                    JsString::try_from_str(name).map_err(ExecutionError::PropertyKeyString)?;
-                self.allocate_runtime_string(name).map(Some)
+                self.bytecode_metadata_property(code, function, key)
+            }
+            FunctionExecutable::ClassBytecode(data) => {
+                let data = self.class_constructor_snapshot(data)?;
+                self.bytecode_metadata_property(data.code, data.function, key)
             }
         }
+    }
+
+    /// Reads immutable length/name metadata shared by ordinary and rare class bytecode payloads.
+    fn bytecode_metadata_property(
+        &mut self,
+        code: CodeId,
+        function: FunctionId,
+        key: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let is_length = key == self.length_atom()?;
+        let is_name = !is_length && key == self.name_atom()?;
+        if !is_length && !is_name {
+            return Ok(None);
+        }
+        let template = self
+            .loaded_code(code)?
+            .module
+            .function(function)
+            .ok_or(ExecutionError::MissingEntryFunction(function))?;
+        if is_length {
+            return Ok(Some(Value::from_i32(
+                i32::try_from(template.layout().function_length).unwrap_or(i32::MAX),
+            )));
+        }
+        let name = template
+            .layout()
+            .name_scope
+            .and_then(|scope| {
+                self.loaded_code(code)
+                    .ok()?
+                    .module
+                    .scope_names()
+                    .get(scope as usize)
+            })
+            .map_or("", AsRef::as_ref);
+        let name = JsString::try_from_str(name).map_err(ExecutionError::PropertyKeyString)?;
+        self.allocate_runtime_string(name).map(Some)
     }
 
     /// Publishes an inferred name only for an anonymous bytecode function created by the compiler.
@@ -233,7 +249,10 @@ impl Isolate {
         let function = self
             .resolve_function_object(receiver)
             .map_err(|_| ExecutionError::NonCallable(receiver))?;
-        if !matches!(function.executable, FunctionExecutable::Bytecode { .. }) {
+        if !matches!(
+            function.executable,
+            FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_)
+        ) {
             return Ok(());
         }
         let text = self
@@ -300,6 +319,7 @@ impl Isolate {
                         )
                     }),
                 FunctionExecutable::Native(native) => native.has_default_prototype(),
+                FunctionExecutable::ClassBytecode(_) => true,
                 FunctionExecutable::Bound(_)
                 | FunctionExecutable::ProxyRevoker(_)
                 | FunctionExecutable::PromiseResolver { .. }
@@ -310,8 +330,13 @@ impl Isolate {
     /// Classifies the immutable public prototype slot without adding flags to every function.
     pub(crate) fn is_class_constructor(&mut self, receiver: Value) -> Result<bool, ExecutionError> {
         let function = self.resolve_function_object(receiver)?;
-        let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
-            return Ok(false);
+        let (code, function) = match function.executable {
+            FunctionExecutable::Bytecode { code, function, .. } => (code, function),
+            FunctionExecutable::ClassBytecode(data) => {
+                let data = self.class_constructor_snapshot(data)?;
+                (data.code, data.function)
+            }
+            _ => return Ok(false),
         };
         let kind = self
             .loaded_code(code)?

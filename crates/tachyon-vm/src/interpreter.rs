@@ -947,6 +947,16 @@ impl Isolate {
                     },
                 )?;
             }
+            Opcode::AttachInstanceFields => {
+                self.attach_instance_fields(base, operands[0], operands[1], operands[2])?;
+            }
+            Opcode::InitializeInstanceElements => {
+                return self.initialize_instance_elements(NativeContinuationSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    call_site: instruction_offset,
+                });
+            }
             Opcode::CreateObject => {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
@@ -1610,6 +1620,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::MapGetOrInsertComputed => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::InstanceElements(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseExecutor => {
@@ -2395,6 +2408,445 @@ impl Isolate {
         Ok(())
     }
 
+    /// Freezes a verified register window into rare constructor metadata without growing hot objects.
+    fn attach_instance_fields(
+        &mut self,
+        base: u32,
+        constructor_register: u32,
+        record_base: u32,
+        count: u32,
+    ) -> Result<(), ExecutionError> {
+        let constructor = self.read(base, constructor_register)?;
+        let function = self.resolve_function_object(constructor)?;
+        let FunctionExecutable::Bytecode {
+            code,
+            function: function_id,
+            environment,
+        } = function.executable
+        else {
+            return Err(ExecutionError::InvalidClassFieldPlan);
+        };
+        let kind = self
+            .loaded_code(code)?
+            .module
+            .function(function_id)
+            .ok_or(ExecutionError::MissingEntryFunction(function_id))?
+            .kind();
+        if !matches!(
+            kind,
+            FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+        ) {
+            return Err(ExecutionError::InvalidClassFieldPlan);
+        }
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(count as usize)
+            .map_err(|_| ExecutionError::ClassFieldAllocationFailed)?;
+        for index in 0..count {
+            let offset = index
+                .checked_mul(3)
+                .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+            let key_value = self.read(
+                base,
+                record_base
+                    .checked_add(offset)
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+            )?;
+            let initializer = self.read(
+                base,
+                record_base
+                    .checked_add(offset)
+                    .and_then(|slot| slot.checked_add(1))
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+            )?;
+            let infer_name = self.read(
+                base,
+                record_base
+                    .checked_add(offset)
+                    .and_then(|slot| slot.checked_add(2))
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+            )?;
+            let initializer = if initializer.as_immediate() == Some(Immediate::Undefined) {
+                None
+            } else {
+                self.resolve_function_object(initializer)
+                    .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
+                Some(initializer)
+            };
+            let infer_name = match infer_name.as_immediate() {
+                Some(Immediate::True) => true,
+                Some(Immediate::False) => false,
+                _ => return Err(ExecutionError::InvalidClassFieldPlan),
+            };
+            records.push(ClassFieldRecord {
+                key: self.property_key(key_value)?,
+                initializer,
+                infer_name,
+            });
+        }
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let plan = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.class_field_plan,
+                0,
+                ClassFieldPlan {
+                    records: records.into_boxed_slice(),
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.write(base, record_base, Value::from_heap_ref(plan.raw()))?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let data = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.class_constructor_data,
+                0,
+                0,
+                ClassConstructorData {
+                    code,
+                    function: function_id,
+                    environment,
+                    plan,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let raw = constructor
+            .as_heap_ref()
+            .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
+        self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let function = no_gc
+                    .borrow_mut(function, self.types.function)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                function.executable = FunctionExecutable::ClassBytecode(data.as_gc_ref());
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(function, Value::from_heap_ref(data.as_gc_ref().raw()))
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Starts one resumable instance-element sequence after the constructor has bound `this`.
+    fn initialize_instance_elements(
+        &mut self,
+        site: NativeContinuationSite,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let frame_depth = self.fiber.frames.len() as u32;
+        let function = self
+            .fiber
+            .derived_activations
+            .last()
+            .filter(|activation| activation.frame_depth == frame_depth)
+            .or_else(|| {
+                self.fiber
+                    .base_class_activations
+                    .last()
+                    .filter(|activation| activation.frame_depth == frame_depth)
+            })
+            .ok_or(ExecutionError::InvalidClassFieldPlan)?
+            .function;
+        let receiver = self.current_this_receiver()?;
+        let executable = self.resolve_function_executable(function)?;
+        let FunctionExecutable::ClassBytecode(data) = executable else {
+            return Err(ExecutionError::InvalidClassFieldPlan);
+        };
+        let plan = self.class_constructor_snapshot(data)?.plan;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let state = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.pending_instance_elements,
+                0,
+                0,
+                PendingInstanceElements {
+                    receiver,
+                    plan,
+                    index: 0,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_instance_elements(site, state)
+    }
+
+    /// Advances synchronously over empty fields and suspends only for initializer or Proxy calls.
+    fn advance_instance_elements(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingInstanceElements>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        loop {
+            let pending = self.pending_instance_elements_snapshot(state)?;
+            let Some(record) = self.class_field_record(pending.plan, pending.index)? else {
+                self.write(site.caller_base, site.destination, pending.receiver)?;
+                return Ok(None);
+            };
+            if let Some(initializer) = record.initializer {
+                self.push_instance_elements_continuation(
+                    site,
+                    state,
+                    InstanceElementStage::Initializer,
+                )?;
+                let frame_depth = self.fiber.frames.len();
+                if let Err(error) = self.call(CallSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    callee: initializer,
+                    argument_base: 0,
+                    argument_source: None,
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
+                    argument_count: 0,
+                    this_value: pending.receiver,
+                    new_target: Value::from_immediate(Immediate::Undefined),
+                    construct_receiver: None,
+                    call_site: site.call_site,
+                }) {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+                if self.fiber.frames.len() != frame_depth {
+                    let frame = self
+                        .fiber
+                        .frames
+                        .last_mut()
+                        .expect("field initializer publishes its bytecode frame");
+                    frame.return_register = None;
+                    frame.return_continuation = true;
+                    return Ok(None);
+                }
+                let continuation = self.pop_native_continuation()?;
+                let value = self.read(site.caller_base, site.destination)?;
+                return self.resume_native_continuation(continuation, value);
+            }
+            if self.define_instance_field(
+                site,
+                state,
+                pending.receiver,
+                record,
+                Value::from_immediate(Immediate::Undefined),
+                false,
+            )? {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Continues after either a field initializer return or a completed Proxy define operation.
+    fn resume_instance_elements(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: InstanceElementStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        let state = self.pending_instance_elements_reference(continuation.first())?;
+        let pending = self.pending_instance_elements_snapshot(state)?;
+        let record = self
+            .class_field_record(pending.plan, pending.index)?
+            .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+        match stage {
+            InstanceElementStage::Initializer => {
+                self.push_instance_elements_continuation(
+                    site,
+                    state,
+                    InstanceElementStage::Define,
+                )?;
+                self.write(site.caller_base, site.destination, value)?;
+                if record.infer_name {
+                    self.set_method_function_name(value, record.key)?;
+                }
+                if self.define_instance_field(site, state, pending.receiver, record, value, true)? {
+                    return Ok(());
+                }
+            }
+            InstanceElementStage::Define => {
+                self.increment_instance_element_index(state)?;
+            }
+        }
+        self.advance_instance_elements(site, state).map(|_| ())
+    }
+
+    /// Defines one field directly or nests Proxy [[DefineOwnProperty]] under the field continuation.
+    fn define_instance_field(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingInstanceElements>,
+        receiver: Value,
+        record: ClassFieldRecord,
+        value: Value,
+        parent_pushed: bool,
+    ) -> Result<bool, ExecutionError> {
+        let descriptor = DataPropertyDescriptor {
+            value: Some(value),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
+        };
+        if !self.is_proxy_value(receiver) {
+            self.define_data_property(receiver, record.key, descriptor)?;
+            if parent_pushed {
+                let continuation = self.pop_native_continuation()?;
+                if continuation.kind()
+                    != NativeContinuationKind::InstanceElements(InstanceElementStage::Define)
+                {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            }
+            self.increment_instance_element_index(state)?;
+            return Ok(false);
+        }
+        if !parent_pushed {
+            self.push_instance_elements_continuation(site, state, InstanceElementStage::Define)?;
+        }
+        let frame_depth = self.fiber.frames.len();
+        let result = self.dispatch_proxy_define(
+            site,
+            receiver,
+            record.key,
+            descriptor.into(),
+            ProxyDefineMode::Object,
+        );
+        if let Err(error) = result {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(true);
+        }
+        let continuation = self.pop_native_continuation()?;
+        if continuation.kind()
+            != NativeContinuationKind::InstanceElements(InstanceElementStage::Define)
+        {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
+        self.increment_instance_element_index(state)?;
+        Ok(false)
+    }
+
+    fn push_instance_elements_continuation(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingInstanceElements>,
+        stage: InstanceElementStage,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::instance_elements(
+                site,
+                stage,
+                Value::from_heap_ref(state.raw()),
+            ))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })
+    }
+
+    fn pending_instance_elements_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<GcRef<PendingInstanceElements>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_instance_elements)
+            .map_err(|_| ExecutionError::InvalidClassFieldPlan)
+    }
+
+    fn pending_instance_elements_snapshot(
+        &mut self,
+        state: GcRef<PendingInstanceElements>,
+    ) -> Result<PendingInstanceElements, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_instance_elements)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn class_field_record(
+        &mut self,
+        plan: GcRef<ClassFieldPlan>,
+        index: u32,
+    ) -> Result<Option<ClassFieldRecord>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let plan = scope.root(plan).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(plan, self.types.class_field_plan)
+                    .map(|plan| plan.records.get(index as usize).copied())
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn increment_instance_element_index(
+        &mut self,
+        state: GcRef<PendingInstanceElements>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let state = no_gc
+                    .borrow_mut(state, self.types.pending_instance_elements)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                state.index = state
+                    .index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+                Ok(())
+            })
+        })
+    }
+
     /// Resolves the active class function's dynamic super base and current `this` receiver.
     fn current_super_reference(&mut self) -> Result<(Value, Value), ExecutionError> {
         let receiver = self.current_this_receiver()?;
@@ -2688,6 +3140,16 @@ impl Isolate {
                     }
                     break kind == FunctionKind::DerivedClassConstructor;
                 }
+                FunctionExecutable::ClassBytecode(data) => {
+                    let data = self.class_constructor_snapshot(data)?;
+                    let kind = self
+                        .loaded_code(data.code)?
+                        .module
+                        .function(data.function)
+                        .ok_or(ExecutionError::MissingEntryFunction(data.function))?
+                        .kind();
+                    break kind == FunctionKind::DerivedClassConstructor;
+                }
                 FunctionExecutable::Native(_) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
@@ -2785,6 +3247,37 @@ impl Isolate {
                             code,
                             function,
                             environment,
+                            kind,
+                            layout,
+                            strictness,
+                        },
+                        site,
+                    );
+                }
+                FunctionExecutable::ClassBytecode(data) => {
+                    let data = self.class_constructor_snapshot(data)?;
+                    let (kind, layout, strictness) = {
+                        let function_template = self
+                            .loaded_code(data.code)?
+                            .module
+                            .function(data.function)
+                            .ok_or(ExecutionError::MissingEntryFunction(data.function))?;
+                        (
+                            function_template.kind(),
+                            function_template.layout(),
+                            function_template.strictness(),
+                        )
+                    };
+                    if site.new_target.as_immediate() == Some(Immediate::Undefined) {
+                        return Err(ExecutionError::ClassConstructorCalledWithoutNew(
+                            site.callee,
+                        ));
+                    }
+                    return self.push_call_frame(
+                        ResolvedCallTarget {
+                            code: data.code,
+                            function: data.function,
+                            environment: data.environment,
                             kind,
                             layout,
                             strictness,
@@ -3793,6 +4286,7 @@ impl Isolate {
                     FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
                 )
             }
+            FunctionExecutable::ClassBytecode(_) => true,
         })
     }
 
@@ -4364,6 +4858,9 @@ impl Isolate {
                 NativeContinuationKind::MapGetOrInsertComputed => {
                     let state = self.pending_map_upsert_reference(continuation.first())?;
                     self.resume_map_get_or_insert_computed(site, state, value)
+                }
+                NativeContinuationKind::InstanceElements(stage) => {
+                    self.resume_instance_elements(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())

@@ -134,9 +134,16 @@ pub(super) fn estimate_function(
         .and_then(|count| {
             count.checked_add(
                 if function.kind == crate::HirFunctionKind::DefaultDerivedConstructor {
-                    3
+                    3 + usize::from(function.initialize_instance_elements)
                 } else {
-                    2
+                    2 + usize::from(
+                        function.initialize_instance_elements
+                            && matches!(
+                                function.kind,
+                                crate::HirFunctionKind::BaseClassConstructor
+                                    | crate::HirFunctionKind::DefaultBaseConstructor
+                            ),
+                    )
                 },
             )
         })

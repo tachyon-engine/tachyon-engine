@@ -139,6 +139,8 @@ pub struct HirFunction {
     pub scope: ScopeId,
     pub strict: bool,
     pub kind: HirFunctionKind,
+    /// Whether this class constructor must run its attached instance-element plan.
+    pub initialize_instance_elements: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

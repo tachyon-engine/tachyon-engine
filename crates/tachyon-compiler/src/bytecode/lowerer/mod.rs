@@ -37,6 +37,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) script_scope: bool,
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
+    pub(super) initialize_instance_elements: bool,
     /// Semantic scope matching the environment currently exposed to emitted loads.
     pub(super) active_scope: ScopeId,
     pub(super) environments: &'a EnvironmentPlans,

@@ -130,6 +130,32 @@ var Captured = outer(3);
 index === 2 && Derived.k0 === 2 && Derived.k1 === 2 && Derived.self === Derived && Derived.value === 6 && Captured.value === 6 && Captured.self === Captured && saved() === Captured;
 "#;
 
+const INSTANCE_FIELD_SOURCE: &str = r#"
+var definitions = 0;
+var symbol = Symbol("field");
+function makeClass(seed) {
+  let captured = seed + 1;
+  class Base {
+    constructor() {
+      return new Proxy({}, {
+        defineProperty(target, key, descriptor) {
+          definitions = definitions + 1;
+          return Reflect.defineProperty(target, key, descriptor);
+        }
+      });
+    }
+  }
+  return class Derived extends Base {
+    first = captured;
+    [symbol] = super.missing;
+    named = function() {};
+  };
+}
+var Derived = makeClass(6);
+var value = new Derived();
+definitions === 3 && value.first === 7 && value[symbol] === undefined && value.named.name === "named";
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -205,6 +231,55 @@ fn static_fields_execute_for_every_dispatch_batch() {
 #[test]
 fn static_fields_survive_forced_major_collections() {
     assert_forced_major_source(STATIC_FIELD_SOURCE, 49);
+}
+
+#[test]
+fn instance_fields_execute_for_every_dispatch_batch() {
+    assert_instance_field_batch::<1>();
+    assert_instance_field_batch::<2>();
+    assert_instance_field_batch::<4>();
+    assert_instance_field_batch::<8>();
+    assert_instance_field_batch::<16>();
+}
+
+#[test]
+fn instance_field_plans_survive_forced_major_collections() {
+    for (source, source_id) in [
+        ("class C { field = 1; } true;", 150),
+        ("class C { field = 1; } var value = new C(); true;", 154),
+        ("class C { field = 1; } new C().field === 1;", 155),
+        (
+            "var key = Symbol('field'); class C { [key] = 1; } new C()[key] === 1;",
+            151,
+        ),
+        (
+            "function make(seed) { let captured = seed + 1; return class { field = captured; }; } var C = make(6); new C().field === 7;",
+            152,
+        ),
+        (
+            "var count = 0; class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { count = count + 1; return Reflect.defineProperty(target, key, descriptor); } }); } } class C extends Base { field = 1; } var value = new C(); count === 1 && value.field === 1;",
+            156,
+        ),
+        (
+            "var key = Symbol('field'); class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { return Reflect.defineProperty(target, key, descriptor); } }); } } class C extends Base { first = 1; [key] = 2; third = 3; } var value = new C(); value.first === 1 && value[key] === 2 && value.third === 3;",
+            157,
+        ),
+        (
+            "class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { return Reflect.defineProperty(target, key, descriptor); } }); } } Base.prototype.value = 4; class C extends Base { field = super.value; } new C().field === 4;",
+            158,
+        ),
+        (
+            "function make(seed) { let captured = seed + 1; class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { return Reflect.defineProperty(target, key, descriptor); } }); } } return class extends Base { field = captured; }; } var C = make(6); new C().field === 7;",
+            159,
+        ),
+        (
+            "class Base { constructor() { return new Proxy({}, { defineProperty(target, key, descriptor) { return Reflect.defineProperty(target, key, descriptor); } }); } } class C extends Base { named = function() {}; } new C().named.name === 'named';",
+            160,
+        ),
+        (INSTANCE_FIELD_SOURCE, 153),
+    ] {
+        assert_forced_major_source(source, source_id);
+    }
 }
 
 #[test]
@@ -317,7 +392,7 @@ fn assert_forced_major_source(source: &str, source_id: u32) {
         .unwrap_or_else(|error| panic!("forced-major class fixture failed: {error:?}; {source}"));
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "forced-major class fixture returned {outcome:?}"
+        "forced-major class fixture returned {outcome:?}; {source}"
     );
 }
 
@@ -467,6 +542,25 @@ fn assert_static_field_batch<const N: usize>() {
             },
         )
         .expect("static field fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes traced field plans, hidden closures, and Proxy definitions with one dispatch batch.
+fn assert_instance_field_batch<const N: usize>() {
+    let module = compile_source(INSTANCE_FIELD_SOURCE, 160 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("instance field fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"
