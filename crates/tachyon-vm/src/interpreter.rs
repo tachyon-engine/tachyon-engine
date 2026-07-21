@@ -1049,6 +1049,31 @@ impl Isolate {
                     },
                 )?;
             }
+            Opcode::DefineClassGetterById | Opcode::DefineClassSetterById => {
+                let receiver = self.read(base, operands[0])?;
+                let function = self.read(base, operands[1])?;
+                let key = self.scope_atom(code, operands[2])?;
+                let descriptor = if opcode == Opcode::DefineClassGetterById {
+                    AccessorPropertyDescriptor {
+                        getter: Some(function),
+                        setter: None,
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                    }
+                } else {
+                    AccessorPropertyDescriptor {
+                        getter: None,
+                        setter: Some(function),
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                    }
+                };
+                self.define_property(
+                    receiver,
+                    key.into(),
+                    PropertyDescriptor::Accessor(descriptor),
+                )?;
+            }
             Opcode::DefineGetterById | Opcode::DefineSetterById => {
                 let receiver = self.read(base, operands[0])?;
                 let function = self.read(base, operands[1])?;

@@ -568,8 +568,13 @@ impl Lowerer<'_> {
                 .ok_or(CompileError::RegisterOverflow)?;
             self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
             let name = self.scope_name(&method.name)?;
+            let opcode = match method.kind {
+                crate::HirClassMethodKind::Method => Opcode::DefineClassMethodById,
+                crate::HirClassMethodKind::Getter => Opcode::DefineClassGetterById,
+                crate::HirClassMethodKind::Setter => Opcode::DefineClassSetterById,
+            };
             self.emit(
-                Opcode::DefineClassMethodById,
+                opcode,
                 &[
                     instance_target
                         .expect("instance method target is allocated before method lowering")
@@ -589,11 +594,12 @@ impl Lowerer<'_> {
                 .ok_or(CompileError::RegisterOverflow)?;
             self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
             let name = self.scope_name(&method.name)?;
-            self.emit(
-                Opcode::DefineClassMethodById,
-                &[destination.index(), closure.index(), name],
-                span,
-            )?;
+            let opcode = match method.kind {
+                crate::HirClassMethodKind::Method => Opcode::DefineClassMethodById,
+                crate::HirClassMethodKind::Getter => Opcode::DefineClassGetterById,
+                crate::HirClassMethodKind::Setter => Opcode::DefineClassSetterById,
+            };
+            self.emit(opcode, &[destination.index(), closure.index(), name], span)?;
         }
         Ok(destination)
     }

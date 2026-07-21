@@ -740,6 +740,8 @@ fn verify_instruction(
         | Opcode::DefineSetterById
         | Opcode::DefineGetterByValue
         | Opcode::DefineSetterByValue
+        | Opcode::DefineClassGetterById
+        | Opcode::DefineClassSetterById
         | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -834,7 +836,9 @@ fn verify_instruction(
         | Opcode::SetById
         | Opcode::DefineGetterById
         | Opcode::DefineSetterById
-        | Opcode::DefineClassMethodById => Some(operands[2]),
+        | Opcode::DefineClassMethodById
+        | Opcode::DefineClassGetterById
+        | Opcode::DefineClassSetterById => Some(operands[2]),
         _ => None,
     };
     if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {

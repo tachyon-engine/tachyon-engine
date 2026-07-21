@@ -20,8 +20,8 @@ use std::sync::Arc;
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
-    HirBinding, HirCatchClause, HirClass, HirClassMethod, HirExpression, HirExpressionKind,
-    HirForInitializer, HirFunction, HirFunctionDeclaration, HirFunctionKind,
+    HirBinding, HirCatchClause, HirClass, HirClassMethod, HirClassMethodKind, HirExpression,
+    HirExpressionKind, HirForInitializer, HirFunction, HirFunctionDeclaration, HirFunctionKind,
     HirIdentifierReference, HirLogicalOperator, HirObjectProperty, HirObjectPropertyKey,
     HirObjectPropertyValue, HirPattern, HirPatternKind, HirPatternProperty, HirProgram, HirScope,
     HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,

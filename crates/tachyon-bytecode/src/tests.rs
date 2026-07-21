@@ -155,6 +155,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CreateClass,
                 Opcode::SuperConstruct,
                 Opcode::DefineClassMethodById,
+                Opcode::DefineClassGetterById,
+                Opcode::DefineClassSetterById,
             ],
         ),
         (2, &[Opcode::CreateBaseClass]),

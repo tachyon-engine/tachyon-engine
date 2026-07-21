@@ -322,7 +322,9 @@ impl BytecodeBuilder {
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],
             Opcode::GetById | Opcode::SetById => &[0, 1],
-            Opcode::DefineClassMethodById => &[0, 1],
+            Opcode::DefineClassMethodById
+            | Opcode::DefineClassGetterById
+            | Opcode::DefineClassSetterById => &[0, 1],
             Opcode::Call | Opcode::Construct | Opcode::SuperConstruct => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {

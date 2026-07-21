@@ -697,6 +697,41 @@ fn compiler_freezes_base_class_constructor_contracts() {
     assert!(!constructor.contains("SuperConstruct"));
 }
 
+#[test]
+/// Freezes class accessors as strict methods installed through non-enumerable accessor opcodes.
+fn compiler_freezes_class_accessor_contracts() {
+    let source = source(
+        MediaType::JavaScript,
+        "class A { get value() { return this._value; } set value(v) { this._value = v; } static get answer() { return 42; } } A;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    assert_eq!(hir.functions().len(), 4);
+    let methods: Vec<_> = hir
+        .functions()
+        .iter()
+        .filter(|function| function.kind == HirFunctionKind::ClassMethod)
+        .collect();
+    assert_eq!(methods.len(), 3);
+    assert!(methods.iter().all(|function| function.strict));
+    assert!(
+        methods
+            .iter()
+            .any(|function| function.name.as_deref() == Some("get value"))
+    );
+    assert!(
+        methods
+            .iter()
+            .any(|function| function.name.as_deref() == Some("set value"))
+    );
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("DefineClassGetterById").count(), 2);
+    assert_eq!(entry.matches("DefineClassSetterById").count(), 1);
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

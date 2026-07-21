@@ -231,9 +231,13 @@ pub enum Opcode {
     SuperConstructForwardAll = 92,
     /// Creates one base class constructor with the realm's standard prototype pair.
     CreateBaseClass = 93,
+    /// Defines one non-enumerable class getter from a compiled closure.
+    DefineClassGetterById = 94,
+    /// Defines one non-enumerable class setter from a compiled closure.
+    DefineClassSetterById = 95,
 }
 
-pub(super) const OPCODE_COUNT: usize = 94;
+pub(super) const OPCODE_COUNT: usize = 96;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -329,10 +333,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DefineClassMethodById
     1, // SuperConstructForwardAll
     2, // CreateBaseClass
+    3, // DefineClassGetterById
+    3, // DefineClassSetterById
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CreateBaseClass as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassSetterById as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -472,6 +478,8 @@ impl Opcode {
             27 => Some(Self::DefineClassMethodById),
             28 => Some(Self::SuperConstructForwardAll),
             29 => Some(Self::CreateBaseClass),
+            30 => Some(Self::DefineClassGetterById),
+            31 => Some(Self::DefineClassSetterById),
             _ => None,
         }
     }

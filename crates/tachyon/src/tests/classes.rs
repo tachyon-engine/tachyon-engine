@@ -51,3 +51,13 @@ fn base_class_call_and_return_semantics() {
         );
     }
 }
+
+#[test]
+/// Publishes paired instance/static accessors with class names and descriptor attributes.
+fn class_accessor_semantics_and_descriptors() {
+    let source = "class A { get value() { return this._value; } set value(next) { this._value = next; } static get answer() { return 42; } } var instance = new A(); instance.value = 7; var descriptor = Object.getOwnPropertyDescriptor(A.prototype, 'value'); var staticDescriptor = Object.getOwnPropertyDescriptor(A, 'answer'); instance.value === 7 && A.answer === 42 && descriptor.get.name === 'get value' && descriptor.set.name === 'set value' && descriptor.enumerable === false && descriptor.configurable === true && staticDescriptor.get.name === 'get answer' && staticDescriptor.enumerable === false;";
+    assert_eq!(
+        execute_source(1_075, source).as_immediate(),
+        Some(Immediate::True),
+    );
+}

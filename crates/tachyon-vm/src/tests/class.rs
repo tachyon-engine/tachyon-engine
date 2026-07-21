@@ -42,6 +42,17 @@ var instance = new A(2, 3);
 instance.value() === 5 && instance instanceof A;
 "#;
 
+const CLASS_ACCESSOR_SOURCE: &str = r#"
+class A {
+  get value() { return this._value; }
+  set value(next) { this._value = next; }
+  static get answer() { return 42; }
+}
+var instance = new A();
+instance.value = 7;
+instance.value === 7 && A.answer === 42;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -67,6 +78,15 @@ fn base_class_constructs_for_every_dispatch_batch() {
     assert_base_class_batch::<4>();
     assert_base_class_batch::<8>();
     assert_base_class_batch::<16>();
+}
+
+#[test]
+fn class_accessors_execute_for_every_dispatch_batch() {
+    assert_class_accessor_batch::<1>();
+    assert_class_accessor_batch::<2>();
+    assert_class_accessor_batch::<4>();
+    assert_class_accessor_batch::<8>();
+    assert_class_accessor_batch::<16>();
 }
 
 #[test]
@@ -117,6 +137,11 @@ fn default_derived_promise_constructor_survives_forced_major_collections() {
 #[test]
 fn base_class_creation_survives_forced_major_collections() {
     assert_forced_major_source(BASE_CLASS_SOURCE, 38);
+}
+
+#[test]
+fn class_accessors_survive_forced_major_collections() {
+    assert_forced_major_source(CLASS_ACCESSOR_SOURCE, 39);
 }
 
 /// Executes a focused class fixture with collection before every managed allocation.
@@ -192,6 +217,25 @@ fn assert_base_class_batch<const N: usize>() {
             },
         )
         .expect("base class fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes getter/setter publication and calls with each tuned dispatch batch.
+fn assert_class_accessor_batch<const N: usize>() {
+    let module = compile_source(CLASS_ACCESSOR_SOURCE, 70 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        )
+        .expect("class accessor fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

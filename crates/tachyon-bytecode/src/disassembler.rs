@@ -146,7 +146,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " receiver=r{}, value=r{}, name={}",
             operands[0], operands[1], operands[2]
         )?,
-        Opcode::DefineClassMethodById => write!(
+        Opcode::DefineClassMethodById
+        | Opcode::DefineClassGetterById
+        | Opcode::DefineClassSetterById => write!(
             output,
             " target=r{}, closure=r{}, name={}",
             operands[0], operands[1], operands[2]

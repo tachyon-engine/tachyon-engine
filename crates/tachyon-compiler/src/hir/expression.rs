@@ -68,6 +68,14 @@ pub struct HirClassMethod {
     pub name: Arc<str>,
     pub function: FunctionStencilId,
     pub is_static: bool,
+    pub kind: HirClassMethodKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirClassMethodKind {
+    Method,
+    Getter,
+    Setter,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -737,10 +745,25 @@ pub(super) fn lower_class(
                     functions,
                 )?);
             }
-            oxc::ast::ast::MethodDefinitionKind::Method => {
+            oxc::ast::ast::MethodDefinitionKind::Method
+            | oxc::ast::ast::MethodDefinitionKind::Get
+            | oxc::ast::ast::MethodDefinitionKind::Set => {
+                let kind = match method.kind {
+                    oxc::ast::ast::MethodDefinitionKind::Method => HirClassMethodKind::Method,
+                    oxc::ast::ast::MethodDefinitionKind::Get => HirClassMethodKind::Getter,
+                    oxc::ast::ast::MethodDefinitionKind::Set => HirClassMethodKind::Setter,
+                    oxc::ast::ast::MethodDefinitionKind::Constructor => {
+                        unreachable!("constructor arm handled above")
+                    }
+                };
+                let function_name = match kind {
+                    HirClassMethodKind::Method => name.clone(),
+                    HirClassMethodKind::Getter => Arc::from(format!("get {name}")),
+                    HirClassMethodKind::Setter => Arc::from(format!("set {name}")),
+                };
                 let function = lower_function_stencil(
                     &method.value,
-                    Some(name.clone()),
+                    Some(function_name),
                     None,
                     source,
                     semantic,
@@ -755,14 +778,8 @@ pub(super) fn lower_class(
                     name,
                     function,
                     is_static: method.r#static,
+                    kind,
                 });
-            }
-            oxc::ast::ast::MethodDefinitionKind::Get | oxc::ast::ast::MethodDefinitionKind::Set => {
-                return Err(unsupported(
-                    source.name(),
-                    source_span(method.span),
-                    "class accessor method",
-                ));
             }
         }
     }
