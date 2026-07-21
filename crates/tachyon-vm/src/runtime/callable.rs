@@ -29,6 +29,7 @@ pub(crate) enum NativeFunction {
     ObjectGetPrototypeOf,
     ObjectCreate,
     ObjectIsPrototypeOf,
+    ObjectSetPrototypeOf,
     ObjectIsExtensible,
     ObjectPreventExtensions,
     ObjectSeal,
@@ -475,6 +476,7 @@ impl NativeFunction {
             | Self::ObjectHasOwn
             | Self::ObjectIs
             | Self::ObjectCreate
+            | Self::ObjectSetPrototypeOf
             | Self::ObjectGetOwnPropertyDescriptor
             | Self::ReflectDeleteProperty
             | Self::ReflectGetOwnPropertyDescriptor
@@ -673,6 +675,7 @@ impl NativeFunction {
             Self::ObjectGetPrototypeOf => "getPrototypeOf",
             Self::ObjectCreate => "create",
             Self::ObjectIsPrototypeOf => "isPrototypeOf",
+            Self::ObjectSetPrototypeOf => "setPrototypeOf",
             Self::ObjectIsExtensible => "isExtensible",
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::ObjectSeal => "seal",

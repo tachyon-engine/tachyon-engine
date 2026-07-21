@@ -1099,6 +1099,19 @@ fn prevent_extensions_blocks_new_own_properties() {
 }
 
 #[test]
+/// Covers Object.setPrototypeOf identity, primitive behavior, and cycle/non-extensible failures.
+fn object_set_prototype_of_uses_the_ordinary_mutation_contract() {
+    assert_eq!(
+        execute_source(
+            1_032,
+            "let prototype = { marker: 7 }; let object = {}; let identity = Object.setPrototypeOf(object, prototype) === object; let cycle = false; try { Object.setPrototypeOf(prototype, object); } catch (error) { cycle = error instanceof TypeError; } let frozen = {}; Object.preventExtensions(frozen); let blocked = false; try { Object.setPrototypeOf(frozen, prototype); } catch (error) { blocked = error instanceof TypeError; } identity && object.marker === 7 && cycle && blocked && Object.setPrototypeOf(1, null) === 1;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Forwards absent Proxy traps iteratively while preserving the outer Object builtin result.
 fn nested_proxy_prototype_and_extensibility_methods_forward() {
     assert_eq!(

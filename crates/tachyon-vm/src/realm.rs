@@ -272,6 +272,17 @@ impl Isolate {
             is_prototype_of,
             true,
         )?;
+        let set_prototype_of = self.allocate_native_function(
+            NativeFunction::ObjectSetPrototypeOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let set_prototype_atom = self.intern_intrinsic_name(b"setPrototypeOf")?;
+        self.set_intrinsic_data_property(constructor, set_prototype_atom, set_prototype_of, true)?;
         let is_extensible = self.allocate_native_function(
             NativeFunction::ObjectIsExtensible,
             OrdinaryObject {

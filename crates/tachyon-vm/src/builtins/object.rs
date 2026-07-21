@@ -275,6 +275,35 @@ impl Isolate {
         self.ordinary_set_prototype_of(target, prototype)
     }
 
+    /// Implements Object.setPrototypeOf validation, primitive return, and throw-on-false semantics.
+    pub(crate) fn object_set_prototype_of(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if matches!(
+            target.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        let prototype = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if prototype.as_immediate() != Some(Immediate::Null) && !self.is_object_value(prototype) {
+            return Err(ExecutionError::NotObject(prototype));
+        }
+        if !self.is_object_value(target) {
+            return Ok(target);
+        }
+        if !self.ordinary_set_prototype_of(target, prototype)? {
+            return Err(ExecutionError::NonExtensibleObject(target));
+        }
+        Ok(target)
+    }
+
     /// Implements the ordinary Object constructor for object values and primitive fallback values.
     pub(crate) fn create_object_from_site(
         &mut self,

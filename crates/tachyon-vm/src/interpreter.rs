@@ -2380,6 +2380,10 @@ impl Isolate {
                         }),
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectSetPrototypeOf) => {
+                    let value = self.object_set_prototype_of(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectIsExtensible) => {
                     if self.try_dispatch_proxy_builtin(&site, ProxyInternalMethod::IsExtensible)? {
                         return Ok(());
