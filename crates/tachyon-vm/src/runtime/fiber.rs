@@ -382,6 +382,23 @@ pub(crate) enum ProxyGetStage {
     TargetGetOwn,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyDeleteMode {
+    Reflect,
+    Sloppy,
+    Strict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyDeleteStage {
+    TrapGetter,
+    TrapCall,
+    TargetGetOwn,
+    TargetIsExtensible,
+}
+
 /// The observable operation that resumes one Map or Set iterable constructor step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -421,6 +438,10 @@ pub(crate) enum NativeContinuationKind {
         stage: ProxyGetOwnStage,
     },
     ProxyGet(ProxyGetStage),
+    ProxyDelete {
+        mode: ProxyDeleteMode,
+        stage: ProxyDeleteStage,
+    },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
     MapGetOrInsertComputed,
@@ -618,6 +639,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ProxyGet(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn proxy_delete(
+        site: NativeContinuationSite,
+        mode: ProxyDeleteMode,
+        stage: ProxyDeleteStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxyDelete { mode, stage },
             first: state,
             second: retained,
         }

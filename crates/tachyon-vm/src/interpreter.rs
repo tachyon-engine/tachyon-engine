@@ -781,32 +781,39 @@ impl Isolate {
                 self.write(base, operands[0], value)?;
             }
             Opcode::DeleteById => {
-                let receiver = self.read(base, operands[1])?;
                 let key = self.scope_atom(code, operands[2])?;
-                let result = self.delete_data_property_from_bytecode(receiver, key)?;
-                self.write(
-                    base,
-                    operands[0],
-                    Value::from_immediate(if result {
-                        Immediate::True
-                    } else {
-                        Immediate::False
-                    }),
-                )?;
+                let receiver = self.read(base, operands[1])?;
+                let mode = self.current_proxy_delete_mode();
+                let site = NativeContinuationSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    call_site: instruction_offset,
+                };
+                if self.is_proxy_value(receiver) {
+                    let key = self.atom_string_value(key)?;
+                    let receiver = self.read(base, operands[1])?;
+                    return self.dispatch_delete_property(site, receiver, key, mode);
+                }
+                return self.finish_ordinary_delete_property_key(site, receiver, key.into(), mode);
             }
             Opcode::DeleteByValue => {
-                let receiver = self.read(base, operands[1])?;
                 let key = self.property_key(self.read(base, operands[2])?)?;
-                let result = self.delete_data_property_from_bytecode(receiver, key)?;
-                self.write(
-                    base,
-                    operands[0],
-                    Value::from_immediate(if result {
-                        Immediate::True
-                    } else {
-                        Immediate::False
-                    }),
-                )?;
+                let receiver = self.read(base, operands[1])?;
+                let mode = self.current_proxy_delete_mode();
+                let site = NativeContinuationSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    call_site: instruction_offset,
+                };
+                if self.is_proxy_value(receiver) {
+                    let key = match key {
+                        PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
+                        PropertyKey::Symbol(symbol) => symbol.value(),
+                    };
+                    let receiver = self.read(base, operands[1])?;
+                    return self.dispatch_delete_property(site, receiver, key, mode);
+                }
+                return self.finish_ordinary_delete_property_key(site, receiver, key, mode);
             }
             Opcode::Typeof => {
                 let value = self.typeof_value(self.read(base, operands[1])?)?;
@@ -1216,6 +1223,20 @@ impl Isolate {
         self.dispatch_proxy_aware_property_read(site, target, receiver, key)
     }
 
+    #[inline(always)]
+    fn current_proxy_delete_mode(&self) -> ProxyDeleteMode {
+        match self
+            .fiber
+            .frames
+            .last()
+            .expect("property deletion always has an active frame")
+            .strictness
+        {
+            FunctionStrictness::Sloppy => ProxyDeleteMode::Sloppy,
+            FunctionStrictness::Strict => ProxyDeleteMode::Strict,
+        }
+    }
+
     /// Applies assignment rejection at the strict boundary or suspends on one setter callback.
     fn dispatch_property_write(
         &mut self,
@@ -1382,6 +1403,20 @@ impl Isolate {
                         (handler, 0, Some(state), 3)
                     }
                     ProxyGetStage::TargetGetOwn => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
+                }
+            }
+            NativeContinuationKind::ProxyDelete { stage, .. } => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let handler = self
+                    .proxy_snapshot(pending.values[PROXY_DELETE_ACTIVE])?
+                    .handler;
+                match stage {
+                    ProxyDeleteStage::TrapGetter => (handler, 0, None, 0),
+                    ProxyDeleteStage::TrapCall => (handler, 0, Some(state), 2),
+                    ProxyDeleteStage::TargetGetOwn | ProxyDeleteStage::TargetIsExtensible => {
                         return Err(ExecutionError::MissingNativeContinuation);
                     }
                 }
@@ -3484,6 +3519,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxyGet(stage) => self
                     .resume_proxy_get(continuation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyDelete { mode, stage } => self
+                    .resume_proxy_delete(continuation, mode, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =

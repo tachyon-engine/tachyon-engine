@@ -1,5 +1,6 @@
 use super::{fixtures::test_isolate, *};
 
+mod delete;
 mod get;
 mod get_own;
 

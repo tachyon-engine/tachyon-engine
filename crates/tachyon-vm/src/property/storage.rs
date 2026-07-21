@@ -237,25 +237,6 @@ impl Isolate {
         Ok(true)
     }
 
-    /// Applies strict DeletePropertyOrThrow semantics to bytecode property deletion.
-    pub(crate) fn delete_data_property_from_bytecode(
-        &mut self,
-        receiver: Value,
-        key: impl Into<PropertyKey>,
-    ) -> Result<bool, ExecutionError> {
-        let deleted = self.delete_own_data_property(receiver, key)?;
-        let strictness = self
-            .fiber
-            .frames
-            .last()
-            .expect("property deletion always has an active frame")
-            .strictness;
-        if !deleted && strictness == FunctionStrictness::Strict {
-            return Err(ExecutionError::ReadOnlyProperty(receiver));
-        }
-        Ok(deleted)
-    }
-
     /// Mutates a fixed existing slot and publishes its potential young edge to the barrier.
     pub(super) fn update_property_slot(
         &mut self,

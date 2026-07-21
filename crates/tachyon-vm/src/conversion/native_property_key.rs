@@ -160,10 +160,9 @@ impl Isolate {
                 }
                 self.finish_builtin_has_own(site, pending.first, key)
             }
-            BuiltinPropertyKeyConsumer::ReflectDeleteProperty => {
-                let deleted = self.delete_own_data_property(pending.first, key)?;
-                self.write(site.caller_base, site.destination, boolean_value(deleted))
-            }
+            BuiltinPropertyKeyConsumer::ReflectDeleteProperty => self
+                .dispatch_delete_property(site, pending.first, primitive, ProxyDeleteMode::Reflect)
+                .map(|_| ()),
             BuiltinPropertyKeyConsumer::ReflectHas => self
                 .dispatch_has_property(site, pending.first, primitive)
                 .map(|_| ()),
