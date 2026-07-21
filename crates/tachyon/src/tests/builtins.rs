@@ -204,6 +204,72 @@ fn promise_resolution_assimilates_thenables_at_each_reaction_boundary() {
 }
 
 #[test]
+/// Calls Array forEach with stable value/index/receiver arguments and ignores holes.
+fn array_for_each_resumes_callbacks_in_index_order() {
+    let value = execute_source(
+        1_039,
+        "var trace = 0; var array = [1, 2, 3]; delete array[1]; array.forEach(function(value, index, receiver) { trace = trace * 10 + value + index; if (receiver !== array) trace = -1; }); trace;",
+    );
+    assert_eq!(
+        value.as_f64(),
+        Some(15.0),
+        "unexpected forEach trace: {value:?}"
+    );
+    assert_eq!(
+        execute_source(
+            1_040,
+            "function checkSequence(array) { var ok = true; array.forEach(function(value, index) { if (value !== index + 1) ok = false; }); return ok; } checkSequence([1, 2, 3, 4, 5, 6, 7, 8]);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
+/// Keeps an outer Promise reaction continuation below nested Array callback frames.
+fn array_for_each_does_not_consume_outer_promise_continuation() {
+    let compile = |source_id, text: &'static str| {
+        Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(source_id),
+                    SourceName::new("array-foreach-promise-boundary"),
+                    MediaType::JavaScript,
+                    Arc::from(text),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap()
+    };
+    let setup = compile(
+        1_041,
+        "var trace = 0; Promise.resolve([1, 2]).then(function(values) { values.forEach(function(value) { trace = trace * 10 + value; }); trace = trace * 10 + 3; }).then(function() { trace = trace * 10 + 4; });",
+    );
+    let probe = compile(1_042, "trace;");
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    assert!(matches!(
+        isolate.execute(
+            &probe,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        ),
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(1_234)
+    ));
+}
+
+#[test]
 /// Drains standard Array iterables through the Map and Set constructor protocol.
 fn collection_constructors_consume_array_iterables() {
     assert_eq!(

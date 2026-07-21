@@ -324,6 +324,16 @@ pub(crate) enum PromiseResolutionMode {
     StaticResolve,
 }
 
+/// One observable boundary in an Array.prototype.forEach iteration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayForEachStage {
+    Length,
+    Has,
+    Get,
+    Callback,
+}
+
 /// The first Proxy essential internal methods routed through the exotic slow path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -475,6 +485,7 @@ pub(crate) enum NativeContinuationKind {
     },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
+    ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
     PromiseExecutor,
     PromiseReaction,
@@ -794,6 +805,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::CollectionForEach,
             first: state,
             second: callback,
+        }
+    }
+
+    /// Roots one fixed Array forEach state across property and callback frames.
+    #[inline]
+    pub(crate) const fn array_for_each(
+        site: NativeContinuationSite,
+        stage: ArrayForEachStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayForEach(stage),
+            first: state,
+            second: retained,
         }
     }
 

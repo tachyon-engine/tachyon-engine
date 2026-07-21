@@ -1450,6 +1450,9 @@ impl Isolate {
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayForEach(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::MapGetOrInsertComputed => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -3067,6 +3070,9 @@ impl Isolate {
                     let value = self.array_sort(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayForEach) => {
+                    return self.begin_array_for_each(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -3635,6 +3641,10 @@ impl Isolate {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;
                     self.resume_collection_for_each(site, state)
                 }
+                NativeContinuationKind::ArrayForEach(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_array_for_each(site, state, stage, value)
+                }
                 NativeContinuationKind::MapGetOrInsertComputed => {
                     let state = self.pending_map_upsert_reference(continuation.first())?;
                     self.resume_map_get_or_insert_computed(site, state, value)
@@ -3662,6 +3672,15 @@ impl Isolate {
                 return self.throw_native_error(kind, site.call_site);
             }
             if self.fiber.frames.len() != frame_depth {
+                return Ok(None);
+            }
+            let frame_completion_base = self
+                .fiber
+                .frames
+                .last()
+                .ok_or(ExecutionError::MissingEnvironment)?
+                .completion_base as usize;
+            if self.fiber.completions.len() <= frame_completion_base {
                 return Ok(None);
             }
             let Some(parent) = self.fiber.completions.pop_native() else {

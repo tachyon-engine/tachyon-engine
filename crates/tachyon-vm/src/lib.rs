@@ -11,6 +11,7 @@
 
 mod argument_list;
 mod array;
+mod array_for_each;
 mod atom;
 mod bound_function;
 mod builtins;
@@ -116,8 +117,8 @@ use runtime::{
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
-        ActiveHandler, ArrayAllocationRoots, BuiltinPropertyKeyConsumer, CodeLoadRoots,
-        CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
+        ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, BuiltinPropertyKeyConsumer,
+        CodeLoadRoots, CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PromiseResolutionMode,
         PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,

@@ -127,6 +127,7 @@ pub(crate) enum NativeFunction {
     ArrayCopyWithin,
     ArrayFlat,
     ArraySort,
+    ArrayForEach,
     ArrayToString,
     ArrayValues,
     ArrayIteratorNext,
@@ -496,6 +497,7 @@ impl NativeFunction {
             | Self::PromiseResolve
             | Self::PromiseReject
             | Self::PromiseCatch
+            | Self::ArrayForEach
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
@@ -790,6 +792,7 @@ impl NativeFunction {
             Self::ArrayCopyWithin => "copyWithin",
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
+            Self::ArrayForEach => "forEach",
             Self::ArrayToString => "toString",
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",

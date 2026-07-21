@@ -1,0 +1,366 @@
+//! Resumable Array.prototype.forEach property and callback state machine.
+
+use super::*;
+
+const FOREACH_RECEIVER: usize = 0;
+const FOREACH_CALLBACK: usize = 1;
+const FOREACH_THIS_ARGUMENT: usize = 2;
+const FOREACH_LENGTH: usize = 3;
+const FOREACH_NEXT_INDEX: usize = 4;
+
+struct ArrayForEachRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: NativeCallState,
+}
+
+impl Trace for ArrayForEachRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
+
+impl Isolate {
+    /// Validates the callback, publishes fixed state, and starts observable length lookup.
+    pub(crate) fn begin_array_for_each(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if !self.is_object_value(site.this_value) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
+        let callback = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.resolve_function_object(callback)?;
+        let this_argument = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let state = self.allocate_array_for_each_state(NativeCallState {
+            values: [
+                site.this_value,
+                callback,
+                this_argument,
+                Value::from_i32(0),
+                Value::from_i32(0),
+            ],
+            count: 5,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let length = self.length_atom()?;
+        self.dispatch_array_for_each_get(
+            continuation_site,
+            state,
+            ArrayForEachStage::Length,
+            site.this_value,
+            length.into(),
+        )
+    }
+
+    /// Resumes length, HasProperty, Get, or callback completion from the iterative trampoline.
+    pub(crate) fn resume_array_for_each(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: ArrayForEachStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            ArrayForEachStage::Length => {
+                let guard = NativeContinuation::array_for_each(
+                    site,
+                    stage,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                );
+                self.fiber
+                    .completions
+                    .push_native(guard)
+                    .map_err(Isolate::completion_stack_error)?;
+                let length = self.array_for_each_to_length(value);
+                self.pop_native_continuation()?;
+                let length = length?;
+                self.set_array_for_each_number(state, FOREACH_LENGTH, length)?;
+                self.advance_array_for_each(site, state)
+            }
+            ArrayForEachStage::Has => {
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                )?;
+                if self.is_truthy_value(value)? {
+                    self.dispatch_array_for_each_element_get(site, state)
+                } else {
+                    self.advance_array_for_each(site, state)
+                }
+            }
+            ArrayForEachStage::Get => self.call_array_for_each_callback(site, state, value),
+            ArrayForEachStage::Callback => self.advance_array_for_each(site, state),
+        }
+    }
+
+    /// Advances the fixed length snapshot and publishes one HasProperty operation at a time.
+    fn advance_array_for_each(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let length = exact_nonnegative_integer(pending.values[FOREACH_LENGTH])?;
+        let index = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
+        if index >= length {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
+        self.set_array_for_each_number(state, FOREACH_NEXT_INDEX, index + 1)?;
+        let key = Value::from_f64(index as f64);
+        self.dispatch_array_for_each_has(site, state, pending.values[FOREACH_RECEIVER], key)
+    }
+
+    /// Dispatches element Get using the index already advanced before HasProperty observation.
+    fn dispatch_array_for_each_element_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let next = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
+        let key = self.property_key_atom(Value::from_f64((next - 1) as f64))?;
+        self.dispatch_array_for_each_get(
+            site,
+            state,
+            ArrayForEachStage::Get,
+            pending.values[FOREACH_RECEIVER],
+            key.into(),
+        )
+    }
+
+    /// Calls the callback with `(value, index, receiver)` while state and value stay rooted.
+    fn call_array_for_each_callback(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let next = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
+        let index = Value::from_f64((next - 1) as f64);
+        let continuation = NativeContinuation::array_for_each(
+            site,
+            ArrayForEachStage::Callback,
+            Value::from_heap_ref(state.raw()),
+            value,
+        );
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Isolate::completion_stack_error)?;
+        let prefix = match self.create_apply_argument_prefix(
+            pending.values[FOREACH_CALLBACK],
+            pending.values[FOREACH_THIS_ARGUMENT],
+            vec![value, index, pending.values[FOREACH_RECEIVER]],
+        ) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        };
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: pending.values[FOREACH_CALLBACK],
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: 3,
+            argument_count: 3,
+            this_value: pending.values[FOREACH_THIS_ARGUMENT],
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("Array forEach callback publishes one frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(());
+        }
+        self.pop_native_continuation()?;
+        self.advance_array_for_each(site, state)
+    }
+
+    /// Publishes an Array parent continuation around a Proxy-aware property Get.
+    fn dispatch_array_for_each_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: ArrayForEachStage,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_array_for_each_parent(site, state, stage, receiver)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, receiver, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_array_for_each(site, state, stage, value)?;
+        debug_assert_eq!(
+            continuation.kind(),
+            NativeContinuationKind::ArrayForEach(stage)
+        );
+        Ok(())
+    }
+
+    /// Publishes an Array parent continuation around an ordinary or Proxy HasProperty operation.
+    fn dispatch_array_for_each_has(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        receiver: Value,
+        key: Value,
+    ) -> Result<(), ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_array_for_each_parent(site, state, ArrayForEachStage::Has, key)?;
+        let outcome = self.dispatch_has_property(site, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return Ok(());
+        }
+        self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_array_for_each(site, state, ArrayForEachStage::Has, value)
+    }
+
+    fn push_array_for_each_parent(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: ArrayForEachStage,
+        retained: Value,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::array_for_each(
+                site,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                retained,
+            ))
+            .map_err(Isolate::completion_stack_error)
+    }
+
+    /// Allocates the fixed receiver/callback/length/index state under the complete VM root set.
+    fn allocate_array_for_each_state(
+        &mut self,
+        pending: NativeCallState,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let mut roots = ArrayForEachRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Stores only exact nonnegative numeric immediates in the fixed iteration state.
+    fn set_array_for_each_number(
+        &mut self,
+        state: GcRef<NativeCallState>,
+        slot: usize,
+        number: u64,
+    ) -> Result<(), ExecutionError> {
+        let value = Value::from_f64(number as f64);
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.native_call_state)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .values[slot] = value;
+                Ok(())
+            })
+        })
+    }
+
+    /// Applies the existing ToLength boundary after observable length Get completes.
+    fn array_for_each_to_length(&mut self, value: Value) -> Result<u64, ExecutionError> {
+        let number = self.convert_to_number(value)?;
+        let number =
+            numeric_value(number).ok_or(ExecutionError::UnsupportedNumberConversion(number))?;
+        if number.is_nan() || number <= 0.0 {
+            return Ok(0);
+        }
+        if !number.is_finite() || number >= MAX_SAFE_INTEGER as f64 {
+            return Ok(MAX_SAFE_INTEGER);
+        }
+        Ok(number.floor() as u64)
+    }
+}
+
+fn exact_nonnegative_integer(value: Value) -> Result<u64, ExecutionError> {
+    let number = numeric_value(value).ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 {
+        return Err(ExecutionError::UnsupportedNumberConversion(value));
+    }
+    Ok(number as u64)
+}

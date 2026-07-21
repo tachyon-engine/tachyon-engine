@@ -1148,6 +1148,18 @@ impl Isolate {
         self.realm.array_sort = Some(sort);
         let sort_atom = self.intern_intrinsic_name(b"sort")?;
         self.set_intrinsic_data_property(prototype, sort_atom, sort, true)?;
+        let for_each = self.allocate_native_function(
+            NativeFunction::ArrayForEach,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_for_each = Some(for_each);
+        let for_each_atom = self.intern_intrinsic_name(b"forEach")?;
+        self.set_intrinsic_data_property(prototype, for_each_atom, for_each, true)?;
         let to_string = self.allocate_native_function(
             NativeFunction::ArrayToString,
             OrdinaryObject {
