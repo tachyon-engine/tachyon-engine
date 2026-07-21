@@ -1805,6 +1805,20 @@ impl Isolate {
             },
         )?;
         self.realm.proxy_constructor = Some(constructor);
+        let revocable = self.allocate_native_function(
+            NativeFunction::ProxyRevocable,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: self
+                    .realm
+                    .function_prototype
+                    .expect("Function prototype initializes before Proxy"),
+            },
+        )?;
+        let revocable_atom = self.intern_intrinsic_name(b"revocable")?;
+        self.set_intrinsic_data_property(constructor, revocable_atom, revocable, true)?;
         Ok(())
     }
 

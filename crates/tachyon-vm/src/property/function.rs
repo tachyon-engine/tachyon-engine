@@ -138,6 +138,17 @@ impl Isolate {
                     .map_err(ExecutionError::PropertyKeyString)?;
                 self.allocate_runtime_string(name).map(Some)
             }
+            FunctionExecutable::ProxyRevoker(_) => {
+                if key == self.length_atom()? {
+                    return Ok(Some(Value::from_i32(0)));
+                }
+                if key != self.name_atom()? {
+                    return Ok(None);
+                }
+                let name =
+                    JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
             FunctionExecutable::Bytecode { code, function, .. } => {
                 let is_length = key == self.length_atom()?;
                 let is_name = !is_length && key == self.name_atom()?;
@@ -243,7 +254,7 @@ impl Isolate {
             .is_ok_and(|function| match function.executable {
                 FunctionExecutable::Bytecode { .. } => true,
                 FunctionExecutable::Native(native) => native.has_default_prototype(),
-                FunctionExecutable::Bound(_) => false,
+                FunctionExecutable::Bound(_) | FunctionExecutable::ProxyRevoker(_) => false,
             })
     }
 

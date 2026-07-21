@@ -102,6 +102,7 @@ pub(crate) enum NativeFunction {
     ErrorIsError,
     ErrorToString,
     ProxyConstructor,
+    ProxyRevocable,
     ArrayConstructor,
     ArrayIsArray,
     ArrayConcat,
@@ -469,7 +470,7 @@ impl NativeFunction {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
-            Self::ProxyConstructor => 2,
+            Self::ProxyConstructor | Self::ProxyRevocable => 2,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
@@ -751,6 +752,7 @@ impl NativeFunction {
             Self::ErrorIsError => "isError",
             Self::ErrorToString => "toString",
             Self::ProxyConstructor => "Proxy",
+            Self::ProxyRevocable => "revocable",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",
@@ -989,6 +991,7 @@ pub(crate) enum FunctionExecutable {
     },
     Native(NativeFunction),
     Bound(GcRef<BoundFunctionData>),
+    ProxyRevoker(Value),
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1163,6 +1166,9 @@ impl Trace for FunctionObject {
         }
         if let FunctionExecutable::Bound(data) = &mut self.executable {
             data.trace(tracer);
+        }
+        if let FunctionExecutable::ProxyRevoker(proxy) = &mut self.executable {
+            proxy.trace(tracer);
         }
         self.function_prototype.trace(tracer);
         self.ordinary.trace(tracer);

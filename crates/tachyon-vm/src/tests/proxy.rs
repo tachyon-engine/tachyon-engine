@@ -70,6 +70,61 @@ fn proxy_constructor_validates_arguments_and_has_no_default_prototype() {
 }
 
 #[test]
+/// Keeps revocable construction rooted, then clears every private edge exactly once.
+fn proxy_revoker_survives_forced_major_and_is_idempotent() {
+    assert_eq!(core::mem::size_of::<FunctionExecutable>(), 16);
+    let mut isolate = test_isolate();
+    let target = isolate.create_ordinary_object().unwrap();
+    let handler = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers = vec![target, handler];
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let site = proxy_call_site(&isolate, 2);
+    let result = isolate.create_revocable_proxy_from_site(&site).unwrap();
+    isolate.fiber.registers = vec![result];
+    let proxy_atom = isolate.intern_intrinsic_name(b"proxy").unwrap();
+    let revoke_atom = isolate.intern_intrinsic_name(b"revoke").unwrap();
+    let proxy = isolate
+        .get_data_property(result, proxy_atom)
+        .unwrap()
+        .unwrap();
+    let revoker = isolate
+        .get_data_property(result, revoke_atom)
+        .unwrap()
+        .unwrap();
+    isolate.fiber.registers = vec![result, proxy, revoker];
+    let revoke_site = CallSite {
+        caller_base: 0,
+        destination: 0,
+        callee: revoker,
+        argument_base: 0,
+        argument_prefix: None,
+        argument_prefix_offset: 0,
+        argument_prefix_count: 0,
+        argument_count: 0,
+        this_value: Value::from_immediate(Immediate::Undefined),
+        new_target: Value::from_immediate(Immediate::Undefined),
+        construct_receiver: None,
+        call_site: WordOffset::new(0),
+    };
+    isolate.call(revoke_site).unwrap();
+    assert_eq!(
+        isolate.fiber.registers[0].as_immediate(),
+        Some(Immediate::Undefined)
+    );
+    let snapshot = isolate.proxy_snapshot(proxy).unwrap();
+    assert_eq!(snapshot.target.as_immediate(), Some(Immediate::Null));
+    assert_eq!(snapshot.handler.as_immediate(), Some(Immediate::Null));
+    isolate.call(revoke_site).unwrap();
+    assert!(matches!(
+        isolate.resolve_function_object(revoker).unwrap().executable,
+        FunctionExecutable::ProxyRevoker(value)
+            if value.as_immediate() == Some(Immediate::Null)
+    ));
+}
+
+#[test]
 fn proxy_trap_getter_and_call_resume_for_every_dispatch_batch() {
     assert_proxy_trap_continuation_batch::<1>();
     assert_proxy_trap_continuation_batch::<2>();

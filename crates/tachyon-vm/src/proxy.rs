@@ -33,6 +33,25 @@ impl Trace for ProxyAllocationRoots<'_> {
     }
 }
 
+struct ProxyRevocableRoots<'a> {
+    vm: VmRoots<'a>,
+    proxy: Value,
+    revoker: Value,
+    prototype: Value,
+    storage: Option<GcRef<PropertyStorage>>,
+}
+
+impl Trace for ProxyRevocableRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.proxy.trace(tracer);
+        self.revoker.trace(tracer);
+        self.prototype.trace(tracer);
+        self.storage.trace(tracer);
+    }
+}
+
 impl Isolate {
     /// Validates ProxyCreate arguments before allocating the independently branded exotic payload.
     pub(crate) fn create_proxy_from_site(
@@ -75,6 +94,139 @@ impl Isolate {
             )
             .map(|proxy| Value::from_heap_ref(proxy.raw()))
             .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Creates the Proxy, stateful revoker, and exact two-property result for Proxy.revocable.
+    pub(crate) fn create_revocable_proxy_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let proxy = self.create_proxy_from_site(site)?;
+        self.write(site.caller_base, site.destination, proxy)?;
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Proxy.revocable");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Proxy.revocable");
+        let proxy_atom = self.intern_intrinsic_name(b"proxy")?;
+        let revoke_atom = self.intern_intrinsic_name(b"revoke")?;
+        let mut roots = ProxyRevocableRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            proxy,
+            revoker: Value::from_immediate(Immediate::Undefined),
+            prototype: function_prototype,
+            storage: None,
+        };
+        let revoker = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    executable: FunctionExecutable::ProxyRevoker(roots.proxy),
+                    function_prototype: None,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.revoker = Value::from_heap_ref(revoker.raw());
+        roots.prototype = object_prototype;
+        let proxy_shape = self
+            .shapes
+            .transition_add(ShapeId::EMPTY, proxy_atom, PropertyAttributes::DEFAULT_DATA)
+            .map_err(ExecutionError::Shape)?;
+        let result_shape = self
+            .shapes
+            .transition_add(proxy_shape, revoke_atom, PropertyAttributes::DEFAULT_DATA)
+            .map_err(ExecutionError::Shape)?;
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.property_storage,
+                0,
+                PropertyStorage::new(Box::new([roots.proxy, roots.revoker])),
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        self.heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                OrdinaryObject {
+                    shape: result_shape,
+                    extensible: true,
+                    storage: roots.storage,
+                    prototype: roots.prototype,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|result| Value::from_heap_ref(result.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Clears a revoker's private edge before invalidating both Proxy slots without allocation.
+    pub(crate) fn revoke_proxy_from_function(
+        &mut self,
+        revoker: Value,
+    ) -> Result<(), ExecutionError> {
+        let proxy = match self.resolve_function_object(revoker)?.executable {
+            FunctionExecutable::ProxyRevoker(proxy) => proxy,
+            _ => return Err(ExecutionError::NonCallable(revoker)),
+        };
+        if proxy.as_immediate() == Some(Immediate::Null) {
+            return Ok(());
+        }
+        let revoker_raw = revoker
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(revoker))?;
+        let revoker_ref = self
+            .heap
+            .checked_reference(revoker_raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(revoker))?;
+        let proxy_raw = proxy.as_heap_ref().ok_or(ExecutionError::ProxyRevoked)?;
+        let proxy_ref = self
+            .heap
+            .checked_reference(proxy_raw, self.types.proxy_object)
+            .map_err(|_| ExecutionError::ProxyRevoked)?;
+        self.heap.with_running_scope(|scope| {
+            let revoker = scope.root(revoker_ref).map_err(ExecutionError::Root)?;
+            let proxy = scope.root(proxy_ref).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                {
+                    let function = no_gc
+                        .borrow_mut(revoker, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    function.executable =
+                        FunctionExecutable::ProxyRevoker(Value::from_immediate(Immediate::Null));
+                }
+                let proxy = no_gc
+                    .borrow_mut(proxy, self.types.proxy_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                proxy.target = Value::from_immediate(Immediate::Null);
+                proxy.handler = Value::from_immediate(Immediate::Null);
+                Ok(())
+            })
+        })
     }
 
     #[inline(always)]

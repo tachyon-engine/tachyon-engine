@@ -2033,6 +2033,9 @@ impl Isolate {
                 FunctionExecutable::Native(_) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::ProxyRevoker(_) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
             }
         }
         let prototype_atom = self.prototype_atom()?;
@@ -2111,6 +2114,14 @@ impl Isolate {
                             strictness,
                         },
                         site,
+                    );
+                }
+                FunctionExecutable::ProxyRevoker(_) => {
+                    self.revoke_proxy_from_function(site.callee)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
@@ -2601,6 +2612,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
                     return Err(ExecutionError::ProxyConstructorRequiresNew);
                 }
+                FunctionExecutable::Native(NativeFunction::ProxyRevocable) => {
+                    let result = self.create_revocable_proxy_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -2986,6 +3001,7 @@ impl Isolate {
                 let target = self.bound_function_snapshot(data)?.bound_target;
                 self.is_constructor_value(target)?
             }
+            FunctionExecutable::ProxyRevoker(_) => false,
             FunctionExecutable::Bytecode { .. } => true,
         })
     }

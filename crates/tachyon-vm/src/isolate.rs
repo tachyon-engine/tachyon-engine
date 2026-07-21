@@ -1132,7 +1132,7 @@ impl Isolate {
             let virtual_count = match self.resolve_function_object(current) {
                 Ok(function) => match function.executable {
                     FunctionExecutable::Native(_) => 3,
-                    FunctionExecutable::Bound(_) => 2,
+                    FunctionExecutable::Bound(_) | FunctionExecutable::ProxyRevoker(_) => 2,
                     FunctionExecutable::Bytecode { .. } => 3,
                 },
                 Err(_) => 0,
