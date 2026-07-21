@@ -1369,6 +1369,9 @@ impl Isolate {
                         1,
                     )
                 }
+                ProxyContinuationStage::ForwardResult => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
             },
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);

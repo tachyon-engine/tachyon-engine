@@ -329,6 +329,7 @@ pub(crate) enum ProxyInternalMethod {
 pub(crate) enum ProxyContinuationStage {
     TrapGetter,
     TrapCall,
+    ForwardResult,
 }
 
 /// The observable operation that resumes one Map or Set iterable constructor step.
@@ -483,6 +484,20 @@ impl NativeContinuation {
             },
             first: proxy,
             second: trap,
+        }
+    }
+
+    /// Preserves the outer Proxy while a nested target performs [[PreventExtensions]].
+    #[inline]
+    pub(crate) const fn proxy_forward_result(site: NativeContinuationSite, proxy: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::Proxy {
+                operation: ProxyInternalMethod::PreventExtensionsObject,
+                stage: ProxyContinuationStage::ForwardResult,
+            },
+            first: proxy,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

@@ -110,30 +110,61 @@ impl Isolate {
     pub(crate) fn dispatch_proxy_internal_method(
         &mut self,
         site: NativeContinuationSite,
-        proxy: Value,
+        mut proxy: Value,
         operation: ProxyInternalMethod,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let snapshot = self.proxy_snapshot(proxy)?;
-        if snapshot.handler.as_immediate() == Some(Immediate::Null) {
-            return Err(ExecutionError::ProxyRevoked);
-        }
-        let trap_name = self.intern_intrinsic_name(operation.trap_name())?;
-        match self.resolve_property_read(snapshot.handler, trap_name.into())? {
-            PropertyRead::Missing => {
-                self.forward_proxy_internal_method(site, proxy, snapshot.target, operation)
+        loop {
+            let snapshot = self.proxy_snapshot(proxy)?;
+            if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
             }
-            PropertyRead::Data(trap) => {
-                self.continue_proxy_trap_lookup(site, proxy, operation, trap)
+            let trap_name = self.intern_intrinsic_name(operation.trap_name())?;
+            match self.resolve_property_read(snapshot.handler, trap_name.into())? {
+                PropertyRead::Missing => {
+                    if self.is_proxy_value(snapshot.target)
+                        && operation != ProxyInternalMethod::PreventExtensionsObject
+                    {
+                        proxy = snapshot.target;
+                        continue;
+                    }
+                    return self.forward_proxy_internal_method(
+                        site,
+                        proxy,
+                        snapshot.target,
+                        operation,
+                    );
+                }
+                PropertyRead::Data(trap) => {
+                    return self.continue_proxy_trap_lookup(site, proxy, operation, trap);
+                }
+                PropertyRead::Accessor(getter)
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    if self.is_proxy_value(snapshot.target)
+                        && operation != ProxyInternalMethod::PreventExtensionsObject
+                    {
+                        proxy = snapshot.target;
+                        continue;
+                    }
+                    return self.forward_proxy_internal_method(
+                        site,
+                        proxy,
+                        snapshot.target,
+                        operation,
+                    );
+                }
+                PropertyRead::Accessor(getter) => {
+                    return self.dispatch_property_callback(
+                        NativeContinuation::proxy_trap_getter(
+                            site,
+                            operation,
+                            proxy,
+                            snapshot.handler,
+                        ),
+                        getter,
+                    );
+                }
             }
-            PropertyRead::Accessor(getter)
-                if getter.as_immediate() == Some(Immediate::Undefined) =>
-            {
-                self.forward_proxy_internal_method(site, proxy, snapshot.target, operation)
-            }
-            PropertyRead::Accessor(getter) => self.dispatch_property_callback(
-                NativeContinuation::proxy_trap_getter(site, operation, proxy, snapshot.handler),
-                getter,
-            ),
         }
     }
 
@@ -158,6 +189,9 @@ impl Isolate {
                 operation,
                 value,
             ),
+            ProxyContinuationStage::ForwardResult => {
+                self.finish_proxy_forward_result(continuation.site(), continuation.first(), value)
+            }
         }
     }
 
@@ -193,6 +227,13 @@ impl Isolate {
         target: Value,
         operation: ProxyInternalMethod,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.is_proxy_value(target) {
+            return if operation == ProxyInternalMethod::PreventExtensionsObject {
+                self.forward_object_prevent_extensions(site, proxy, target)
+            } else {
+                self.dispatch_proxy_internal_method(site, target, operation)
+            };
+        }
         let (receiver, snapshot) = self.object_snapshot(target)?;
         let result = match operation {
             ProxyInternalMethod::GetPrototypeOf => snapshot.prototype,
@@ -207,6 +248,65 @@ impl Isolate {
             }
         };
         self.write(site.caller_base, site.destination, result)?;
+        Ok(None)
+    }
+
+    /// Maps a nested Proxy's boolean [[PreventExtensions]] result back to Object.preventExtensions.
+    fn forward_object_prevent_extensions(
+        &mut self,
+        site: NativeContinuationSite,
+        outer_proxy: Value,
+        target: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_forward_result(site, outer_proxy))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let frame_depth = self.fiber.frames.len();
+        let result = self.dispatch_proxy_internal_method(
+            site,
+            target,
+            ProxyInternalMethod::PreventExtensions,
+        );
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth {
+            return Ok(outcome);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.finish_proxy_forward_result(site, continuation.first(), value)
+    }
+
+    /// Applies Object.preventExtensions' throw-on-false and original-object return contract.
+    fn finish_proxy_forward_result(
+        &mut self,
+        site: NativeContinuationSite,
+        outer_proxy: Value,
+        result: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if !self.is_truthy_value(result)? {
+            return Err(ExecutionError::ProxyInvariantViolation);
+        }
+        self.write(site.caller_base, site.destination, outer_proxy)?;
         Ok(None)
     }
 

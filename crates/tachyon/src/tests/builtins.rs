@@ -1099,6 +1099,19 @@ fn prevent_extensions_blocks_new_own_properties() {
 }
 
 #[test]
+/// Forwards absent Proxy traps iteratively while preserving the outer Object builtin result.
+fn nested_proxy_prototype_and_extensibility_methods_forward() {
+    assert_eq!(
+        execute_source(
+            1_031,
+            "let prototype = {}; let inner = new Proxy({}, { getPrototypeOf() { return prototype; }, isExtensible(target) { return Reflect.isExtensible(target); }, preventExtensions(target) { Object.preventExtensions(target); return true; } }); let outer = new Proxy(inner, { get getPrototypeOf() { return undefined; } }); let prototypeOk = Object.getPrototypeOf(outer) === prototype; let extensibleOk = Reflect.isExtensible(outer); let returned = Object.preventExtensions(outer); prototypeOk && extensibleOk && returned === outer && !Reflect.isExtensible(outer);",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
+}
+
+#[test]
 /// Covers omitted arguments, explicit undefined, supplied values, and left-to-right defaults.
 fn default_parameters_use_undefined_only_and_see_prior_parameters() {
     assert_eq!(
