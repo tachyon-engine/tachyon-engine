@@ -230,3 +230,36 @@ fn public_instance_field_semantics() {
         );
     }
 }
+
+#[test]
+/// Executes static blocks after key collection while preserving source order and lexical boundaries.
+fn class_static_block_semantics() {
+    for (source_id, source) in [
+        (
+            1_102,
+            "var order = ''; function key() { order = order + 'k'; return 'method'; } class Base {} Base.inherited = 4; class C extends Base { static first = (order = order + 'f', 1); [key()]() {} static { order = order + 'b'; this.fromSuper = super.inherited + 1; } static last = (order = order + 'l', 2); } order === 'kfbl' && C.first === 1 && C.last === 2 && C.fromSuper === 5;",
+        ),
+        (
+            1_103,
+            "class C { static { this.first = helper(); function helper() { return 7; } let local = 3; this.read = function() { return local; }; this.target = new.target; } static { let local = 5; this.second = local; } } C.first === 7 && C.read() === 3 && C.second === 5 && C.target === undefined;",
+        ),
+        (
+            1_104,
+            "function make(seed) { return class Named { static { this.value = seed + 1; this.self = Named; } }; } var C = make(6); C.value === 7 && C.self === C;",
+        ),
+        (
+            1_105,
+            "var order = ''; var caught = false; try { class C { static { order = order + 'a'; throw 9; } static field = (order = order + 'b', 1); } } catch (error) { caught = error === 9; } caught && order === 'a';",
+        ),
+        (
+            1_106,
+            "class Base {} Base.value = 1; class Other {} Other.value = 8; class C extends Base { static { Object.setPrototypeOf(this, Other); this.read = super.value; } } C.read === 8;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

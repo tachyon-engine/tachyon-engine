@@ -156,6 +156,24 @@ var value = new Derived();
 definitions === 3 && value.first === 7 && value[symbol] === undefined && value.named.name === "named";
 "#;
 
+const STATIC_BLOCK_SOURCE: &str = r#"
+var order = "";
+function make(seed) {
+  return class Named {
+    static first = (order = order + "f", seed);
+    static {
+      order = order + "b";
+      let local = seed + 1;
+      this.read = function() { return local; };
+      this.self = Named;
+    }
+    static last = (order = order + "l", seed + 2);
+  };
+}
+var C = make(5);
+order === "fbl" && C.first === 5 && C.read() === 6 && C.self === C && C.last === 7;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -280,6 +298,20 @@ fn instance_field_plans_survive_forced_major_collections() {
     ] {
         assert_forced_major_source(source, source_id);
     }
+}
+
+#[test]
+fn static_blocks_execute_for_every_dispatch_batch() {
+    assert_static_block_batch::<1>();
+    assert_static_block_batch::<2>();
+    assert_static_block_batch::<4>();
+    assert_static_block_batch::<8>();
+    assert_static_block_batch::<16>();
+}
+
+#[test]
+fn static_blocks_survive_forced_major_collections() {
+    assert_forced_major_source(STATIC_BLOCK_SOURCE, 166);
 }
 
 #[test]
@@ -561,6 +593,25 @@ fn assert_instance_field_batch<const N: usize>() {
             },
         )
         .expect("instance field fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes ordered static fields/blocks and captured block locals with one dispatch batch.
+fn assert_static_block_batch<const N: usize>() {
+    let module = compile_source(STATIC_BLOCK_SOURCE, 170 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("static block fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

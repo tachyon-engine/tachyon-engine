@@ -890,7 +890,9 @@ fn lower_function(
                     FunctionKind::BaseClassConstructor
                 }
                 HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
-                HirFunctionKind::ClassFieldInitializer => FunctionKind::ClassFieldInitializer,
+                HirFunctionKind::ClassFieldInitializer | HirFunctionKind::ClassStaticBlock => {
+                    FunctionKind::ClassFieldInitializer
+                }
             },
             strictness: if function.strict {
                 FunctionStrictness::Strict

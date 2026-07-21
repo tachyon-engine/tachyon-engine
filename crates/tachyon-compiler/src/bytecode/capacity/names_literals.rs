@@ -243,17 +243,22 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             for element in class.elements.iter() {
                 let key = match element {
-                    crate::HirClassElement::Method(method) => &method.key,
-                    crate::HirClassElement::PublicField(field) => &field.key,
+                    crate::HirClassElement::Method(method) => Some(&method.key),
+                    crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::StaticBlock(_) => None,
                 };
-                count = checked_count_add(
-                    count,
-                    match key {
-                        HirObjectPropertyKey::Static(_) => 1,
-                        HirObjectPropertyKey::Computed(key) => expression_scope_name_count(key)?,
-                    },
-                    "scope names",
-                )?;
+                if let Some(key) = key {
+                    count = checked_count_add(
+                        count,
+                        match key {
+                            HirObjectPropertyKey::Static(_) => 1,
+                            HirObjectPropertyKey::Computed(key) => {
+                                expression_scope_name_count(key)?
+                            }
+                        },
+                        "scope names",
+                    )?;
+                }
             }
             Ok(count)
         }
@@ -642,10 +647,11 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 .unwrap_or(0);
             for element in class.elements.iter() {
                 let key = match element {
-                    crate::HirClassElement::Method(method) => &method.key,
-                    crate::HirClassElement::PublicField(field) => &field.key,
+                    crate::HirClassElement::Method(method) => Some(&method.key),
+                    crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::StaticBlock(_) => None,
                 };
-                if let HirObjectPropertyKey::Computed(key) = key {
+                if let Some(HirObjectPropertyKey::Computed(key)) = key {
                     count = checked_count_add(
                         count,
                         expression_literal_count(key)?,

@@ -263,12 +263,13 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             let mut element_instructions = 0;
             for element in class.elements.iter() {
                 let (key, fixed) = match element {
-                    crate::HirClassElement::Method(method) => (&method.key, 2),
-                    crate::HirClassElement::PublicField(field) => (&field.key, 7),
+                    crate::HirClassElement::Method(method) => (Some(&method.key), 2),
+                    crate::HirClassElement::PublicField(field) => (Some(&field.key), 7),
+                    crate::HirClassElement::StaticBlock(_) => (None, 5),
                 };
                 element_instructions =
                     checked_count_add(element_instructions, fixed, "bytecode instructions")?;
-                if let HirObjectPropertyKey::Computed(key) = key {
+                if let Some(HirObjectPropertyKey::Computed(key)) = key {
                     element_instructions = checked_count_add(
                         element_instructions,
                         checked_count_add(
@@ -288,6 +289,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 usize::from(class.elements.iter().any(|element| match element {
                     crate::HirClassElement::Method(method) => !method.is_static,
                     crate::HirClassElement::PublicField(field) => !field.is_static,
+                    crate::HirClassElement::StaticBlock(_) => false,
                 })),
                 "bytecode instructions",
             )?;

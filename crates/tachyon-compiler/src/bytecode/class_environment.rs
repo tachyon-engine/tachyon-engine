@@ -201,10 +201,11 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>
             }
             for element in class.elements.iter() {
                 let key = match element {
-                    crate::HirClassElement::Method(method) => &method.key,
-                    crate::HirClassElement::PublicField(field) => &field.key,
+                    crate::HirClassElement::Method(method) => Some(&method.key),
+                    crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::StaticBlock(_) => None,
                 };
-                if let HirObjectPropertyKey::Computed(key) = key {
+                if let Some(HirObjectPropertyKey::Computed(key)) = key {
                     collect_expression(key, bindings);
                 }
             }

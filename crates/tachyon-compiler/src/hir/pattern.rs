@@ -374,7 +374,7 @@ fn nearest_function_scope(
         if semantic
             .scoping()
             .scope_flags(scope)
-            .contains(OxcScopeFlags::Function)
+            .intersects(OxcScopeFlags::Function | OxcScopeFlags::ClassStaticBlock)
         {
             return Some(scope);
         }

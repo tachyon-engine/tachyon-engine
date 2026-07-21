@@ -787,10 +787,11 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                 .unwrap_or(0);
             for element in class.elements.iter() {
                 let key = match element {
-                    crate::HirClassElement::Method(method) => &method.key,
-                    crate::HirClassElement::PublicField(field) => &field.key,
+                    crate::HirClassElement::Method(method) => Some(&method.key),
+                    crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::StaticBlock(_) => None,
                 };
-                if let crate::HirObjectPropertyKey::Computed(key) = key {
+                if let Some(crate::HirObjectPropertyKey::Computed(key)) = key {
                     count =
                         checked_count_add(count, expression_label_count(key)?, "bytecode labels")?;
                 }

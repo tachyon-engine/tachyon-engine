@@ -15,6 +15,15 @@ struct PendingStaticField {
 }
 
 #[derive(Clone, Copy)]
+enum PendingStaticElement {
+    Field(PendingStaticField),
+    Block {
+        initializer: RegisterId,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Clone, Copy)]
 struct PendingInstanceField {
     key: LoweredClassKey,
     initializer: Option<RegisterId>,
@@ -604,6 +613,7 @@ impl Lowerer<'_> {
         let instance_target = if class.elements.iter().any(|element| match element {
             crate::HirClassElement::Method(method) => !method.is_static,
             crate::HirClassElement::PublicField(field) => !field.is_static,
+            crate::HirClassElement::StaticBlock(_) => false,
         }) {
             let target = self.register()?;
             self.emit(
@@ -615,14 +625,15 @@ impl Lowerer<'_> {
         } else {
             None
         };
-        let static_field_count = class
+        let static_element_count = class
             .elements
             .iter()
             .filter(|element| {
                 matches!(element, crate::HirClassElement::PublicField(field) if field.is_static)
+                    || matches!(element, crate::HirClassElement::StaticBlock(_))
             })
             .count();
-        let mut static_fields = Vec::with_capacity(static_field_count);
+        let mut static_elements = Vec::with_capacity(static_element_count);
         let instance_field_count = class
             .elements
             .iter()
@@ -647,40 +658,25 @@ impl Lowerer<'_> {
                     let initializer = field
                         .initializer
                         .map(|initializer| {
-                            let closure = self.register()?;
-                            let function = initializer
-                                .index()
-                                .checked_add(1)
-                                .ok_or(CompileError::RegisterOverflow)?;
-                            self.emit(
-                                Opcode::CreateClosure,
-                                &[closure.index(), function],
+                            self.create_class_initializer(
+                                initializer,
+                                if field.is_static {
+                                    destination
+                                } else {
+                                    instance_target
+                                        .expect("instance field requires class prototype")
+                                },
                                 field.span,
-                            )?;
-                            self.emit(
-                                Opcode::SetFunctionHomeObject,
-                                &[
-                                    closure.index(),
-                                    if field.is_static {
-                                        destination.index()
-                                    } else {
-                                        instance_target
-                                            .expect("instance field requires class prototype")
-                                            .index()
-                                    },
-                                ],
-                                field.span,
-                            )?;
-                            Ok::<RegisterId, CompileError>(closure)
+                            )
                         })
                         .transpose()?;
                     if field.is_static {
-                        static_fields.push(PendingStaticField {
+                        static_elements.push(PendingStaticElement::Field(PendingStaticField {
                             key,
                             initializer,
                             infer_name: field.infer_name,
                             span: field.span,
-                        });
+                        }));
                     } else {
                         instance_fields.push(PendingInstanceField {
                             key,
@@ -689,6 +685,14 @@ impl Lowerer<'_> {
                             span: field.span,
                         });
                     }
+                }
+                crate::HirClassElement::StaticBlock(block) => {
+                    let initializer =
+                        self.create_class_initializer(block.function, destination, block.span)?;
+                    static_elements.push(PendingStaticElement::Block {
+                        initializer,
+                        span: block.span,
+                    });
                 }
             }
         }
@@ -702,8 +706,15 @@ impl Lowerer<'_> {
                 span,
             )?;
         }
-        for field in static_fields {
-            self.initialize_static_field(destination, field)?;
+        for element in static_elements {
+            match element {
+                PendingStaticElement::Field(field) => {
+                    self.initialize_static_field(destination, field)?;
+                }
+                PendingStaticElement::Block { initializer, span } => {
+                    self.call_static_initializer(destination, initializer, span)?;
+                }
+            }
         }
         if class.name_binding.is_some() {
             self.emit(Opcode::LeaveClassEnvironment, &[], span)?;
@@ -714,6 +725,27 @@ impl Lowerer<'_> {
             self.active_scope = previous_scope;
         }
         Ok(destination)
+    }
+
+    /// Creates one hidden class initializer and publishes its static or instance home object.
+    fn create_class_initializer(
+        &mut self,
+        initializer: crate::FunctionStencilId,
+        home_object: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let closure = self.register()?;
+        let function = initializer
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+        self.emit(
+            Opcode::SetFunctionHomeObject,
+            &[closure.index(), home_object.index()],
+            span,
+        )?;
+        Ok(closure)
     }
 
     /// Evaluates one class key in source order, names its closure, and installs its descriptor.
@@ -805,26 +837,7 @@ impl Lowerer<'_> {
         field: PendingStaticField,
     ) -> Result<(), CompileError> {
         let value = if let Some(initializer) = field.initializer {
-            let receiver = self.register()?;
-            let callee = self.register()?;
-            debug_assert_eq!(callee.index(), receiver.index() + 1);
-            self.emit(
-                Opcode::Move,
-                &[receiver.index(), target.index()],
-                field.span,
-            )?;
-            self.emit(
-                Opcode::Move,
-                &[callee.index(), initializer.index()],
-                field.span,
-            )?;
-            let value = self.register()?;
-            self.emit(
-                Opcode::CallWithReceiver,
-                &[value.index(), receiver.index(), 0],
-                field.span,
-            )?;
-            value
+            self.call_static_initializer(target, initializer, field.span)?
         } else {
             self.load_undefined(field.span)?
         };
@@ -854,6 +867,27 @@ impl Lowerer<'_> {
                 field.span,
             ),
         }
+    }
+
+    /// Calls one hidden static initializer with the class constructor as its `this` value.
+    fn call_static_initializer(
+        &mut self,
+        target: RegisterId,
+        initializer: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver = self.register()?;
+        let callee = self.register()?;
+        debug_assert_eq!(callee.index(), receiver.index() + 1);
+        self.emit(Opcode::Move, &[receiver.index(), target.index()], span)?;
+        self.emit(Opcode::Move, &[callee.index(), initializer.index()], span)?;
+        let value = self.register()?;
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[value.index(), receiver.index(), 0],
+            span,
+        )?;
+        Ok(value)
     }
 
     /// Freezes key/initializer/name triples into one verified contiguous constructor record window.

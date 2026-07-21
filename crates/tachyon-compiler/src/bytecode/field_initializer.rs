@@ -1,26 +1,144 @@
 //! Capture discovery for synthetic class-field initializer stencils.
 
-use crate::hir::HirObjectExpressionPart;
+use crate::hir::{HirForInLeft, HirObjectExpressionPart};
 use crate::{
     BindingId, HirAssignmentTarget, HirClassElement, HirExpression, HirExpressionKind,
-    HirFunctionKind, HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind,
-    HirProgram, HirStatementKind,
+    HirForInitializer, HirFunctionKind, HirObjectPropertyKey, HirObjectPropertyValue, HirPattern,
+    HirPatternKind, HirProgram, HirStatement, HirStatementKind, HirVariableDeclaration,
 };
 
-/// Returns bindings referenced by field initializers that Oxc did not model as function scopes.
+/// Returns bindings crossing synthetic class-initializer boundaries absent from Oxc's function tree.
 pub(super) fn forced_captures(hir: &HirProgram) -> Vec<BindingId> {
     let mut bindings = Vec::new();
     for function in hir.functions() {
-        if function.kind != HirFunctionKind::ClassFieldInitializer {
-            continue;
-        }
-        for statement in function.body.iter() {
-            if let HirStatementKind::Return(Some(expression)) = &statement.kind {
-                collect_expression(expression, &mut bindings);
+        match function.kind {
+            HirFunctionKind::ClassFieldInitializer => {
+                for statement in function.body.iter() {
+                    if let HirStatementKind::Return(Some(expression)) = &statement.kind {
+                        collect_expression(expression, &mut bindings);
+                    }
+                }
             }
+            HirFunctionKind::ClassStaticBlock => collect_statements(&function.body, &mut bindings),
+            _ => {}
         }
     }
     bindings
+}
+
+/// Traverses a static block without entering separately-owned nested function stencils.
+fn collect_statements(statements: &[HirStatement], bindings: &mut Vec<BindingId>) {
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::Expression(expression) | HirStatementKind::Throw(expression) => {
+                collect_expression(expression, bindings);
+            }
+            HirStatementKind::Return(expression) => {
+                if let Some(expression) = expression {
+                    collect_expression(expression, bindings);
+                }
+            }
+            HirStatementKind::VariableDeclaration(declaration) => {
+                collect_declaration(declaration, bindings);
+            }
+            HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::Empty => {}
+            HirStatementKind::Block(body) => collect_statements(body, bindings),
+            HirStatementKind::If {
+                test,
+                consequent,
+                alternate,
+            } => {
+                collect_expression(test, bindings);
+                collect_statements(core::slice::from_ref(consequent), bindings);
+                if let Some(alternate) = alternate {
+                    collect_statements(core::slice::from_ref(alternate), bindings);
+                }
+            }
+            HirStatementKind::For {
+                initializer,
+                test,
+                update,
+                body,
+            } => {
+                if let Some(initializer) = initializer {
+                    match initializer {
+                        HirForInitializer::Variable(declaration) => {
+                            collect_declaration(declaration, bindings);
+                        }
+                        HirForInitializer::Expression(expression) => {
+                            collect_expression(expression, bindings);
+                        }
+                    }
+                }
+                if let Some(test) = test {
+                    collect_expression(test, bindings);
+                }
+                if let Some(update) = update {
+                    collect_expression(update, bindings);
+                }
+                collect_statements(core::slice::from_ref(body), bindings);
+            }
+            HirStatementKind::ForIn { left, right, body }
+            | HirStatementKind::ForOf {
+                left, right, body, ..
+            } => {
+                collect_for_in_left(left, bindings);
+                collect_expression(right, bindings);
+                collect_statements(core::slice::from_ref(body), bindings);
+            }
+            HirStatementKind::Loop { test, body, .. } => {
+                collect_expression(test, bindings);
+                collect_statements(core::slice::from_ref(body), bindings);
+            }
+            HirStatementKind::Switch {
+                discriminant,
+                cases,
+            } => {
+                collect_expression(discriminant, bindings);
+                for case in cases.iter() {
+                    if let Some(test) = &case.test {
+                        collect_expression(test, bindings);
+                    }
+                    collect_statements(&case.consequent, bindings);
+                }
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                collect_statements(block, bindings);
+                if let Some(handler) = handler {
+                    if let Some(parameter) = &handler.parameter {
+                        collect_target(parameter, bindings);
+                    }
+                    collect_statements(&handler.body, bindings);
+                }
+                if let Some(finalizer) = finalizer {
+                    collect_statements(finalizer, bindings);
+                }
+            }
+        }
+    }
+}
+
+fn collect_declaration(declaration: &HirVariableDeclaration, bindings: &mut Vec<BindingId>) {
+    for declarator in declaration.declarators.iter() {
+        collect_target(&declarator.pattern, bindings);
+        if let Some(initializer) = &declarator.initializer {
+            collect_expression(initializer, bindings);
+        }
+    }
+}
+
+fn collect_for_in_left(left: &HirForInLeft, bindings: &mut Vec<BindingId>) {
+    match left {
+        HirForInLeft::Variable(declaration) => collect_declaration(declaration, bindings),
+        HirForInLeft::Assignment(pattern) => collect_target(pattern, bindings),
+    }
 }
 
 fn record(binding: Option<BindingId>, bindings: &mut Vec<BindingId>) {
@@ -113,10 +231,11 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
             }
             for element in class.elements.iter() {
                 let key = match element {
-                    HirClassElement::Method(method) => &method.key,
-                    HirClassElement::PublicField(field) => &field.key,
+                    HirClassElement::Method(method) => Some(&method.key),
+                    HirClassElement::PublicField(field) => Some(&field.key),
+                    HirClassElement::StaticBlock(_) => None,
                 };
-                if let HirObjectPropertyKey::Computed(key) = key {
+                if let Some(HirObjectPropertyKey::Computed(key)) = key {
                     collect_expression(key, bindings);
                 }
             }

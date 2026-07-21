@@ -18,7 +18,9 @@ use super::pattern::{HirPattern, lower_assignment_pattern, new_binding};
 use super::program::{
     BindingId, FunctionStencilId, HirFunction, HirIdentifierReference, ReferenceId,
 };
-use super::statement::{lower_arrow_function_stencil, lower_function_stencil};
+use super::statement::{
+    StatementContext, lower_arrow_function_stencil, lower_function_stencil, lower_statement,
+};
 use super::{missing_semantic, source_span, to_scope_id, unsupported};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +72,13 @@ pub struct HirClass {
 pub enum HirClassElement {
     Method(HirClassMethod),
     PublicField(HirClassField),
+    StaticBlock(HirClassStaticBlock),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HirClassStaticBlock {
+    pub span: SourceSpan,
+    pub function: FunctionStencilId,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -906,11 +915,40 @@ pub(super) fn lower_class(
                 }));
             }
             oxc::ast::ast::ClassElement::StaticBlock(block) => {
-                return Err(unsupported(
-                    source.name(),
-                    source_span(block.span),
-                    "class static block",
-                ));
+                let mut body = Vec::with_capacity(block.body.len());
+                for statement in &block.body {
+                    body.push(lower_statement(
+                        statement,
+                        source,
+                        semantic,
+                        functions,
+                        StatementContext::FunctionBody,
+                    )?);
+                }
+                let function = FunctionStencilId(
+                    u32::try_from(functions.len()).map_err(|_| CompileError::BindingOverflow)?,
+                );
+                let scope = block.scope_id.get().ok_or_else(|| {
+                    missing_semantic(source, source_span(block.span), "class static block scope")
+                })?;
+                functions.push(HirFunction {
+                    id: function,
+                    span: source_span(block.span),
+                    name: None,
+                    self_binding: None,
+                    parameters: Arc::from([]),
+                    parameter_initializers: Arc::from([]),
+                    rest_parameter: None,
+                    body: body.into(),
+                    scope: to_scope_id(scope),
+                    strict: true,
+                    kind: super::program::HirFunctionKind::ClassStaticBlock,
+                    initialize_instance_elements: false,
+                });
+                elements.push(HirClassElement::StaticBlock(HirClassStaticBlock {
+                    span: source_span(block.span),
+                    function,
+                }));
             }
             _ => {
                 return Err(unsupported(
