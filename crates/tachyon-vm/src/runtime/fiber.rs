@@ -315,6 +315,15 @@ pub(crate) enum PropertyWriteMode {
     Reflect,
 }
 
+/// Identifies the observable caller that must resume after `Get(resolution, "then")`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PromiseResolutionMode {
+    ResolverCall,
+    Reaction,
+    StaticResolve,
+}
+
 /// The first Proxy essential internal methods routed through the exotic slow path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -468,6 +477,9 @@ pub(crate) enum NativeContinuationKind {
     CollectionForEach,
     MapGetOrInsertComputed,
     PromiseExecutor,
+    PromiseReaction,
+    PromiseResolution(PromiseResolutionMode),
+    PromiseThenable,
     ConversionCallRoot,
 }
 
@@ -708,6 +720,47 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PromiseExecutor,
+            first: promise,
+            second: arguments,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn promise_reaction(site: NativeContinuationSite, capability: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseReaction,
+            first: capability,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots a Promise and its resolution while observable `then` lookup executes.
+    #[inline]
+    pub(crate) const fn promise_resolution(
+        site: NativeContinuationSite,
+        mode: PromiseResolutionMode,
+        promise: Value,
+        resolution: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseResolution(mode),
+            first: promise,
+            second: resolution,
+        }
+    }
+
+    /// Roots resolving functions while a thenable job calls the captured `then` method.
+    #[inline]
+    pub(crate) const fn promise_thenable(
+        site: NativeContinuationSite,
+        promise: Value,
+        arguments: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseThenable,
             first: promise,
             second: arguments,
         }

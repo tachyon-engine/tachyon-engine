@@ -1887,6 +1887,27 @@ impl Isolate {
                 self.realm.promise_reject = Some(function);
             }
         }
+        for (name, native) in [
+            (b"then".as_slice(), NativeFunction::PromiseThen),
+            (b"catch".as_slice(), NativeFunction::PromiseCatch),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(prototype, atom, function, true)?;
+            if native == NativeFunction::PromiseThen {
+                self.realm.promise_then = Some(function);
+            } else {
+                self.realm.promise_catch = Some(function);
+            }
+        }
         Ok(())
     }
 

@@ -28,6 +28,7 @@ mod iterator;
 mod number;
 mod object;
 mod promise;
+mod promise_state;
 mod property;
 mod proxy;
 mod realm;
@@ -91,8 +92,9 @@ use object::{
     PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId,
     SymbolObject, SymbolPropertyKey,
 };
-use promise::{
-    PromiseJobQueue, PromiseObject, PromiseReaction, PromiseResolutionCell, PromiseState,
+use promise_state::{
+    PromiseCapabilityRoots, PromiseJob, PromiseJobQueue, PromiseObject, PromiseReaction,
+    PromiseReactionRoots, PromiseResolutionCell, PromiseState,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
@@ -117,12 +119,12 @@ use runtime::{
         ActiveHandler, ArrayAllocationRoots, BuiltinPropertyKeyConsumer, CodeLoadRoots,
         CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
-        PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,
-        ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
-        ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
-        ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        NativeContinuationKind, NativeContinuationSite, PreferredType, PromiseResolutionMode,
+        PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
+        PrototypeInitializationRoots, ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage,
+        ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage,
+        ProxyHasStage, ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

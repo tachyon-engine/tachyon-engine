@@ -21,6 +21,18 @@ const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
 const MAX_LOADED_MODULES: u32 = 64;
 const MAX_GLOBAL_BINDINGS: u32 = 1 << 18;
+const ASYNC_HARNESS_NAME: &str = "doneprintHandle.js";
+const ASYNC_HARNESS_SOURCE: &str = r#"
+var __tachyonAsyncStatus = 0;
+function $DONE(error) {
+  if (__tachyonAsyncStatus !== 0 || error) {
+    __tachyonAsyncStatus = 2;
+  } else {
+    __tachyonAsyncStatus = 1;
+  }
+}
+"#;
+const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
 
 /// Stateless in-process Test262 adapter; each request owns an independent Tachyon isolate.
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,10 +47,6 @@ impl EngineAdapter for TachyonAdapter {
 
 /// Parses the body before harness lowering, then executes all source units in one isolate.
 fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
-    if request.is_async {
-        return unsupported("Tachyon async Test262 completion is not implemented");
-    }
-
     let body_mode = if request.is_module {
         SourceMode::Module
     } else {
@@ -49,7 +57,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
     }
     for (index, prelude) in request.test.preludes.iter().enumerate() {
         if let Err(error) = Compiler.parse(
-            source_text(source_id(index, 1), prelude),
+            prelude_source_text(source_id(index, 1), prelude, request.is_async),
             options(SourceMode::Script),
         ) {
             return unsupported(format!(
@@ -75,7 +83,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
     };
     for (index, prelude) in request.test.preludes.iter().enumerate() {
         let module = match Compiler.compile(
-            source_text(source_id(index, 1), prelude),
+            prelude_source_text(source_id(index, 1), prelude, request.is_async),
             options(SourceMode::Script),
         ) {
             Ok(module) => module,
@@ -96,7 +104,13 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         Ok(module) => module,
         Err(error) => return body_compile_error(error),
     };
-    execute_module(&mut isolate, &module).unwrap_or(EngineOutcome::Completed)
+    if let Some(outcome) = execute_module(&mut isolate, &module) {
+        return outcome;
+    }
+    if request.is_async {
+        return execute_async_probe(&mut isolate);
+    }
+    EngineOutcome::Completed
 }
 
 fn options(source_mode: SourceMode) -> CompileOptions {
@@ -117,6 +131,66 @@ fn source_text(id: u32, unit: &SourceUnit) -> SourceText {
         MediaType::JavaScript,
         Arc::clone(&unit.source),
     )
+}
+
+/// Replaces the print-based async harness with an isolate-local completion status for this adapter.
+fn prelude_source_text(id: u32, unit: &SourceUnit, is_async: bool) -> SourceText {
+    if is_async && unit.name.as_ref() == ASYNC_HARNESS_NAME {
+        return SourceText::new(
+            SourceId::new(id),
+            SourceName::new(ASYNC_HARNESS_NAME),
+            MediaType::JavaScript,
+            Arc::from(ASYNC_HARNESS_SOURCE),
+        );
+    }
+    source_text(id, unit)
+}
+
+/// Reads the completion flag only after the VM has drained the body's Promise checkpoint.
+fn execute_async_probe(isolate: &mut Isolate) -> EngineOutcome {
+    let source = SourceText::new(
+        SourceId::new(u32::MAX),
+        SourceName::new("tachyon-async-probe"),
+        MediaType::JavaScript,
+        Arc::from(ASYNC_PROBE_SOURCE),
+    );
+    let module = match Compiler.compile(source, options(SourceMode::Script)) {
+        Ok(module) => module,
+        Err(error) => {
+            return unsupported(format!(
+                "Tachyon cannot lower its async completion probe: {}",
+                compile_error_message(&error)
+            ));
+        }
+    };
+    match isolate.execute(
+        &module,
+        ExecutionBudget {
+            fuel: EXECUTION_FUEL_LIMIT,
+            quantum: u32::MAX,
+        },
+    ) {
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(1) => EngineOutcome::Completed,
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(2) => EngineOutcome::Error {
+            phase: Phase::Runtime,
+            error_type: "Test262Error".into(),
+            message: "Tachyon async test called $DONE with an error or more than once".into(),
+        },
+        Ok(RunOutcome::Completed(_)) => {
+            unsupported("Tachyon async test finished without calling $DONE")
+        }
+        Ok(RunOutcome::Thrown(value)) => EngineOutcome::Error {
+            phase: Phase::Runtime,
+            error_type: "Error".into(),
+            message: format!("Tachyon async completion probe threw {value:?}").into(),
+        },
+        Ok(RunOutcome::BudgetExhausted) => EngineOutcome::Timeout {
+            message: "Tachyon async completion probe exhausted its instruction budget".into(),
+        },
+        Err(error) => unsupported(format!(
+            "Tachyon could not execute its async completion probe: {error:?}"
+        )),
+    }
 }
 
 /// Maps the current VM outcomes without treating missing exception objects as a successful test.
@@ -282,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn harness_reference_errors_and_unsupported_async_are_explicit() {
+    fn harness_reference_errors_and_async_done_status_are_explicit() {
         assert!(matches!(
             execute(&composed(
                 "1 + 2;",
@@ -294,7 +368,30 @@ mod tests {
         ));
         assert!(matches!(
             execute(&composed("1 + 2;", &[], true)),
-            EngineOutcome::Unsupported { .. }
+            EngineOutcome::Error {
+                phase: crate::Phase::Runtime,
+                ..
+            }
+        ));
+        assert_eq!(
+            execute(&composed(
+                "$DONE();",
+                &[("doneprintHandle.js", "ignored by Tachyon")],
+                true,
+            )),
+            EngineOutcome::Completed
+        );
+        assert!(matches!(
+            execute(&composed(
+                "$DONE('failure');",
+                &[("doneprintHandle.js", "ignored by Tachyon")],
+                true,
+            )),
+            EngineOutcome::Error {
+                phase: crate::Phase::Runtime,
+                ref error_type,
+                ..
+            } if &**error_type == "Test262Error"
         ));
     }
 }

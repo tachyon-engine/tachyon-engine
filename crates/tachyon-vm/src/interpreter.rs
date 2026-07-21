@@ -1144,6 +1144,9 @@ impl Isolate {
                     .expect("return retains its frame")
                     .has_finally
                 {
+                    if self.fiber.frames.len() == 1 {
+                        return self.promise_checkpoint(value, instruction_offset);
+                    }
                     return self.finish_return(value);
                 }
                 return self
@@ -1158,6 +1161,9 @@ impl Isolate {
                     .expect("return retains its frame")
                     .has_finally
                 {
+                    if self.fiber.frames.len() == 1 {
+                        return self.promise_checkpoint(value, instruction_offset);
+                    }
                     return self.finish_return(value);
                 }
                 return self
@@ -1448,6 +1454,13 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseExecutor => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::PromiseReaction => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::PromiseResolution(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::PromiseThenable => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::Conversion { .. } => {
@@ -2209,12 +2222,7 @@ impl Isolate {
                     let resolution = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                    self.call_promise_resolver(cell, reject, resolution)?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(Immediate::Undefined),
-                    );
+                    return self.begin_promise_resolver_call(&site, cell, reject, resolution);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
                     return self.write(
@@ -2745,8 +2753,21 @@ impl Isolate {
                             return self.write(site.caller_base, site.destination, value);
                         }
                     }
-                    let promise = self.create_promise(PromiseState::Fulfilled, value)?;
-                    return self.write(site.caller_base, site.destination, promise);
+                    let promise = self.create_promise(
+                        PromiseState::Pending,
+                        Value::from_immediate(Immediate::Undefined),
+                    )?;
+                    self.write(site.caller_base, site.destination, promise)?;
+                    return self.begin_promise_resolution(
+                        promise,
+                        value,
+                        NativeContinuationSite {
+                            caller_base: site.caller_base,
+                            destination: site.destination,
+                            call_site: site.call_site,
+                        },
+                        PromiseResolutionMode::StaticResolve,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::PromiseReject) => {
                     let reason = self
@@ -2754,6 +2775,14 @@ impl Isolate {
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let promise = self.create_promise(PromiseState::Rejected, reason)?;
                     return self.write(site.caller_base, site.destination, promise);
+                }
+                FunctionExecutable::Native(NativeFunction::PromiseThen) => {
+                    let result = self.promise_then(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::PromiseCatch) => {
+                    let result = self.promise_catch(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
@@ -3613,6 +3642,15 @@ impl Isolate {
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
+                NativeContinuationKind::PromiseReaction => {
+                    self.finish_promise_reaction(continuation, value)
+                }
+                NativeContinuationKind::PromiseResolution(mode) => {
+                    self.finish_promise_resolution(continuation, mode, value)
+                }
+                NativeContinuationKind::PromiseThenable => {
+                    self.finish_promise_thenable(continuation)
+                }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")
                 }
@@ -3704,6 +3742,9 @@ impl Isolate {
                     let value = completion
                         .value()
                         .ok_or(ExecutionError::MissingCompletionRecord)?;
+                    if self.fiber.frames.len() == 1 {
+                        return self.promise_checkpoint(value, instruction_offset);
+                    }
                     return self.finish_return(value);
                 }
                 CompletionKind::Throw => {}
@@ -3741,6 +3782,32 @@ impl Isolate {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
                     let site = continuation.site();
                     self.write(site.caller_base, site.destination, continuation.first())?;
+                    return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::PromiseReaction {
+                    self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
+                    self.promise_jobs.finish_active();
+                    let site = continuation.site();
+                    self.fiber
+                        .frames
+                        .last_mut()
+                        .ok_or(ExecutionError::MissingEnvironment)?
+                        .pc = site.call_site;
+                    return Ok(None);
+                }
+                if let NativeContinuationKind::PromiseResolution(mode) = continuation.kind() {
+                    self.reject_promise_resolution(continuation, mode, value)?;
+                    return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::PromiseThenable {
+                    self.reject_promise_thenable(continuation, value)?;
+                    return Ok(None);
+                }
+                if let Some(parent) = self.fiber.completions.last_native()
+                    && let NativeContinuationKind::PromiseResolution(mode) = parent.kind()
+                {
+                    let parent = self.pop_native_continuation()?;
+                    self.reject_promise_resolution(parent, mode, value)?;
                     return Ok(None);
                 }
             }

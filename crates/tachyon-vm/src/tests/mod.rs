@@ -19,6 +19,7 @@ mod dispatch;
 mod environments;
 mod finally;
 mod fixtures;
+mod promise;
 mod properties;
 mod property_keys;
 mod proxy;

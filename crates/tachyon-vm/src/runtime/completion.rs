@@ -251,6 +251,15 @@ impl CompletionStack {
         }
     }
 
+    /// Inspects the top native trampoline without changing its rooted lifetime.
+    #[inline]
+    pub(crate) fn last_native(&self) -> Option<NativeContinuation> {
+        match self.entries.last() {
+            Some(CompletionEntry::Native(continuation)) => Some(*continuation),
+            Some(CompletionEntry::Language(_)) | None => None,
+        }
+    }
+
     /// Drops abandoned callback trampolines without crossing a frame or language checkpoint.
     #[inline]
     pub(crate) fn discard_native_suffix(&mut self, frame_completion_base: u32) {

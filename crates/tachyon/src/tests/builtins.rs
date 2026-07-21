@@ -68,6 +68,142 @@ fn promise_constructor_uses_resolving_functions_and_consumes_executor_throw() {
 }
 
 #[test]
+/// Drains settled, pending, chained, and throwing reactions before the next source unit.
+fn promise_checkpoint_drains_nested_reactions_in_fifo_order() {
+    let compile = |source_id, text: &'static str| {
+        Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(source_id),
+                    SourceName::new("promise-checkpoint"),
+                    MediaType::JavaScript,
+                    Arc::from(text),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap()
+    };
+    let setup = compile(
+        1_033,
+        "var trace = 0; var resolvePending; Promise.resolve(2).then(function(value) { trace = trace * 10 + value; return value + 1; }).then(function(value) { trace = trace * 10 + value; }); var pending = new Promise(function(resolve) { resolvePending = resolve; }); pending.then(function(value) { trace = trace * 10 + value; }); resolvePending(4); Promise.resolve(1).then(function() { throw 5; }).catch(function(reason) { trace = trace * 10 + reason; });",
+    );
+    let probe = compile(1_034, "trace;");
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    assert!(matches!(
+        isolate.execute(
+            &probe,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        ),
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(2_435)
+    ));
+}
+
+#[test]
+/// Keeps sibling Promise chains in FIFO order while each handler appends another reaction.
+fn promise_checkpoint_preserves_sibling_chain_order() {
+    let compile = |source_id, text: &'static str| {
+        Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(source_id),
+                    SourceName::new("promise-chain-order"),
+                    MediaType::JavaScript,
+                    Arc::from(text),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap()
+    };
+    let setup = compile(
+        1_035,
+        "var sequence = []; var p = Promise.resolve(); sequence.push(1); p.then(function() { sequence.push(3); }).then(function() { sequence.push(5); }).then(function() { sequence.push(7); }); p.then(function() { sequence.push(4); }).then(function() { sequence.push(6); }).then(function() { sequence.push(8); }); sequence.push(2);",
+    );
+    let probe = compile(
+        1_036,
+        "sequence.length === 8 ? sequence[0] * 10000000 + sequence[1] * 1000000 + sequence[2] * 100000 + sequence[3] * 10000 + sequence[4] * 1000 + sequence[5] * 100 + sequence[6] * 10 + sequence[7] : -sequence.length;",
+    );
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    let outcome = isolate.execute(
+        &probe,
+        ExecutionBudget {
+            fuel: 64,
+            quantum: 64,
+        },
+    );
+    assert!(
+        matches!(outcome, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(12_345_678)),
+        "unexpected sibling-chain trace: {outcome:?}",
+    );
+}
+
+#[test]
+/// Assimilates getter-backed thenables and ignores throws after their first resolve call.
+fn promise_resolution_assimilates_thenables_at_each_reaction_boundary() {
+    let compile = |source_id, text: &'static str| {
+        Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(source_id),
+                    SourceName::new("promise-thenable-resolution"),
+                    MediaType::JavaScript,
+                    Arc::from(text),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap()
+    };
+    let setup = compile(
+        1_037,
+        "var trace = 0; var thenable = {}; Object.defineProperty(thenable, 'then', { get: function() { trace = trace * 10 + 1; return function(resolve, reject) { trace = trace * 10 + 2; resolve(3); reject(4); throw 5; }; } }); Promise.resolve(0).then(function() { return thenable; }).then(function(value) { trace = trace * 10 + value; }, function() { trace = -1; });",
+    );
+    let probe = compile(1_038, "trace;");
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    assert!(matches!(
+        isolate.execute(
+            &probe,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        ),
+        Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(123)
+    ));
+}
+
+#[test]
 /// Drains standard Array iterables through the Map and Set constructor protocol.
 fn collection_constructors_consume_array_iterables() {
     assert_eq!(

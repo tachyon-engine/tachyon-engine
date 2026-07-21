@@ -107,6 +107,8 @@ pub(crate) enum NativeFunction {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    PromiseThen,
+    PromiseCatch,
     ArrayConstructor,
     ArrayIsArray,
     ArrayConcat,
@@ -485,6 +487,7 @@ impl NativeFunction {
             | Self::ReflectDeleteProperty
             | Self::ReflectGetOwnPropertyDescriptor
             | Self::ReflectHas => 2,
+            Self::PromiseThen => 2,
             Self::ReflectGet => 2,
             Self::ReflectSet => 3,
             Self::ReflectSetPrototypeOf => 2,
@@ -492,6 +495,7 @@ impl NativeFunction {
             | Self::PromiseConstructor
             | Self::PromiseResolve
             | Self::PromiseReject
+            | Self::PromiseCatch
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
@@ -766,6 +770,8 @@ impl NativeFunction {
             Self::PromiseConstructor => "Promise",
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
+            Self::PromiseThen => "then",
+            Self::PromiseCatch => "catch",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
             Self::ArrayConcat => "concat",

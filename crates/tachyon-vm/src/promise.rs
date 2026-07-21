@@ -1,194 +1,6 @@
 //! Promise state, reaction records, and the isolate-owned FIFO microtask substrate.
 
-use std::collections::VecDeque;
-
 use super::*;
-
-struct PromiseCapabilityRoots<'a> {
-    vm: VmRoots<'a>,
-    promise: Value,
-    cell: Option<GcRef<PromiseResolutionCell>>,
-    resolve: Value,
-    reject: Value,
-}
-
-impl Trace for PromiseCapabilityRoots<'_> {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.vm.trace(tracer);
-        self.promise.trace(tracer);
-        self.cell.trace(tracer);
-        self.resolve.trace(tracer);
-        self.reject.trace(tracer);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub(crate) enum PromiseState {
-    #[allow(dead_code, reason = "constructed by the Promise executor slice")]
-    Pending,
-    Fulfilled,
-    Rejected,
-}
-
-/// One fixed-size reaction node. Linked nodes avoid reallocating a `Vec` inside a managed object.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PromiseReaction {
-    pub(crate) handler: Value,
-    pub(crate) capability: Value,
-    pub(crate) next: Option<GcRef<Self>>,
-}
-
-/// Shared one-shot state captured by the resolve and reject functions of one capability.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PromiseResolutionCell {
-    pub(crate) promise: Value,
-    pub(crate) already_resolved: bool,
-}
-
-impl Trace for PromiseResolutionCell {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.promise.trace(tracer);
-    }
-}
-
-impl Trace for PromiseReaction {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.handler.trace(tracer);
-        self.capability.trace(tracer);
-        self.next.trace(tracer);
-    }
-}
-
-/// Promise exotic payload with an ordinary property base and allocation-stable reaction lists.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct PromiseObject {
-    pub(crate) state: PromiseState,
-    pub(crate) result: Value,
-    pub(crate) fulfill_head: Option<GcRef<PromiseReaction>>,
-    pub(crate) fulfill_tail: Option<GcRef<PromiseReaction>>,
-    pub(crate) reject_head: Option<GcRef<PromiseReaction>>,
-    pub(crate) reject_tail: Option<GcRef<PromiseReaction>>,
-    pub(crate) ordinary: OrdinaryObject,
-}
-
-impl Trace for PromiseObject {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.result.trace(tracer);
-        self.fulfill_head.trace(tracer);
-        self.fulfill_tail.trace(tracer);
-        self.reject_head.trace(tracer);
-        self.reject_tail.trace(tracer);
-        self.ordinary.trace(tracer);
-    }
-}
-
-#[allow(
-    dead_code,
-    reason = "consumed by the next Promise reaction execution slice"
-)]
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum PromiseJob {
-    Reaction {
-        handler: Value,
-        capability: Value,
-        argument: Value,
-        rejected: bool,
-    },
-    Thenable {
-        promise: Value,
-        thenable: Value,
-        then: Value,
-    },
-}
-
-impl Trace for PromiseJob {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        match self {
-            Self::Reaction {
-                handler,
-                capability,
-                argument,
-                ..
-            } => {
-                handler.trace(tracer);
-                capability.trace(tracer);
-                argument.trace(tracer);
-            }
-            Self::Thenable {
-                promise,
-                thenable,
-                then,
-            } => {
-                promise.trace(tracer);
-                thenable.trace(tracer);
-                then.trace(tracer);
-            }
-        }
-    }
-}
-
-/// FIFO jobs are isolate-local and traced as roots until a checkpoint consumes them.
-#[derive(Debug)]
-pub(crate) struct PromiseJobQueue {
-    jobs: VecDeque<PromiseJob>,
-    active: Option<PromiseJob>,
-}
-
-impl PromiseJobQueue {
-    pub(crate) fn new() -> Self {
-        Self {
-            jobs: VecDeque::with_capacity(tuning::promises::INITIAL_PROMISE_JOB_CAPACITY),
-            active: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.jobs.len()
-    }
-
-    #[allow(
-        dead_code,
-        reason = "consumed by the next Promise reaction execution slice"
-    )]
-    pub(crate) fn push(&mut self, job: PromiseJob) {
-        self.jobs.push_back(job);
-    }
-
-    /// Moves one job into a separately traced slot before any handler can allocate.
-    #[allow(
-        dead_code,
-        reason = "consumed by the next Promise reaction execution slice"
-    )]
-    pub(crate) fn begin_next(&mut self) -> Option<PromiseJob> {
-        debug_assert!(self.active.is_none());
-        self.active = self.jobs.pop_front();
-        self.active
-    }
-
-    #[allow(
-        dead_code,
-        reason = "consumed by the next Promise reaction execution slice"
-    )]
-    pub(crate) fn finish_active(&mut self) {
-        self.active = None;
-    }
-}
-
-impl Trace for PromiseJobQueue {
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.active.trace(tracer);
-        for job in &mut self.jobs {
-            job.trace(tracer);
-        }
-    }
-}
 
 impl Isolate {
     /// Allocates one Promise with its state/result initialized before publication.
@@ -268,7 +80,7 @@ impl Isolate {
     }
 
     /// Creates the shared one-shot cell and the two strict native resolving callables.
-    fn create_promise_capability_arguments(
+    pub(crate) fn create_promise_capability_arguments(
         &mut self,
         promise: Value,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
@@ -418,14 +230,12 @@ impl Isolate {
         self.write(site.caller_base, site.destination, promise)
     }
 
-    /// Applies the shared already-resolved guard and settles primitive resolutions immediately.
-    pub(crate) fn call_promise_resolver(
+    /// Claims one shared resolving-function cell before any observable resolution work.
+    pub(crate) fn claim_promise_resolver(
         &mut self,
         cell: GcRef<PromiseResolutionCell>,
-        reject: bool,
-        resolution: Value,
-    ) -> Result<(), ExecutionError> {
-        let promise = self.heap.with_running_scope(|scope| {
+    ) -> Result<Option<Value>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
             let cell = scope.root(cell).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 let cell = no_gc
@@ -437,18 +247,224 @@ impl Isolate {
                 cell.already_resolved = true;
                 Ok(Some(cell.promise))
             })
-        })?;
+        })
+    }
+
+    /// Starts one resolving-function call without recursively entering the interpreter.
+    pub(crate) fn begin_promise_resolver_call(
+        &mut self,
+        site: &CallSite,
+        cell: GcRef<PromiseResolutionCell>,
+        reject: bool,
+        resolution: Value,
+    ) -> Result<(), ExecutionError> {
+        let promise = self.claim_promise_resolver(cell)?;
         let Some(promise) = promise else {
-            return Ok(());
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
         };
         if reject {
-            return self.settle_promise(promise, PromiseState::Rejected, resolution);
+            self.settle_promise(promise, PromiseState::Rejected, resolution)?;
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
         }
+        self.begin_promise_resolution(
+            promise,
+            resolution,
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            PromiseResolutionMode::ResolverCall,
+        )
+    }
+
+    /// Runs the Promise Resolution Procedure through an observable, resumable `then` lookup.
+    pub(crate) fn begin_promise_resolution(
+        &mut self,
+        promise: Value,
+        resolution: Value,
+        site: NativeContinuationSite,
+        mode: PromiseResolutionMode,
+    ) -> Result<(), ExecutionError> {
         if promise == resolution {
             let error = self.create_native_error(NativeErrorKind::Type, None)?;
-            return self.settle_promise(promise, PromiseState::Rejected, error);
+            self.settle_promise(promise, PromiseState::Rejected, error)?;
+            return self.complete_promise_resolution(site, mode, promise);
         }
-        self.settle_promise(promise, PromiseState::Fulfilled, resolution)
+        if !self.is_object_value(resolution) {
+            self.settle_promise(promise, PromiseState::Fulfilled, resolution)?;
+            return self.complete_promise_resolution(site, mode, promise);
+        }
+
+        let continuation = NativeContinuation::promise_resolution(site, mode, promise, resolution);
+        let completion_base = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Isolate::completion_stack_error)?;
+        let then_atom = match self.intern_intrinsic_name(b"then") {
+            Ok(atom) => atom,
+            Err(error) => {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        };
+        let read = match self.resolve_property_read_until_proxy(resolution, then_atom.into()) {
+            Ok(read) => read,
+            Err(error) => {
+                let Some(kind) = execution_error_kind(&error) else {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                };
+                let reason = self.create_native_error(kind, None)?;
+                self.pop_native_continuation()?;
+                return self.reject_promise_resolution(continuation, mode, reason);
+            }
+        };
+        match read {
+            PropertyReadResolution::Read(PropertyRead::Missing) => {
+                self.pop_native_continuation()?;
+                self.finish_promise_resolution(
+                    continuation,
+                    mode,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+            }
+            PropertyReadResolution::Read(PropertyRead::Data(then)) => {
+                self.pop_native_continuation()?;
+                self.finish_promise_resolution(continuation, mode, then)
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.pop_native_continuation()?;
+                self.finish_promise_resolution(
+                    continuation,
+                    mode,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter)) => {
+                self.pop_native_continuation()?;
+                match self.dispatch_property_callback(continuation, getter) {
+                    Ok(_) => Ok(()),
+                    Err(error) => self.reject_promise_resolution_error(continuation, mode, error),
+                }
+            }
+            PropertyReadResolution::Proxy(_) => {
+                let frame_depth = self.fiber.frames.len();
+                let dispatched = self.dispatch_proxy_aware_property_read(
+                    site,
+                    resolution,
+                    resolution,
+                    then_atom.into(),
+                );
+                if let Err(error) = dispatched {
+                    let Some(kind) = execution_error_kind(&error) else {
+                        if self.fiber.completions.len() > completion_base {
+                            self.pop_native_continuation()?;
+                        }
+                        return Err(error);
+                    };
+                    let reason = self.create_native_error(kind, None)?;
+                    if self.fiber.completions.len() > completion_base {
+                        self.pop_native_continuation()?;
+                    }
+                    return self.reject_promise_resolution(continuation, mode, reason);
+                }
+                if self.fiber.frames.len() != frame_depth
+                    || self.fiber.completions.len() == completion_base
+                {
+                    return Ok(());
+                }
+                let continuation = self.pop_native_continuation()?;
+                let then = self.read(site.caller_base, site.destination)?;
+                self.finish_promise_resolution(continuation, mode, then)
+            }
+        }
+    }
+
+    /// Converts an observable `then` lookup failure into rejection at the Promise boundary.
+    fn reject_promise_resolution_error(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: PromiseResolutionMode,
+        error: ExecutionError,
+    ) -> Result<(), ExecutionError> {
+        let Some(kind) = execution_error_kind(&error) else {
+            return Err(error);
+        };
+        let reason = self.create_native_error(kind, None)?;
+        self.reject_promise_resolution(continuation, mode, reason)
+    }
+
+    /// Completes resolution after `then` lookup and enqueues callable thenables as jobs.
+    pub(crate) fn finish_promise_resolution(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: PromiseResolutionMode,
+        then: Value,
+    ) -> Result<(), ExecutionError> {
+        let promise = continuation.first();
+        let resolution = continuation.second();
+        if self.resolve_function_object(then).is_ok() {
+            self.promise_jobs.push(PromiseJob::Thenable {
+                promise,
+                thenable: resolution,
+                then,
+            });
+        } else {
+            self.settle_promise(promise, PromiseState::Fulfilled, resolution)?;
+        }
+        self.complete_promise_resolution(continuation.site(), mode, promise)
+    }
+
+    /// Rejects a pending resolution while preserving the caller-specific return contract.
+    pub(crate) fn reject_promise_resolution(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: PromiseResolutionMode,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let promise = continuation.first();
+        self.settle_promise(promise, PromiseState::Rejected, reason)?;
+        self.complete_promise_resolution(continuation.site(), mode, promise)
+    }
+
+    /// Restores the native caller or active reaction after resolution reaches a stable state.
+    fn complete_promise_resolution(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: PromiseResolutionMode,
+        promise: Value,
+    ) -> Result<(), ExecutionError> {
+        match mode {
+            PromiseResolutionMode::ResolverCall => self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            ),
+            PromiseResolutionMode::StaticResolve => {
+                self.write(site.caller_base, site.destination, promise)
+            }
+            PromiseResolutionMode::Reaction => {
+                self.promise_jobs.finish_active();
+                self.fiber
+                    .frames
+                    .last_mut()
+                    .ok_or(ExecutionError::MissingEnvironment)?
+                    .pc = site.call_site;
+                Ok(())
+            }
+        }
     }
 
     /// Transitions a pending Promise exactly once and publishes its result through the GC barrier.
@@ -466,26 +482,471 @@ impl Isolate {
             .heap
             .checked_reference(raw, self.types.promise_object)
             .map_err(|_| ExecutionError::NotObject(promise))?;
-        self.heap.with_running_scope(|scope| {
+        let reactions = self.heap.with_running_scope(|scope| {
             let promise = scope.root(promise).map_err(ExecutionError::Root)?;
-            let changed = scope.with_no_gc_scope(|no_gc| {
+            let reactions = scope.with_no_gc_scope(|no_gc| {
                 let promise = no_gc
                     .borrow_mut(promise, self.types.promise_object)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 if promise.state != PromiseState::Pending {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 promise.state = state;
                 promise.result = result;
-                Ok(true)
+                let reactions = if state == PromiseState::Rejected {
+                    promise.reject_head
+                } else {
+                    promise.fulfill_head
+                };
+                promise.fulfill_head = None;
+                promise.fulfill_tail = None;
+                promise.reject_head = None;
+                promise.reject_tail = None;
+                Ok(Some(reactions))
             })?;
-            if changed {
+            if reactions.is_some() {
                 scope
                     .write_value_barrier(promise, result)
                     .map_err(ExecutionError::HeapReference)?;
             }
+            Ok(reactions.flatten())
+        })?;
+        self.enqueue_promise_reaction_list(reactions, result, state == PromiseState::Rejected)
+    }
+
+    /// Implements the intrinsic `%Promise.prototype.then%` capability fast path.
+    pub(crate) fn promise_then(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let source = site.this_value;
+        let on_fulfilled = self
+            .call_argument(site, 0)?
+            .filter(|value| self.resolve_function_object(*value).is_ok());
+        let on_rejected = self
+            .call_argument(site, 1)?
+            .filter(|value| self.resolve_function_object(*value).is_ok());
+        self.perform_intrinsic_promise_then(source, on_fulfilled, on_rejected, site)
+    }
+
+    /// Implements the current intrinsic catch path through the shared reaction substrate.
+    pub(crate) fn promise_catch(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let on_rejected = self
+            .call_argument(site, 0)?
+            .filter(|value| self.resolve_function_object(*value).is_ok());
+        self.perform_intrinsic_promise_then(site.this_value, None, on_rejected, site)
+    }
+
+    /// Creates the intrinsic result capability and publishes or enqueues both reactions.
+    fn perform_intrinsic_promise_then(
+        &mut self,
+        source: Value,
+        on_fulfilled: Option<Value>,
+        on_rejected: Option<Value>,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let snapshot = self.promise_snapshot(source)?;
+        let result = self.create_promise(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )?;
+        self.write(site.caller_base, site.destination, result)?;
+        match snapshot.state {
+            PromiseState::Pending => {
+                self.append_promise_reaction(source, result, on_fulfilled, false)?;
+                self.append_promise_reaction(source, result, on_rejected, true)?;
+            }
+            PromiseState::Fulfilled => self.promise_jobs.push(PromiseJob::Reaction {
+                handler: on_fulfilled.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                capability: result,
+                argument: snapshot.result,
+                rejected: false,
+            }),
+            PromiseState::Rejected => self.promise_jobs.push(PromiseJob::Reaction {
+                handler: on_rejected.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                capability: result,
+                argument: snapshot.result,
+                rejected: true,
+            }),
+        }
+        Ok(result)
+    }
+
+    /// Appends one fixed reaction node and records both Promise and tail-node barriers.
+    fn append_promise_reaction(
+        &mut self,
+        source: Value,
+        capability: Value,
+        handler: Option<Value>,
+        rejected: bool,
+    ) -> Result<(), ExecutionError> {
+        let handler = handler.unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let mut roots = PromiseReactionRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            source,
+            capability,
+            handler,
+        };
+        let reaction = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.promise_reaction,
+                0,
+                0,
+                PromiseReaction {
+                    handler: roots.handler,
+                    capability: roots.capability,
+                    next: None,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let raw = roots
+            .source
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(roots.source))?;
+        let source = self
+            .heap
+            .checked_reference(raw, self.types.promise_object)
+            .map_err(|_| ExecutionError::NotObject(roots.source))?;
+        self.heap.with_running_scope(|scope| {
+            let source = scope.root(source).map_err(ExecutionError::Root)?;
+            let reaction = scope.root(reaction).map_err(ExecutionError::Root)?;
+            let old_tail = scope.with_no_gc_scope(|no_gc| {
+                let promise = no_gc
+                    .borrow_mut(source, self.types.promise_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let (head, tail) = if rejected {
+                    (&mut promise.reject_head, &mut promise.reject_tail)
+                } else {
+                    (&mut promise.fulfill_head, &mut promise.fulfill_tail)
+                };
+                let old_tail = *tail;
+                if head.is_none() {
+                    *head = Some(reaction.as_gc_ref());
+                }
+                *tail = Some(reaction.as_gc_ref());
+                Ok(old_tail)
+            })?;
+            scope
+                .write_barrier(source, reaction)
+                .map_err(ExecutionError::HeapReference)?;
+            if let Some(old_tail) = old_tail {
+                let old_tail = scope.root(old_tail).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(old_tail, self.types.promise_reaction)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .next = Some(reaction.as_gc_ref());
+                    Ok::<(), ExecutionError>(())
+                })?;
+                scope
+                    .write_barrier(old_tail, reaction)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
             Ok(())
         })
+    }
+
+    /// Copies linked reactions into FIFO jobs after a Promise transitions out of pending.
+    fn enqueue_promise_reaction_list(
+        &mut self,
+        mut reaction: Option<GcRef<PromiseReaction>>,
+        argument: Value,
+        rejected: bool,
+    ) -> Result<(), ExecutionError> {
+        while let Some(current) = reaction {
+            let snapshot = self.heap.with_running_scope(|scope| {
+                let current = scope.root(current).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(current, self.types.promise_reaction)
+                        .copied()
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            self.promise_jobs.push(PromiseJob::Reaction {
+                handler: snapshot.handler,
+                capability: snapshot.capability,
+                argument,
+                rejected,
+            });
+            reaction = snapshot.next;
+        }
+        Ok(())
+    }
+
+    /// Drains Promise reactions at one ECMAScript job boundary without recursive VM entry.
+    pub(crate) fn promise_checkpoint(
+        &mut self,
+        result: Value,
+        return_site: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.promise_jobs.begin_checkpoint(result);
+        loop {
+            let Some(job) = self.promise_jobs.begin_next() else {
+                let result = self
+                    .promise_jobs
+                    .finish_checkpoint()
+                    .expect("checkpoint retains the original completion");
+                return Ok(Some(RunOutcome::Completed(result)));
+            };
+            match job {
+                PromiseJob::Reaction {
+                    handler,
+                    capability,
+                    argument,
+                    rejected,
+                } => {
+                    if self.resolve_function_object(handler).is_err() {
+                        let state = if rejected {
+                            PromiseState::Rejected
+                        } else {
+                            PromiseState::Fulfilled
+                        };
+                        self.settle_promise(capability, state, argument)?;
+                        self.promise_jobs.finish_active();
+                        continue;
+                    }
+                    return self.call_promise_reaction_handler(
+                        handler,
+                        capability,
+                        argument,
+                        return_site,
+                    );
+                }
+                PromiseJob::Thenable {
+                    promise,
+                    thenable,
+                    then,
+                } => {
+                    if self.begin_promise_thenable_job(promise, thenable, then, return_site)? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Calls one reaction handler and leaves its active job rooted until continuation completion.
+    fn call_promise_reaction_handler(
+        &mut self,
+        handler: Value,
+        capability: Value,
+        argument: Value,
+        return_site: WordOffset,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let arguments = self.allocate_promise_job_arguments(argument)?;
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let site = NativeContinuationSite {
+            caller_base: frame.base,
+            destination: 0,
+            call_site: return_site,
+        };
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::promise_reaction(site, capability))
+            .map_err(Isolate::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: frame.base,
+            destination: 0,
+            callee: handler,
+            argument_base: 0,
+            argument_source: Some(arguments),
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 1,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: return_site,
+        }) {
+            self.fiber.completions.pop_native();
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("Promise reaction handler publishes a frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(None);
+        }
+        let continuation = self
+            .fiber
+            .completions
+            .pop_native()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let returned = self.read(site.caller_base, site.destination)?;
+        self.finish_promise_reaction(continuation, returned)?;
+        self.promise_checkpoint(
+            self.promise_jobs
+                .checkpoint_result
+                .expect("active checkpoint retains its result"),
+            return_site,
+        )
+    }
+
+    /// Allocates one traced argument source for a Promise job callback.
+    fn allocate_promise_job_arguments(
+        &mut self,
+        argument: Value,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                NativeCallState {
+                    values: [argument, undefined, undefined, undefined, undefined],
+                    count: 1,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Settles a reaction capability after its handler returns and resumes checkpoint dispatch.
+    pub(crate) fn finish_promise_reaction(
+        &mut self,
+        continuation: NativeContinuation,
+        returned: Value,
+    ) -> Result<(), ExecutionError> {
+        self.begin_promise_resolution(
+            continuation.first(),
+            returned,
+            continuation.site(),
+            PromiseResolutionMode::Reaction,
+        )
+    }
+
+    /// Calls one thenable job with fresh resolving functions and no recursive interpreter entry.
+    fn begin_promise_thenable_job(
+        &mut self,
+        promise: Value,
+        thenable: Value,
+        then: Value,
+        return_site: WordOffset,
+    ) -> Result<bool, ExecutionError> {
+        let arguments = self.create_promise_capability_arguments(promise)?;
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let site = NativeContinuationSite {
+            caller_base: frame.base,
+            destination: 0,
+            call_site: return_site,
+        };
+        let continuation = NativeContinuation::promise_thenable(
+            site,
+            promise,
+            Value::from_heap_ref(arguments.raw()),
+        );
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Isolate::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: frame.base,
+            destination: 0,
+            callee: then,
+            argument_base: 0,
+            argument_source: Some(arguments),
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 2,
+            this_value: thenable,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: return_site,
+        }) {
+            let Some(kind) = execution_error_kind(&error) else {
+                self.pop_native_continuation()?;
+                return Err(error);
+            };
+            let reason = self.create_native_error(kind, None)?;
+            self.pop_native_continuation()?;
+            self.reject_promise_thenable(continuation, reason)?;
+            return Ok(false);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("thenable bytecode call publishes one frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(true);
+        }
+        let continuation = self.pop_native_continuation()?;
+        debug_assert_eq!(continuation.kind(), NativeContinuationKind::PromiseThenable);
+        self.promise_jobs.finish_active();
+        Ok(false)
+    }
+
+    /// Completes a normally returned thenable call and resumes the owning checkpoint boundary.
+    pub(crate) fn finish_promise_thenable(
+        &mut self,
+        continuation: NativeContinuation,
+    ) -> Result<(), ExecutionError> {
+        self.promise_jobs.finish_active();
+        self.fiber
+            .frames
+            .last_mut()
+            .ok_or(ExecutionError::MissingEnvironment)?
+            .pc = continuation.site().call_site;
+        Ok(())
+    }
+
+    /// Routes an abrupt thenable call through its shared first-call-wins reject function.
+    pub(crate) fn reject_promise_thenable(
+        &mut self,
+        continuation: NativeContinuation,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let arguments = self.native_call_state_reference(continuation.second())?;
+        let reject = self.native_call_state_snapshot(arguments)?.values[1];
+        let FunctionExecutable::PromiseResolver { cell, reject: true } =
+            self.resolve_function_object(reject)?.executable
+        else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        if let Some(promise) = self.claim_promise_resolver(cell)? {
+            self.settle_promise(promise, PromiseState::Rejected, reason)?;
+        }
+        self.promise_jobs.finish_active();
+        self.fiber
+            .frames
+            .last_mut()
+            .ok_or(ExecutionError::MissingEnvironment)?
+            .pc = continuation.site().call_site;
+        Ok(())
     }
 }
 
@@ -517,90 +978,4 @@ fn allocate_promise_resolver(
     )
     .map(|function| Value::from_heap_ref(function.raw()))
     .map_err(ExecutionError::HeapAllocation)
-}
-
-#[cfg(test)]
-mod tests {
-    use tachyon_gc::{ForcedCollectionMode, SPAN_SIZE_BYTES};
-
-    use super::*;
-
-    fn test_isolate() -> Isolate {
-        Isolate::new(IsolateConfig::new(
-            AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
-            HeapLimit::new(16 * SPAN_SIZE_BYTES),
-            StackLimits::new(64, 4_096),
-            RealmLimits::new(64, 1_024).with_max_shapes(384),
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn promise_jobs_move_through_the_traced_active_slot_in_fifo_order() {
-        let mut queue = PromiseJobQueue::new();
-        queue.push(PromiseJob::Reaction {
-            handler: Value::from_i32(1),
-            capability: Value::from_i32(2),
-            argument: Value::from_i32(3),
-            rejected: false,
-        });
-        queue.push(PromiseJob::Thenable {
-            promise: Value::from_i32(4),
-            thenable: Value::from_i32(5),
-            then: Value::from_i32(6),
-        });
-        assert_eq!(queue.len(), 2);
-        assert!(matches!(
-            queue.begin_next(),
-            Some(PromiseJob::Reaction { argument, .. }) if argument.as_i32() == Some(3)
-        ));
-        assert_eq!(queue.len(), 1);
-        queue.finish_active();
-        assert!(matches!(
-            queue.begin_next(),
-            Some(PromiseJob::Thenable { then, .. }) if then.as_i32() == Some(6)
-        ));
-    }
-
-    #[test]
-    fn resolving_functions_share_the_first_call_guard_across_forced_major() {
-        let mut isolate = test_isolate();
-        let promise = isolate
-            .create_promise(
-                PromiseState::Pending,
-                Value::from_immediate(Immediate::Undefined),
-            )
-            .unwrap();
-        let arguments = isolate
-            .create_promise_capability_arguments(promise)
-            .unwrap();
-        let arguments = isolate.native_call_state_snapshot(arguments).unwrap();
-        let resolve = arguments.values[0];
-        let reject = arguments.values[1];
-        isolate.fiber.registers = vec![promise, resolve, reject];
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
-        let FunctionExecutable::PromiseResolver {
-            cell,
-            reject: false,
-        } = isolate.resolve_function_object(resolve).unwrap().executable
-        else {
-            panic!("resolve capability must use the shared cell")
-        };
-        isolate
-            .call_promise_resolver(cell, false, Value::from_i32(7))
-            .unwrap();
-        let FunctionExecutable::PromiseResolver { cell, reject: true } =
-            isolate.resolve_function_object(reject).unwrap().executable
-        else {
-            panic!("reject capability must use the shared cell")
-        };
-        isolate
-            .call_promise_resolver(cell, true, Value::from_i32(9))
-            .unwrap();
-        let snapshot = isolate.promise_snapshot(promise).unwrap();
-        assert_eq!(snapshot.state, PromiseState::Fulfilled);
-        assert_eq!(snapshot.result.as_i32(), Some(7));
-    }
 }
