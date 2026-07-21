@@ -64,6 +64,14 @@ fn derived_class_static_reject_survives_forced_major_collections() {
     );
 }
 
+#[test]
+fn derived_class_methods_survive_forced_major_collections() {
+    assert_forced_major_source(
+        "class P extends Promise { constructor(executor) { super(executor); } value() { return 7; } static make(executor) { return new this(executor); } } var value = P.make(function() {}); value.value() === 7;",
+        36,
+    );
+}
+
 /// Executes a focused class fixture with collection before every managed allocation.
 fn assert_forced_major_source(source: &str, source_id: u32) {
     let module = compile_source(source, source_id);

@@ -746,6 +746,7 @@ fn lower_function(
             kind: match function.kind {
                 HirFunctionKind::Ordinary => FunctionKind::Ordinary,
                 HirFunctionKind::DerivedClassConstructor => FunctionKind::DerivedClassConstructor,
+                HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
             },
             strictness: if function.strict {
                 FunctionStrictness::Strict

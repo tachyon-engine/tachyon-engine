@@ -1031,6 +1031,21 @@ impl Isolate {
                     instruction_offset,
                 );
             }
+            Opcode::DefineClassMethodById => {
+                let target = self.read(base, operands[0])?;
+                let method = self.read(base, operands[1])?;
+                let key = self.scope_atom(code, operands[2])?;
+                self.define_data_property(
+                    target,
+                    key,
+                    DataPropertyDescriptor {
+                        value: Some(method),
+                        writable: Some(true),
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                    },
+                )?;
+            }
             Opcode::DefineGetterById | Opcode::DefineSetterById => {
                 let receiver = self.read(base, operands[0])?;
                 let function = self.read(base, operands[1])?;
@@ -2279,6 +2294,9 @@ impl Isolate {
                         .function(function)
                         .ok_or(ExecutionError::MissingEntryFunction(function))?
                         .kind();
+                    if kind == FunctionKind::ClassMethod {
+                        return Err(ExecutionError::NonConstructor(site.callee));
+                    }
                     break kind == FunctionKind::DerivedClassConstructor;
                 }
                 FunctionExecutable::Native(_) => {
@@ -3372,7 +3390,14 @@ impl Isolate {
             FunctionExecutable::ProxyRevoker(_) => false,
             FunctionExecutable::PromiseResolver { .. } => false,
             FunctionExecutable::PromiseCapabilityExecutor(_) => false,
-            FunctionExecutable::Bytecode { .. } => true,
+            FunctionExecutable::Bytecode { code, function, .. } => {
+                self.loaded_code(code)?
+                    .module
+                    .function(function)
+                    .ok_or(ExecutionError::MissingEntryFunction(function))?
+                    .kind()
+                    != FunctionKind::ClassMethod
+            }
         })
     }
 

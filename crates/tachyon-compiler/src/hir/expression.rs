@@ -60,6 +60,14 @@ pub struct HirClass {
     pub name: Option<Arc<str>>,
     pub super_class: Box<HirExpression>,
     pub constructor: FunctionStencilId,
+    pub methods: Arc<[HirClassMethod]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirClassMethod {
+    pub name: Arc<str>,
+    pub function: FunctionStencilId,
+    pub is_static: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -643,7 +651,7 @@ pub(super) fn lower_expression(
     Ok(HirExpression { span, kind })
 }
 
-/// Copies one explicit derived constructor while rejecting class elements outside this slice.
+/// Copies a derived constructor and static-name methods while rejecting unsupported class elements.
 pub(super) fn lower_class(
     class: &oxc::ast::ast::Class<'_>,
     declaration_name: Option<Arc<str>>,
@@ -674,28 +682,101 @@ pub(super) fn lower_class(
         .super_class
         .as_ref()
         .ok_or_else(|| unsupported(source.name(), source_span(class.span), "base class"))?;
-    let [oxc::ast::ast::ClassElement::MethodDefinition(method)] = class.body.body.as_slice() else {
-        return Err(unsupported(
+    let mut constructor = None;
+    let mut methods = Vec::with_capacity(class.body.body.len());
+    for element in &class.body.body {
+        let oxc::ast::ast::ClassElement::MethodDefinition(method) = element else {
+            return Err(unsupported(
+                source.name(),
+                source_span(class.body.span),
+                "class fields or static blocks",
+            ));
+        };
+        if method.computed
+            || !method.decorators.is_empty()
+            || method.accessibility.is_some()
+            || method.r#override
+            || method.optional
+        {
+            return Err(unsupported(
+                source.name(),
+                source_span(method.span),
+                "computed or TypeScript class method",
+            ));
+        }
+        let name: Arc<str> = match &method.key {
+            PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
+            PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+            PropertyKey::NumericLiteral(literal) => {
+                let mut buffer = ryu_js::Buffer::new();
+                Arc::from(if literal.value == 0.0 {
+                    "0"
+                } else {
+                    buffer.format(literal.value)
+                })
+            }
+            _ => {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(method.key.span()),
+                    "class method key",
+                ));
+            }
+        };
+        match method.kind {
+            oxc::ast::ast::MethodDefinitionKind::Constructor => {
+                if method.r#static || constructor.is_some() {
+                    return Err(unsupported(
+                        source.name(),
+                        source_span(method.span),
+                        "duplicate or static constructor",
+                    ));
+                }
+                constructor = Some(lower_function_stencil(
+                    &method.value,
+                    declaration_name.clone(),
+                    None,
+                    source,
+                    semantic,
+                    functions,
+                )?);
+            }
+            oxc::ast::ast::MethodDefinitionKind::Method => {
+                let function = lower_function_stencil(
+                    &method.value,
+                    Some(name.clone()),
+                    None,
+                    source,
+                    semantic,
+                    functions,
+                )?;
+                let stencil = functions
+                    .get_mut(function.index() as usize)
+                    .expect("new class method stencil is published at its stable index");
+                stencil.strict = true;
+                stencil.kind = super::program::HirFunctionKind::ClassMethod;
+                methods.push(HirClassMethod {
+                    name,
+                    function,
+                    is_static: method.r#static,
+                });
+            }
+            oxc::ast::ast::MethodDefinitionKind::Get | oxc::ast::ast::MethodDefinitionKind::Set => {
+                return Err(unsupported(
+                    source.name(),
+                    source_span(method.span),
+                    "class accessor method",
+                ));
+            }
+        }
+    }
+    let constructor = constructor.ok_or_else(|| {
+        unsupported(
             source.name(),
             source_span(class.body.span),
-            "class elements other than one constructor",
-        ));
-    };
-    if method.kind != oxc::ast::ast::MethodDefinitionKind::Constructor || method.r#static {
-        return Err(unsupported(
-            source.name(),
-            source_span(method.span),
-            "class element other than constructor",
-        ));
-    }
-    let constructor = lower_function_stencil(
-        &method.value,
-        declaration_name.clone(),
-        None,
-        source,
-        semantic,
-        functions,
-    )?;
+            "class without explicit constructor",
+        )
+    })?;
     let stencil = functions
         .get_mut(constructor.index() as usize)
         .expect("new class constructor stencil is published at its stable index");
@@ -705,6 +786,7 @@ pub(super) fn lower_class(
         name: declaration_name,
         super_class: Box::new(lower_expression(super_class, source, semantic, functions)?),
         constructor,
+        methods: methods.into(),
     })
 }
 

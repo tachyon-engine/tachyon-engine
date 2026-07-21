@@ -598,6 +598,38 @@ fn compiler_freezes_derived_class_and_super_call_contracts() {
     assert!(constructor.contains("InitializeThis"));
 }
 
+#[test]
+/// Freezes method kind, strictness, and installation opcodes independently of VM behavior.
+fn compiler_freezes_class_method_kind_and_definition_contracts() {
+    let source = source(
+        MediaType::JavaScript,
+        "class P extends Promise { constructor(executor) { super(executor); } value() { return this; } static make() { return this; } } P;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    assert_eq!(hir.functions().len(), 3);
+    assert_eq!(
+        hir.functions()[0].kind,
+        HirFunctionKind::DerivedClassConstructor
+    );
+    assert!(
+        hir.functions()[1..]
+            .iter()
+            .all(|function| function.kind == HirFunctionKind::ClassMethod && function.strict)
+    );
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    assert_eq!(module.functions().len(), 4);
+    assert!(
+        module.functions()[2..]
+            .iter()
+            .all(|function| function.kind() == tachyon_bytecode::FunctionKind::ClassMethod)
+    );
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("DefineClassMethodById").count(), 2);
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

@@ -278,6 +278,7 @@ pub enum FunctionKind {
     Module,
     Ordinary,
     DerivedClassConstructor,
+    ClassMethod,
     Generator,
     Async,
     AsyncGenerator,
@@ -301,6 +302,7 @@ impl EnvironmentRecordKind {
             FunctionKind::Module => Self::Module,
             FunctionKind::Ordinary
             | FunctionKind::DerivedClassConstructor
+            | FunctionKind::ClassMethod
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,

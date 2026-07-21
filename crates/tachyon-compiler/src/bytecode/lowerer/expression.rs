@@ -539,6 +539,54 @@ impl Lowerer<'_> {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
         }
+        let instance_methods = class.methods.iter().filter(|method| !method.is_static);
+        let instance_target = if class.methods.iter().any(|method| !method.is_static) {
+            let target = self.register()?;
+            self.emit(
+                Opcode::GetById,
+                &[target.index(), destination.index(), prototype_name],
+                span,
+            )?;
+            Some(target)
+        } else {
+            None
+        };
+        for method in instance_methods {
+            let closure = self.register()?;
+            let function = method
+                .function
+                .index()
+                .checked_add(1)
+                .ok_or(CompileError::RegisterOverflow)?;
+            self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+            let name = self.scope_name(&method.name)?;
+            self.emit(
+                Opcode::DefineClassMethodById,
+                &[
+                    instance_target
+                        .expect("instance method target is allocated before method lowering")
+                        .index(),
+                    closure.index(),
+                    name,
+                ],
+                span,
+            )?;
+        }
+        for method in class.methods.iter().filter(|method| method.is_static) {
+            let closure = self.register()?;
+            let function = method
+                .function
+                .index()
+                .checked_add(1)
+                .ok_or(CompileError::RegisterOverflow)?;
+            self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+            let name = self.scope_name(&method.name)?;
+            self.emit(
+                Opcode::DefineClassMethodById,
+                &[destination.index(), closure.index(), name],
+                span,
+            )?;
+        }
         Ok(destination)
     }
 

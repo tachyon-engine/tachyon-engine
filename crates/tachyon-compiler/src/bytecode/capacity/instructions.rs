@@ -259,11 +259,24 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Class(class) => checked_count_add(
-            expression_instruction_count(&class.super_class)?,
-            4 + usize::from(class.name.is_some()),
-            "bytecode instructions",
-        ),
+        HirExpressionKind::Class(class) => {
+            let method_instructions = class.methods.len().checked_mul(2).ok_or(
+                CompileError::LoweringCapacityOverflow {
+                    collection: "bytecode instructions",
+                },
+            )?;
+            let fixed = checked_count_add(
+                4 + usize::from(class.name.is_some()),
+                usize::from(class.methods.iter().any(|method| !method.is_static)),
+                "bytecode instructions",
+            )?;
+            let fixed = checked_count_add(fixed, method_instructions, "bytecode instructions")?;
+            checked_count_add(
+                expression_instruction_count(&class.super_class)?,
+                fixed,
+                "bytecode instructions",
+            )
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

@@ -270,7 +270,11 @@ impl Isolate {
         }
         self.resolve_function_object(receiver)
             .is_ok_and(|function| match function.executable {
-                FunctionExecutable::Bytecode { .. } => true,
+                FunctionExecutable::Bytecode { code, function, .. } => self
+                    .loaded_code(code)
+                    .ok()
+                    .and_then(|code| code.module.function(function))
+                    .is_some_and(|metadata| metadata.kind() != FunctionKind::ClassMethod),
                 FunctionExecutable::Native(native) => native.has_default_prototype(),
                 FunctionExecutable::Bound(_)
                 | FunctionExecutable::ProxyRevoker(_)

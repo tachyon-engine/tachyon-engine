@@ -747,7 +747,7 @@ fn verify_instruction(
             }
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
-        Opcode::GetById | Opcode::SetById => {
+        Opcode::GetById | Opcode::SetById | Opcode::DefineClassMethodById => {
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
@@ -821,9 +821,11 @@ fn verify_instruction(
         Opcode::DeclareScope => Some(operands[0]),
         Opcode::DeclareGlobalLexical => Some(operands[0]),
         Opcode::InitializeGlobalLexical => Some(operands[1]),
-        Opcode::GetById | Opcode::SetById | Opcode::DefineGetterById | Opcode::DefineSetterById => {
-            Some(operands[2])
-        }
+        Opcode::GetById
+        | Opcode::SetById
+        | Opcode::DefineGetterById
+        | Opcode::DefineSetterById
+        | Opcode::DefineClassMethodById => Some(operands[2]),
         _ => None,
     };
     if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {

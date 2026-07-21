@@ -34,7 +34,7 @@ fn promise_static_resolution_allocates_branded_objects() {
             "Object.getPrototypeOf(Promise.resolve(1)) === Promise.prototype;",
         ),
         (
-            1_056,
+            1_065,
             "var p = new Promise(function() {}); p.constructor = null; Promise.resolve(p) !== p;",
         ),
     ] {
@@ -292,6 +292,16 @@ fn derived_promise_class_constructor_preserves_branch_and_return_semantics() {
             "failed source: {source}",
         );
     }
+}
+
+#[test]
+/// Installs strict non-constructible instance/static methods with class descriptors.
+fn derived_class_methods_publish_callable_semantics() {
+    let source = "class P extends Promise { constructor(executor) { super(executor); } value() { return this.marker; } static make(executor) { return new this(executor); } } P.prototype.marker = 7; var instance = P.make(function() {}); var method = P.prototype.value; var instanceDescriptor = Object.getOwnPropertyDescriptor(P.prototype, 'value'); var staticDescriptor = Object.getOwnPropertyDescriptor(P, 'make'); var threw = false; try { new method(); } catch (error) { threw = error instanceof TypeError; } instance.value() === 7 && method.name === 'value' && !Object.hasOwn(method, 'prototype') && instanceDescriptor.writable === true && instanceDescriptor.enumerable === false && instanceDescriptor.configurable === true && staticDescriptor.enumerable === false && threw;";
+    assert_eq!(
+        execute_source(1_066, source).as_immediate(),
+        Some(tachyon_value::Immediate::True),
+    );
 }
 
 #[test]

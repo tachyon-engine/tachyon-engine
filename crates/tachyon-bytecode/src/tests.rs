@@ -153,6 +153,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CopyDataProperties,
                 Opcode::CreateClass,
                 Opcode::SuperConstruct,
+                Opcode::DefineClassMethodById,
             ],
         ),
     ];

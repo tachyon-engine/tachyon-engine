@@ -236,6 +236,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             if class.name.is_some() {
                 count = checked_count_add(count, 1, "scope names")?;
             }
+            count = checked_count_add(count, class.methods.len(), "scope names")?;
             Ok(count)
         }
         HirExpressionKind::Sequence(expressions) => {

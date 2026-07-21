@@ -145,6 +145,7 @@ pub struct HirFunction {
 pub enum HirFunctionKind {
     Ordinary,
     DerivedClassConstructor,
+    ClassMethod,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.

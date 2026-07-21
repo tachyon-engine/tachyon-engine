@@ -225,9 +225,11 @@ pub enum Opcode {
     InitializeThis = 89,
     /// Validates class heritage before its observable `prototype` property access.
     CheckConstructor = 90,
+    /// Defines one non-enumerable class method from a compiled closure.
+    DefineClassMethodById = 91,
 }
 
-pub(super) const OPCODE_COUNT: usize = 91;
+pub(super) const OPCODE_COUNT: usize = 92;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -320,10 +322,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // SuperConstruct
     1, // InitializeThis
     1, // CheckConstructor
+    3, // DefineClassMethodById
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CheckConstructor as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassMethodById as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -460,6 +463,7 @@ impl Opcode {
             24 => Some(Self::SuperConstruct),
             25 => Some(Self::InitializeThis),
             26 => Some(Self::CheckConstructor),
+            27 => Some(Self::DefineClassMethodById),
             _ => None,
         }
     }
