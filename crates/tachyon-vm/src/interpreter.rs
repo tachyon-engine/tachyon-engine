@@ -1357,6 +1357,19 @@ impl Isolate {
                     .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
                 1,
             ),
+            NativeContinuationKind::Proxy { stage, .. } => match stage {
+                ProxyContinuationStage::TrapGetter => (continuation.second(), 0, 0),
+                ProxyContinuationStage::TrapCall => {
+                    let handler = self.proxy_snapshot(continuation.first())?.handler;
+                    (
+                        handler,
+                        site.caller_base
+                            .checked_add(site.destination)
+                            .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
+                        1,
+                    )
+                }
+            },
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -1418,6 +1431,31 @@ impl Isolate {
         let continuation = self.pop_native_continuation()?;
         let returned = self.read(site.caller_base, site.destination)?;
         self.resume_native_continuation(continuation, returned)
+    }
+
+    /// Dispatches one builtin object operation through Proxy exotic methods when applicable.
+    #[cold]
+    fn try_dispatch_proxy_builtin(
+        &mut self,
+        site: &CallSite,
+        operation: ProxyInternalMethod,
+    ) -> Result<bool, ExecutionError> {
+        let Some(target) = self.call_argument(site, 0)? else {
+            return Ok(false);
+        };
+        if !self.is_proxy_value(target) {
+            return Ok(false);
+        }
+        self.dispatch_proxy_internal_method(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            target,
+            operation,
+        )?;
+        Ok(true)
     }
 
     /// Calls one descriptor-field getter while keeping synchronous errors at the bytecode boundary.
@@ -2304,6 +2342,11 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetPrototypeOf) => {
+                    if self
+                        .try_dispatch_proxy_builtin(&site, ProxyInternalMethod::GetPrototypeOf)?
+                    {
+                        return Ok(());
+                    }
                     let prototype = self.object_get_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, prototype);
                 }
@@ -2324,6 +2367,9 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIsExtensible) => {
+                    if self.try_dispatch_proxy_builtin(&site, ProxyInternalMethod::IsExtensible)? {
+                        return Ok(());
+                    }
                     let result = self.object_is_extensible(&site)?;
                     return self.write(
                         site.caller_base,
@@ -2336,6 +2382,12 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectPreventExtensions) => {
+                    if self.try_dispatch_proxy_builtin(
+                        &site,
+                        ProxyInternalMethod::PreventExtensionsObject,
+                    )? {
+                        return Ok(());
+                    }
                     let value = self.object_prevent_extensions(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
@@ -2370,6 +2422,11 @@ impl Isolate {
                     return self.reflect_get(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectGetPrototypeOf) => {
+                    if self
+                        .try_dispatch_proxy_builtin(&site, ProxyInternalMethod::GetPrototypeOf)?
+                    {
+                        return Ok(());
+                    }
                     let prototype = self.reflect_get_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, prototype);
                 }
@@ -2384,10 +2441,18 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectIsExtensible) => {
+                    if self.try_dispatch_proxy_builtin(&site, ProxyInternalMethod::IsExtensible)? {
+                        return Ok(());
+                    }
                     let result = self.reflect_is_extensible(&site)?;
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectPreventExtensions) => {
+                    if self
+                        .try_dispatch_proxy_builtin(&site, ProxyInternalMethod::PreventExtensions)?
+                    {
+                        return Ok(());
+                    }
                     let result = self.reflect_prevent_extensions(&site)?;
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
@@ -3334,6 +3399,9 @@ impl Isolate {
                 NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect) => {
                     self.write(site.caller_base, site.destination, boolean_value(true))
                 }
+                NativeContinuationKind::Proxy { operation, stage } => self
+                    .resume_proxy_internal_method(continuation, operation, stage, value)
+                    .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =
                         self.pending_collection_initializer_reference(continuation.first())?;

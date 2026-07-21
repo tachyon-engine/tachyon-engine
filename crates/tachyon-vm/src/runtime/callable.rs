@@ -1273,6 +1273,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_)
         | ExecutionError::ProxyConstructorRequiresNew
+        | ExecutionError::ProxyRevoked
+        | ExecutionError::ProxyInvariantViolation
         | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)

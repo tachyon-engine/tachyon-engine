@@ -313,6 +313,24 @@ pub(crate) enum PropertyWriteMode {
     Reflect,
 }
 
+/// The first Proxy essential internal methods routed through the exotic slow path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyInternalMethod {
+    GetPrototypeOf,
+    IsExtensible,
+    PreventExtensions,
+    PreventExtensionsObject,
+}
+
+/// One observable callback boundary in a resumable Proxy internal method.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyContinuationStage {
+    TrapGetter,
+    TrapCall,
+}
+
 /// The observable operation that resumes one Map or Set iterable constructor step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -338,6 +356,10 @@ pub(crate) enum NativeContinuationKind {
     },
     PropertyGet(PropertyCallbackMode),
     PropertySet(PropertyWriteMode),
+    Proxy {
+        operation: ProxyInternalMethod,
+        stage: ProxyContinuationStage,
+    },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
     MapGetOrInsertComputed,
@@ -423,6 +445,44 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect),
             first: receiver,
             second: value,
+        }
+    }
+
+    /// Roots the Proxy and handler while an accessor-backed trap lookup executes.
+    #[inline]
+    pub(crate) const fn proxy_trap_getter(
+        site: NativeContinuationSite,
+        operation: ProxyInternalMethod,
+        proxy: Value,
+        handler: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::Proxy {
+                operation,
+                stage: ProxyContinuationStage::TrapGetter,
+            },
+            first: proxy,
+            second: handler,
+        }
+    }
+
+    /// Roots a dynamically returned trap while its call executes outside the Rust stack.
+    #[inline]
+    pub(crate) const fn proxy_trap_call(
+        site: NativeContinuationSite,
+        operation: ProxyInternalMethod,
+        proxy: Value,
+        trap: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::Proxy {
+                operation,
+                stage: ProxyContinuationStage::TrapCall,
+            },
+            first: proxy,
+            second: trap,
         }
     }
 

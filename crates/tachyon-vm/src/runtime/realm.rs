@@ -437,8 +437,10 @@ impl Realm {
         self.global_lexicals
             .try_reserve_exact(1)
             .map_err(|_| ExecutionError::GlobalBindingAllocationFailed)?;
-        self.global_lexical_slots_by_atom
-            .resize(required_slots, None);
+        if additional_slots != 0 {
+            self.global_lexical_slots_by_atom
+                .resize(required_slots, None);
+        }
         let slot = GlobalLexicalSlotId::from_index(self.global_lexicals.len())
             .ok_or(ExecutionError::GlobalBindingLimit { limit: u32::MAX })?;
         self.global_lexicals.push(GlobalLexicalBinding {
@@ -527,7 +529,9 @@ impl Realm {
         self.global_bindings
             .try_reserve_exact(1)
             .map_err(|_| ExecutionError::GlobalBindingAllocationFailed)?;
-        self.global_slots_by_atom.resize(required_slots, None);
+        if additional_slots != 0 {
+            self.global_slots_by_atom.resize(required_slots, None);
+        }
         let slot = GlobalSlotId::from_index(self.global_bindings.len())
             .ok_or(ExecutionError::GlobalBindingLimit { limit: u32::MAX })?;
         self.global_bindings.push(GlobalBinding { name, value });

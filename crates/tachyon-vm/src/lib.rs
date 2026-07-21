@@ -112,7 +112,8 @@ use runtime::{
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
         PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,
-        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ProxyContinuationStage, ProxyInternalMethod, SymbolAllocationRoots, ToPrimitiveStage,
+        VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
@@ -314,6 +315,8 @@ pub enum ExecutionError {
     InvalidJsonCircularStructure,
     UnsupportedDynamicFunctionConstructor,
     ProxyConstructorRequiresNew,
+    ProxyRevoked,
+    ProxyInvariantViolation,
     NonExtensibleObject(Value),
     ReadOnlyProperty(Value),
     InvalidPropertyDescriptor(Value),

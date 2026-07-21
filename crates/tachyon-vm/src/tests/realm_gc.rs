@@ -442,6 +442,22 @@ fn realm_global_slots_are_stable_and_atom_indexed() {
 }
 
 #[test]
+fn publishing_lower_atom_global_preserves_higher_atom_mapping() {
+    let mut isolate = test_isolate();
+    let lower = isolate.intern_intrinsic_name(b"lower-slot").unwrap();
+    let higher = isolate.intern_intrinsic_name(b"higher-slot").unwrap();
+
+    isolate.realm.set(higher, Value::from_i32(2)).unwrap();
+    isolate.realm.set(lower, Value::from_i32(1)).unwrap();
+
+    let higher_slot = isolate.realm.resolve(higher).unwrap();
+    assert_eq!(
+        isolate.realm.get_slot(higher_slot),
+        Some(Value::from_i32(2))
+    );
+}
+
+#[test]
 /// Confirms loaded scope operands self-resolve once and retain the stable realm slot.
 fn loaded_scope_resolution_caches_a_published_global_slot() {
     let mut isolate = test_isolate();
