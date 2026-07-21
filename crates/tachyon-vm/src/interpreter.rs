@@ -1059,6 +1059,12 @@ impl Isolate {
                     key,
                 );
             }
+            Opcode::EnterClassEnvironment => self.enter_class_environment()?,
+            Opcode::InitializeClassEnvironment => {
+                let value = self.read(base, operands[0])?;
+                self.initialize_class_environment(value)?;
+            }
+            Opcode::LeaveClassEnvironment => self.leave_class_environment()?,
             Opcode::SetById => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
@@ -1961,6 +1967,148 @@ impl Isolate {
         Ok(())
     }
 
+    /// Enters one exact single-slot immutable environment for named class evaluation.
+    fn enter_class_environment(&mut self) -> Result<(), ExecutionError> {
+        if self.fiber.class_environments.len() == self.fiber.class_environments.capacity() {
+            self.fiber
+                .class_environments
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        }
+        let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let slot_count = NonZeroU32::new(1).expect("class name environment has one slot");
+        let environment =
+            Environment::try_bindings(EnvironmentKind::Declarative, parent, slot_count, |_| {
+                BindingState::new(false, false)
+            })
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        let environment = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.environment,
+                0,
+                environment,
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let frame_depth = u32::try_from(self.fiber.frames.len())
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        self.fiber
+            .frames
+            .last_mut()
+            .ok_or(ExecutionError::MissingEnvironment)?
+            .environment = Some(environment);
+        self.fiber.class_environments.push(frame_depth);
+        Ok(())
+    }
+
+    /// Initializes the active class-name slot once and publishes its constructor edge.
+    fn initialize_class_environment(&mut self, value: Value) -> Result<(), ExecutionError> {
+        let frame_depth = self.fiber.frames.len();
+        if !self
+            .fiber
+            .class_environments
+            .last()
+            .is_some_and(|depth| *depth as usize == frame_depth)
+        {
+            return Err(ExecutionError::MissingEnvironment);
+        }
+        let environment = self.environment_at_depth(0)?;
+        self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference_mut(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .initialize(0, value)
+                    .map_err(|error| environment_access_error(0, 0, error))
+            })
+        })?;
+        if let Some(target) = value.as_heap_ref() {
+            self.heap
+                .write_barrier(environment.raw(), target)
+                .map_err(ExecutionError::HeapReference)?;
+        }
+        Ok(())
+    }
+
+    /// Restores the parent environment after one class expression finishes or unwinds.
+    fn leave_class_environment(&mut self) -> Result<(), ExecutionError> {
+        let frame_depth = self.fiber.frames.len();
+        if !self
+            .fiber
+            .class_environments
+            .last()
+            .is_some_and(|depth| *depth as usize == frame_depth)
+        {
+            return Err(ExecutionError::MissingEnvironment);
+        }
+        let environment = self
+            .fiber
+            .frames
+            .last()
+            .and_then(|frame| frame.environment)
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let parent = self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map(Environment::parent)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("class environment retains its frame")
+            .environment = parent;
+        self.fiber.class_environments.pop();
+        Ok(())
+    }
+
+    /// Restores the lexical depth frozen into the selected same-frame exception handler.
+    fn restore_class_environment_depth(&mut self, target: u32) -> Result<(), ExecutionError> {
+        let frame_depth = self.fiber.frames.len();
+        let mut current = self
+            .fiber
+            .class_environments
+            .iter()
+            .rev()
+            .take_while(|depth| **depth as usize == frame_depth)
+            .count();
+        let target = usize::try_from(target)
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        if target > current {
+            return Err(ExecutionError::MissingEnvironment);
+        }
+        while current > target {
+            self.leave_class_environment()?;
+            current -= 1;
+        }
+        Ok(())
+    }
+
+    /// Drops stale class environments after a JavaScript frame leaves the explicit fiber.
+    #[inline(always)]
+    fn discard_exited_class_environments(&mut self) {
+        let frame_depth = self.fiber.frames.len() as u32;
+        while self
+            .fiber
+            .class_environments
+            .last()
+            .is_some_and(|depth| *depth > frame_depth)
+        {
+            self.fiber.class_environments.pop();
+        }
+    }
+
     /// Allocates non-empty captured-slot backing after the current activation frame is rooted.
     fn allocate_current_environment(
         &mut self,
@@ -2048,6 +2196,7 @@ impl Isolate {
         self.fiber.argument_sources.clear();
         self.fiber.derived_activations.clear();
         self.fiber.base_class_activations.clear();
+        self.fiber.class_environments.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -3925,6 +4074,7 @@ impl Isolate {
             )
         {
             self.fiber.frames.pop();
+            self.discard_exited_class_environments();
             self.fiber.argument_objects.pop();
             self.fiber.argument_sources.pop();
             if self
@@ -4007,6 +4157,7 @@ impl Isolate {
             .frames
             .pop()
             .expect("callee return always has an active frame");
+        self.discard_exited_class_environments();
         self.fiber
             .argument_objects
             .pop()
@@ -4273,6 +4424,7 @@ impl Isolate {
             let handler = self.find_abrupt_handler(frame, instruction_offset, completion)?;
             self.discard_exited_finalizers(frame, instruction_offset, completion, handler)?;
             if let Some((index, handler)) = handler {
+                self.restore_class_environment_depth(handler.environment_depth)?;
                 if handler.kind.is_finalizer() {
                     self.enter_finalizer(index, handler, completion)?;
                     return Ok(None);
@@ -4323,6 +4475,7 @@ impl Isolate {
                 .frames
                 .pop()
                 .expect("non-entry abrupt completion retains a callee frame");
+            self.discard_exited_class_environments();
             self.fiber
                 .argument_objects
                 .pop()

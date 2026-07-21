@@ -392,6 +392,119 @@ pub(super) fn validate_class_instructions(
     Ok(())
 }
 
+/// Verifies balanced class-name environments and forbids control-flow edges across their depth.
+pub(super) fn validate_class_environments(
+    function: FunctionId,
+    handlers: &[HandlerEntry],
+    bytecode: &VerifiedBytecode,
+) -> Result<(), ModuleBuildError> {
+    let words = bytecode.bytecode().words();
+    let mut depth_at = vec![None; words.len().saturating_add(1)];
+    let mut depth = 0_u32;
+    let mut offset = 0_u32;
+    while (offset as usize) < words.len() {
+        depth_at[offset as usize] = Some(depth);
+        let word_offset = WordOffset::new(offset);
+        let instruction = decode_instruction(words, word_offset).map_err(|_| {
+            ModuleBuildError::VerifiedBytecodeDecodeInvariant {
+                function,
+                offset: word_offset,
+            }
+        })?;
+        match instruction.opcode {
+            Opcode::EnterClassEnvironment => {
+                depth =
+                    depth
+                        .checked_add(1)
+                        .ok_or(ModuleBuildError::InvalidClassEnvironmentDepth {
+                            function,
+                            offset: word_offset,
+                            expected: u32::MAX,
+                            actual: depth,
+                        })?;
+            }
+            Opcode::InitializeClassEnvironment if depth == 0 => {
+                return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+                    function,
+                    offset: word_offset,
+                    expected: 1,
+                    actual: 0,
+                });
+            }
+            Opcode::LeaveClassEnvironment => {
+                depth =
+                    depth
+                        .checked_sub(1)
+                        .ok_or(ModuleBuildError::InvalidClassEnvironmentDepth {
+                            function,
+                            offset: word_offset,
+                            expected: 1,
+                            actual: 0,
+                        })?;
+            }
+            _ => {}
+        }
+        offset += u32::from(instruction.word_len);
+    }
+    depth_at[words.len()] = Some(depth);
+    if depth != 0 {
+        return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+            function,
+            offset: WordOffset::new(words.len() as u32),
+            expected: 0,
+            actual: depth,
+        });
+    }
+
+    let mut offset = 0_u32;
+    while (offset as usize) < words.len() {
+        let word_offset = WordOffset::new(offset);
+        let instruction = decode_instruction(words, word_offset).map_err(|_| {
+            ModuleBuildError::VerifiedBytecodeDecodeInvariant {
+                function,
+                offset: word_offset,
+            }
+        })?;
+        let target = match instruction.opcode {
+            Opcode::Jump | Opcode::BreakThroughFinally | Opcode::ContinueThroughFinally => {
+                Some(instruction.operands[0])
+            }
+            Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => {
+                Some(instruction.operands[1])
+            }
+            _ => None,
+        };
+        if let Some(target) = target {
+            let source_depth = depth_at[offset as usize]
+                .expect("verified instruction offsets have an environment depth");
+            let target_depth =
+                depth_at[target as usize].expect("verified jump targets have an environment depth");
+            if source_depth != target_depth {
+                return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+                    function,
+                    offset: word_offset,
+                    expected: source_depth,
+                    actual: target_depth,
+                });
+            }
+        }
+        offset += u32::from(instruction.word_len);
+    }
+    for handler in handlers {
+        let target_depth = depth_at[handler.handler.index() as usize]
+            .expect("verified handler targets have an environment depth");
+        if handler.environment_depth != target_depth {
+            return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+                function,
+                offset: handler.handler,
+                expected: target_depth,
+                actual: handler.environment_depth,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Feedback sites have stable ordering and bounds, while their mutable feedback stays isolate-local.
 pub(super) fn validate_feedback_sites(
     function: FunctionId,
@@ -452,11 +565,21 @@ pub(super) fn validate_binding_plan(
                     register_count: layout.register_count,
                 });
             }
-            BindingLocation::Environment { slot, .. } if slot >= max_environment_slot_count => {
+            BindingLocation::Environment { slot, .. }
+            | BindingLocation::ClassEnvironment { slot, .. }
+                if slot >= max_environment_slot_count =>
+            {
                 return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
                     function,
                     binding: binding.clone(),
                     environment_slot_count: max_environment_slot_count,
+                });
+            }
+            BindingLocation::ClassEnvironment { slot, .. } if slot != 0 => {
+                return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
+                    function,
+                    binding: binding.clone(),
+                    environment_slot_count: 1,
                 });
             }
             _ => {}
@@ -688,7 +811,9 @@ fn verify_instruction(
         | Opcode::ContinueThroughFinally
         | Opcode::ReturnUndefined
         | Opcode::DeclareScope
-        | Opcode::DeclareGlobalLexical => {}
+        | Opcode::DeclareGlobalLexical
+        | Opcode::EnterClassEnvironment
+        | Opcode::LeaveClassEnvironment => {}
         Opcode::LoadUndefined
         | Opcode::LoadNull
         | Opcode::LoadFalse
@@ -706,7 +831,8 @@ fn verify_instruction(
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
-        | Opcode::LoadSuperBase => check_register(operands[0])?,
+        | Opcode::LoadSuperBase
+        | Opcode::InitializeClassEnvironment => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;

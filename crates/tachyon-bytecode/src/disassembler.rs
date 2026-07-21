@@ -62,8 +62,12 @@ pub fn disassemble(function: &CompiledFunction) -> Result<String, DisassemblyErr
 fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -> fmt::Result {
     write!(output, "{opcode}")?;
     match opcode {
-        Opcode::Nop | Opcode::ReturnUndefined | Opcode::EnterFinally | Opcode::ResumeCompletion => {
-        }
+        Opcode::Nop
+        | Opcode::ReturnUndefined
+        | Opcode::EnterFinally
+        | Opcode::ResumeCompletion
+        | Opcode::EnterClassEnvironment
+        | Opcode::LeaveClassEnvironment => {}
         Opcode::DeclareScope => write!(output, " scope={}", operands[0])?,
         Opcode::DeclareGlobalLexical => {
             write!(output, " scope={}, mutable={}", operands[0], operands[1])?
@@ -79,7 +83,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
-        | Opcode::LoadSuperBase => write!(output, " r{}", operands[0])?,
+        | Opcode::LoadSuperBase
+        | Opcode::InitializeClassEnvironment => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,

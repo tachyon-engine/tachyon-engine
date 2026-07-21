@@ -30,11 +30,15 @@ pub(super) struct Lowerer<'a> {
     pub(super) continue_targets: Vec<ControlTarget>,
     pub(super) handlers: Vec<Option<HandlerEntry>>,
     pub(super) finally_depth: u32,
+    /// Number of dynamically-entered lexical environments in the current function.
+    pub(super) environment_depth: u32,
     pub(super) next_register: u32,
     pub(super) source_name: SourceName,
     pub(super) script_scope: bool,
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
+    /// Semantic scope matching the environment currently exposed to emitted loads.
+    pub(super) active_scope: ScopeId,
     pub(super) environments: &'a EnvironmentPlans,
 }
 
@@ -907,17 +911,26 @@ impl Lowerer<'_> {
         &mut self,
         reference: &HirIdentifierReference,
     ) -> Result<Option<LocalBinding>, CompileError> {
-        let (Some(function_scope), Some(binding)) = (self.function_scope, reference.binding) else {
+        let Some(binding) = reference.binding else {
             return Ok(None);
         };
-        let Some((depth, slot)) = self.environments.reference_slot(function_scope, binding) else {
+        let Some((depth, slot, class_environment)) =
+            self.environments.reference_slot(self.active_scope, binding)
+        else {
             return Ok(None);
         };
         self.add_binding_plan(BindingPlanEntry {
             name: slot.name.clone(),
-            location: BindingLocation::Environment {
-                depth,
-                slot: slot.slot,
+            location: if class_environment {
+                BindingLocation::ClassEnvironment {
+                    depth,
+                    slot: slot.slot,
+                }
+            } else {
+                BindingLocation::Environment {
+                    depth,
+                    slot: slot.slot,
+                }
             },
             mutable: slot.mutable,
         })?;

@@ -248,7 +248,9 @@ impl BytecodeBuilder {
             | Opcode::ContinueThroughFinally
             | Opcode::ReturnUndefined
             | Opcode::DeclareScope
-            | Opcode::DeclareGlobalLexical => &[],
+            | Opcode::DeclareGlobalLexical
+            | Opcode::EnterClassEnvironment
+            | Opcode::LeaveClassEnvironment => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -261,6 +263,7 @@ impl BytecodeBuilder {
             | Opcode::StoreScope
             | Opcode::StoreResolvedScope
             | Opcode::InitializeGlobalLexical
+            | Opcode::InitializeClassEnvironment
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject

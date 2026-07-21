@@ -58,6 +58,9 @@ pub struct HirExpression {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirClass {
     pub name: Option<Arc<str>>,
+    /// The private immutable binding created only for a named class expression.
+    pub name_binding: Option<super::program::HirBinding>,
+    pub scope: super::program::ScopeId,
     pub super_class: Option<Box<HirExpression>>,
     pub constructor: FunctionStencilId,
     pub methods: Arc<[HirClassMethod]>,
@@ -697,28 +700,24 @@ pub(super) fn lower_class(
             "decorated or TypeScript class",
         ));
     }
-    let class_name = match (&declaration_name, &class.id) {
-        (Some(name), _) => Some(name.clone()),
-        (None, Some(identifier)) => {
-            let symbol = identifier.symbol_id.get().ok_or_else(|| {
-                missing_semantic(source, source_span(identifier.span), "class name symbol")
-            })?;
-            if semantic
-                .scoping()
-                .get_resolved_references(symbol)
-                .next()
-                .is_some()
-            {
-                return Err(unsupported(
-                    source.name(),
-                    source_span(class.span),
-                    "named class expression environment",
-                ));
-            }
-            Some(Arc::from(identifier.name.as_str()))
-        }
-        (None, None) => None,
-    };
+    let name_binding = declaration_name
+        .is_none()
+        .then(|| {
+            class
+                .id
+                .as_ref()
+                .map(|identifier| new_binding(identifier, source, semantic))
+                .transpose()
+        })
+        .transpose()?
+        .flatten();
+    let class_name = declaration_name
+        .clone()
+        .or_else(|| name_binding.as_ref().map(|binding| binding.name.clone()));
+    let class_scope = class
+        .scope_id
+        .get()
+        .ok_or_else(|| missing_semantic(source, source_span(class.span), "class scope"))?;
     let mut constructor = None;
     let mut methods = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
@@ -876,6 +875,8 @@ pub(super) fn lower_class(
     stencil.strict = true;
     Ok(HirClass {
         name: class_name,
+        name_binding,
+        scope: to_scope_id(class_scope),
         super_class: class
             .super_class
             .as_ref()

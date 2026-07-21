@@ -249,9 +249,15 @@ pub enum Opcode {
     GetSuperById = 101,
     /// Reads one normalized-key super property from an already-loaded base.
     GetSuperByValue = 102,
+    /// Enters one private immutable class-name lexical environment.
+    EnterClassEnvironment = 103,
+    /// Initializes the active class-name binding from one constructor register.
+    InitializeClassEnvironment = 104,
+    /// Restores the lexical environment active before class evaluation.
+    LeaveClassEnvironment = 105,
 }
 
-pub(super) const OPCODE_COUNT: usize = 103;
+pub(super) const OPCODE_COUNT: usize = 106;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -356,10 +362,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // LoadSuperBase
     2, // GetSuperById
     3, // GetSuperByValue
+    0, // EnterClassEnvironment
+    1, // InitializeClassEnvironment
+    0, // LeaveClassEnvironment
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::GetSuperByValue as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LeaveClassEnvironment as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -508,6 +517,9 @@ impl Opcode {
             36 => Some(Self::LoadSuperBase),
             37 => Some(Self::GetSuperById),
             38 => Some(Self::GetSuperByValue),
+            39 => Some(Self::EnterClassEnvironment),
+            40 => Some(Self::InitializeClassEnvironment),
+            41 => Some(Self::LeaveClassEnvironment),
             _ => None,
         }
     }

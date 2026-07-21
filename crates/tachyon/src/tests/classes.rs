@@ -113,11 +113,42 @@ fn class_super_property_semantics() {
 }
 
 #[test]
-/// Publishes explicit class-expression names without leaking a lexical binding to the outer scope.
-fn non_referential_named_class_expression() {
-    let source = "var value = class Hidden { method() { return 1; } }; value.name === 'Hidden' && value.prototype.method() === 1 && typeof Hidden === 'undefined';";
-    assert_eq!(
-        execute_source(1_082, source).as_immediate(),
-        Some(Immediate::True),
-    );
+/// Preserves the private immutable class name through heritage, methods, and outer shadowing.
+fn named_class_expression_environment() {
+    for (source_id, source) in [
+        (
+            1_082,
+            "var value = class Hidden { method() { return 1; } }; value.name === 'Hidden' && value.prototype.method() === 1 && typeof Hidden === 'undefined';",
+        ),
+        (
+            1_083,
+            "var value = class Hidden { static self() { return Hidden; } }; value.self() === value && typeof Hidden === 'undefined';",
+        ),
+        (
+            1_084,
+            "var Hidden = 7; var value = class Hidden { static self() { return Hidden; } }; value.self() === value && Hidden === 7;",
+        ),
+        (
+            1_085,
+            "var threw = false; try { var value = class Hidden extends Hidden {}; } catch (error) { threw = error instanceof ReferenceError; } threw && typeof Hidden === 'undefined';",
+        ),
+        (
+            1_086,
+            "var value = class Hidden { constructor() { this.owner = Hidden; } method() { let captured = 1; return function() { return captured === 1 && Hidden; }; } }; var instance = new value(); instance.owner === value && instance.method()() === value;",
+        ),
+        (
+            1_087,
+            "var Outer = class OuterName { static make() { return class Inner { static self() { return Inner; } static outer() { return OuterName; } }; } }; var Inner = Outer.make(); Inner.self() === Inner && Inner.outer() === Outer;",
+        ),
+        (
+            1_088,
+            "function run() { let captured = 7; function read() { return captured; } try { var value = class Hidden extends Hidden {}; } catch (error) {} return read(); } run() === 7;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
 }

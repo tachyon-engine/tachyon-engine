@@ -631,7 +631,7 @@ fn compiler_freezes_class_method_kind_and_definition_contracts() {
 }
 
 #[test]
-/// Accepts non-referential named class expressions while keeping recursive names explicit.
+/// Freezes the enter/initialize/leave protocol and method capture for named class expressions.
 fn compiler_handles_named_class_expression_without_leaking_binding() {
     let class_source = source(
         MediaType::JavaScript,
@@ -662,20 +662,54 @@ fn compiler_handles_named_class_expression_without_leaking_binding() {
             .contains("SetFunctionName")
     );
 
-    let error = Compiler.lower_to_hir(
-        source(
-            MediaType::JavaScript,
-            "var value = class Hidden { method() { return Hidden; } }; value;",
-        ),
-        CompileOptions::default(),
+    let recursive = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "var value = class Hidden { method() { return Hidden; } }; value;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let entry = tachyon_bytecode::disassemble(&recursive.functions()[0]).unwrap();
+    assert!(entry.contains("EnterClassEnvironment"));
+    assert!(entry.contains("InitializeClassEnvironment"));
+    assert!(entry.contains("LeaveClassEnvironment"));
+    let method = recursive
+        .functions()
+        .iter()
+        .find(|function| function.kind() == tachyon_bytecode::FunctionKind::ClassMethod)
+        .unwrap();
+    assert!(method.binding_plan().iter().any(|binding| {
+        matches!(
+            binding.location,
+            tachyon_bytecode::BindingLocation::ClassEnvironment { depth: 0, slot: 0 }
+        )
+    }));
+    assert!(
+        tachyon_bytecode::disassemble(method)
+            .unwrap()
+            .contains("LoadEnvironment r0, depth=0, slot=0")
     );
-    assert!(matches!(
-        error,
-        Err(CompileError::UnsupportedSyntax {
-            syntax: "named class expression environment",
-            ..
+
+    let nested = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "var value = class Hidden { method() { let captured = 1; return function() { return captured && Hidden; }; } }; value;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    assert!(nested.functions().iter().any(|function| {
+        function.binding_plan().iter().any(|binding| {
+            binding.name.as_ref() == "Hidden"
+                && matches!(
+                    binding.location,
+                    tachyon_bytecode::BindingLocation::ClassEnvironment { depth: 1, slot: 0 }
+                )
         })
-    ));
+    }));
 }
 
 #[test]

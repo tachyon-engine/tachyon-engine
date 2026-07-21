@@ -357,8 +357,18 @@ pub struct FeedbackSite {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingLocation {
     FrameRegister(RegisterId),
-    Environment { depth: u32, slot: u32 },
-    ModuleCell { slot: u32 },
+    Environment {
+        depth: u32,
+        slot: u32,
+    },
+    /// A dynamically-entered class-name environment rather than a function-owned slot.
+    ClassEnvironment {
+        depth: u32,
+        slot: u32,
+    },
+    ModuleCell {
+        slot: u32,
+    },
     GlobalLexical,
     GlobalProperty,
     Dynamic,
@@ -586,6 +596,12 @@ pub enum ModuleBuildError {
         target: FunctionId,
         target_kind: FunctionKind,
     },
+    InvalidClassEnvironmentDepth {
+        function: FunctionId,
+        offset: WordOffset,
+        expected: u32,
+        actual: u32,
+    },
     VerifyFunction {
         function: FunctionId,
         error: VerifyError,
@@ -733,7 +749,12 @@ impl CompiledModule {
             .iter()
             .map(|template| template.metadata.layout.environment_slot_count)
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(u32::from(templates.iter().any(|template| {
+                template.metadata.binding_plan.iter().any(|binding| {
+                    matches!(binding.location, BindingLocation::ClassEnvironment { .. })
+                })
+            })));
         let context = VerifyContext {
             register_count: 0,
             constant_count,
@@ -792,6 +813,11 @@ impl CompiledModule {
                 template.metadata.kind,
                 &bytecode,
                 &function_kinds,
+            )?;
+            verify::validate_class_environments(
+                template.id,
+                &template.metadata.handlers,
+                &bytecode,
             )?;
             verify::validate_function_layout(
                 template.id,

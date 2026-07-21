@@ -51,6 +51,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::ReturnUndefined,
                 Opcode::EnterFinally,
                 Opcode::ResumeCompletion,
+                Opcode::EnterClassEnvironment,
+                Opcode::LeaveClassEnvironment,
             ],
         ),
         (
@@ -76,6 +78,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CheckConstructor,
                 Opcode::BreakThroughFinally,
                 Opcode::ContinueThroughFinally,
+                Opcode::InitializeClassEnvironment,
             ],
         ),
         (
@@ -676,6 +679,56 @@ fn compiled_module_enforces_class_kind_and_opcode_contracts() {
         ),
         Err(ModuleBuildError::InvalidFunctionStrictness {
             kind: FunctionKind::DerivedClassConstructor,
+            ..
+        })
+    ));
+
+    let mut balanced_environment = encode_instruction(Opcode::EnterClassEnvironment, &[]).unwrap();
+    balanced_environment
+        .extend(encode_instruction(Opcode::InitializeClassEnvironment, &[0]).unwrap());
+    balanced_environment.extend(encode_instruction(Opcode::LeaveClassEnvironment, &[]).unwrap());
+    balanced_environment.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let balanced = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(balanced_environment),
+        FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        ),
+    );
+    assert!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![balanced],
+            FunctionId::new(0),
+        )
+        .is_ok()
+    );
+
+    let mut unbalanced_environment =
+        encode_instruction(Opcode::EnterClassEnvironment, &[]).unwrap();
+    unbalanced_environment.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let unbalanced = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(unbalanced_environment),
+        FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default()),
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![unbalanced],
+            FunctionId::new(0),
+        ),
+        Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+            expected: 0,
+            actual: 1,
             ..
         })
     ));

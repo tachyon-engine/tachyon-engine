@@ -1064,6 +1064,8 @@ pub(crate) struct Fiber {
     pub(crate) derived_activations: Vec<ClassActivation>,
     /// Only base class constructors enter this stack; ordinary functions never pay its cost.
     pub(crate) base_class_activations: Vec<ClassActivation>,
+    /// Frame depths for active class-name lexical environments, sparse across ordinary execution.
+    pub(crate) class_environments: Vec<u32>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -1088,6 +1090,9 @@ impl Fiber {
         }));
         debug_assert!(self.base_class_activations.iter().all(|activation| {
             activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
+        }));
+        debug_assert!(self.class_environments.iter().all(|depth| {
+            *depth != 0 && usize::try_from(*depth).is_ok_and(|depth| depth <= self.frames.len())
         }));
         for frame in &mut self.frames {
             frame.environment.trace(tracer);

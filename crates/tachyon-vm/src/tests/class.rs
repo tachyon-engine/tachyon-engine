@@ -98,6 +98,16 @@ var instance = new B();
 instance.y === 4;
 "#;
 
+const NAMED_CLASS_ENVIRONMENT_SOURCE: &str = r#"
+var Outer = 7;
+var value = class Inner {
+  static self() { return Inner; }
+  method() { return Inner; }
+};
+var instance = new value();
+value.self() === value && instance.method() === value && Outer === 7 && typeof Inner === "undefined";
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -150,6 +160,15 @@ fn super_properties_execute_for_every_dispatch_batch() {
     assert_super_property_batch::<4>();
     assert_super_property_batch::<8>();
     assert_super_property_batch::<16>();
+}
+
+#[test]
+fn named_class_environments_execute_for_every_dispatch_batch() {
+    assert_named_class_environment_batch::<1>();
+    assert_named_class_environment_batch::<2>();
+    assert_named_class_environment_batch::<4>();
+    assert_named_class_environment_batch::<8>();
+    assert_named_class_environment_batch::<16>();
 }
 
 #[test]
@@ -229,6 +248,19 @@ fn computed_class_elements_survive_forced_major_collections() {
 fn super_property_home_objects_survive_forced_major_collections() {
     assert_forced_major_source(SUPER_PROPERTY_SOURCE, 44);
     assert_forced_major_source(SUPER_PROPERTY_CONSTRUCTOR_SOURCE, 45);
+}
+
+#[test]
+fn named_class_environments_survive_forced_major_collections() {
+    assert_forced_major_source(NAMED_CLASS_ENVIRONMENT_SOURCE, 46);
+    assert_forced_major_source(
+        "var value = class Inner { method() { let captured = 1; return function() { return captured === 1 && Inner; }; } }; var closure = new value().method(); closure() === value;",
+        47,
+    );
+    assert_forced_major_source(
+        "var threw = false; try { var value = class Inner extends Inner {}; } catch (error) { threw = error instanceof ReferenceError; } var object = {}; threw && object !== null;",
+        48,
+    );
 }
 
 /// Executes a focused class fixture with collection before every managed allocation.
@@ -361,6 +393,25 @@ fn assert_super_property_batch<const N: usize>() {
             },
         )
         .expect("super property fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes private class-name capture and outer-scope restoration with each dispatch batch.
+fn assert_named_class_environment_batch<const N: usize>() {
+    let module = compile_source(NAMED_CLASS_ENVIRONMENT_SOURCE, 130 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_024,
+                quantum: 1_024,
+            },
+        )
+        .expect("named class environment fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

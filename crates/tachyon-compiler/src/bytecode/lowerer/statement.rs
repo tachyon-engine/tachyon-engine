@@ -1237,7 +1237,7 @@ impl Lowerer<'_> {
             handler,
             handler_end: handler,
             kind: HandlerKind::Catch,
-            environment_depth: 0,
+            environment_depth: self.environment_depth,
         };
         *self
             .handlers
@@ -1260,7 +1260,7 @@ impl Lowerer<'_> {
             handler,
             handler_end,
             kind: HandlerKind::Finally,
-            environment_depth: 0,
+            environment_depth: self.environment_depth,
         };
         *self
             .handlers
@@ -1283,7 +1283,7 @@ impl Lowerer<'_> {
             handler,
             handler_end,
             kind: HandlerKind::IteratorClose,
-            environment_depth: 0,
+            environment_depth: self.environment_depth,
         };
         *self
             .handlers

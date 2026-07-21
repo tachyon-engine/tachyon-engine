@@ -530,6 +530,15 @@ impl Lowerer<'_> {
         class: &crate::HirClass,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
+        let previous_scope = self.active_scope;
+        if class.name_binding.is_some() {
+            self.emit(Opcode::EnterClassEnvironment, &[], span)?;
+            self.environment_depth = self
+                .environment_depth
+                .checked_add(1)
+                .ok_or(CompileError::BindingOverflow)?;
+            self.active_scope = class.scope;
+        }
         let prototype_name = self.scope_name(&std::sync::Arc::from("prototype"))?;
         let destination = self.register()?;
         let function = class
@@ -576,6 +585,13 @@ impl Lowerer<'_> {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
         }
+        if class.name_binding.is_some() {
+            self.emit(
+                Opcode::InitializeClassEnvironment,
+                &[destination.index()],
+                span,
+            )?;
+        }
         let instance_target = if class.methods.iter().any(|method| !method.is_static) {
             let target = self.register()?;
             self.emit(
@@ -594,6 +610,14 @@ impl Lowerer<'_> {
                 instance_target.expect("instance target exists when an instance method was counted")
             };
             self.define_class_method(method, target)?;
+        }
+        if class.name_binding.is_some() {
+            self.emit(Opcode::LeaveClassEnvironment, &[], span)?;
+            self.environment_depth = self
+                .environment_depth
+                .checked_sub(1)
+                .ok_or(CompileError::BindingOverflow)?;
+            self.active_scope = previous_scope;
         }
         Ok(destination)
     }

@@ -1,6 +1,7 @@
 //! Lowering of the first owned HIR subset into immutable register bytecode.
 
 mod capacity;
+mod class_environment;
 mod lowerer;
 
 use lowerer::Lowerer;
@@ -109,11 +110,13 @@ fn lower_entry(
         continue_targets: Vec::with_capacity(entry_capacity.continue_targets),
         handlers: Vec::with_capacity(entry_capacity.handlers),
         finally_depth: 0,
+        environment_depth: 0,
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: true,
         root_scope: hir.root_scope(),
         function_scope: None,
+        active_scope: hir.root_scope(),
         environments,
     };
     for lexical in &environments.global_lexicals {
@@ -244,14 +247,21 @@ struct CapturedSlot {
 #[derive(Clone, Debug)]
 struct FunctionEnvironmentPlan {
     scope: ScopeId,
-    parent_function: Option<usize>,
     slots: Vec<CapturedSlot>,
+}
+
+#[derive(Clone, Debug)]
+struct ClassEnvironmentPlan {
+    scope: ScopeId,
+    slot: CapturedSlot,
 }
 
 #[derive(Clone, Debug)]
 struct EnvironmentPlans {
     functions: Vec<FunctionEnvironmentPlan>,
+    classes: Vec<ClassEnvironmentPlan>,
     global_lexicals: Vec<GlobalLexicalPlan>,
+    scopes: std::sync::Arc<[crate::HirScope]>,
 }
 
 #[derive(Clone, Debug)]
@@ -332,17 +342,27 @@ impl EnvironmentPlans {
             collect_captured_slots(source, &function.body, &mut slots)?;
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
-                parent_function: None,
                 slots,
             });
         }
-        for index in 0..functions.len() {
-            functions[index].parent_function =
-                nearest_parent_function(functions[index].scope, hir.scopes(), &functions);
-        }
+        let classes = class_environment::collect(hir)
+            .into_iter()
+            .map(|binding| ClassEnvironmentPlan {
+                scope: binding.scope,
+                slot: CapturedSlot {
+                    id: binding.id,
+                    slot: 0,
+                    name: binding.name,
+                    mutable: false,
+                    initialized: false,
+                },
+            })
+            .collect();
         Ok(Self {
             functions,
+            classes,
             global_lexicals,
+            scopes: hir.scopes().into(),
         })
     }
 
@@ -368,58 +388,50 @@ impl EnvironmentPlans {
         &self,
         current_scope: ScopeId,
         binding: BindingId,
-    ) -> Option<(u32, &CapturedSlot)> {
-        let current = self
-            .functions
-            .iter()
-            .position(|function| function.scope == current_scope)?;
-        let target = self
-            .functions
-            .iter()
-            .position(|function| function.slots.iter().any(|slot| slot.id == binding))?;
-        let mut cursor = if self.functions[current].slots.is_empty() {
-            self.nearest_environment_parent(current)?
+    ) -> Option<(u32, &CapturedSlot, bool)> {
+        let (target_scope, slot, class_environment) = self.slot_for_binding(binding)?;
+        let mut cursor = if self.scope_has_environment(current_scope) {
+            current_scope
         } else {
-            current
+            self.nearest_environment_parent(current_scope)?
         };
         let mut depth = 0_u32;
-        while cursor != target {
+        while cursor != target_scope {
             cursor = self.nearest_environment_parent(cursor)?;
             depth = depth.checked_add(1)?;
         }
-        let slot = self.functions[target]
-            .slots
-            .iter()
-            .find(|slot| slot.id == binding)?;
-        Some((depth, slot))
+        Some((depth, slot, class_environment))
     }
 
-    fn nearest_environment_parent(&self, mut function: usize) -> Option<usize> {
-        loop {
-            function = self.functions[function].parent_function?;
-            if !self.functions[function].slots.is_empty() {
-                return Some(function);
+    fn slot_for_binding(&self, binding: BindingId) -> Option<(ScopeId, &CapturedSlot, bool)> {
+        for function in &self.functions {
+            if let Some(slot) = function.slots.iter().find(|slot| slot.id == binding) {
+                return Some((function.scope, slot, false));
             }
         }
-    }
-}
-
-fn nearest_parent_function(
-    scope: ScopeId,
-    scopes: &[crate::HirScope],
-    functions: &[FunctionEnvironmentPlan],
-) -> Option<usize> {
-    let mut parent = scopes.get(scope.index() as usize)?.parent;
-    while let Some(scope) = parent {
-        if let Some(index) = functions
+        self.classes
             .iter()
-            .position(|function| function.scope == scope)
-        {
-            return Some(index);
-        }
-        parent = scopes.get(scope.index() as usize)?.parent;
+            .find(|class| class.slot.id == binding)
+            .map(|class| (class.scope, &class.slot, true))
     }
-    None
+
+    fn scope_has_environment(&self, scope: ScopeId) -> bool {
+        self.functions
+            .iter()
+            .any(|function| function.scope == scope && !function.slots.is_empty())
+            || self.classes.iter().any(|class| class.scope == scope)
+    }
+
+    fn nearest_environment_parent(&self, scope: ScopeId) -> Option<ScopeId> {
+        let mut parent = self.scopes.get(scope.index() as usize)?.parent;
+        while let Some(scope) = parent {
+            if self.scope_has_environment(scope) {
+                return Some(scope);
+            }
+            parent = self.scopes.get(scope.index() as usize)?.parent;
+        }
+        None
+    }
 }
 
 fn push_captured_slot(
@@ -647,11 +659,13 @@ fn lower_function(
         continue_targets: Vec::with_capacity(function_capacity.continue_targets),
         handlers: Vec::with_capacity(function_capacity.handlers),
         finally_depth: 0,
+        environment_depth: 0,
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: false,
         root_scope,
         function_scope: Some(function.scope),
+        active_scope: function.scope,
         environments,
     };
     let synthetic_terminal = if function.kind == HirFunctionKind::DefaultDerivedConstructor {
