@@ -650,6 +650,7 @@ impl Lowerer<'_> {
             crate::HirClassElement::PublicField(field) => !field.is_static,
             crate::HirClassElement::PrivateField(_) => true,
             crate::HirClassElement::PrivateMethod(_) => true,
+            crate::HirClassElement::PrivateAccessor(_) => true,
             crate::HirClassElement::StaticBlock(_) => false,
         }) {
             let target = self.register()?;
@@ -680,12 +681,18 @@ impl Lowerer<'_> {
             })
             .count();
         let mut instance_fields = Vec::with_capacity(instance_field_count);
-        let private_method_count = class
+        let private_element_count = class
             .elements
             .iter()
-            .filter(|element| matches!(element, crate::HirClassElement::PrivateMethod(_)))
+            .filter(|element| {
+                matches!(
+                    element,
+                    crate::HirClassElement::PrivateMethod(_)
+                        | crate::HirClassElement::PrivateAccessor(_)
+                )
+            })
             .count();
-        let mut private_methods = Vec::with_capacity(private_method_count);
+        let mut private_elements = Vec::with_capacity(private_element_count);
         for element in class.elements.iter() {
             match element {
                 crate::HirClassElement::Method(method) => {
@@ -758,12 +765,44 @@ impl Lowerer<'_> {
                         instance_target.expect("private method requires class prototype"),
                         method.span,
                     )?;
-                    private_methods.push(PendingInstanceElement {
+                    private_elements.push(PendingInstanceElement {
                         key: LoweredClassKey::Computed(key),
                         payload: Some(closure),
                         infer_name: false,
                         kind: ClassInstanceElementKind::PrivateMethod,
                         span: method.span,
+                    });
+                }
+                crate::HirClassElement::PrivateAccessor(accessor) => {
+                    let key = self.load_private_name(&accessor.name, accessor.span)?;
+                    let getter = match accessor.getter {
+                        Some(getter) => self.create_private_method(
+                            getter,
+                            instance_target.expect("private accessor requires class prototype"),
+                            accessor.span,
+                        )?,
+                        None => self.load_undefined(accessor.span)?,
+                    };
+                    let setter = match accessor.setter {
+                        Some(setter) => self.create_private_method(
+                            setter,
+                            instance_target.expect("private accessor requires class prototype"),
+                            accessor.span,
+                        )?,
+                        None => self.load_undefined(accessor.span)?,
+                    };
+                    let pair = self.register()?;
+                    self.emit(
+                        Opcode::CreateAccessorPair,
+                        &[pair.index(), getter.index(), setter.index()],
+                        accessor.span,
+                    )?;
+                    private_elements.push(PendingInstanceElement {
+                        key: LoweredClassKey::Computed(key),
+                        payload: Some(pair),
+                        infer_name: false,
+                        kind: ClassInstanceElementKind::PrivateAccessor,
+                        span: accessor.span,
                     });
                 }
                 crate::HirClassElement::StaticBlock(block) => {
@@ -776,8 +815,8 @@ impl Lowerer<'_> {
                 }
             }
         }
-        if !private_methods.is_empty() || !instance_fields.is_empty() {
-            self.attach_instance_elements(destination, &private_methods, &instance_fields, span)?;
+        if !private_elements.is_empty() || !instance_fields.is_empty() {
+            self.attach_instance_elements(destination, &private_elements, &instance_fields, span)?;
         }
         if class.name_binding.is_some() {
             self.emit(
@@ -1007,11 +1046,11 @@ impl Lowerer<'_> {
     fn attach_instance_elements(
         &mut self,
         constructor: RegisterId,
-        private_methods: &[PendingInstanceElement],
+        private_elements: &[PendingInstanceElement],
         fields: &[PendingInstanceElement],
         span: SourceSpan,
     ) -> Result<(), CompileError> {
-        let element_count = private_methods
+        let element_count = private_elements
             .len()
             .checked_add(fields.len())
             .ok_or(CompileError::RegisterOverflow)?;
@@ -1021,7 +1060,7 @@ impl Lowerer<'_> {
         for _ in 1..register_count {
             self.register()?;
         }
-        for (index, field) in private_methods.iter().chain(fields).enumerate() {
+        for (index, field) in private_elements.iter().chain(fields).enumerate() {
             let offset = u32::try_from(index)
                 .map_err(|_| CompileError::RegisterOverflow)?
                 .checked_mul(4)

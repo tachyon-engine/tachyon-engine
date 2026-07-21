@@ -1,6 +1,7 @@
 //! Unforgeable private data slots backed by hidden shape keys.
 
 use super::super::*;
+use super::accessor::StoredProperty;
 
 struct ProxyPrivateStorageRoots<'a> {
     vm: VmRoots<'a>,
@@ -44,7 +45,7 @@ impl Isolate {
         name: Value,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        self.define_private_element(receiver, name, value, true)
+        self.define_private_element(receiver, name, value, PropertyKind::Data, true)
     }
 
     /// Adds one immutable private method without exposing its storage as an ordinary descriptor.
@@ -54,7 +55,23 @@ impl Isolate {
         name: Value,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        self.define_private_element(receiver, name, value, false)
+        self.define_private_element(receiver, name, value, PropertyKind::Data, false)
+    }
+
+    /// Adds one shared getter/setter pair behind an unobservable private accessor slot.
+    pub(crate) fn define_private_accessor(
+        &mut self,
+        receiver: Value,
+        name: Value,
+        pair: Value,
+    ) -> Result<(), ExecutionError> {
+        let raw = pair
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedAccessorDescriptor)?;
+        self.heap
+            .checked_reference(raw, self.types.accessor_pair)
+            .map_err(ExecutionError::HeapReference)?;
+        self.define_private_element(receiver, name, pair, PropertyKind::Accessor, false)
     }
 
     /// Shares private brand insertion while retaining the element kind's writability contract.
@@ -63,6 +80,7 @@ impl Isolate {
         receiver: Value,
         name: Value,
         value: Value,
+        kind: PropertyKind,
         writable: bool,
     ) -> Result<(), ExecutionError> {
         let key = self.private_property_key(name)?;
@@ -76,10 +94,11 @@ impl Isolate {
         if self.shapes.lookup(snapshot.shape, key).is_some() {
             return Err(ExecutionError::PrivateBrandCheckFailed(receiver));
         }
-        self.add_property_slot(
+        self.add_property_slot_with_kind(
             object,
             snapshot,
             key,
+            kind,
             value,
             PropertyAttributes::data(writable, false, false),
         )
@@ -90,7 +109,7 @@ impl Isolate {
         &mut self,
         receiver: Value,
         name: Value,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<PropertyRead, ExecutionError> {
         let key = self.private_property_key(name)?;
         let Some(storage_receiver) = self.proxy_private_storage(receiver, false)? else {
             return Err(ExecutionError::PrivateBrandCheckFailed(receiver));
@@ -100,8 +119,16 @@ impl Isolate {
             .shapes
             .lookup(snapshot.shape, key)
             .ok_or(ExecutionError::PrivateBrandCheckFailed(receiver))?;
-        self.property_value_from_snapshot(snapshot, property)?
-            .ok_or(ExecutionError::PrivateBrandCheckFailed(receiver))
+        match self.stored_property_from_snapshot(snapshot, property)? {
+            Some(StoredProperty::Data(value)) => Ok(PropertyRead::Data(value)),
+            Some(StoredProperty::Accessor { pair, .. }) => {
+                if pair.getter.as_immediate() == Some(Immediate::Undefined) {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
+                Ok(PropertyRead::Accessor(pair.getter))
+            }
+            None => Err(ExecutionError::PrivateBrandCheckFailed(receiver)),
+        }
     }
 
     /// Writes an existing own private field while preserving its unobservable shape metadata.
@@ -110,7 +137,7 @@ impl Isolate {
         receiver: Value,
         name: Value,
         value: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<PropertyWrite, ExecutionError> {
         let key = self.private_property_key(name)?;
         let Some(storage_receiver) = self.proxy_private_storage(receiver, false)? else {
             return Err(ExecutionError::PrivateBrandCheckFailed(receiver));
@@ -120,16 +147,22 @@ impl Isolate {
             .shapes
             .lookup(snapshot.shape, key)
             .ok_or(ExecutionError::PrivateBrandCheckFailed(receiver))?;
-        if !property.attributes.writable() {
-            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        match self.stored_property_from_snapshot(snapshot, property)? {
+            Some(StoredProperty::Data(_)) => {
+                if !property.attributes.writable() {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
+                self.update_property_slot(snapshot, key, property.slot, value)?;
+                Ok(PropertyWrite::Complete(true))
+            }
+            Some(StoredProperty::Accessor { pair, .. }) => {
+                if pair.setter.as_immediate() == Some(Immediate::Undefined) {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
+                Ok(PropertyWrite::Setter(pair.setter))
+            }
+            None => Err(ExecutionError::PrivateBrandCheckFailed(receiver)),
         }
-        if self
-            .raw_property_value_from_snapshot(snapshot, property)?
-            .is_none()
-        {
-            return Err(ExecutionError::PrivateBrandCheckFailed(receiver));
-        }
-        self.update_property_slot(snapshot, key, property.slot, value)
     }
 
     /// Returns the ordinary sidecar used for private slots on a Proxy, allocating it lazily.

@@ -962,14 +962,57 @@ impl Isolate {
             Opcode::GetPrivate => {
                 let object = self.read(base, operands[1])?;
                 let name = self.read(base, operands[2])?;
-                let value = self.get_private_field(object, name)?;
-                self.write(base, operands[0], value)?;
+                match self.get_private_field(object, name)? {
+                    PropertyRead::Data(value) => self.write(base, operands[0], value)?,
+                    PropertyRead::Accessor(callee) => {
+                        return self.dispatch_property_callback(
+                            NativeContinuation::property_get(
+                                NativeContinuationSite {
+                                    caller_base: base,
+                                    destination: operands[0],
+                                    call_site: instruction_offset,
+                                },
+                                PropertyCallbackMode::Ordinary,
+                                object,
+                            ),
+                            callee,
+                        );
+                    }
+                    PropertyRead::Missing => {
+                        return Err(ExecutionError::PrivateBrandCheckFailed(object));
+                    }
+                }
             }
             Opcode::SetPrivate => {
                 let object = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
                 let name = self.read(base, operands[2])?;
-                self.set_private_field(object, name, value)?;
+                match self.set_private_field(object, name, value)? {
+                    PropertyWrite::Complete(true) => {}
+                    PropertyWrite::Complete(false) => {
+                        return Err(ExecutionError::ReadOnlyProperty(object));
+                    }
+                    PropertyWrite::Setter(callee) => {
+                        return self.dispatch_property_callback(
+                            NativeContinuation::property_set(
+                                NativeContinuationSite {
+                                    caller_base: base,
+                                    destination: operands[1],
+                                    call_site: instruction_offset,
+                                },
+                                object,
+                                value,
+                            ),
+                            callee,
+                        );
+                    }
+                }
+            }
+            Opcode::CreateAccessorPair => {
+                let getter = self.read(base, operands[1])?;
+                let setter = self.read(base, operands[2])?;
+                let pair = self.allocate_private_accessor_pair(getter, setter)?;
+                self.write(base, operands[0], pair)?;
             }
             Opcode::InitializeInstanceElements => {
                 return self.initialize_instance_elements(NativeContinuationSite {
@@ -2499,13 +2542,6 @@ impl Isolate {
                     .and_then(|slot| slot.checked_add(3))
                     .ok_or(ExecutionError::InvalidClassFieldPlan)?,
             )?;
-            let payload = if payload.as_immediate() == Some(Immediate::Undefined) {
-                None
-            } else {
-                self.resolve_function_object(payload)
-                    .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
-                Some(payload)
-            };
             let infer_name = match infer_name.as_immediate() {
                 Some(Immediate::True) => true,
                 Some(Immediate::False) => false,
@@ -2516,7 +2552,27 @@ impl Isolate {
                 .and_then(|kind| u32::try_from(kind).ok())
                 .and_then(ClassInstanceElementKind::from_operand)
                 .ok_or(ExecutionError::InvalidClassFieldPlan)?;
-            if kind == ClassInstanceElementKind::PrivateMethod && payload.is_none() {
+            let payload = if payload.as_immediate() == Some(Immediate::Undefined) {
+                None
+            } else {
+                let raw = payload
+                    .as_heap_ref()
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+                if kind == ClassInstanceElementKind::PrivateAccessor {
+                    self.heap
+                        .checked_reference(raw, self.types.accessor_pair)
+                        .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
+                } else {
+                    self.resolve_function_object(payload)
+                        .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
+                }
+                Some(payload)
+            };
+            if matches!(
+                kind,
+                ClassInstanceElementKind::PrivateMethod | ClassInstanceElementKind::PrivateAccessor
+            ) && payload.is_none()
+            {
                 return Err(ExecutionError::InvalidClassFieldPlan);
             }
             records.push(ClassInstanceElementRecord {
@@ -2666,6 +2722,21 @@ impl Isolate {
             };
             if record.kind == ClassInstanceElementKind::PrivateMethod {
                 self.define_private_method(
+                    pending.receiver,
+                    record
+                        .key
+                        .symbol_identity()
+                        .map(SymbolId::value)
+                        .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+                    record
+                        .payload
+                        .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+                )?;
+                self.increment_instance_element_index(state)?;
+                continue;
+            }
+            if record.kind == ClassInstanceElementKind::PrivateAccessor {
+                self.define_private_accessor(
                     pending.receiver,
                     record
                         .key

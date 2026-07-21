@@ -293,6 +293,7 @@ pub enum ClassInstanceElementKind {
     PublicField = 0,
     PrivateField = 1,
     PrivateMethod = 2,
+    PrivateAccessor = 3,
 }
 
 impl ClassInstanceElementKind {
@@ -302,13 +303,17 @@ impl ClassInstanceElementKind {
             0 => Some(Self::PublicField),
             1 => Some(Self::PrivateField),
             2 => Some(Self::PrivateMethod),
+            3 => Some(Self::PrivateAccessor),
             _ => None,
         }
     }
 
     #[must_use]
     pub const fn is_private(self) -> bool {
-        matches!(self, Self::PrivateField | Self::PrivateMethod)
+        matches!(
+            self,
+            Self::PrivateField | Self::PrivateMethod | Self::PrivateAccessor
+        )
     }
 }
 

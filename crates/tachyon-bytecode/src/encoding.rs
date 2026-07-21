@@ -271,9 +271,11 @@ pub enum Opcode {
     GetPrivate = 112,
     /// Writes one existing own private data slot using an engine-private name value.
     SetPrivate = 113,
+    /// Allocates one normalized getter/setter pair during class evaluation.
+    CreateAccessorPair = 114,
 }
 
-pub(super) const OPCODE_COUNT: usize = 114;
+pub(super) const OPCODE_COUNT: usize = 115;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -389,10 +391,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     2, // CreatePrivateName
     3, // GetPrivate
     3, // SetPrivate
+    3, // CreateAccessorPair
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::SetPrivate as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CreateAccessorPair as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -552,6 +555,7 @@ impl Opcode {
             47 => Some(Self::CreatePrivateName),
             48 => Some(Self::GetPrivate),
             49 => Some(Self::SetPrivate),
+            50 => Some(Self::CreateAccessorPair),
             _ => None,
         }
     }

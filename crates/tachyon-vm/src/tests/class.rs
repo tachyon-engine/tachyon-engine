@@ -171,8 +171,12 @@ class Derived extends Base {
   #value = 2;
   #first = this.#method();
   #method() { return this.#value; }
+  get #double() { return this.#value * 2; }
+  set #double(next) { this.#value = next / 2; }
   read() { return this.#value; }
   readFirst() { return this.#first; }
+  readDouble() { return this.#double; }
+  writeDouble(next) { this.#double = next; return this.#value; }
   update() { return ++this.#value; }
   readMethod() { return this.#method; }
   constructor() { super(); }
@@ -181,9 +185,11 @@ var value = new Derived();
 var other = new Derived();
 var read = Derived.prototype.read;
 var readFirst = Derived.prototype.readFirst;
+var readDouble = Derived.prototype.readDouble;
+var writeDouble = Derived.prototype.writeDouble;
 var update = Derived.prototype.update;
 var readMethod = Derived.prototype.readMethod;
-readFirst.call(value) === 2 && read.call(value) === 2 && update.call(value) === 3 && read.call(value) === 3 && readMethod.call(value) === readMethod.call(other) && traps === 0;
+readFirst.call(value) === 2 && readDouble.call(value) === 4 && update.call(value) === 3 && writeDouble.call(value, 10) === 5 && read.call(value) === 5 && readMethod.call(value) === readMethod.call(other) && traps === 0;
 "#;
 
 const STATIC_BLOCK_SOURCE: &str = r#"

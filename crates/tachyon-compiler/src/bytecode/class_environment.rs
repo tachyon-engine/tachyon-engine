@@ -220,6 +220,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnviro
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
                     crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::PrivateMethod(_) => None,
+                    crate::HirClassElement::PrivateAccessor(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {

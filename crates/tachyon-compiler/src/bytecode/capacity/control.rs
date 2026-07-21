@@ -792,6 +792,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
                     crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::PrivateMethod(_) => None,
+                    crate::HirClassElement::PrivateAccessor(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(crate::HirObjectPropertyKey::Computed(key)) = key {

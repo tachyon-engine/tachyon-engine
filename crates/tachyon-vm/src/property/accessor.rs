@@ -420,6 +420,33 @@ impl Isolate {
         getter: Value,
         setter: Value,
     ) -> Result<(Value, Value), ExecutionError> {
+        let symbol_key = key.symbol().map(SymbolId::value);
+        self.allocate_unpublished_accessor_pair(receiver, symbol_key, getter, setter)
+    }
+
+    /// Allocates one class-private accessor pair shared by every stamped instance.
+    pub(crate) fn allocate_private_accessor_pair(
+        &mut self,
+        getter: Value,
+        setter: Value,
+    ) -> Result<Value, ExecutionError> {
+        self.allocate_unpublished_accessor_pair(
+            Value::from_immediate(Immediate::Undefined),
+            None,
+            getter,
+            setter,
+        )
+        .map(|(_, pair)| pair)
+    }
+
+    /// Publishes one pair while independently rooting optional receiver and Symbol edges.
+    fn allocate_unpublished_accessor_pair(
+        &mut self,
+        receiver: Value,
+        symbol_key: Option<Value>,
+        getter: Value,
+        setter: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
         self.validate_accessor_callable(getter)?;
         self.validate_accessor_callable(setter)?;
         let mut roots = AccessorAllocationRoots {
@@ -431,7 +458,7 @@ impl Isolate {
                 loaded_code: &mut self.loaded_code,
             },
             receiver,
-            symbol_key: key.symbol().map(SymbolId::value),
+            symbol_key,
             getter,
             setter,
         };

@@ -236,6 +236,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                     HirClassElement::PublicField(field) => Some(&field.key),
                     HirClassElement::PrivateField(_) => None,
                     HirClassElement::PrivateMethod(_) => None,
+                    HirClassElement::PrivateAccessor(_) => None,
                     HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {

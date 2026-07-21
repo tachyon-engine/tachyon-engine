@@ -878,6 +878,49 @@ fn compiler_freezes_private_method_call_receiver() {
     assert!(!call_method.contains("Call r"));
 }
 
+#[test]
+/// Merges a private getter/setter pair and freezes one shared accessor payload.
+fn compiler_freezes_private_accessor_pair() {
+    let source = source(
+        MediaType::JavaScript,
+        "class C { get #value() { return 1; } set #value(next) {} read() { return this.#value; } } C;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let class = hir
+        .statements()
+        .iter()
+        .find_map(|statement| match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => declaration
+                .declarators
+                .iter()
+                .find_map(|declarator| match declarator.initializer.as_ref() {
+                    Some(HirExpression {
+                        kind: HirExpressionKind::Class(class),
+                        ..
+                    }) => Some(class),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .expect("class declaration retains one HIR class expression");
+    let accessor = class
+        .elements
+        .iter()
+        .find_map(|element| match element {
+            HirClassElement::PrivateAccessor(accessor) => Some(accessor),
+            _ => None,
+        })
+        .expect("private getter and setter merge into one HIR element");
+    assert!(accessor.getter.is_some());
+    assert!(accessor.setter.is_some());
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("CreateAccessorPair").count(), 1);
+    assert_eq!(entry.matches("AttachInstanceFields").count(), 1);
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

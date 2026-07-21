@@ -169,6 +169,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::AttachInstanceFields,
                 Opcode::GetPrivate,
                 Opcode::SetPrivate,
+                Opcode::CreateAccessorPair,
             ],
         ),
         (

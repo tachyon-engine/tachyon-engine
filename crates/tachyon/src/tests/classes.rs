@@ -356,6 +356,38 @@ fn private_instance_field_semantics() {
             1_128,
             "class C { #method() { return 1; } overwrite() { this.#method = 2; } update() { this.#method++; } } var value = new C(); var assignment = false; var update = false; try { value.overwrite(); } catch (error) { assignment = error instanceof TypeError; } try { value.update(); } catch (error) { update = error instanceof TypeError; } assignment && update;",
         ),
+        (
+            1_129,
+            "class C { #value = 1; get #accessor() { return this.#value + 1; } set #accessor(next) { this.#value = next - 1; } read() { return this.#accessor; } write(next) { return this.#accessor = next; } value() { return this.#value; } } var value = new C(); value.read() === 2 && value.write(8) === 8 && value.value() === 7;",
+        ),
+        (
+            1_130,
+            "class C { get #readOnly() { return 1; } set #writeOnly(value) {} readMissing() { return this.#writeOnly; } writeMissing() { this.#readOnly = 2; } } var value = new C(); var read = false; var write = false; try { value.readMissing(); } catch (error) { read = error instanceof TypeError; } try { value.writeMissing(); } catch (error) { write = error instanceof TypeError; } read && write;",
+        ),
+        (
+            1_131,
+            "class Base { value() { return 4; } } class C extends Base { get #value() { return super.value() + 1; } read() { return this.#value; } } new C().read() === 5;",
+        ),
+        (
+            1_132,
+            "var traps = 0; class Base { constructor() { return new Proxy({}, { get() { traps++; }, set() { traps++; }, defineProperty() { traps++; } }); } } class C extends Base { #value = 2; get #accessor() { return this.#value; } set #accessor(next) { this.#value = next; } read() { return this.#accessor; } write(next) { this.#accessor = next; } constructor() { super(); } } var value = new C(); var first = C.prototype.read.call(value); C.prototype.write.call(value, 4); first === 2 && C.prototype.read.call(value) === 4 && traps === 0;",
+        ),
+        (
+            1_133,
+            "class Base { constructor() { return Object.preventExtensions({}); } } class C extends Base { get #accessor() { return 1; } constructor() { super(); } } var threw = false; try { new C(); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_134,
+            "class C { get #value() { throw 1; } set #value(next) { throw next; } read() { return this.#value; } write() { this.#value = 2; } } var value = new C(); var read = 0; var write = 0; try { value.read(); } catch (error) { read = error; } try { value.write(); } catch (error) { write = error; } read === 1 && write === 2;",
+        ),
+        (
+            1_135,
+            "var log = ''; class C { #stored = 1; get #value() { log += 'g'; return this.#stored; } set #value(next) { log += 's'; this.#stored = next; } add() { this.#value += (log += 'r', 2); } update() { return this.#value++; } read() { return this.#stored; } } var value = new C(); value.add(); var old = value.update(); log === 'grsgs' && old === 3 && value.read() === 4;",
+        ),
+        (
+            1_136,
+            "class C { #a; #b; #c; get #readA() { return this.#a; } get #readB() { return this.#b; } get #readC() { return this.#c; } a(value) { this.#a = value; return this.#readA; } b(value) { this.#b = value; return this.#readB; } c(value) { this.#c = value; return this.#readC; } } var value = new C(); value.a(1) === 1 && value.b(2) === 2 && value.c(3) === 3;",
+        ),
     ] {
         assert_eq!(
             execute_source(source_id, source).as_immediate(),

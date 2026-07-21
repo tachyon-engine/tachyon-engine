@@ -325,7 +325,8 @@ impl BytecodeBuilder {
             | Opcode::DefineSetterByValue
             | Opcode::CopyDataProperties
             | Opcode::GetPrivate
-            | Opcode::SetPrivate => &[0, 1, 2],
+            | Opcode::SetPrivate
+            | Opcode::CreateAccessorPair => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],

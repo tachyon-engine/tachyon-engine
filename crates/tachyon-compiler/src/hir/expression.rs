@@ -75,6 +75,7 @@ pub enum HirClassElement {
     PublicField(HirClassField),
     PrivateField(HirPrivateField),
     PrivateMethod(HirPrivateMethod),
+    PrivateAccessor(HirPrivateAccessor),
     StaticBlock(HirClassStaticBlock),
 }
 
@@ -102,6 +103,14 @@ pub struct HirPrivateMethod {
     pub span: SourceSpan,
     pub name: HirPrivateName,
     pub function: FunctionStencilId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirPrivateAccessor {
+    pub span: SourceSpan,
+    pub name: HirPrivateName,
+    pub getter: Option<FunctionStencilId>,
+    pub setter: Option<FunctionStencilId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -893,15 +902,14 @@ pub(super) fn lower_class(
                 }
                 validate_class_method(method, source)?;
                 if let PropertyKey::PrivateIdentifier(identifier) = &method.key {
-                    if method.kind != oxc::ast::ast::MethodDefinitionKind::Method {
-                        return Err(unsupported(
-                            source.name(),
-                            source_span(method.span),
-                            "private class accessor",
-                        ));
-                    }
                     let name = private_name_definition(class, identifier, source, semantic)?;
-                    let function_name: Arc<str> = Arc::from(format!("#{}", name.name));
+                    let prefix = match method.kind {
+                        oxc::ast::ast::MethodDefinitionKind::Method => "",
+                        oxc::ast::ast::MethodDefinitionKind::Get => "get ",
+                        oxc::ast::ast::MethodDefinitionKind::Set => "set ",
+                        oxc::ast::ast::MethodDefinitionKind::Constructor => unreachable!(),
+                    };
+                    let function_name: Arc<str> = Arc::from(format!("{prefix}#{}", name.name));
                     let function = lower_function_stencil(
                         &method.value,
                         Some(function_name),
@@ -915,11 +923,37 @@ pub(super) fn lower_class(
                         .expect("new private method stencil remains published");
                     stencil.strict = true;
                     stencil.kind = super::program::HirFunctionKind::ClassMethod;
-                    elements.push(HirClassElement::PrivateMethod(HirPrivateMethod {
-                        span: source_span(method.span),
-                        name,
-                        function,
-                    }));
+                    if method.kind == oxc::ast::ast::MethodDefinitionKind::Method {
+                        elements.push(HirClassElement::PrivateMethod(HirPrivateMethod {
+                            span: source_span(method.span),
+                            name,
+                            function,
+                        }));
+                    } else if let Some(accessor) =
+                        elements.iter_mut().find_map(|element| match element {
+                            HirClassElement::PrivateAccessor(accessor)
+                                if accessor.name.id == name.id =>
+                            {
+                                Some(accessor)
+                            }
+                            _ => None,
+                        })
+                    {
+                        if method.kind == oxc::ast::ast::MethodDefinitionKind::Get {
+                            accessor.getter = Some(function);
+                        } else {
+                            accessor.setter = Some(function);
+                        }
+                    } else {
+                        elements.push(HirClassElement::PrivateAccessor(HirPrivateAccessor {
+                            span: source_span(method.span),
+                            name,
+                            getter: (method.kind == oxc::ast::ast::MethodDefinitionKind::Get)
+                                .then_some(function),
+                            setter: (method.kind == oxc::ast::ast::MethodDefinitionKind::Set)
+                                .then_some(function),
+                        }));
+                    }
                     continue;
                 }
                 let key = lower_class_key(
@@ -1083,6 +1117,7 @@ pub(super) fn lower_class(
         matches!(element, HirClassElement::PublicField(field) if !field.is_static)
             || matches!(element, HirClassElement::PrivateField(_))
             || matches!(element, HirClassElement::PrivateMethod(_))
+            || matches!(element, HirClassElement::PrivateAccessor(_))
     }) {
         functions
             .get_mut(constructor.index() as usize)
