@@ -145,6 +145,9 @@ impl Isolate {
             promise_object: registry
                 .try_register("PromiseObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            promise_resolution_cell: registry
+                .try_register("PromiseResolutionCell")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             promise_reaction: registry
                 .try_register("PromiseReaction")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1179,7 +1182,9 @@ impl Isolate {
             let virtual_count = match self.resolve_function_object(current) {
                 Ok(function) => match function.executable {
                     FunctionExecutable::Native(_) => 3,
-                    FunctionExecutable::Bound(_) | FunctionExecutable::ProxyRevoker(_) => 2,
+                    FunctionExecutable::Bound(_)
+                    | FunctionExecutable::ProxyRevoker(_)
+                    | FunctionExecutable::PromiseResolver { .. } => 2,
                     FunctionExecutable::Bytecode { .. } => 3,
                 },
                 Err(_) => 0,

@@ -1005,6 +1005,10 @@ pub(crate) enum FunctionExecutable {
     Native(NativeFunction),
     Bound(GcRef<BoundFunctionData>),
     ProxyRevoker(Value),
+    PromiseResolver {
+        cell: GcRef<PromiseResolutionCell>,
+        reject: bool,
+    },
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1207,6 +1211,9 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::ProxyRevoker(proxy) = &mut self.executable {
             proxy.trace(tracer);
         }
+        if let FunctionExecutable::PromiseResolver { cell, .. } = &mut self.executable {
+            cell.trace(tracer);
+        }
         self.function_prototype.trace(tracer);
         self.ordinary.trace(tracer);
     }
@@ -1238,6 +1245,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_proxy_define: GcType<PendingProxyDefine>,
     pub(crate) promise_object: GcType<PromiseObject>,
+    pub(crate) promise_resolution_cell: GcType<PromiseResolutionCell>,
     #[allow(dead_code, reason = "allocated by the Promise.then reaction slice")]
     pub(crate) promise_reaction: GcType<PromiseReaction>,
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,

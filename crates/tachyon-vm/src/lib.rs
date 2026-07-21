@@ -91,7 +91,9 @@ use object::{
     PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId,
     SymbolObject, SymbolPropertyKey,
 };
-use promise::{PromiseJobQueue, PromiseObject, PromiseReaction, PromiseState};
+use promise::{
+    PromiseJobQueue, PromiseObject, PromiseReaction, PromiseResolutionCell, PromiseState,
+};
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
 use proxy::{

@@ -467,6 +467,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
     MapGetOrInsertComputed,
+    PromiseExecutor,
     ConversionCallRoot,
 }
 
@@ -695,6 +696,20 @@ impl NativeContinuation {
             kind: NativeContinuationKind::ProxyDefine { mode, stage },
             first: state,
             second: retained,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn promise_executor(
+        site: NativeContinuationSite,
+        promise: Value,
+        arguments: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseExecutor,
+            first: promise,
+            second: arguments,
         }
     }
 

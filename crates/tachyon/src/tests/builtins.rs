@@ -23,6 +23,51 @@ fn promise_static_resolution_allocates_branded_objects() {
 }
 
 #[test]
+/// Calls Promise executors synchronously and converts executor throws into rejection.
+fn promise_constructor_uses_resolving_functions_and_consumes_executor_throw() {
+    for (source_id, source) in [
+        (
+            1_025,
+            "let calls = 0; let p = new Promise(function(resolve, reject) { calls = calls + 1; resolve(3); reject(4); }); calls === 1 && p instanceof Promise;",
+        ),
+        (
+            1_026,
+            "let calls = 0; let p = new Promise(function() { calls = calls + 1; throw 7; }); calls === 1 && p instanceof Promise;",
+        ),
+        (
+            1_027,
+            "let caught = false; try { new Promise(1); } catch (error) { caught = error instanceof TypeError; } caught;",
+        ),
+        (
+            1_028,
+            "let resolve, reject, count; new Promise(function(a, b) { resolve = a; reject = b; count = arguments.length; }); typeof resolve === 'function' && resolve.length === 1 && resolve.name === '' && typeof reject === 'function' && reject.length === 1 && count === 2;",
+        ),
+        (
+            1_029,
+            "let captured; new Promise(function() { 'use strict'; captured = this; }); captured === undefined;",
+        ),
+        (
+            1_030,
+            "var resolve, reject, count; new Promise(function(a, b) { resolve = a; reject = b; count = arguments.length; }); typeof resolve === 'function' && resolve.length === 1 && resolve.name === '' && typeof reject === 'function' && reject.length === 1 && count === 2;",
+        ),
+        (
+            1_031,
+            "function Target() {} Target.prototype = {}; let p = Reflect.construct(Promise, [function() {}], Target); Object.getPrototypeOf(p) === Target.prototype;",
+        ),
+        (
+            1_032,
+            "let threw = false; let p; try { p = new Promise(Array.prototype.push); } catch (error) { threw = true; } !threw && p instanceof Promise;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(tachyon_value::Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Drains standard Array iterables through the Map and Set constructor protocol.
 fn collection_constructors_consume_array_iterables() {
     assert_eq!(

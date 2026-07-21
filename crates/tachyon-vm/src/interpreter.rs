@@ -1447,6 +1447,9 @@ impl Isolate {
             NativeContinuationKind::MapGetOrInsertComputed => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseExecutor => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -2082,6 +2085,9 @@ impl Isolate {
                     let proxy = self.create_proxy_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, proxy);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseConstructor) => {
+                    return self.begin_promise_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -2106,6 +2112,9 @@ impl Isolate {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
                 FunctionExecutable::ProxyRevoker(_) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::PromiseResolver { .. } => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
             }
@@ -2190,6 +2199,17 @@ impl Isolate {
                 }
                 FunctionExecutable::ProxyRevoker(_) => {
                     self.revoke_proxy_from_function(site.callee)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::PromiseResolver { cell, reject } => {
+                    let resolution = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    self.call_promise_resolver(cell, reject, resolution)?;
                     return self.write(
                         site.caller_base,
                         site.destination,
@@ -3121,6 +3141,7 @@ impl Isolate {
                 self.is_constructor_value(target)?
             }
             FunctionExecutable::ProxyRevoker(_) => false,
+            FunctionExecutable::PromiseResolver { .. } => false,
             FunctionExecutable::Bytecode { .. } => true,
         })
     }
@@ -3589,6 +3610,9 @@ impl Isolate {
                     let state = self.pending_map_upsert_reference(continuation.first())?;
                     self.resume_map_get_or_insert_computed(site, state, value)
                 }
+                NativeContinuationKind::PromiseExecutor => {
+                    self.write(site.caller_base, site.destination, continuation.first())
+                }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")
                 }
@@ -3711,6 +3735,15 @@ impl Isolate {
             self.fiber
                 .completions
                 .truncate(frame.completion_base as usize);
+            if frame.return_continuation {
+                let continuation = self.pop_native_continuation()?;
+                if continuation.kind() == NativeContinuationKind::PromiseExecutor {
+                    self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
+                    let site = continuation.site();
+                    self.write(site.caller_base, site.destination, continuation.first())?;
+                    return Ok(None);
+                }
+            }
             instruction_offset = frame
                 .call_site
                 .expect("every non-entry frame records its caller call-site");
@@ -3954,7 +3987,7 @@ impl Isolate {
     }
 
     #[inline]
-    fn completion_stack_error(error: CompletionStackError) -> ExecutionError {
+    pub(crate) fn completion_stack_error(error: CompletionStackError) -> ExecutionError {
         match error {
             CompletionStackError::Limit { limit, requested } => {
                 ExecutionError::CompletionStackLimit { limit, requested }
