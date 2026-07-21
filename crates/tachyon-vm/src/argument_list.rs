@@ -248,6 +248,7 @@ impl Isolate {
             destination: site.destination,
             callee: snapshot.target,
             argument_base: 0,
+            argument_source: None,
             argument_prefix: Some(prefix),
             argument_prefix_offset: 0,
             argument_prefix_count: snapshot.length,

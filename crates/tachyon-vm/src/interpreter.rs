@@ -1090,6 +1090,7 @@ impl Isolate {
                         .checked_add(operands[1])
                         .and_then(|base| base.checked_add(1))
                         .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_source: None,
                     argument_prefix: None,
                     argument_prefix_offset: 0,
                     argument_prefix_count: 0,
@@ -1111,6 +1112,7 @@ impl Isolate {
                         .checked_add(operands[1])
                         .and_then(|base| base.checked_add(2))
                         .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_source: None,
                     argument_prefix: None,
                     argument_prefix_offset: 0,
                     argument_prefix_count: 0,
@@ -1326,7 +1328,7 @@ impl Isolate {
         callee: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let site = continuation.site();
-        let (receiver, argument_base, argument_count) = match continuation.kind() {
+        let (receiver, argument_base, argument_source, argument_count) = match continuation.kind() {
             NativeContinuationKind::PropertyGet(mode) => {
                 let receiver = continuation.first();
                 let receiver = if mode == PropertyCallbackMode::Descriptor {
@@ -1348,17 +1350,18 @@ impl Isolate {
                 } else {
                     receiver
                 };
-                (receiver, 0, 0)
+                (receiver, 0, None, 0)
             }
             NativeContinuationKind::PropertySet(_) => (
                 continuation.first(),
                 site.caller_base
                     .checked_add(site.destination)
                     .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
+                None,
                 1,
             ),
             NativeContinuationKind::Proxy { stage, .. } => match stage {
-                ProxyContinuationStage::TrapGetter => (continuation.second(), 0, 0),
+                ProxyContinuationStage::TrapGetter => (continuation.second(), 0, None, 0),
                 ProxyContinuationStage::TrapCall => {
                     let handler = self.proxy_snapshot(continuation.first())?.handler;
                     (
@@ -1366,10 +1369,28 @@ impl Isolate {
                         site.caller_base
                             .checked_add(site.destination)
                             .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
+                        None,
                         1,
                     )
                 }
                 ProxyContinuationStage::ForwardResult => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            },
+            NativeContinuationKind::ProxySetPrototype { stage, .. } => match stage {
+                ProxySetPrototypeStage::TrapGetter | ProxySetPrototypeStage::TrapCall => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    let pending = self.native_call_state_snapshot(state)?;
+                    let proxy = pending.values[PROXY_ACTIVE_OBJECT];
+                    let handler = self.proxy_snapshot(proxy)?.handler;
+                    if stage == ProxySetPrototypeStage::TrapGetter {
+                        (handler, 0, None, 0)
+                    } else {
+                        (handler, 0, Some(state), 2)
+                    }
+                }
+                ProxySetPrototypeStage::TargetIsExtensible
+                | ProxySetPrototypeStage::TargetGetPrototypeOf => {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             },
@@ -1408,6 +1429,7 @@ impl Isolate {
             destination: site.destination,
             callee,
             argument_base,
+            argument_source,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,
@@ -1492,6 +1514,7 @@ impl Isolate {
             destination: site.destination,
             callee,
             argument_base: 0,
+            argument_source: None,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,
@@ -1823,6 +1846,7 @@ impl Isolate {
         }
         self.fiber.frames.clear();
         self.fiber.argument_objects.clear();
+        self.fiber.argument_sources.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -1863,6 +1887,7 @@ impl Isolate {
             call_site: None,
         });
         self.fiber.argument_objects.push(None);
+        self.fiber.argument_sources.push(None);
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
@@ -1939,6 +1964,7 @@ impl Isolate {
                 .checked_add(callee_register)
                 .and_then(|base| base.checked_add(1))
                 .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+            argument_source: None,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,
@@ -2381,6 +2407,12 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectSetPrototypeOf) => {
+                    if self.dispatch_proxy_set_prototype_from_site(
+                        &site,
+                        ProxySetPrototypeMode::Object,
+                    )? {
+                        return Ok(());
+                    }
                     let value = self.object_set_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
@@ -2455,6 +2487,12 @@ impl Isolate {
                     return self.reflect_set(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectSetPrototypeOf) => {
+                    if self.dispatch_proxy_set_prototype_from_site(
+                        &site,
+                        ProxySetPrototypeMode::Reflect,
+                    )? {
+                        return Ok(());
+                    }
                     let result = self.reflect_set_prototype_of(&site)?;
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
@@ -3047,6 +3085,16 @@ impl Isolate {
             return self.bound_function_argument(data, index).map(Some);
         }
         let suffix_index = index - site.argument_prefix_count;
+        if let Some(source) = site.argument_source {
+            return self.native_call_state_snapshot(source).and_then(|state| {
+                state
+                    .argument(suffix_index)
+                    .map(Some)
+                    .ok_or(ExecutionError::InvalidRegister(RegisterId::new(
+                        suffix_index,
+                    )))
+            });
+        }
         let absolute = site
             .argument_base
             .checked_add(suffix_index)
@@ -3078,6 +3126,7 @@ impl Isolate {
             destination: 0,
             callee: Value::from_immediate(Immediate::Undefined),
             argument_base: frame.argument_base,
+            argument_source: self.fiber.argument_sources.last().copied().flatten(),
             argument_prefix: frame.argument_prefix,
             argument_prefix_offset: frame.argument_prefix_offset,
             argument_prefix_count: frame.argument_prefix_count,
@@ -3119,6 +3168,7 @@ impl Isolate {
             destination: 0,
             callee: Value::from_immediate(Immediate::Undefined),
             argument_base: frame.argument_base,
+            argument_source: self.fiber.argument_sources.last().copied().flatten(),
             argument_prefix: frame.argument_prefix,
             argument_prefix_offset: frame.argument_prefix_offset,
             argument_prefix_count: frame.argument_prefix_count,
@@ -3257,6 +3307,7 @@ impl Isolate {
             call_site: Some(site.call_site),
         });
         self.fiber.argument_objects.push(None);
+        self.fiber.argument_sources.push(site.argument_source);
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
             && let Err(error) = self.allocate_current_environment(
                 target.kind,
@@ -3269,6 +3320,7 @@ impl Isolate {
         {
             self.fiber.frames.pop();
             self.fiber.argument_objects.pop();
+            self.fiber.argument_sources.pop();
             self.fiber.registers.truncate(callee_base as usize);
             return Err(error);
         }
@@ -3311,6 +3363,10 @@ impl Isolate {
             .argument_objects
             .pop()
             .expect("arguments cache stays aligned with active frames");
+        self.fiber
+            .argument_sources
+            .pop()
+            .expect("argument sources stay aligned with active frames");
         let value = match frame.construct_receiver {
             Some(receiver) if !self.is_object_value(value) => receiver,
             _ => value,
@@ -3424,6 +3480,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::Proxy { operation, stage } => self
                     .resume_proxy_internal_method(continuation, operation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxySetPrototype { mode, stage } => self
+                    .resume_proxy_set_prototype(continuation, mode, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =
@@ -3547,6 +3606,14 @@ impl Isolate {
                 .frames
                 .pop()
                 .expect("non-entry abrupt completion retains a callee frame");
+            self.fiber
+                .argument_objects
+                .pop()
+                .expect("arguments cache stays aligned with abrupt frame unwinding");
+            self.fiber
+                .argument_sources
+                .pop()
+                .expect("argument sources stay aligned with abrupt frame unwinding");
             self.fiber.registers.truncate(frame.base as usize);
             self.fiber.handlers.truncate(frame.handler_base as usize);
             self.fiber

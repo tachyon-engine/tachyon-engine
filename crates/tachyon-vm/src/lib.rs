@@ -92,7 +92,7 @@ use object::{
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};
-use proxy::ProxyObject;
+use proxy::{PROXY_ACTIVE_OBJECT, ProxyObject};
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{
@@ -100,7 +100,7 @@ use runtime::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, ErrorIntrinsics, FlatWork, FunctionExecutable, FunctionObject,
         GenericPropertyDescriptor, GlobalNumberFunction, IntrinsicPropertyAtoms, MathFunction,
-        NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
+        NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
         ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
     },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
@@ -112,8 +112,8 @@ use runtime::{
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
         PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,
-        ProxyContinuationStage, ProxyInternalMethod, SymbolAllocationRoots, ToPrimitiveStage,
-        VmRoots, next_to_primitive_stage,
+        ProxyContinuationStage, ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

@@ -1141,6 +1141,7 @@ pub(crate) struct CallSite {
     pub(crate) destination: u32,
     pub(crate) callee: Value,
     pub(crate) argument_base: u32,
+    pub(crate) argument_source: Option<GcRef<NativeCallState>>,
     pub(crate) argument_prefix: Option<GcRef<BoundFunctionData>>,
     pub(crate) argument_prefix_offset: u32,
     pub(crate) argument_prefix_count: u32,
@@ -1149,6 +1150,27 @@ pub(crate) struct CallSite {
     pub(crate) new_target: Value,
     pub(crate) construct_receiver: Option<Value>,
     pub(crate) call_site: WordOffset,
+}
+
+/// Fixed-capacity traced arguments for native state machines that call arbitrary JS functions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NativeCallState {
+    pub(crate) values: [Value; 5],
+    pub(crate) count: u8,
+}
+
+impl NativeCallState {
+    #[inline(always)]
+    pub(crate) fn argument(self, index: u32) -> Option<Value> {
+        (index < u32::from(self.count)).then(|| self.values[index as usize])
+    }
+}
+
+impl Trace for NativeCallState {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.values.trace(tracer);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1204,6 +1226,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
+    pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
     pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,

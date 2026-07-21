@@ -396,6 +396,7 @@ impl Isolate {
             destination: site.destination,
             callee,
             argument_base: 0,
+            argument_source: None,
             argument_prefix: prefix,
             argument_prefix_offset: 0,
             argument_prefix_count: u32::try_from(arguments.len())

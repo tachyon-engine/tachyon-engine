@@ -332,6 +332,22 @@ pub(crate) enum ProxyContinuationStage {
     ForwardResult,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxySetPrototypeMode {
+    Reflect,
+    Object,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxySetPrototypeStage {
+    TrapGetter,
+    TrapCall,
+    TargetIsExtensible,
+    TargetGetPrototypeOf,
+}
+
 /// The observable operation that resumes one Map or Set iterable constructor step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -360,6 +376,10 @@ pub(crate) enum NativeContinuationKind {
     Proxy {
         operation: ProxyInternalMethod,
         stage: ProxyContinuationStage,
+    },
+    ProxySetPrototype {
+        mode: ProxySetPrototypeMode,
+        stage: ProxySetPrototypeStage,
     },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
@@ -498,6 +518,22 @@ impl NativeContinuation {
             },
             first: proxy,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn proxy_set_prototype(
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        stage: ProxySetPrototypeStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxySetPrototype { mode, stage },
+            first: state,
+            second: retained,
         }
     }
 
@@ -685,6 +721,8 @@ pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
     /// Activation-aligned lazy Arguments object roots; avoids growing the hot Frame layout.
     pub(crate) argument_objects: Vec<Option<Value>>,
+    /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.
+    pub(crate) argument_sources: Vec<Option<GcRef<NativeCallState>>>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -699,7 +737,9 @@ impl Fiber {
     pub(crate) fn trace_roots(&mut self, tracer: &mut dyn Tracer) {
         self.registers.trace(tracer);
         self.argument_objects.trace(tracer);
+        self.argument_sources.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
+        debug_assert_eq!(self.argument_sources.len(), self.frames.len());
         for frame in &mut self.frames {
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);

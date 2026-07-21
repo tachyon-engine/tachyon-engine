@@ -52,6 +52,22 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    /// Copies one fixed native argument state through a checked no-GC borrow.
+    pub(crate) fn native_call_state_snapshot(
+        &mut self,
+        state: GcRef<NativeCallState>,
+    ) -> Result<NativeCallState, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.native_call_state)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Registers VM payload descriptors before constructing an otherwise empty isolate heap.
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
@@ -127,6 +143,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_native_property_key: registry
                 .try_register("PendingNativePropertyKey")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            native_call_state: registry
+                .try_register("NativeCallState")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")

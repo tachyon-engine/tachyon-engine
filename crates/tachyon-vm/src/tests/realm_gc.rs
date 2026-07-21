@@ -294,6 +294,7 @@ fn array_flat_work_stack_survives_forced_major_allocations() {
             destination: 0,
             callee: isolate.realm.array_flat.unwrap(),
             argument_base: 1,
+            argument_source: None,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,

@@ -6,6 +6,7 @@ fn proxy_call_site(isolate: &Isolate, argument_count: u32) -> CallSite {
         destination: 0,
         callee: isolate.realm.proxy_constructor.unwrap(),
         argument_base: 0,
+        argument_source: None,
         argument_prefix: None,
         argument_prefix_offset: 0,
         argument_prefix_count: 0,
@@ -99,6 +100,7 @@ fn proxy_revoker_survives_forced_major_and_is_idempotent() {
         destination: 0,
         callee: revoker,
         argument_base: 0,
+        argument_source: None,
         argument_prefix: None,
         argument_prefix_offset: 0,
         argument_prefix_count: 0,
@@ -131,6 +133,78 @@ fn proxy_trap_getter_and_call_resume_for_every_dispatch_batch() {
     assert_proxy_trap_continuation_batch::<4>();
     assert_proxy_trap_continuation_batch::<8>();
     assert_proxy_trap_continuation_batch::<16>();
+}
+
+#[test]
+fn proxy_set_prototype_arguments_resume_for_every_dispatch_batch() {
+    assert_proxy_set_prototype_batch::<1>();
+    assert_proxy_set_prototype_batch::<2>();
+    assert_proxy_set_prototype_batch::<4>();
+    assert_proxy_set_prototype_batch::<8>();
+    assert_proxy_set_prototype_batch::<16>();
+}
+
+/// Verifies the traced native argument source, handler receiver, and invariant after forced major GC.
+fn assert_proxy_set_prototype_batch<const N: usize>() {
+    let module = proxy_set_prototype_module();
+    let mut isolate = test_isolate();
+    let code = isolate.load_module(&module).unwrap();
+    let getter = allocate_proxy_test_function(&mut isolate, code, FunctionId::new(1));
+    let trap = allocate_proxy_test_function(&mut isolate, code, FunctionId::new(2));
+    let target = isolate.create_ordinary_object().unwrap();
+    let prototype = isolate.create_ordinary_object().unwrap();
+    let handler = isolate.create_ordinary_object().unwrap();
+    assert!(
+        isolate
+            .ordinary_set_prototype_of(target, prototype)
+            .unwrap()
+    );
+    let receiver = isolate.object_snapshot(target).unwrap().0;
+    isolate.set_object_extensible(receiver, false).unwrap();
+    let key = isolate.intern_intrinsic_name(b"setPrototypeOf").unwrap();
+    isolate
+        .define_property(
+            handler,
+            key.into(),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: None,
+                enumerable: Some(true),
+                configurable: Some(true),
+            }),
+        )
+        .unwrap();
+    isolate.fiber.registers = vec![target, handler];
+    let proxy = isolate
+        .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+        .unwrap();
+    for (name, value) in [
+        (b"proxy".as_slice(), proxy),
+        (b"trap".as_slice(), trap),
+        (b"expectedTarget".as_slice(), target),
+        (b"expectedPrototype".as_slice(), prototype),
+        (b"expectedHandler".as_slice(), handler),
+    ] {
+        let atom = isolate.intern_intrinsic_name(name).unwrap();
+        isolate.realm.set(atom, value).unwrap();
+    }
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 96,
+                quantum: 96,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value)
+            if value.as_immediate() == Some(Immediate::True)
+    ));
 }
 
 /// Runs an accessor-backed isExtensible trap through two bytecode callbacks and forced major GC.
@@ -248,6 +322,82 @@ fn proxy_is_extensible_module() -> CompiledModule {
             Arc::from("isExtensible"),
             Arc::from("proxy"),
             Arc::from("trap"),
+        ],
+        templates,
+        FunctionId::new(0),
+    )
+    .unwrap()
+}
+
+/// Builds an accessor-backed `Reflect.setPrototypeOf(proxy, prototype)` argument identity check.
+fn proxy_set_prototype_module() -> CompiledModule {
+    let span = SourceSpan { start: 0, end: 1 };
+    let mut entry = BytecodeBuilder::default();
+    entry.emit(Opcode::LoadScope, &[0, 0], span).unwrap();
+    entry.emit(Opcode::GetById, &[1, 0, 1], span).unwrap();
+    entry.emit(Opcode::LoadScope, &[2, 2], span).unwrap();
+    entry.emit(Opcode::LoadScope, &[3, 3], span).unwrap();
+    entry.emit(Opcode::Move, &[4, 0], span).unwrap();
+    entry.emit(Opcode::Move, &[5, 1], span).unwrap();
+    entry.emit(Opcode::Move, &[6, 2], span).unwrap();
+    entry.emit(Opcode::Move, &[7, 3], span).unwrap();
+    entry
+        .emit(Opcode::CallWithReceiver, &[8, 4, 2], span)
+        .unwrap();
+    entry.emit(Opcode::Return, &[8], span).unwrap();
+    let (entry_bytecode, entry_map, entry_registers) = entry.finish().unwrap();
+    let mut getter = BytecodeBuilder::default();
+    getter.emit(Opcode::LoadScope, &[0, 4], span).unwrap();
+    getter.emit(Opcode::Return, &[0], span).unwrap();
+    let (getter_bytecode, getter_map, getter_registers) = getter.finish().unwrap();
+    let mut trap = BytecodeBuilder::default();
+    trap.emit(Opcode::LoadThis, &[2], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[3, 5], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[4, 0, 3], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[5, 6], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[6, 1, 5], span).unwrap();
+    trap.emit(Opcode::LoadScope, &[7, 7], span).unwrap();
+    trap.emit(Opcode::StrictEqual, &[8, 2, 7], span).unwrap();
+    trap.emit(Opcode::BitwiseAnd, &[9, 4, 6], span).unwrap();
+    trap.emit(Opcode::BitwiseAnd, &[10, 9, 8], span).unwrap();
+    trap.emit(Opcode::CreateObject, &[11], span).unwrap();
+    trap.emit(Opcode::Return, &[10], span).unwrap();
+    let (trap_bytecode, trap_map, trap_registers) = trap.finish().unwrap();
+    let templates = vec![
+        proxy_test_template(
+            FunctionId::new(0),
+            entry_bytecode,
+            entry_map,
+            entry_registers,
+            0,
+        ),
+        proxy_test_template(
+            FunctionId::new(1),
+            getter_bytecode,
+            getter_map,
+            getter_registers,
+            0,
+        ),
+        proxy_test_template(
+            FunctionId::new(2),
+            trap_bytecode,
+            trap_map,
+            trap_registers,
+            2,
+        ),
+    ];
+    CompiledModule::new(
+        Arc::from("proxy setPrototypeOf continuation"),
+        Vec::new(),
+        vec![
+            Arc::from("Reflect"),
+            Arc::from("setPrototypeOf"),
+            Arc::from("proxy"),
+            Arc::from("expectedPrototype"),
+            Arc::from("trap"),
+            Arc::from("expectedTarget"),
+            Arc::from("expectedPrototype"),
+            Arc::from("expectedHandler"),
         ],
         templates,
         FunctionId::new(0),

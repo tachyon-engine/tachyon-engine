@@ -283,6 +283,7 @@ pub(in crate::tests) fn create_test_bound_function(isolate: &mut Isolate, target
             destination: 0,
             callee: isolate.realm.function_prototype_bind.unwrap(),
             argument_base: 2,
+            argument_source: None,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,

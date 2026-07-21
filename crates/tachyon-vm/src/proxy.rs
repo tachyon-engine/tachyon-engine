@@ -52,6 +52,24 @@ impl Trace for ProxyRevocableRoots<'_> {
     }
 }
 
+struct NativeCallStateRoots<'a> {
+    vm: VmRoots<'a>,
+    values: [Value; 5],
+}
+
+impl Trace for NativeCallStateRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.values.trace(tracer);
+    }
+}
+
+const PROXY_TARGET_ARGUMENT: usize = 0;
+const PROXY_PROTOTYPE_ARGUMENT: usize = 1;
+pub(crate) const PROXY_ACTIVE_OBJECT: usize = 2;
+const PROXY_RESULT_OBJECT: usize = 3;
+
 impl Isolate {
     /// Validates ProxyCreate arguments before allocating the independently branded exotic payload.
     pub(crate) fn create_proxy_from_site(
@@ -227,6 +245,363 @@ impl Isolate {
                 Ok(())
             })
         })
+    }
+
+    /// Routes Object/Reflect.setPrototypeOf to the Proxy slow path after shared argument validation.
+    pub(crate) fn dispatch_proxy_set_prototype_from_site(
+        &mut self,
+        site: &CallSite,
+        mode: ProxySetPrototypeMode,
+    ) -> Result<bool, ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_proxy_value(target) {
+            return Ok(false);
+        }
+        let prototype = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if prototype.as_immediate() != Some(Immediate::Null) && !self.is_object_value(prototype) {
+            return Err(ExecutionError::NotObject(prototype));
+        }
+        self.dispatch_proxy_set_prototype(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            target,
+            prototype,
+            target,
+            mode,
+        )?;
+        Ok(true)
+    }
+
+    /// Walks absent traps iteratively and publishes pending state only at an observable callback.
+    fn dispatch_proxy_set_prototype(
+        &mut self,
+        site: NativeContinuationSite,
+        mut proxy: Value,
+        prototype: Value,
+        result_object: Value,
+        mode: ProxySetPrototypeMode,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        loop {
+            let snapshot = self.proxy_snapshot(proxy)?;
+            if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
+            }
+            let trap_name = self.intern_intrinsic_name(b"setPrototypeOf")?;
+            match self.resolve_property_read(snapshot.handler, trap_name.into())? {
+                PropertyRead::Missing => {
+                    if self.is_proxy_value(snapshot.target) {
+                        proxy = snapshot.target;
+                        continue;
+                    }
+                    let success = self.ordinary_set_prototype_of(snapshot.target, prototype)?;
+                    return self.finish_proxy_set_prototype(site, mode, result_object, success);
+                }
+                PropertyRead::Data(trap) => {
+                    let state = self.allocate_proxy_set_prototype_state(
+                        snapshot.target,
+                        prototype,
+                        proxy,
+                        result_object,
+                    )?;
+                    return self.continue_proxy_set_prototype_lookup(site, mode, state, trap);
+                }
+                PropertyRead::Accessor(getter)
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    if self.is_proxy_value(snapshot.target) {
+                        proxy = snapshot.target;
+                        continue;
+                    }
+                    let success = self.ordinary_set_prototype_of(snapshot.target, prototype)?;
+                    return self.finish_proxy_set_prototype(site, mode, result_object, success);
+                }
+                PropertyRead::Accessor(getter) => {
+                    let state = self.allocate_proxy_set_prototype_state(
+                        snapshot.target,
+                        prototype,
+                        proxy,
+                        result_object,
+                    )?;
+                    return self.dispatch_property_callback(
+                        NativeContinuation::proxy_set_prototype(
+                            site,
+                            mode,
+                            ProxySetPrototypeStage::TrapGetter,
+                            Value::from_heap_ref(state.raw()),
+                            snapshot.handler,
+                        ),
+                        getter,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Resumes trap lookup/call and target invariant checks from one typed continuation stage.
+    pub(crate) fn resume_proxy_set_prototype(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: ProxySetPrototypeMode,
+        stage: ProxySetPrototypeStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let state = self.native_call_state_reference(continuation.first())?;
+        match stage {
+            ProxySetPrototypeStage::TrapGetter => {
+                self.continue_proxy_set_prototype_lookup(continuation.site(), mode, state, value)
+            }
+            ProxySetPrototypeStage::TrapCall => {
+                self.finish_proxy_set_prototype_trap(continuation.site(), mode, state, value)
+            }
+            ProxySetPrototypeStage::TargetIsExtensible => {
+                self.continue_proxy_set_prototype_invariant(continuation.site(), mode, state, value)
+            }
+            ProxySetPrototypeStage::TargetGetPrototypeOf => {
+                let pending = self.native_call_state_snapshot(state)?;
+                if value != pending.values[PROXY_PROTOTYPE_ARGUMENT] {
+                    return Err(ExecutionError::ProxyInvariantViolation);
+                }
+                self.finish_proxy_set_prototype(
+                    continuation.site(),
+                    mode,
+                    pending.values[PROXY_RESULT_OBJECT],
+                    true,
+                )
+            }
+        }
+    }
+
+    /// Applies GetMethod nullish/callable rules before invoking `(target, prototype)`.
+    fn continue_proxy_set_prototype_lookup(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        state: GcRef<NativeCallState>,
+        trap: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        if matches!(
+            trap.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            let target = pending.values[PROXY_TARGET_ARGUMENT];
+            if self.is_proxy_value(target) {
+                return self.dispatch_proxy_set_prototype(
+                    site,
+                    target,
+                    pending.values[PROXY_PROTOTYPE_ARGUMENT],
+                    pending.values[PROXY_RESULT_OBJECT],
+                    mode,
+                );
+            }
+            let success =
+                self.ordinary_set_prototype_of(target, pending.values[PROXY_PROTOTYPE_ARGUMENT])?;
+            return self.finish_proxy_set_prototype(
+                site,
+                mode,
+                pending.values[PROXY_RESULT_OBJECT],
+                success,
+            );
+        }
+        self.resolve_function_object(trap)?;
+        self.dispatch_property_callback(
+            NativeContinuation::proxy_set_prototype(
+                site,
+                mode,
+                ProxySetPrototypeStage::TrapCall,
+                Value::from_heap_ref(state.raw()),
+                trap,
+            ),
+            trap,
+        )
+    }
+
+    /// Converts the trap result and starts the target's observable extensibility check when needed.
+    fn finish_proxy_set_prototype_trap(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        state: GcRef<NativeCallState>,
+        trap_result: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if !self.is_truthy_value(trap_result)? {
+            let pending = self.native_call_state_snapshot(state)?;
+            return self.finish_proxy_set_prototype(
+                site,
+                mode,
+                pending.values[PROXY_RESULT_OBJECT],
+                false,
+            );
+        }
+        let pending = self.native_call_state_snapshot(state)?;
+        let target = pending.values[PROXY_TARGET_ARGUMENT];
+        if self.is_proxy_value(target) {
+            return self.dispatch_proxy_set_prototype_target_method(
+                site,
+                mode,
+                state,
+                ProxySetPrototypeStage::TargetIsExtensible,
+                target,
+                ProxyInternalMethod::IsExtensible,
+            );
+        }
+        let extensible = self.object_snapshot(target)?.1.extensible;
+        self.continue_proxy_set_prototype_invariant(site, mode, state, boolean_value(extensible))
+    }
+
+    /// Finishes on extensible targets or obtains the target prototype for the final invariant.
+    fn continue_proxy_set_prototype_invariant(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        state: GcRef<NativeCallState>,
+        extensible: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        if self.is_truthy_value(extensible)? {
+            return self.finish_proxy_set_prototype(
+                site,
+                mode,
+                pending.values[PROXY_RESULT_OBJECT],
+                true,
+            );
+        }
+        let target = pending.values[PROXY_TARGET_ARGUMENT];
+        if self.is_proxy_value(target) {
+            return self.dispatch_proxy_set_prototype_target_method(
+                site,
+                mode,
+                state,
+                ProxySetPrototypeStage::TargetGetPrototypeOf,
+                target,
+                ProxyInternalMethod::GetPrototypeOf,
+            );
+        }
+        let prototype = self.object_snapshot(target)?.1.prototype;
+        if prototype != pending.values[PROXY_PROTOTYPE_ARGUMENT] {
+            return Err(ExecutionError::ProxyInvariantViolation);
+        }
+        self.finish_proxy_set_prototype(site, mode, pending.values[PROXY_RESULT_OBJECT], true)
+    }
+
+    /// Publishes one parent continuation around a possibly suspended target internal method.
+    fn dispatch_proxy_set_prototype_target_method(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        state: GcRef<NativeCallState>,
+        stage: ProxySetPrototypeStage,
+        target: Value,
+        operation: ProxyInternalMethod,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_set_prototype(
+                site,
+                mode,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                target,
+            ))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = match self.dispatch_proxy_internal_method(site, target, operation) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_set_prototype(continuation, mode, stage, value)
+    }
+
+    /// Maps the internal boolean result to Reflect or Object.setPrototypeOf's public contract.
+    fn finish_proxy_set_prototype(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetPrototypeMode,
+        result_object: Value,
+        success: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let result = match mode {
+            ProxySetPrototypeMode::Reflect => boolean_value(success),
+            ProxySetPrototypeMode::Object if success => result_object,
+            ProxySetPrototypeMode::Object => {
+                return Err(ExecutionError::ProxyInvariantViolation);
+            }
+        };
+        self.write(site.caller_base, site.destination, result)?;
+        Ok(None)
+    }
+
+    /// Allocates the traced `(target, prototype)` argument source plus invariant identities.
+    fn allocate_proxy_set_prototype_state(
+        &mut self,
+        target: Value,
+        prototype: Value,
+        active_proxy: Value,
+        result_object: Value,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let values = [target, prototype, active_proxy, result_object, undefined];
+        let mut roots = NativeCallStateRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            values,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                NativeCallState {
+                    values: roots.values,
+                    count: 2,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    pub(crate) fn native_call_state_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.native_call_state)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
     }
 
     #[inline(always)]

@@ -37,6 +37,7 @@ impl Isolate {
             destination: continuation.site.destination,
             callee,
             argument_base,
+            argument_source: None,
             argument_prefix: None,
             argument_prefix_offset: 0,
             argument_prefix_count: 0,
