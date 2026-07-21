@@ -735,7 +735,7 @@ fn allocate_bytecode_test_function(
                     function,
                     environment: None,
                 },
-                function_prototype: None,
+                prototype_or_home_object: None,
                 ordinary: OrdinaryObject {
                     shape: ShapeId::EMPTY,
                     extensible: true,

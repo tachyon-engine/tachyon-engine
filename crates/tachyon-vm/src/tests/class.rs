@@ -67,6 +67,37 @@ instance.c = 3;
 order === "abcc" && instance.a() === 1 && A.b() === 2 && instance.c === 3;
 "#;
 
+const SUPER_PROPERTY_SOURCE: &str = r#"
+class A {
+  value() { return this.x + 1; }
+  get current() { return this.x; }
+  static value() { return this.x + 1; }
+}
+class B extends A {
+  value() { return super.value() + 1; }
+  get current() { return super.current + 1; }
+  static value() { return super.value() + 1; }
+  computed(key) { return super[key](); }
+}
+B.x = 3;
+var instance = new B();
+instance.x = 4;
+instance.value() === 6 && instance.current === 5 && B.value() === 5 && instance.computed("value") === 5;
+"#;
+
+const SUPER_PROPERTY_CONSTRUCTOR_SOURCE: &str = r#"
+class A { value() { return this.x; } }
+class B extends A {
+  constructor() {
+    super();
+    this.x = 4;
+    this.y = super.value();
+  }
+}
+var instance = new B();
+instance.y === 4;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -110,6 +141,15 @@ fn computed_class_elements_execute_for_every_dispatch_batch() {
     assert_computed_class_batch::<4>();
     assert_computed_class_batch::<8>();
     assert_computed_class_batch::<16>();
+}
+
+#[test]
+fn super_properties_execute_for_every_dispatch_batch() {
+    assert_super_property_batch::<1>();
+    assert_super_property_batch::<2>();
+    assert_super_property_batch::<4>();
+    assert_super_property_batch::<8>();
+    assert_super_property_batch::<16>();
 }
 
 #[test]
@@ -183,6 +223,12 @@ fn computed_class_elements_survive_forced_major_collections() {
     ] {
         assert_forced_major_source(source, source_id);
     }
+}
+
+#[test]
+fn super_property_home_objects_survive_forced_major_collections() {
+    assert_forced_major_source(SUPER_PROPERTY_SOURCE, 44);
+    assert_forced_major_source(SUPER_PROPERTY_CONSTRUCTOR_SOURCE, 45);
 }
 
 /// Executes a focused class fixture with collection before every managed allocation.
@@ -296,6 +342,25 @@ fn assert_computed_class_batch<const N: usize>() {
             },
         )
         .expect("computed class fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes class HomeObject lookup and receiver-preserving super calls with each batch size.
+fn assert_super_property_batch<const N: usize>() {
+    let module = compile_source(SUPER_PROPERTY_SOURCE, 110 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_024,
+                quantum: 1_024,
+            },
+        )
+        .expect("super property fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

@@ -126,6 +126,8 @@ pub enum HirExpressionKind {
         object: Box<HirExpression>,
         property: Box<HirExpression>,
     },
+    SuperStaticMember(Arc<str>),
+    SuperComputedMember(Box<HirExpression>),
     Unary {
         operator: HirUnaryOperator,
         argument: Box<HirExpression>,
@@ -477,6 +479,11 @@ pub(super) fn lower_expression(
                 HirExpressionKind::ObjectSpread(properties.into())
             }
         }
+        Expression::StaticMemberExpression(expression)
+            if !expression.optional && matches!(expression.object, Expression::Super(_)) =>
+        {
+            HirExpressionKind::SuperStaticMember(Arc::from(expression.property.name.as_str()))
+        }
         Expression::StaticMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::StaticMember {
                 object: Box::new(lower_expression(
@@ -487,6 +494,16 @@ pub(super) fn lower_expression(
                 )?),
                 property: Arc::from(expression.property.name.as_str()),
             }
+        }
+        Expression::ComputedMemberExpression(expression)
+            if !expression.optional && matches!(expression.object, Expression::Super(_)) =>
+        {
+            HirExpressionKind::SuperComputedMember(Box::new(lower_expression(
+                &expression.expression,
+                source,
+                semantic,
+                functions,
+            )?))
         }
         Expression::ComputedMemberExpression(expression) if !expression.optional => {
             HirExpressionKind::ComputedMember {

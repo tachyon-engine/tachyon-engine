@@ -1026,6 +1026,39 @@ impl Isolate {
                     instruction_offset,
                 );
             }
+            Opcode::LoadSuperBase => {
+                let (super_base, _) = self.current_super_reference()?;
+                self.write(base, operands[0], super_base)?;
+            }
+            Opcode::GetSuperById => {
+                let (super_base, receiver) = self.current_super_reference()?;
+                let key = self.scope_atom(code, operands[1])?;
+                return self.dispatch_reflect_property_read(
+                    NativeContinuationSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        call_site: instruction_offset,
+                    },
+                    super_base,
+                    receiver,
+                    key.into(),
+                );
+            }
+            Opcode::GetSuperByValue => {
+                let super_base = self.read(base, operands[1])?;
+                let receiver = self.current_this_receiver()?;
+                let key = self.property_key(self.read(base, operands[2])?)?;
+                return self.dispatch_reflect_property_read(
+                    NativeContinuationSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        call_site: instruction_offset,
+                    },
+                    super_base,
+                    receiver,
+                    key,
+                );
+            }
             Opcode::SetById => {
                 let receiver = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
@@ -1047,6 +1080,7 @@ impl Isolate {
                 } else {
                     self.property_key(self.read(base, operands[2])?)?
                 };
+                self.set_function_home_object(method, target)?;
                 self.define_data_property(
                     target,
                     key,
@@ -1072,6 +1106,7 @@ impl Isolate {
                 } else {
                     self.property_key(self.read(base, operands[2])?)?
                 };
+                self.set_function_home_object(function, receiver)?;
                 let descriptor = if matches!(
                     opcode,
                     Opcode::DefineClassGetterById | Opcode::DefineClassGetterByValue
@@ -2012,6 +2047,7 @@ impl Isolate {
         self.fiber.argument_objects.clear();
         self.fiber.argument_sources.clear();
         self.fiber.derived_activations.clear();
+        self.fiber.base_class_activations.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -2048,7 +2084,7 @@ impl Isolate {
             argument_count: 0,
             handler_base: 0,
             completion_base: 0,
-            construct_receiver: None,
+            receiver_or_home_object: None,
             call_site: None,
         });
         self.fiber.argument_objects.push(None);
@@ -2096,7 +2132,7 @@ impl Isolate {
                         function,
                         environment,
                     },
-                    function_prototype: None,
+                    prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -2184,6 +2220,58 @@ impl Isolate {
             },
         )?;
         Ok(())
+    }
+
+    /// Resolves the active class function's dynamic super base and current `this` receiver.
+    fn current_super_reference(&mut self) -> Result<(Value, Value), ExecutionError> {
+        let receiver = self.current_this_receiver()?;
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .copied()
+            .ok_or(ExecutionError::UninitializedThis)?;
+        let frame_depth = self.fiber.frames.len();
+        let home_object = if frame.new_target.as_immediate() == Some(Immediate::Undefined) {
+            frame
+                .receiver_or_home_object
+                .ok_or(ExecutionError::UninitializedThis)?
+        } else {
+            let function = self
+                .fiber
+                .derived_activations
+                .last()
+                .filter(|activation| activation.frame_depth as usize == frame_depth)
+                .or_else(|| {
+                    self.fiber
+                        .base_class_activations
+                        .last()
+                        .filter(|activation| activation.frame_depth as usize == frame_depth)
+                })
+                .map(|activation| activation.function)
+                .ok_or(ExecutionError::UninitializedThis)?;
+            self.function_home_object(function)?
+        };
+        let super_base = self.object_snapshot(home_object)?.1.prototype;
+        if super_base.as_immediate() == Some(Immediate::Null) {
+            return Err(ExecutionError::NotObject(super_base));
+        }
+        Ok((super_base, receiver))
+    }
+
+    /// Reads the active frame's `this` without re-observing a computed super base.
+    #[inline(always)]
+    fn current_this_receiver(&self) -> Result<Value, ExecutionError> {
+        let receiver = self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::UninitializedThis)?
+            .this_value;
+        if receiver.as_immediate() == Some(Immediate::Uninitialized) {
+            return Err(ExecutionError::UninitializedThis);
+        }
+        Ok(receiver)
     }
 
     /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
@@ -2326,7 +2414,7 @@ impl Isolate {
             return Err(ExecutionError::SuperAlreadyCalled);
         }
         frame.this_value = value;
-        frame.construct_receiver = Some(value);
+        frame.receiver_or_home_object = Some(value);
         Ok(())
     }
 
@@ -3613,7 +3701,9 @@ impl Isolate {
             argument_count: frame.argument_count,
             this_value: frame.this_value,
             new_target: frame.new_target,
-            construct_receiver: frame.construct_receiver,
+            construct_receiver: (frame.new_target.as_immediate() != Some(Immediate::Undefined))
+                .then_some(frame.receiver_or_home_object)
+                .flatten(),
             call_site: frame.call_site.unwrap_or(WordOffset::new(0)),
         };
         let mut output_index = 0_u32;
@@ -3655,7 +3745,9 @@ impl Isolate {
             argument_count: frame.argument_count,
             this_value: frame.this_value,
             new_target: frame.new_target,
-            construct_receiver: frame.construct_receiver,
+            construct_receiver: (frame.new_target.as_immediate() != Some(Immediate::Undefined))
+                .then_some(frame.receiver_or_home_object)
+                .flatten(),
             call_site: frame.call_site.unwrap_or(WordOffset::new(0)),
         };
         for index in 0..site.argument_count {
@@ -3731,6 +3823,12 @@ impl Isolate {
                 .try_reserve_exact(1)
                 .map_err(|_| ExecutionError::FrameAllocationFailed)?;
         }
+        if target.kind == FunctionKind::BaseClassConstructor {
+            self.fiber
+                .base_class_activations
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        }
         if target.layout.max_handler_depth != 0 {
             let handler_depth = usize::try_from(target.layout.max_handler_depth).map_err(|_| {
                 ExecutionError::HandlerStackTooLarge(target.layout.max_handler_depth)
@@ -3770,6 +3868,11 @@ impl Isolate {
             self.write(callee_base, index, value)?;
         }
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
+        let receiver_or_home_object = if target.kind == FunctionKind::ClassMethod {
+            Some(self.function_home_object(site.callee)?)
+        } else {
+            site.construct_receiver
+        };
         self.fiber.frames.push(Frame {
             code: target.code,
             function: target.function,
@@ -3780,7 +3883,7 @@ impl Isolate {
             return_continuation: false,
             this_value,
             new_target: site.new_target,
-            construct_receiver: site.construct_receiver,
+            receiver_or_home_object,
             strictness: target.strictness,
             has_finally: target.layout.max_completion_depth != 0,
             argument_base: site.argument_base,
@@ -3795,7 +3898,7 @@ impl Isolate {
         self.fiber.argument_objects.push(None);
         self.fiber.argument_sources.push(site.argument_source);
         if target.kind == FunctionKind::DerivedClassConstructor {
-            self.fiber.derived_activations.push(DerivedActivation {
+            self.fiber.derived_activations.push(ClassActivation {
                 frame_depth: self.fiber.frames.len() as u32,
                 function: site.callee,
             });
@@ -3804,6 +3907,12 @@ impl Isolate {
                 .last_mut()
                 .expect("derived activation retains its frame")
                 .this_value = Value::from_immediate(Immediate::Uninitialized);
+        }
+        if target.kind == FunctionKind::BaseClassConstructor {
+            self.fiber.base_class_activations.push(ClassActivation {
+                frame_depth: self.fiber.frames.len() as u32,
+                function: site.callee,
+            });
         }
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
             && let Err(error) = self.allocate_current_environment(
@@ -3825,6 +3934,14 @@ impl Isolate {
                 .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
             {
                 self.fiber.derived_activations.pop();
+            }
+            if self
+                .fiber
+                .base_class_activations
+                .last()
+                .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
+            {
+                self.fiber.base_class_activations.pop();
             }
             self.fiber.registers.truncate(callee_base as usize);
             return Err(error);
@@ -3901,8 +4018,21 @@ impl Isolate {
         if derived {
             self.fiber.derived_activations.pop();
         }
-        let value = match frame.construct_receiver {
-            Some(receiver) if !self.is_object_value(value) => receiver,
+        if self
+            .fiber
+            .base_class_activations
+            .last()
+            .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
+        {
+            self.fiber.base_class_activations.pop();
+        }
+        let value = match frame.receiver_or_home_object {
+            Some(receiver)
+                if frame.new_target.as_immediate() != Some(Immediate::Undefined)
+                    && !self.is_object_value(value) =>
+            {
+                receiver
+            }
             _ => value,
         };
         self.fiber.registers.truncate(frame.base as usize);
@@ -4208,6 +4338,14 @@ impl Isolate {
                 .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
             {
                 self.fiber.derived_activations.pop();
+            }
+            if self
+                .fiber
+                .base_class_activations
+                .last()
+                .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
+            {
+                self.fiber.base_class_activations.pop();
             }
             self.fiber.registers.truncate(frame.base as usize);
             self.fiber.handlers.truncate(frame.handler_base as usize);

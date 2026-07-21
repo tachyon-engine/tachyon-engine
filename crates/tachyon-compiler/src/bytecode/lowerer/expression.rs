@@ -455,6 +455,29 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::SuperStaticMember(property) => {
+                let destination = self.register()?;
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::GetSuperById,
+                    &[destination.index(), property],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
+            HirExpressionKind::SuperComputedMember(property) => {
+                let base = self.register()?;
+                self.emit(Opcode::LoadSuperBase, &[base.index()], expression.span)?;
+                let property = self.expression(property)?;
+                self.prepare_property_key(property, base, false, expression.span)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::GetSuperByValue,
+                    &[destination.index(), base.index(), property.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Assignment {
                 operator,
                 target,
@@ -1134,6 +1157,12 @@ impl Lowerer<'_> {
         if let HirExpressionKind::ComputedMember { object, property } = &callee.kind {
             return self.computed_method_call_expression(object, property, arguments, span);
         }
+        if let HirExpressionKind::SuperStaticMember(property) = &callee.kind {
+            return self.super_method_call_expression(Some(property), None, arguments, span);
+        }
+        if let HirExpressionKind::SuperComputedMember(property) = &callee.kind {
+            return self.super_method_call_expression(None, Some(property), arguments, span);
+        }
         let callee_value = self.expression(callee)?;
         if arguments.is_empty() {
             let destination = self.register()?;
@@ -1164,6 +1193,62 @@ impl Lowerer<'_> {
         self.emit(
             Opcode::Call,
             &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Loads a super method with the active `this` as receiver and preserves argument order.
+    fn super_method_call_expression(
+        &mut self,
+        static_property: Option<&std::sync::Arc<str>>,
+        computed_property: Option<&HirExpression>,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver_value = self.register()?;
+        self.emit(Opcode::LoadThis, &[receiver_value.index()], span)?;
+        let computed = if let Some(property) = computed_property {
+            let base = self.register()?;
+            self.emit(Opcode::LoadSuperBase, &[base.index()], span)?;
+            let property = self.expression(property)?;
+            self.prepare_property_key(property, base, false, span)?;
+            Some((base, property))
+        } else {
+            None
+        };
+        let receiver = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[receiver.index(), receiver_value.index()],
+            span,
+        )?;
+        let callee = self.register()?;
+        if let Some(property) = static_property {
+            let property = self.scope_name(property)?;
+            self.emit(Opcode::GetSuperById, &[callee.index(), property], span)?;
+        } else {
+            let (base, property) = computed.expect("computed super call retains its lookup state");
+            self.emit(
+                Opcode::GetSuperByValue,
+                &[callee.index(), base.index(), property.index()],
+                span,
+            )?;
+        }
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[destination.index(), receiver.index(), argument_count],
             span,
         )?;
         Ok(destination)

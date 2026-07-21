@@ -353,6 +353,22 @@ pub(super) fn validate_class_instructions(
         }
         if matches!(
             instruction.opcode,
+            Opcode::LoadSuperBase | Opcode::GetSuperById | Opcode::GetSuperByValue
+        ) && !matches!(
+            kind,
+            FunctionKind::ClassMethod
+                | FunctionKind::DerivedClassConstructor
+                | FunctionKind::BaseClassConstructor
+        ) {
+            return Err(ModuleBuildError::InvalidClassInstruction {
+                function,
+                kind,
+                offset: word_offset,
+                opcode: instruction.opcode,
+            });
+        }
+        if matches!(
+            instruction.opcode,
             Opcode::CreateClass | Opcode::CreateBaseClass
         ) {
             let target = FunctionId::new(instruction.operands[1]);
@@ -689,7 +705,8 @@ fn verify_instruction(
         | Opcode::LoadArgumentsObject
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
-        | Opcode::CheckConstructor => check_register(operands[0])?,
+        | Opcode::CheckConstructor
+        | Opcode::LoadSuperBase => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -763,6 +780,12 @@ fn verify_instruction(
         Opcode::SetFunctionNameByValue => {
             check_register(operands[0])?;
             check_register(operands[1])?;
+        }
+        Opcode::GetSuperById => check_register(operands[0])?,
+        Opcode::GetSuperByValue => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            check_register(operands[2])?;
         }
         Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
         Opcode::GetById | Opcode::SetById | Opcode::DefineClassMethodById => {
@@ -839,6 +862,7 @@ fn verify_instruction(
         Opcode::DeclareScope => Some(operands[0]),
         Opcode::DeclareGlobalLexical => Some(operands[0]),
         Opcode::InitializeGlobalLexical => Some(operands[1]),
+        Opcode::GetSuperById => Some(operands[1]),
         Opcode::GetById
         | Opcode::SetById
         | Opcode::DefineGetterById

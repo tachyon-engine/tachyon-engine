@@ -78,7 +78,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::LoadArgumentsObject
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
-        | Opcode::CheckConstructor => write!(output, " r{}", operands[0])?,
+        | Opcode::CheckConstructor
+        | Opcode::LoadSuperBase => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,
@@ -144,6 +145,12 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::SetById => write!(
             output,
             " receiver=r{}, value=r{}, name={}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::GetSuperById => write!(output, " r{}, name={}", operands[0], operands[1])?,
+        Opcode::GetSuperByValue => write!(
+            output,
+            " r{}, base=r{}, key=r{}",
             operands[0], operands[1], operands[2]
         )?,
         Opcode::DefineClassMethodById

@@ -82,3 +82,32 @@ fn computed_class_element_semantics() {
         );
     }
 }
+
+#[test]
+/// Uses dynamic HomeObject prototypes while preserving the call-site `this` receiver.
+fn class_super_property_semantics() {
+    for (source_id, source) in [
+        (
+            1_078,
+            "class A { value() { return this.x + 1; } get current() { return this.x; } static value() { return this.x + 1; } } class B extends A { value() { return super.value() + 1; } get current() { return super.current + 1; } static value() { return super.value() + 1; } computed(key) { return super[key](); } } B.x = 3; var instance = new B(); instance.x = 4; instance.value() === 6 && instance.current === 5 && B.value() === 5 && instance.computed('value') === 5;",
+        ),
+        (
+            1_079,
+            "class A { value() { return this.x; } } class B extends A { value() { return super.value(); } } var method = B.prototype.value; var custom = { x: 9 }; method.call(custom) === 9;",
+        ),
+        (
+            1_080,
+            "class A { value() { return 1; } } class B extends A { value() { return super.value(); } } class Other { value() { return 7; } } Object.setPrototypeOf(B.prototype, Other.prototype); new B().value() === 7;",
+        ),
+        (
+            1_081,
+            "class A { value() { return 4; } } class B extends A { value() { return super[(() => { Object.setPrototypeOf(B.prototype, null); return 'value'; })()](); } } new B().value() === 4;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

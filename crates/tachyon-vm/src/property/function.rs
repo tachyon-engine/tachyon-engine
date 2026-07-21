@@ -337,7 +337,7 @@ impl Isolate {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(function, self.types.function)
-                    .map(|function| function.function_prototype)
+                    .map(|function| function.prototype_or_home_object)
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
@@ -418,7 +418,7 @@ impl Isolate {
                 let object = no_gc
                     .borrow_mut(function, self.types.function)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                object.function_prototype = Some(prototype);
+                object.prototype_or_home_object = Some(prototype);
                 Ok::<(), ExecutionError>(())
             })?;
             scope
@@ -426,6 +426,57 @@ impl Isolate {
                 .map_err(ExecutionError::HeapReference)?;
             Ok(())
         })
+    }
+
+    /// Publishes `[[HomeObject]]` into the class-method-only half of the auxiliary function slot.
+    pub(crate) fn set_function_home_object(
+        &mut self,
+        function: Value,
+        home_object: Value,
+    ) -> Result<(), ExecutionError> {
+        let object = self.resolve_function_object(function)?;
+        let FunctionExecutable::Bytecode {
+            code,
+            function: function_id,
+            ..
+        } = object.executable
+        else {
+            return Err(ExecutionError::NonCallable(function));
+        };
+        let kind = self
+            .loaded_code(code)?
+            .module
+            .function(function_id)
+            .ok_or(ExecutionError::MissingEntryFunction(function_id))?
+            .kind();
+        if kind != FunctionKind::ClassMethod {
+            return Err(ExecutionError::NonCallable(function));
+        }
+        self.set_function_prototype(function, home_object)
+    }
+
+    /// Reads one class method's `[[HomeObject]]` without materializing a public prototype.
+    pub(crate) fn function_home_object(
+        &mut self,
+        function: Value,
+    ) -> Result<Value, ExecutionError> {
+        let raw = function
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(function))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.function)
+            .map_err(|_| ExecutionError::NonCallable(function))?;
+        let value = self.heap.with_running_scope(|scope| {
+            let function = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(function, self.types.function)
+                    .map(|function| function.prototype_or_home_object)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        value.ok_or(ExecutionError::UninitializedThis)
     }
 
     /// Replaces one callable's ordinary `[[Prototype]]` edge and publishes the GC barrier.

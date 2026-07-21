@@ -253,6 +253,8 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::SuperStaticMember(_) => Ok(1),
+        HirExpressionKind::SuperComputedMember(property) => expression_scope_name_count(property),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -645,6 +647,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             }
             Ok(count)
         }
+        HirExpressionKind::SuperComputedMember(property) => expression_literal_count(property),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

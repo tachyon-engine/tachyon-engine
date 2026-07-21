@@ -325,7 +325,7 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::PromiseCapabilityExecutor(capability),
-                    function_prototype: None,
+                    prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

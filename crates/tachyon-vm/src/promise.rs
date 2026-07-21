@@ -959,7 +959,7 @@ fn allocate_promise_resolver(
         0,
         FunctionObject {
             executable: FunctionExecutable::PromiseResolver { cell, reject },
-            function_prototype: None,
+            prototype_or_home_object: None,
             ordinary: OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,

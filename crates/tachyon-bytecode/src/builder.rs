@@ -272,7 +272,8 @@ impl BytecodeBuilder {
             | Opcode::LoadArgumentsObject
             | Opcode::InitializeThis
             | Opcode::SuperConstructForwardAll
-            | Opcode::CheckConstructor => &[0],
+            | Opcode::CheckConstructor
+            | Opcode::LoadSuperBase => &[0],
             Opcode::Move
             | Opcode::Not
             | Opcode::Negate
@@ -329,6 +330,8 @@ impl BytecodeBuilder {
             Opcode::DefineClassMethodByValue
             | Opcode::DefineClassGetterByValue
             | Opcode::DefineClassSetterByValue => &[0, 1, 2],
+            Opcode::GetSuperById => &[0],
+            Opcode::GetSuperByValue => &[0, 1, 2],
             Opcode::Call | Opcode::Construct | Opcode::SuperConstruct => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {

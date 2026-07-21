@@ -1015,7 +1015,8 @@ pub(crate) struct Frame {
     pub(crate) return_continuation: bool,
     pub(crate) this_value: Value,
     pub(crate) new_target: Value,
-    pub(crate) construct_receiver: Option<Value>,
+    /// Construct receiver when `new_target` exists, otherwise a class method's `[[HomeObject]]`.
+    pub(crate) receiver_or_home_object: Option<Value>,
     pub(crate) strictness: FunctionStrictness,
     pub(crate) has_finally: bool,
     pub(crate) argument_base: u32,
@@ -1032,12 +1033,12 @@ const _: [(); 104] = [(); core::mem::size_of::<Frame>()];
 
 /// Sparse derived-constructor state kept outside the hot `Frame` and ordinary-call path.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DerivedActivation {
+pub(crate) struct ClassActivation {
     pub(crate) frame_depth: u32,
     pub(crate) function: Value,
 }
 
-impl Trace for DerivedActivation {
+impl Trace for ClassActivation {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.function.trace(tracer);
@@ -1060,7 +1061,9 @@ pub(crate) struct Fiber {
     /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.
     pub(crate) argument_sources: Vec<Option<GcRef<NativeCallState>>>,
     /// Only derived constructors enter this stack, preserving the ordinary call hot path.
-    pub(crate) derived_activations: Vec<DerivedActivation>,
+    pub(crate) derived_activations: Vec<ClassActivation>,
+    /// Only base class constructors enter this stack; ordinary functions never pay its cost.
+    pub(crate) base_class_activations: Vec<ClassActivation>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -1077,16 +1080,20 @@ impl Fiber {
         self.argument_objects.trace(tracer);
         self.argument_sources.trace(tracer);
         self.derived_activations.trace(tracer);
+        self.base_class_activations.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         debug_assert_eq!(self.argument_sources.len(), self.frames.len());
         debug_assert!(self.derived_activations.iter().all(|activation| {
+            activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
+        }));
+        debug_assert!(self.base_class_activations.iter().all(|activation| {
             activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
         }));
         for frame in &mut self.frames {
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);
             frame.new_target.trace(tracer);
-            frame.construct_receiver.trace(tracer);
+            frame.receiver_or_home_object.trace(tracer);
             frame.argument_prefix.trace(tracer);
             if let Some(return_register) = frame.return_register {
                 debug_assert!((return_register.index() as usize) < self.registers.len());

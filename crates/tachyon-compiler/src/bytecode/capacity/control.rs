@@ -793,6 +793,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             }
             Ok(count)
         }
+        HirExpressionKind::SuperComputedMember(property) => expression_label_count(property),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

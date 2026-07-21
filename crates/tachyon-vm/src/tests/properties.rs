@@ -189,7 +189,7 @@ fn function_prototype_is_lazily_materialized_with_constructor_back_reference() {
             no_gc
                 .borrow(function, isolate.types.function)
                 .unwrap()
-                .function_prototype
+                .prototype_or_home_object
         })
     });
     assert!(before.is_none());
@@ -862,7 +862,7 @@ fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
             0,
             FunctionObject {
                 executable: FunctionExecutable::Native(NativeFunction::ObjectConstructor),
-                function_prototype: None,
+                prototype_or_home_object: None,
                 ordinary: OrdinaryObject {
                     shape: ShapeId::EMPTY,
                     extensible: true,

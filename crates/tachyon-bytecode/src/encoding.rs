@@ -243,9 +243,15 @@ pub enum Opcode {
     DefineClassGetterByValue = 98,
     /// Defines one non-enumerable class setter with a normalized runtime PropertyKey.
     DefineClassSetterByValue = 99,
+    /// Loads the active class method's dynamic super base after validating `this`.
+    LoadSuperBase = 100,
+    /// Reads one static-name super property with the active `this` receiver.
+    GetSuperById = 101,
+    /// Reads one normalized-key super property from an already-loaded base.
+    GetSuperByValue = 102,
 }
 
-pub(super) const OPCODE_COUNT: usize = 100;
+pub(super) const OPCODE_COUNT: usize = 103;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -347,10 +353,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DefineClassMethodByValue
     3, // DefineClassGetterByValue
     3, // DefineClassSetterByValue
+    1, // LoadSuperBase
+    2, // GetSuperById
+    3, // GetSuperByValue
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassSetterByValue as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::GetSuperByValue as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -496,6 +505,9 @@ impl Opcode {
             33 => Some(Self::DefineClassMethodByValue),
             34 => Some(Self::DefineClassGetterByValue),
             35 => Some(Self::DefineClassSetterByValue),
+            36 => Some(Self::LoadSuperBase),
+            37 => Some(Self::GetSuperById),
+            38 => Some(Self::GetSuperByValue),
             _ => None,
         }
     }

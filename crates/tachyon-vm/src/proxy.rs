@@ -166,7 +166,7 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::ProxyRevoker(roots.proxy),
-                    function_prototype: None,
+                    prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

@@ -315,7 +315,7 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::Native(native),
-                    function_prototype: None,
+                    prototype_or_home_object: None,
                     ordinary,
                 },
                 AllocationSpace::Old,
@@ -415,7 +415,7 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::Bound(data),
-                    function_prototype: None,
+                    prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

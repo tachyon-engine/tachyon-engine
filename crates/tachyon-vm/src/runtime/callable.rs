@@ -1028,7 +1028,8 @@ pub(crate) enum FunctionExecutable {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FunctionObject {
     pub(crate) executable: FunctionExecutable,
-    pub(crate) function_prototype: Option<Value>,
+    /// Public `prototype` for constructors, or `[[HomeObject]]` for class methods.
+    pub(crate) prototype_or_home_object: Option<Value>,
     pub(crate) ordinary: OrdinaryObject,
 }
 
@@ -1230,7 +1231,7 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::PromiseCapabilityExecutor(capability) = &mut self.executable {
             capability.trace(tracer);
         }
-        self.function_prototype.trace(tracer);
+        self.prototype_or_home_object.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

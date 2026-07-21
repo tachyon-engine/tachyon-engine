@@ -759,6 +759,25 @@ fn compiler_freezes_computed_class_method_contracts() {
     assert_eq!(entry.matches("DefineClassGetterByValue").count(), 1);
 }
 
+#[test]
+/// Freezes static/computed super reads and receiver-preserving calls as class-only opcodes.
+fn compiler_freezes_super_property_contracts() {
+    let source = source(
+        MediaType::JavaScript,
+        "class A { value() { return 1; } } class B extends A { value() { return super.value(); } other(key) { return super[key]; } } new B().value();",
+    );
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let disassembly = module
+        .functions()
+        .iter()
+        .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+        .collect::<String>();
+    assert!(disassembly.contains("GetSuperById"));
+    assert!(disassembly.contains("LoadSuperBase"));
+    assert!(disassembly.contains("GetSuperByValue"));
+    assert!(disassembly.contains("CallWithReceiver"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

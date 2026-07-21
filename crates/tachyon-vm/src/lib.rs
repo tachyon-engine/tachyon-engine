@@ -121,8 +121,8 @@ use runtime::{
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, BuiltinPropertyKeyConsumer,
-        CodeLoadRoots, CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
-        ConversionContinuation, ConversionNativeFunction, DerivedActivation, Fiber, Frame,
+        ClassActivation, CodeLoadRoots, CollectionInitializerStage, ConversionCallbackStage,
+        ConversionConsumer, ConversionContinuation, ConversionNativeFunction, Fiber, Frame,
         NativeContinuation, NativeContinuationKind, NativeContinuationSite, PreferredType,
         PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,
         PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,

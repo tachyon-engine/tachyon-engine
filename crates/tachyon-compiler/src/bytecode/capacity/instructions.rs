@@ -294,6 +294,12 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 "bytecode instructions",
             )
         }
+        HirExpressionKind::SuperStaticMember(_) => Ok(1),
+        HirExpressionKind::SuperComputedMember(property) => checked_count_add(
+            expression_instruction_count(property)?,
+            3,
+            "bytecode instructions",
+        ),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -477,7 +483,19 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
         HirExpressionKind::Call { callee, arguments }
         | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_instruction_count(callee)?;
-            count = checked_count_add(count, 2, "bytecode instructions")?;
+            count = checked_count_add(
+                count,
+                if matches!(
+                    callee.kind,
+                    HirExpressionKind::SuperStaticMember(_)
+                        | HirExpressionKind::SuperComputedMember(_)
+                ) {
+                    3
+                } else {
+                    2
+                },
+                "bytecode instructions",
+            )?;
             for argument in arguments.iter() {
                 count = checked_count_add(
                     count,
