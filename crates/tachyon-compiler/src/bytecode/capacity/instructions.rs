@@ -271,6 +271,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     crate::HirClassElement::Method(method) => (Some(&method.key), 2),
                     crate::HirClassElement::PublicField(field) => (Some(&field.key), 7),
                     crate::HirClassElement::PrivateField(_) => (None, 7),
+                    crate::HirClassElement::PrivateMethod(_) => (None, 7),
                     crate::HirClassElement::StaticBlock(_) => (None, 5),
                 };
                 element_instructions =
@@ -299,6 +300,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     crate::HirClassElement::Method(method) => !method.is_static,
                     crate::HirClassElement::PublicField(field) => !field.is_static,
                     crate::HirClassElement::PrivateField(_) => true,
+                    crate::HirClassElement::PrivateMethod(_) => true,
                     crate::HirClassElement::StaticBlock(_) => false,
                 })),
                 "bytecode instructions",

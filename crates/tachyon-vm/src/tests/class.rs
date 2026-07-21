@@ -169,14 +169,21 @@ class Base {
 }
 class Derived extends Base {
   #value = 2;
+  #first = this.#method();
+  #method() { return this.#value; }
   read() { return this.#value; }
+  readFirst() { return this.#first; }
   update() { return ++this.#value; }
+  readMethod() { return this.#method; }
   constructor() { super(); }
 }
 var value = new Derived();
+var other = new Derived();
 var read = Derived.prototype.read;
+var readFirst = Derived.prototype.readFirst;
 var update = Derived.prototype.update;
-read.call(value) === 2 && update.call(value) === 3 && read.call(value) === 3 && traps === 0;
+var readMethod = Derived.prototype.readMethod;
+readFirst.call(value) === 2 && read.call(value) === 2 && update.call(value) === 3 && read.call(value) === 3 && readMethod.call(value) === readMethod.call(other) && traps === 0;
 "#;
 
 const STATIC_BLOCK_SOURCE: &str = r#"
@@ -653,9 +660,13 @@ fn assert_private_field_batch<const N: usize>() {
             },
         )
         .expect("private field fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "dispatch batch {N} returned {outcome:?}"
+        "dispatch batch {N} returned {outcome:?}, error kind: {thrown_kind:?}"
     );
 }
 

@@ -74,6 +74,7 @@ pub enum HirClassElement {
     Method(HirClassMethod),
     PublicField(HirClassField),
     PrivateField(HirPrivateField),
+    PrivateMethod(HirPrivateMethod),
     StaticBlock(HirClassStaticBlock),
 }
 
@@ -94,6 +95,13 @@ pub struct HirPrivateField {
     pub span: SourceSpan,
     pub name: HirPrivateName,
     pub initializer: Option<FunctionStencilId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirPrivateMethod {
+    pub span: SourceSpan,
+    pub name: HirPrivateName,
+    pub function: FunctionStencilId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -845,22 +853,36 @@ pub(super) fn lower_class(
     stencil.strict = true;
     let mut private_names = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
-        let oxc::ast::ast::ClassElement::PropertyDefinition(field) = element else {
-            continue;
+        let (identifier, is_static, span) = match element {
+            oxc::ast::ast::ClassElement::MethodDefinition(method) => {
+                let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
+                    continue;
+                };
+                (identifier, method.r#static, method.span)
+            }
+            oxc::ast::ast::ClassElement::PropertyDefinition(field) => {
+                let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+                    continue;
+                };
+                (identifier, field.r#static, field.span)
+            }
+            _ => continue,
         };
-        let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
-            continue;
-        };
-        if field.r#static {
+        if is_static {
             return Err(unsupported(
                 source.name(),
-                source_span(field.span),
-                "static private class field",
+                source_span(span),
+                "static private class element",
             ));
         }
-        private_names.push(private_name_definition(
-            class, identifier, source, semantic,
-        )?);
+        let private_name = private_name_definition(class, identifier, source, semantic)?;
+        if private_names
+            .iter()
+            .any(|existing: &HirPrivateName| existing.id == private_name.id)
+        {
+            continue;
+        }
+        private_names.push(private_name);
     }
     let mut elements = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
@@ -870,6 +892,36 @@ pub(super) fn lower_class(
                     continue;
                 }
                 validate_class_method(method, source)?;
+                if let PropertyKey::PrivateIdentifier(identifier) = &method.key {
+                    if method.kind != oxc::ast::ast::MethodDefinitionKind::Method {
+                        return Err(unsupported(
+                            source.name(),
+                            source_span(method.span),
+                            "private class accessor",
+                        ));
+                    }
+                    let name = private_name_definition(class, identifier, source, semantic)?;
+                    let function_name: Arc<str> = Arc::from(format!("#{}", name.name));
+                    let function = lower_function_stencil(
+                        &method.value,
+                        Some(function_name),
+                        None,
+                        source,
+                        semantic,
+                        functions,
+                    )?;
+                    let stencil = functions
+                        .get_mut(function.index() as usize)
+                        .expect("new private method stencil remains published");
+                    stencil.strict = true;
+                    stencil.kind = super::program::HirFunctionKind::ClassMethod;
+                    elements.push(HirClassElement::PrivateMethod(HirPrivateMethod {
+                        span: source_span(method.span),
+                        name,
+                        function,
+                    }));
+                    continue;
+                }
                 let key = lower_class_key(
                     &method.key,
                     method.computed,
@@ -1030,6 +1082,7 @@ pub(super) fn lower_class(
     if elements.iter().any(|element| {
         matches!(element, HirClassElement::PublicField(field) if !field.is_static)
             || matches!(element, HirClassElement::PrivateField(_))
+            || matches!(element, HirClassElement::PrivateMethod(_))
     }) {
         functions
             .get_mut(constructor.index() as usize)

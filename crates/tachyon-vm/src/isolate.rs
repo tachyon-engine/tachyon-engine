@@ -110,8 +110,8 @@ impl Isolate {
             class_constructor_data: registry
                 .try_register("ClassConstructorData")
                 .map_err(IsolateCreationError::TypeRegistration)?,
-            class_field_plan: registry
-                .try_register("ClassFieldPlan")
+            class_instance_element_plan: registry
+                .try_register("ClassInstanceElementPlan")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_instance_elements: registry
                 .try_register("PendingInstanceElements")

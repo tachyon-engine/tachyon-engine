@@ -2478,7 +2478,7 @@ impl Isolate {
                     .checked_add(offset)
                     .ok_or(ExecutionError::InvalidClassFieldPlan)?,
             )?;
-            let initializer = self.read(
+            let payload = self.read(
                 base,
                 record_base
                     .checked_add(offset)
@@ -2492,39 +2492,42 @@ impl Isolate {
                     .and_then(|slot| slot.checked_add(2))
                     .ok_or(ExecutionError::InvalidClassFieldPlan)?,
             )?;
-            let private = self.read(
+            let kind = self.read(
                 base,
                 record_base
                     .checked_add(offset)
                     .and_then(|slot| slot.checked_add(3))
                     .ok_or(ExecutionError::InvalidClassFieldPlan)?,
             )?;
-            let initializer = if initializer.as_immediate() == Some(Immediate::Undefined) {
+            let payload = if payload.as_immediate() == Some(Immediate::Undefined) {
                 None
             } else {
-                self.resolve_function_object(initializer)
+                self.resolve_function_object(payload)
                     .map_err(|_| ExecutionError::InvalidClassFieldPlan)?;
-                Some(initializer)
+                Some(payload)
             };
             let infer_name = match infer_name.as_immediate() {
                 Some(Immediate::True) => true,
                 Some(Immediate::False) => false,
                 _ => return Err(ExecutionError::InvalidClassFieldPlan),
             };
-            let private = match private.as_immediate() {
-                Some(Immediate::True) => true,
-                Some(Immediate::False) => false,
-                _ => return Err(ExecutionError::InvalidClassFieldPlan),
-            };
-            records.push(ClassFieldRecord {
-                key: if private {
+            let kind = kind
+                .as_i32()
+                .and_then(|kind| u32::try_from(kind).ok())
+                .and_then(ClassInstanceElementKind::from_operand)
+                .ok_or(ExecutionError::InvalidClassFieldPlan)?;
+            if kind == ClassInstanceElementKind::PrivateMethod && payload.is_none() {
+                return Err(ExecutionError::InvalidClassFieldPlan);
+            }
+            records.push(ClassInstanceElementRecord {
+                key: if kind.is_private() {
                     self.private_property_key(key_value)?
                 } else {
                     self.property_key(key_value)?
                 },
-                initializer,
+                payload,
                 infer_name,
-                private,
+                kind,
             });
         }
         let roots = &mut VmRoots {
@@ -2537,9 +2540,9 @@ impl Isolate {
         let plan = self
             .heap
             .try_allocate_external_with_gc(
-                self.types.class_field_plan,
+                self.types.class_instance_element_plan,
                 0,
-                ClassFieldPlan {
+                ClassInstanceElementPlan {
                     records: records.into_boxed_slice(),
                 },
                 AllocationSpace::Young,
@@ -2661,7 +2664,22 @@ impl Isolate {
                 self.write(site.caller_base, site.destination, pending.receiver)?;
                 return Ok(None);
             };
-            if let Some(initializer) = record.initializer {
+            if record.kind == ClassInstanceElementKind::PrivateMethod {
+                self.define_private_method(
+                    pending.receiver,
+                    record
+                        .key
+                        .symbol_identity()
+                        .map(SymbolId::value)
+                        .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+                    record
+                        .payload
+                        .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+                )?;
+                self.increment_instance_element_index(state)?;
+                continue;
+            }
+            if let Some(initializer) = record.payload {
                 self.push_instance_elements_continuation(
                     site,
                     state,
@@ -2754,7 +2772,7 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<PendingInstanceElements>,
         receiver: Value,
-        record: ClassFieldRecord,
+        record: ClassInstanceElementRecord,
         value: Value,
         parent_pushed: bool,
     ) -> Result<bool, ExecutionError> {
@@ -2764,7 +2782,7 @@ impl Isolate {
             enumerable: Some(true),
             configurable: Some(true),
         };
-        if record.private {
+        if record.kind == ClassInstanceElementKind::PrivateField {
             self.define_private_field(
                 receiver,
                 record
@@ -2878,14 +2896,14 @@ impl Isolate {
 
     fn class_field_record(
         &mut self,
-        plan: GcRef<ClassFieldPlan>,
+        plan: GcRef<ClassInstanceElementPlan>,
         index: u32,
-    ) -> Result<Option<ClassFieldRecord>, ExecutionError> {
+    ) -> Result<Option<ClassInstanceElementRecord>, ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let plan = scope.root(plan).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
-                    .borrow(plan, self.types.class_field_plan)
+                    .borrow(plan, self.types.class_instance_element_plan)
                     .map(|plan| plan.records.get(index as usize).copied())
                     .map_err(ExecutionError::NoGcBorrow)
             })

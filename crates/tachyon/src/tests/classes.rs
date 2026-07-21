@@ -298,11 +298,63 @@ fn private_instance_field_semantics() {
         ),
         (
             1_113,
-            "class Base { constructor() { return Object.preventExtensions({}); } } class Derived extends Base { #value = 3; read() { return this.#value; } constructor() { super(); } } var value = new Derived(); Derived.prototype.read.call(value) === 3 && Reflect.ownKeys(value).length === 0;",
+            "class Base { constructor() { return Object.preventExtensions({}); } } class Derived extends Base { #value = 3; constructor() { super(); } } var threw = false; try { new Derived(); } catch (error) { threw = error instanceof TypeError; } threw;",
         ),
         (
             1_115,
             "var traps = 0; class Base { constructor() { return new Proxy({}, { get() { traps = traps + 1; }, set() { traps = traps + 1; }, defineProperty() { traps = traps + 1; } }); } } class Derived extends Base { #value = 3; read() { return this.#value; } write(value) { this.#value = value; } update() { return ++this.#value; } constructor() { super(); } } var value = new Derived(); var first = Derived.prototype.read.call(value); Derived.prototype.write.call(value, 4); var next = Derived.prototype.update.call(value); first === 3 && next === 5 && Derived.prototype.read.call(value) === 5 && traps === 0;",
+        ),
+        (
+            1_116,
+            "class C { first = this.#method(); #method() { return 42; } second = this.#method(); read() { return this.#method; } } var first = new C(); var second = new C(); first.first === 42 && first.second === 42 && first.read() === second.read() && first.read().name === '#method';",
+        ),
+        (
+            1_117,
+            "class Base { value() { return 4; } } class Derived extends Base { #method() { return super.value() + 1; } call() { return this.#method(); } } new Derived().call() === 5;",
+        ),
+        (
+            1_118,
+            "class C { #method() { return 1; } read() { return this.#method; } } var threw = false; try { C.prototype.read.call({}); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_119,
+            "class C { #first = 1; #second = 2; read() { return this.#first + this.#second; } } new C().read() === 3;",
+        ),
+        (
+            1_120,
+            "class C { #first() { return 1; } #second() { return 2; } read() { return this.#first() + this.#second(); } } new C().read() === 3;",
+        ),
+        (
+            1_121,
+            "class C { #value = 2; #method() {} readValue() { return this.#value; } readMethod() { return this.#method; } } var value = new C(); value.readValue() === 2 && typeof value.readMethod() === 'function';",
+        ),
+        (
+            1_122,
+            "class C { #value = 2; #method() { return 1; } read() { return this.#method(); } } new C().read() === 1;",
+        ),
+        (
+            1_123,
+            "class C { #value = 2; #method() { return this.#value; } read() { return this.#method(); } } new C().read() === 2;",
+        ),
+        (
+            1_124,
+            "class Base { constructor() { return new Proxy({}, {}); } } class C extends Base { #method() { return 1; } read() { return this.#method(); } constructor() { super(); } } var value = new C(); C.prototype.read.call(value) === 1;",
+        ),
+        (
+            1_125,
+            "class Base { constructor() { return new Proxy({}, {}); } } class C extends Base { #value = 2; #method() { return this.#value; } read() { return this.#method(); } constructor() { super(); } } var value = new C(); C.prototype.read.call(value) === 2;",
+        ),
+        (
+            1_126,
+            "class Base { constructor() { return new Proxy({}, {}); } } class C extends Base { #value = 2; #first = this.#method(); #method() { return this.#value; } read() { return this.#first; } constructor() { super(); } } var value = new C(); C.prototype.read.call(value) === 2;",
+        ),
+        (
+            1_127,
+            "class Base { constructor() { return Object.preventExtensions({}); } } class C extends Base { #method() { return 1; } constructor() { super(); } } var threw = false; try { new C(); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_128,
+            "class C { #method() { return 1; } overwrite() { this.#method = 2; } update() { this.#method++; } } var value = new C(); var assignment = false; var update = false; try { value.overwrite(); } catch (error) { assignment = error instanceof TypeError; } try { value.update(); } catch (error) { update = error instanceof TypeError; } assignment && update;",
         ),
     ] {
         assert_eq!(

@@ -58,9 +58,9 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
-    BytecodeConstant, CompiledModule, DecodedInstruction, FunctionId, FunctionKind, FunctionLayout,
-    FunctionStrictness, HandlerEntry, HandlerKind, Opcode, RegisterId, VerifiedBytecode,
-    VerifiedInstructionDecoder, WordOffset,
+    BytecodeConstant, ClassInstanceElementKind, CompiledModule, DecodedInstruction, FunctionId,
+    FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode,
+    RegisterId, VerifiedBytecode, VerifiedInstructionDecoder, WordOffset,
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
@@ -116,7 +116,10 @@ use runtime::{
         NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
         ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
     },
-    class::{ClassConstructorData, ClassFieldPlan, ClassFieldRecord, PendingInstanceElements},
+    class::{
+        ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,
+        PendingInstanceElements,
+    },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
     environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},

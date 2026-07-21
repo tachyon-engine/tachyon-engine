@@ -248,6 +248,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
                     crate::HirClassElement::PrivateField(_) => None,
+                    crate::HirClassElement::PrivateMethod(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(key) = key {
@@ -661,6 +662,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
                     crate::HirClassElement::PrivateField(_) => None,
+                    crate::HirClassElement::PrivateMethod(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {

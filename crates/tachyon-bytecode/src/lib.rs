@@ -286,6 +286,32 @@ pub enum FunctionKind {
     AsyncGenerator,
 }
 
+/// The immutable meaning of one constructor-owned instance-element record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum ClassInstanceElementKind {
+    PublicField = 0,
+    PrivateField = 1,
+    PrivateMethod = 2,
+}
+
+impl ClassInstanceElementKind {
+    #[must_use]
+    pub const fn from_operand(operand: u32) -> Option<Self> {
+        match operand {
+            0 => Some(Self::PublicField),
+            1 => Some(Self::PrivateField),
+            2 => Some(Self::PrivateMethod),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_private(self) -> bool {
+        matches!(self, Self::PrivateField | Self::PrivateMethod)
+    }
+}
+
 /// The runtime record category owning one dense environment-slot plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

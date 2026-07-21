@@ -368,7 +368,7 @@ impl BytecodeBuilder {
                         operands[1]
                             .checked_add(
                                 count
-                                    .checked_mul(3)
+                                    .checked_mul(4)
                                     .ok_or(BuilderError::RegisterCountOverflow)?,
                             )
                             .and_then(|end| end.checked_sub(1))

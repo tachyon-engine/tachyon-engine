@@ -1031,7 +1031,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             if operands[2] != 0 {
                 let last = operands[1]
-                    .checked_add(operands[2].checked_mul(3).ok_or(
+                    .checked_add(operands[2].checked_mul(4).ok_or(
                         VerifyError::RegisterOutOfRange {
                             offset,
                             register: u32::MAX,

@@ -1,4 +1,6 @@
 use super::*;
+use crate::FunctionStencilId;
+use tachyon_bytecode::ClassInstanceElementKind;
 
 #[derive(Clone, Copy)]
 enum LoweredClassKey {
@@ -24,11 +26,11 @@ enum PendingStaticElement {
 }
 
 #[derive(Clone, Copy)]
-struct PendingInstanceField {
+struct PendingInstanceElement {
     key: LoweredClassKey,
-    initializer: Option<RegisterId>,
+    payload: Option<RegisterId>,
     infer_name: bool,
-    private: bool,
+    kind: ClassInstanceElementKind,
     span: SourceSpan,
 }
 
@@ -647,6 +649,7 @@ impl Lowerer<'_> {
             crate::HirClassElement::Method(method) => !method.is_static,
             crate::HirClassElement::PublicField(field) => !field.is_static,
             crate::HirClassElement::PrivateField(_) => true,
+            crate::HirClassElement::PrivateMethod(_) => true,
             crate::HirClassElement::StaticBlock(_) => false,
         }) {
             let target = self.register()?;
@@ -677,6 +680,12 @@ impl Lowerer<'_> {
             })
             .count();
         let mut instance_fields = Vec::with_capacity(instance_field_count);
+        let private_method_count = class
+            .elements
+            .iter()
+            .filter(|element| matches!(element, crate::HirClassElement::PrivateMethod(_)))
+            .count();
+        let mut private_methods = Vec::with_capacity(private_method_count);
         for element in class.elements.iter() {
             match element {
                 crate::HirClassElement::Method(method) => {
@@ -713,11 +722,11 @@ impl Lowerer<'_> {
                             span: field.span,
                         }));
                     } else {
-                        instance_fields.push(PendingInstanceField {
+                        instance_fields.push(PendingInstanceElement {
                             key,
-                            initializer,
+                            payload: initializer,
                             infer_name: field.infer_name,
-                            private: false,
+                            kind: ClassInstanceElementKind::PublicField,
                             span: field.span,
                         });
                     }
@@ -734,12 +743,27 @@ impl Lowerer<'_> {
                             )
                         })
                         .transpose()?;
-                    instance_fields.push(PendingInstanceField {
+                    instance_fields.push(PendingInstanceElement {
                         key: LoweredClassKey::Computed(key),
-                        initializer,
+                        payload: initializer,
                         infer_name: false,
-                        private: true,
+                        kind: ClassInstanceElementKind::PrivateField,
                         span: field.span,
+                    });
+                }
+                crate::HirClassElement::PrivateMethod(method) => {
+                    let key = self.load_private_name(&method.name, method.span)?;
+                    let closure = self.create_private_method(
+                        method.function,
+                        instance_target.expect("private method requires class prototype"),
+                        method.span,
+                    )?;
+                    private_methods.push(PendingInstanceElement {
+                        key: LoweredClassKey::Computed(key),
+                        payload: Some(closure),
+                        infer_name: false,
+                        kind: ClassInstanceElementKind::PrivateMethod,
+                        span: method.span,
                     });
                 }
                 crate::HirClassElement::StaticBlock(block) => {
@@ -752,8 +776,8 @@ impl Lowerer<'_> {
                 }
             }
         }
-        if !instance_fields.is_empty() {
-            self.attach_instance_fields(destination, &instance_fields, span)?;
+        if !private_methods.is_empty() || !instance_fields.is_empty() {
+            self.attach_instance_elements(destination, &private_methods, &instance_fields, span)?;
         }
         if class.name_binding.is_some() {
             self.emit(
@@ -793,6 +817,27 @@ impl Lowerer<'_> {
         let value = self.register()?;
         self.emit(Opcode::LoadEnvironment, &[value.index(), depth, slot], span)?;
         Ok(value)
+    }
+
+    /// Creates one shared private method closure with the class prototype as its home object.
+    fn create_private_method(
+        &mut self,
+        method: FunctionStencilId,
+        home_object: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let closure = self.register()?;
+        let function = method
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+        self.emit(
+            Opcode::SetFunctionHomeObject,
+            &[closure.index(), home_object.index()],
+            span,
+        )?;
+        Ok(closure)
     }
 
     /// Creates one hidden class initializer and publishes its static or instance home object.
@@ -959,19 +1004,24 @@ impl Lowerer<'_> {
     }
 
     /// Freezes field metadata into one verified contiguous constructor record window.
-    fn attach_instance_fields(
+    fn attach_instance_elements(
         &mut self,
         constructor: RegisterId,
-        fields: &[PendingInstanceField],
+        private_methods: &[PendingInstanceElement],
+        fields: &[PendingInstanceElement],
         span: SourceSpan,
     ) -> Result<(), CompileError> {
-        let count = u32::try_from(fields.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        let element_count = private_methods
+            .len()
+            .checked_add(fields.len())
+            .ok_or(CompileError::RegisterOverflow)?;
+        let count = u32::try_from(element_count).map_err(|_| CompileError::RegisterOverflow)?;
         let register_count = count.checked_mul(4).ok_or(CompileError::RegisterOverflow)?;
         let record_base = self.register()?;
         for _ in 1..register_count {
             self.register()?;
         }
-        for (index, field) in fields.iter().enumerate() {
+        for (index, field) in private_methods.iter().chain(fields).enumerate() {
             let offset = u32::try_from(index)
                 .map_err(|_| CompileError::RegisterOverflow)?
                 .checked_mul(4)
@@ -980,33 +1030,25 @@ impl Lowerer<'_> {
                 .index()
                 .checked_add(offset)
                 .ok_or(CompileError::RegisterOverflow)?;
-            let initializer_slot = key_slot
+            let payload_slot = key_slot
                 .checked_add(1)
                 .ok_or(CompileError::RegisterOverflow)?;
             let infer_name_slot = key_slot
                 .checked_add(2)
                 .ok_or(CompileError::RegisterOverflow)?;
-            let private_slot = key_slot
+            let kind_slot = key_slot
                 .checked_add(3)
                 .ok_or(CompileError::RegisterOverflow)?;
             let key = self.class_key_value(field.key, field.span)?;
             self.emit(Opcode::Move, &[key_slot, key.index()], field.span)?;
-            let initializer = match field.initializer {
-                Some(initializer) => initializer,
+            let payload = match field.payload {
+                Some(payload) => payload,
                 None => self.load_undefined(field.span)?,
             };
+            self.emit(Opcode::Move, &[payload_slot, payload.index()], field.span)?;
             self.emit(
-                Opcode::Move,
-                &[initializer_slot, initializer.index()],
-                field.span,
-            )?;
-            self.emit(
-                if field.private {
-                    Opcode::LoadTrue
-                } else {
-                    Opcode::LoadFalse
-                },
-                &[private_slot],
+                Opcode::LoadImmediate,
+                &[kind_slot, field.kind as u32],
                 field.span,
             )?;
             self.emit(
@@ -1604,6 +1646,9 @@ impl Lowerer<'_> {
         if let HirExpressionKind::ComputedMember { object, property } = &callee.kind {
             return self.computed_method_call_expression(object, property, arguments, span);
         }
+        if let HirExpressionKind::PrivateMember { object, name } = &callee.kind {
+            return self.private_method_call_expression(object, name, arguments, span);
+        }
         if let HirExpressionKind::SuperStaticMember(property) = &callee.kind {
             return self.super_method_call_expression(Some(property), None, arguments, span);
         }
@@ -1823,6 +1868,43 @@ impl Lowerer<'_> {
         self.emit(
             Opcode::GetByValue,
             &[callee.index(), call_base.index(), property.index()],
+            span,
+        )?;
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Loads a private method while retaining its base in the contiguous receiver call window.
+    fn private_method_call_expression(
+        &mut self,
+        object: &HirExpression,
+        name: &crate::hir::HirPrivateName,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver = self.expression(object)?;
+        let key = self.load_private_name(name, span)?;
+        let call_base = self.register()?;
+        self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+        let callee = self.register()?;
+        self.emit(
+            Opcode::GetPrivate,
+            &[callee.index(), call_base.index(), key.index()],
             span,
         )?;
         let mut argument_slots = Vec::with_capacity(arguments.len());

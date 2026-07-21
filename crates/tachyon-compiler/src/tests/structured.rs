@@ -860,6 +860,24 @@ fn compiler_freezes_super_property_contracts() {
     assert!(disassembly.contains("CallWithReceiver"));
 }
 
+#[test]
+/// Keeps a private member reference's base value as the dynamic receiver at its call site.
+fn compiler_freezes_private_method_call_receiver() {
+    let source = source(
+        MediaType::JavaScript,
+        "class C { #value = 1; #method(argument) { return this.#value + argument; } call() { return this.#method(2); } } new C().call();",
+    );
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let call_method = module
+        .functions()
+        .iter()
+        .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+        .find(|function| function.contains("GetPrivate") && function.contains("CallWithReceiver"))
+        .expect("private method call emits one receiver-preserving function");
+    assert!(call_method.contains("GetPrivate"));
+    assert!(!call_method.contains("Call r"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

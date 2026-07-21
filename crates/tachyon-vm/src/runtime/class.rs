@@ -2,7 +2,7 @@
 
 use std::mem::size_of;
 
-use tachyon_bytecode::FunctionId;
+use tachyon_bytecode::{ClassInstanceElementKind, FunctionId};
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 
 use super::callable::{FunctionExecutable, FunctionObject};
@@ -10,30 +10,30 @@ use super::environment::Environment;
 use crate::object::PropertyKey;
 use crate::{CodeId, Value};
 
-/// One normalized public field record retained by a class constructor.
+/// One normalized instance-element record retained by a class constructor.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ClassFieldRecord {
+pub(crate) struct ClassInstanceElementRecord {
     pub(crate) key: PropertyKey,
-    pub(crate) initializer: Option<Value>,
+    pub(crate) payload: Option<Value>,
     pub(crate) infer_name: bool,
-    pub(crate) private: bool,
+    pub(crate) kind: ClassInstanceElementKind,
 }
 
-impl Trace for ClassFieldRecord {
+impl Trace for ClassInstanceElementRecord {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.key.trace(tracer);
-        self.initializer.trace(tracer);
+        self.payload.trace(tracer);
     }
 }
 
-/// Exact-capacity immutable field plan owned by one class constructor.
+/// Exact-capacity immutable instance-element plan owned by one class constructor.
 #[derive(Debug)]
-pub(crate) struct ClassFieldPlan {
-    pub(crate) records: Box<[ClassFieldRecord]>,
+pub(crate) struct ClassInstanceElementPlan {
+    pub(crate) records: Box<[ClassInstanceElementRecord]>,
 }
 
-impl Trace for ClassFieldPlan {
+impl Trace for ClassInstanceElementPlan {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         for record in self.records.iter_mut() {
@@ -42,12 +42,12 @@ impl Trace for ClassFieldPlan {
     }
 }
 
-impl GcExternalMemory for ClassFieldPlan {
+impl GcExternalMemory for ClassInstanceElementPlan {
     #[inline]
     fn external_memory_bytes(&self) -> usize {
         self.records
             .len()
-            .saturating_mul(size_of::<ClassFieldRecord>())
+            .saturating_mul(size_of::<ClassInstanceElementRecord>())
     }
 }
 
@@ -57,7 +57,7 @@ pub(crate) struct ClassConstructorData {
     pub(crate) code: CodeId,
     pub(crate) function: FunctionId,
     pub(crate) environment: Option<GcRef<Environment>>,
-    pub(crate) plan: GcRef<ClassFieldPlan>,
+    pub(crate) plan: GcRef<ClassInstanceElementPlan>,
 }
 
 impl Trace for ClassConstructorData {
@@ -72,7 +72,7 @@ impl Trace for ClassConstructorData {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingInstanceElements {
     pub(crate) receiver: Value,
-    pub(crate) plan: GcRef<ClassFieldPlan>,
+    pub(crate) plan: GcRef<ClassInstanceElementPlan>,
     pub(crate) index: u32,
 }
 

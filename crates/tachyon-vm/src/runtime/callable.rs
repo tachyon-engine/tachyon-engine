@@ -1249,7 +1249,7 @@ pub(crate) struct VmTypes {
     pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) class_constructor_data: GcType<ClassConstructorData>,
-    pub(crate) class_field_plan: GcType<ClassFieldPlan>,
+    pub(crate) class_instance_element_plan: GcType<ClassInstanceElementPlan>,
     pub(crate) pending_instance_elements: GcType<PendingInstanceElements>,
     pub(crate) environment: GcType<Environment>,
     pub(crate) exclusion_list: GcType<ExclusionList>,

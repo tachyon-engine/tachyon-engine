@@ -389,6 +389,20 @@ fn verifier_rejects_call_argument_window_past_register_file() {
 }
 
 #[test]
+fn verifier_rejects_instance_element_kind_slot_past_register_file() {
+    let mut words = encode_instruction(Opcode::AttachInstanceFields, &[0, 1, 1]).unwrap();
+    words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    assert!(matches!(
+        Bytecode::from_words(words).verify(context()),
+        Err(VerifyError::RegisterOutOfRange {
+            register: 4,
+            register_count: 4,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn verifier_rejects_scope_name_index_past_module_table() {
     let mut words = encode_instruction(Opcode::LoadScope, &[0, 1]).unwrap();
     words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());

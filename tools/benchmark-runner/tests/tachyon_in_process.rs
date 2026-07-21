@@ -76,7 +76,7 @@ fn tachyon_adapter_executes_all_honest_in_process_modes() {
     assert_eq!(metrics.iterations, 1);
 }
 
-/// Keeps process startup and unsupported future syntax out of successful in-process measurements.
+/// Keeps process startup and malformed source out of successful in-process measurements.
 #[test]
 fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
     let (config, corpus) = config_and_corpus();
@@ -103,7 +103,7 @@ fn tachyon_adapter_rejects_process_cold_start_and_unsupported_syntax() {
     ));
 
     let mut unsupported = request(script, MeasurementMode::PrecompiledExecute);
-    unsupported.source = Arc::from("class Unsupported { #method() {} }");
+    unsupported.source = Arc::from("function {");
     assert!(matches!(
         adapter.prepare(&unsupported),
         Err(AdapterError::Setup(message)) if message.contains("compile failed")
@@ -127,7 +127,7 @@ fn parse_compile_mode_keeps_compile_failures_inside_the_sample_boundary() {
         .unwrap();
     let mut adapter = adapter(&config);
     let mut request = request(script, MeasurementMode::ParseCompileExecute);
-    request.source = Arc::from("class Unsupported { #method() {} }");
+    request.source = Arc::from("function {");
 
     adapter.prepare(&request).unwrap();
     assert!(matches!(

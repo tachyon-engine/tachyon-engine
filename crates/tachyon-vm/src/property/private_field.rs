@@ -37,18 +37,42 @@ impl Isolate {
         Ok(PropertyKey::Private(SymbolId::new(serial, raw)))
     }
 
-    /// Adds a fresh private field without consulting extensibility or observable Proxy traps.
+    /// Adds a fresh private element after enforcing ordinary extensibility without Proxy traps.
     pub(crate) fn define_private_field(
         &mut self,
         receiver: Value,
         name: Value,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        self.define_private_element(receiver, name, value, true)
+    }
+
+    /// Adds one immutable private method without exposing its storage as an ordinary descriptor.
+    pub(crate) fn define_private_method(
+        &mut self,
+        receiver: Value,
+        name: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.define_private_element(receiver, name, value, false)
+    }
+
+    /// Shares private brand insertion while retaining the element kind's writability contract.
+    fn define_private_element(
+        &mut self,
+        receiver: Value,
+        name: Value,
+        value: Value,
+        writable: bool,
+    ) -> Result<(), ExecutionError> {
         let key = self.private_property_key(name)?;
         let storage_receiver = self
             .proxy_private_storage(receiver, true)?
             .expect("private define always creates a Proxy sidecar");
         let (object, snapshot) = self.object_snapshot(storage_receiver)?;
+        if !snapshot.extensible {
+            return Err(ExecutionError::NonExtensibleObject(receiver));
+        }
         if self.shapes.lookup(snapshot.shape, key).is_some() {
             return Err(ExecutionError::PrivateBrandCheckFailed(receiver));
         }
@@ -57,7 +81,7 @@ impl Isolate {
             snapshot,
             key,
             value,
-            PropertyAttributes::data(true, false, false),
+            PropertyAttributes::data(writable, false, false),
         )
     }
 
@@ -96,6 +120,9 @@ impl Isolate {
             .shapes
             .lookup(snapshot.shape, key)
             .ok_or(ExecutionError::PrivateBrandCheckFailed(receiver))?;
+        if !property.attributes.writable() {
+            return Err(ExecutionError::ReadOnlyProperty(receiver));
+        }
         if self
             .raw_property_value_from_snapshot(snapshot, property)?
             .is_none()
