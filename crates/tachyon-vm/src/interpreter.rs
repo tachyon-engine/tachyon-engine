@@ -1173,6 +1173,9 @@ impl Isolate {
                 operands[2],
                 instruction_offset,
             )?,
+            Opcode::SuperConstructForwardAll => {
+                self.super_construct_forward_all(base, operands[0], instruction_offset)?;
+            }
             Opcode::InitializeThis => {
                 let value = self.read(base, operands[0])?;
                 self.initialize_derived_this(value)?;
@@ -2174,6 +2177,47 @@ impl Isolate {
             argument_count,
             this_value: Value::from_immediate(Immediate::Undefined),
             new_target,
+            construct_receiver: None,
+            call_site,
+        })
+    }
+
+    /// Constructs the current superclass while forwarding the active frame's complete argument view.
+    fn super_construct_forward_all(
+        &mut self,
+        caller_base: u32,
+        destination: u32,
+        call_site: WordOffset,
+    ) -> Result<(), ExecutionError> {
+        let activation = self
+            .fiber
+            .derived_activations
+            .last()
+            .copied()
+            .filter(|activation| activation.frame_depth as usize == self.fiber.frames.len())
+            .ok_or(ExecutionError::UninitializedThis)?;
+        let superclass = self.object_snapshot(activation.function)?.1.prototype;
+        if !self.is_constructor_value(superclass)? {
+            return Err(ExecutionError::NonConstructor(superclass));
+        }
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .expect("default derived constructor retains its active frame");
+        let argument_source = self.fiber.argument_sources.last().copied().flatten();
+        self.construct_site(CallSite {
+            caller_base,
+            destination,
+            callee: superclass,
+            argument_base: frame.argument_base,
+            argument_source,
+            argument_prefix: frame.argument_prefix,
+            argument_prefix_offset: frame.argument_prefix_offset,
+            argument_prefix_count: frame.argument_prefix_count,
+            argument_count: frame.argument_count,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: frame.new_target,
             construct_receiver: None,
             call_site,
         })

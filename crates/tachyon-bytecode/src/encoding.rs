@@ -227,9 +227,11 @@ pub enum Opcode {
     CheckConstructor = 90,
     /// Defines one non-enumerable class method from a compiled closure.
     DefineClassMethodById = 91,
+    /// Constructs the active derived superclass with the current activation's complete arguments.
+    SuperConstructForwardAll = 92,
 }
 
-pub(super) const OPCODE_COUNT: usize = 92;
+pub(super) const OPCODE_COUNT: usize = 93;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -323,10 +325,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // InitializeThis
     1, // CheckConstructor
     3, // DefineClassMethodById
+    1, // SuperConstructForwardAll
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DefineClassMethodById as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::SuperConstructForwardAll as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -464,6 +467,7 @@ impl Opcode {
             25 => Some(Self::InitializeThis),
             26 => Some(Self::CheckConstructor),
             27 => Some(Self::DefineClassMethodById),
+            28 => Some(Self::SuperConstructForwardAll),
             _ => None,
         }
     }

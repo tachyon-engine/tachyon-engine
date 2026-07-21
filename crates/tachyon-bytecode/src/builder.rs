@@ -270,6 +270,7 @@ impl BytecodeBuilder {
             | Opcode::LoadArgumentsLength
             | Opcode::LoadArgumentsObject
             | Opcode::InitializeThis
+            | Opcode::SuperConstructForwardAll
             | Opcode::CheckConstructor => &[0],
             Opcode::Move
             | Opcode::Not

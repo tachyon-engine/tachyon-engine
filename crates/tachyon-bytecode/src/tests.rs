@@ -72,6 +72,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::LoadArgumentsLength,
                 Opcode::LoadArgumentsObject,
                 Opcode::InitializeThis,
+                Opcode::SuperConstructForwardAll,
                 Opcode::CheckConstructor,
                 Opcode::BreakThroughFinally,
                 Opcode::ContinueThroughFinally,
@@ -692,6 +693,33 @@ fn compiled_module_enforces_class_kind_and_opcode_contracts() {
         ),
         Err(ModuleBuildError::InvalidClassInstruction {
             opcode: Opcode::SuperConstruct,
+            ..
+        })
+    ));
+
+    let mut invalid_forward = encode_instruction(Opcode::SuperConstructForwardAll, &[0]).unwrap();
+    invalid_forward.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let ordinary = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(invalid_forward),
+        FunctionMetadata::new(
+            FunctionKind::Ordinary,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        ),
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![ordinary],
+            FunctionId::new(0)
+        ),
+        Err(ModuleBuildError::InvalidClassInstruction {
+            opcode: Opcode::SuperConstructForwardAll,
             ..
         })
     ));

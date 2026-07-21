@@ -131,7 +131,15 @@ pub(super) fn estimate_function(
         .and_then(|count| count.checked_add(usize::from(function.rest_parameter.is_some())))
         .and_then(|count| count.checked_add(rest_binding_count))
         .and_then(|count| count.checked_add(parameter_initializer_instructions))
-        .and_then(|count| count.checked_add(2))
+        .and_then(|count| {
+            count.checked_add(
+                if function.kind == crate::HirFunctionKind::DefaultDerivedConstructor {
+                    3
+                } else {
+                    2
+                },
+            )
+        })
         .and_then(|count| count.checked_mul(MAX_ENCODED_INSTRUCTION_WORDS))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "function bytecode words",

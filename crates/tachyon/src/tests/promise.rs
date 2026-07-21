@@ -305,6 +305,27 @@ fn derived_class_methods_publish_callable_semantics() {
 }
 
 #[test]
+/// Forwards every positional argument through synthetic ordinary and Promise constructors.
+fn default_derived_constructor_forwards_complete_arguments() {
+    for (source_id, source) in [
+        (
+            1_067,
+            "function Base(a, b) { this.sum = a + b; } class P extends Base {} var value = new P(2, 3); value.sum === 5 && value instanceof P && value instanceof Base;",
+        ),
+        (
+            1_068,
+            "class P extends Promise {} var value = P.resolve(1); value instanceof P && value instanceof Promise;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(tachyon_value::Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Keeps sibling Promise chains in FIFO order while each handler appends another reaction.
 fn promise_checkpoint_preserves_sibling_chain_order() {
     let setup = compile_promise_fixture(

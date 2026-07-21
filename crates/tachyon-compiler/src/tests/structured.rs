@@ -630,6 +630,31 @@ fn compiler_freezes_class_method_kind_and_definition_contracts() {
     assert_eq!(entry.matches("DefineClassMethodById").count(), 2);
 }
 
+#[test]
+/// Freezes the synthetic default-derived constructor as explicit forwarding bytecode.
+fn compiler_emits_default_derived_constructor_forwarding() {
+    let source = source(
+        MediaType::JavaScript,
+        "class P extends Promise { value() { return 1; } } new P(function() {});",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    assert!(hir.functions().iter().any(|function| {
+        function.kind == HirFunctionKind::DefaultDerivedConstructor && function.strict
+    }));
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let constructor = module
+        .functions()
+        .iter()
+        .find(|function| function.kind() == tachyon_bytecode::FunctionKind::DerivedClassConstructor)
+        .unwrap();
+    let constructor = tachyon_bytecode::disassemble(constructor).unwrap();
+    assert!(constructor.contains("SuperConstructForwardAll"));
+    assert!(constructor.contains("InitializeThis"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

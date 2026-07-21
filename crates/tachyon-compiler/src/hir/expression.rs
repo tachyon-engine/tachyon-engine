@@ -770,17 +770,38 @@ pub(super) fn lower_class(
             }
         }
     }
-    let constructor = constructor.ok_or_else(|| {
-        unsupported(
-            source.name(),
-            source_span(class.body.span),
-            "class without explicit constructor",
-        )
-    })?;
+    let constructor = match constructor {
+        Some(constructor) => constructor,
+        None => {
+            let id = FunctionStencilId(
+                u32::try_from(functions.len()).map_err(|_| CompileError::BindingOverflow)?,
+            );
+            let scope = class
+                .scope_id
+                .get()
+                .ok_or_else(|| missing_semantic(source, source_span(class.span), "class scope"))?;
+            functions.push(HirFunction {
+                id,
+                span: source_span(class.span),
+                name: declaration_name.clone(),
+                self_binding: None,
+                parameters: Arc::from([]),
+                parameter_initializers: Arc::from([]),
+                rest_parameter: None,
+                body: Arc::from([]),
+                scope: to_scope_id(scope),
+                strict: true,
+                kind: super::program::HirFunctionKind::DefaultDerivedConstructor,
+            });
+            id
+        }
+    };
     let stencil = functions
         .get_mut(constructor.index() as usize)
         .expect("new class constructor stencil is published at its stable index");
-    stencil.kind = super::program::HirFunctionKind::DerivedClassConstructor;
+    if stencil.kind != super::program::HirFunctionKind::DefaultDerivedConstructor {
+        stencil.kind = super::program::HirFunctionKind::DerivedClassConstructor;
+    }
     stencil.strict = true;
     Ok(HirClass {
         name: declaration_name,

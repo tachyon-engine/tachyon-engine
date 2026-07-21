@@ -654,6 +654,23 @@ fn lower_function(
         function_scope: Some(function.scope),
         environments,
     };
+    let synthetic_terminal = if function.kind == HirFunctionKind::DefaultDerivedConstructor {
+        debug_assert!(function.parameters.is_empty());
+        debug_assert!(function.parameter_initializers.is_empty());
+        debug_assert!(function.rest_parameter.is_none());
+        debug_assert!(function.body.is_empty());
+        let result = lowerer.register()?;
+        lowerer.emit(
+            Opcode::SuperConstructForwardAll,
+            &[result.index()],
+            function.span,
+        )?;
+        lowerer.emit(Opcode::InitializeThis, &[result.index()], function.span)?;
+        lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
+        true
+    } else {
+        false
+    };
     if let Some(binding) = &function.self_binding {
         lowerer.add_local(binding, None, false)?;
     }
@@ -695,7 +712,7 @@ fn lower_function(
             lowerer.local_function_declaration(declaration, statement.span)?;
         }
     }
-    let mut terminal = false;
+    let mut terminal = synthetic_terminal;
     for statement in function.body.iter() {
         if matches!(statement.kind, HirStatementKind::FunctionDeclaration(_)) {
             continue;
@@ -745,7 +762,10 @@ fn lower_function(
         FunctionMetadata {
             kind: match function.kind {
                 HirFunctionKind::Ordinary => FunctionKind::Ordinary,
-                HirFunctionKind::DerivedClassConstructor => FunctionKind::DerivedClassConstructor,
+                HirFunctionKind::DerivedClassConstructor
+                | HirFunctionKind::DefaultDerivedConstructor => {
+                    FunctionKind::DerivedClassConstructor
+                }
                 HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
             },
             strictness: if function.strict {

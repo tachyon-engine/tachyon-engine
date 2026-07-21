@@ -145,6 +145,7 @@ pub struct HirFunction {
 pub enum HirFunctionKind {
     Ordinary,
     DerivedClassConstructor,
+    DefaultDerivedConstructor,
     ClassMethod,
 }
 

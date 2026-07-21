@@ -341,7 +341,7 @@ pub(super) fn validate_class_instructions(
         })?;
         if matches!(
             instruction.opcode,
-            Opcode::SuperConstruct | Opcode::InitializeThis
+            Opcode::SuperConstruct | Opcode::SuperConstructForwardAll | Opcode::InitializeThis
         ) && kind != FunctionKind::DerivedClassConstructor
         {
             return Err(ModuleBuildError::InvalidClassInstruction {
@@ -680,6 +680,7 @@ fn verify_instruction(
         | Opcode::LoadArgumentsLength
         | Opcode::LoadArgumentsObject
         | Opcode::InitializeThis
+        | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;

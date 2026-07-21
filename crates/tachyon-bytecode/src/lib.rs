@@ -417,7 +417,9 @@ impl FunctionMetadata {
     pub fn new(kind: FunctionKind, layout: FunctionLayout) -> Self {
         let strictness = if matches!(
             kind,
-            FunctionKind::Module | FunctionKind::DerivedClassConstructor
+            FunctionKind::Module
+                | FunctionKind::DerivedClassConstructor
+                | FunctionKind::ClassMethod
         ) {
             FunctionStrictness::Strict
         } else {
@@ -747,7 +749,9 @@ impl CompiledModule {
             }
             if matches!(
                 template.metadata.kind,
-                FunctionKind::Module | FunctionKind::DerivedClassConstructor
+                FunctionKind::Module
+                    | FunctionKind::DerivedClassConstructor
+                    | FunctionKind::ClassMethod
             ) && template.metadata.strictness != FunctionStrictness::Strict
             {
                 return Err(ModuleBuildError::InvalidFunctionStrictness {
