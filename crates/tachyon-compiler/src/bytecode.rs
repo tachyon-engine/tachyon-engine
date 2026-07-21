@@ -255,7 +255,15 @@ struct FunctionEnvironmentPlan {
 #[derive(Clone, Debug)]
 struct ClassEnvironmentPlan {
     scope: ScopeId,
-    slot: CapturedSlot,
+    name: Option<CapturedSlot>,
+    private_names: Box<[PrivateNameSlot]>,
+}
+
+#[derive(Clone, Debug)]
+struct PrivateNameSlot {
+    id: crate::hir::HirPrivateNameId,
+    name: std::sync::Arc<str>,
+    slot: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -303,12 +311,15 @@ impl EnvironmentPlans {
                 }
             }
         }
-        let class_bindings = class_environment::collect(hir);
+        let class_environments = class_environment::collect(hir);
         let mut forced_captures = field_initializer::forced_captures(hir);
         forced_captures.retain(|binding| {
-            !class_bindings
-                .iter()
-                .any(|class_binding| class_binding.id == *binding)
+            !class_environments.iter().any(|class| {
+                class
+                    .name_binding
+                    .as_ref()
+                    .is_some_and(|name| name.id == *binding)
+            })
         });
         let mut functions = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
@@ -354,19 +365,40 @@ impl EnvironmentPlans {
                 slots,
             });
         }
-        let classes = class_bindings
+        let classes = class_environments
             .into_iter()
-            .map(|binding| ClassEnvironmentPlan {
-                scope: binding.scope,
-                slot: CapturedSlot {
-                    id: binding.id,
-                    slot: 0,
-                    name: binding.name,
-                    mutable: false,
-                    initialized: false,
-                },
+            .map(|class| {
+                let private_base = u32::from(class.name_binding.is_some());
+                let private_names = class
+                    .private_names
+                    .iter()
+                    .enumerate()
+                    .map(|(index, private)| {
+                        Ok(PrivateNameSlot {
+                            id: private.id,
+                            name: private.name.clone(),
+                            slot: private_base
+                                .checked_add(
+                                    u32::try_from(index)
+                                        .map_err(|_| CompileError::BindingOverflow)?,
+                                )
+                                .ok_or(CompileError::BindingOverflow)?,
+                        })
+                    })
+                    .collect::<Result<Box<[_]>, CompileError>>()?;
+                Ok(ClassEnvironmentPlan {
+                    scope: class.scope,
+                    name: class.name_binding.map(|binding| CapturedSlot {
+                        id: binding.id,
+                        slot: 0,
+                        name: binding.name,
+                        mutable: false,
+                        initialized: false,
+                    }),
+                    private_names,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, CompileError>>()?;
         Ok(Self {
             functions,
             classes,
@@ -405,12 +437,14 @@ impl EnvironmentPlans {
         };
         let mut depth = 0_u32;
         loop {
-            if let Some(class) = self
-                .classes
-                .iter()
-                .find(|class| class.scope == cursor && class.slot.id == binding)
-            {
-                return Some((depth, &class.slot, true));
+            if let Some(class) = self.classes.iter().find(|class| {
+                class.scope == cursor && class.name.as_ref().is_some_and(|name| name.id == binding)
+            }) {
+                return Some((
+                    depth,
+                    class.name.as_ref().expect("matched class-name binding"),
+                    true,
+                ));
             }
             if let Some(slot) = self
                 .functions
@@ -419,6 +453,37 @@ impl EnvironmentPlans {
                 .and_then(|function| function.slots.iter().find(|slot| slot.id == binding))
             {
                 return Some((depth, slot, false));
+            }
+            cursor = self.nearest_environment_parent(cursor)?;
+            depth = depth.checked_add(1)?;
+        }
+    }
+
+    /// Resolves a private name to the nearest active class environment slot.
+    fn private_reference_slot(
+        &self,
+        current_scope: ScopeId,
+        private_name: crate::hir::HirPrivateNameId,
+    ) -> Option<(u32, &PrivateNameSlot)> {
+        let mut cursor = if self.scope_has_environment(current_scope) {
+            current_scope
+        } else {
+            self.nearest_environment_parent(current_scope)?
+        };
+        let mut depth = 0_u32;
+        loop {
+            if let Some(slot) = self
+                .classes
+                .iter()
+                .find(|class| class.scope == cursor)
+                .and_then(|class| {
+                    class
+                        .private_names
+                        .iter()
+                        .find(|slot| slot.id == private_name)
+                })
+            {
+                return Some((depth, slot));
             }
             cursor = self.nearest_environment_parent(cursor)?;
             depth = depth.checked_add(1)?;

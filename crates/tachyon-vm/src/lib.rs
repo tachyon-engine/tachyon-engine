@@ -278,6 +278,8 @@ pub enum ExecutionError {
     ConstantValueAllocationFailed,
     ClassFieldAllocationFailed,
     InvalidClassFieldPlan,
+    PrivateBrandCheckFailed(Value),
+    PrivatePropertyKeyEscaped,
     ConstantString(StringAllocationError),
     PropertyKeyAtom(AtomTableError),
     PropertyKeyString(StringAllocationError),

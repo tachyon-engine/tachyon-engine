@@ -66,8 +66,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::ReturnUndefined
         | Opcode::EnterFinally
         | Opcode::ResumeCompletion
-        | Opcode::EnterClassEnvironment
         | Opcode::LeaveClassEnvironment => {}
+        Opcode::EnterClassEnvironment => write!(output, " slots={}", operands[0])?,
         Opcode::DeclareScope => write!(output, " scope={}", operands[0])?,
         Opcode::DeclareGlobalLexical => {
             write!(output, " scope={}, mutable={}", operands[0], operands[1])?
@@ -83,8 +83,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
-        | Opcode::LoadSuperBase
-        | Opcode::InitializeClassEnvironment => write!(output, " r{}", operands[0])?,
+        | Opcode::LoadSuperBase => write!(output, " r{}", operands[0])?,
+        Opcode::InitializeClassEnvironment => {
+            write!(output, " r{}, slot={}", operands[0], operands[1])?
+        }
+        Opcode::CreatePrivateName => write!(output, " r{}, name={}", operands[0], operands[1])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,
@@ -137,6 +140,8 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::DefineGetterByValue
         | Opcode::DefineSetterByValue
         | Opcode::CopyDataProperties
+        | Opcode::GetPrivate
+        | Opcode::SetPrivate
         | Opcode::SetAccessorFunctionName => write!(
             output,
             " r{}, r{}, r{}",

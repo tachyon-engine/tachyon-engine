@@ -16,6 +16,7 @@ pub(crate) struct ClassFieldRecord {
     pub(crate) key: PropertyKey,
     pub(crate) initializer: Option<Value>,
     pub(crate) infer_name: bool,
+    pub(crate) private: bool,
 }
 
 impl Trace for ClassFieldRecord {

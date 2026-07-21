@@ -190,6 +190,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
             collect_expression(object, bindings);
             collect_expression(property, bindings);
         }
+        HirExpressionKind::PrivateMember { object, .. } => collect_expression(object, bindings),
         HirExpressionKind::SuperComputedMember(property)
         | HirExpressionKind::Unary {
             argument: property, ..
@@ -233,6 +234,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 let key = match element {
                     HirClassElement::Method(method) => Some(&method.key),
                     HirClassElement::PublicField(field) => Some(&field.key),
+                    HirClassElement::PrivateField(_) => None,
                     HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {
@@ -294,5 +296,6 @@ fn collect_assignment_target(target: &HirAssignmentTarget, bindings: &mut Vec<Bi
             collect_expression(object, bindings);
             collect_expression(property, bindings);
         }
+        HirAssignmentTarget::PrivateMember { object, .. } => collect_expression(object, bindings),
     }
 }

@@ -55,6 +55,7 @@ impl SymbolId {
 pub(crate) enum PropertyKey {
     Atom(AtomId),
     Symbol(SymbolId),
+    Private(SymbolId),
 }
 
 impl PropertyKey {
@@ -62,15 +63,23 @@ impl PropertyKey {
     pub(crate) const fn atom(self) -> Option<AtomId> {
         match self {
             Self::Atom(atom) => Some(atom),
-            Self::Symbol(_) => None,
+            Self::Symbol(_) | Self::Private(_) => None,
         }
     }
 
     #[inline(always)]
     pub(crate) const fn symbol(self) -> Option<SymbolId> {
         match self {
-            Self::Atom(_) => None,
+            Self::Atom(_) | Self::Private(_) => None,
             Self::Symbol(symbol) => Some(symbol),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn symbol_identity(self) -> Option<SymbolId> {
+        match self {
+            Self::Atom(_) => None,
+            Self::Symbol(symbol) | Self::Private(symbol) => Some(symbol),
         }
     }
 }
@@ -85,7 +94,7 @@ impl From<AtomId> for PropertyKey {
 impl Trace for PropertyKey {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
-        if let Self::Symbol(symbol) = self {
+        if let Self::Symbol(symbol) | Self::Private(symbol) = self {
             let mut reference = symbol.reference();
             tracer.trace_raw_heap_ref(&mut reference);
             *symbol = symbol.with_reference(reference);
@@ -206,6 +215,9 @@ impl OwnPropertyKeys {
         loop {
             while let Some(entry) = self.slots.get(self.index).copied().flatten() {
                 self.index += 1;
+                if matches!(entry.key, PropertyKey::Private(_)) {
+                    continue;
+                }
                 if matches!(entry.key, PropertyKey::Symbol(_)) == self.symbols {
                     self.remaining -= 1;
                     return Some(entry);
@@ -315,11 +327,16 @@ impl ShapeTable {
             current = entry.parent.expect("non-root shapes have a parent");
         }
         debug_assert!(keys.iter().all(Option::is_some));
+        let public_count = keys
+            .iter()
+            .flatten()
+            .filter(|entry| !matches!(entry.key, PropertyKey::Private(_)))
+            .count();
         Ok(OwnPropertyKeys {
             slots: keys.into_boxed_slice(),
             index: 0,
             symbols: false,
-            remaining: count,
+            remaining: public_count,
         })
     }
 
@@ -514,7 +531,7 @@ impl PropertyStorage {
     }
 
     pub(crate) fn set_symbol_presence(&mut self, slot: u32, key: PropertyKey, present: bool) {
-        let Some(id) = key.symbol() else {
+        let Some(id) = key.symbol_identity() else {
             return;
         };
         let entry = self

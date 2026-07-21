@@ -23,6 +23,9 @@ impl Isolate {
                 let key = match key {
                     PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
                     PropertyKey::Symbol(symbol) => symbol.value(),
+                    PropertyKey::Private(_) => {
+                        return Err(ExecutionError::PrivatePropertyKeyEscaped);
+                    }
                 };
                 self.dispatch_proxy_get(site, proxy, key, receiver)
             }

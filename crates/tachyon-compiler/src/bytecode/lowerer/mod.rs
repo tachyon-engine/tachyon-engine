@@ -945,6 +945,26 @@ impl Lowerer<'_> {
         }))
     }
 
+    /// Resolves one lexical private name and publishes verifier-visible class-slot metadata.
+    pub(super) fn private_reference(
+        &mut self,
+        private_name: &crate::hir::HirPrivateName,
+    ) -> Result<(u32, u32), CompileError> {
+        let (depth, slot, name) = {
+            let (depth, slot) = self
+                .environments
+                .private_reference_slot(self.active_scope, private_name.id)
+                .ok_or_else(|| self.unsupported(SourceSpan { start: 0, end: 0 }, "private name"))?;
+            (depth, slot.slot, slot.name.clone())
+        };
+        self.add_binding_plan(BindingPlanEntry {
+            name,
+            location: BindingLocation::ClassEnvironment { depth, slot },
+            mutable: false,
+        })?;
+        Ok((depth, slot))
+    }
+
     pub(super) fn read_local(
         &mut self,
         binding: &LocalBinding,

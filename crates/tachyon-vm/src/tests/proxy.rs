@@ -76,6 +76,33 @@ fn proxy_constructor_validates_arguments_and_has_no_default_prototype() {
 }
 
 #[test]
+/// A failed private brand read must not allocate or publish a Proxy sidecar.
+fn failed_private_brand_read_keeps_proxy_sidecar_absent() {
+    let mut isolate = test_isolate();
+    let target = isolate.create_ordinary_object().unwrap();
+    let handler = isolate.create_ordinary_object().unwrap();
+    isolate.fiber.registers = vec![target, handler];
+    let proxy = isolate
+        .create_proxy_from_site(&proxy_call_site(&isolate, 2))
+        .unwrap();
+    isolate.fiber.registers = vec![proxy];
+    let private_name = isolate.allocate_symbol(None).unwrap();
+    isolate.fiber.registers.push(private_name);
+    let proxy = isolate.fiber.registers[0];
+    assert!(matches!(
+        isolate.get_private_field(proxy, private_name),
+        Err(ExecutionError::PrivateBrandCheckFailed(value)) if value == proxy
+    ));
+    assert!(
+        isolate
+            .proxy_snapshot(proxy)
+            .unwrap()
+            .private_storage
+            .is_none()
+    );
+}
+
+#[test]
 /// Keeps revocable construction rooted, then clears every private edge exactly once.
 fn proxy_revoker_survives_forced_major_and_is_idempotent() {
     assert_eq!(core::mem::size_of::<FunctionExecutable>(), 16);

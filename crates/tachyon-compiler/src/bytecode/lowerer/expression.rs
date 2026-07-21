@@ -28,6 +28,7 @@ struct PendingInstanceField {
     key: LoweredClassKey,
     initializer: Option<RegisterId>,
     infer_name: bool,
+    private: bool,
     span: SourceSpan,
 }
 
@@ -480,6 +481,17 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::PrivateMember { object, name } => {
+                let receiver = self.expression(object)?;
+                let key = self.load_private_name(name, expression.span)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::GetPrivate,
+                    &[destination.index(), receiver.index(), key.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::SuperStaticMember(property) => {
                 let destination = self.register()?;
                 let property = self.scope_name(property)?;
@@ -556,13 +568,34 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
         let previous_scope = self.active_scope;
-        if class.name_binding.is_some() {
-            self.emit(Opcode::EnterClassEnvironment, &[], span)?;
+        let class_environment_slots = u32::try_from(
+            usize::from(class.name_binding.is_some())
+                .checked_add(class.private_names.len())
+                .ok_or(CompileError::BindingOverflow)?,
+        )
+        .map_err(|_| CompileError::BindingOverflow)?;
+        if class_environment_slots != 0 {
+            self.emit(
+                Opcode::EnterClassEnvironment,
+                &[class_environment_slots],
+                span,
+            )?;
             self.environment_depth = self
                 .environment_depth
                 .checked_add(1)
                 .ok_or(CompileError::BindingOverflow)?;
             self.active_scope = class.scope;
+            for private_name in class.private_names.iter() {
+                let name = self.scope_name(&private_name.name)?;
+                let value = self.register()?;
+                self.emit(Opcode::CreatePrivateName, &[value.index(), name], span)?;
+                let (_, slot) = self.private_reference(private_name)?;
+                self.emit(
+                    Opcode::InitializeClassEnvironment,
+                    &[value.index(), slot],
+                    span,
+                )?;
+            }
         }
         let prototype_name = self.scope_name(&std::sync::Arc::from("prototype"))?;
         let destination = self.register()?;
@@ -613,6 +646,7 @@ impl Lowerer<'_> {
         let instance_target = if class.elements.iter().any(|element| match element {
             crate::HirClassElement::Method(method) => !method.is_static,
             crate::HirClassElement::PublicField(field) => !field.is_static,
+            crate::HirClassElement::PrivateField(_) => true,
             crate::HirClassElement::StaticBlock(_) => false,
         }) {
             let target = self.register()?;
@@ -639,6 +673,7 @@ impl Lowerer<'_> {
             .iter()
             .filter(|element| {
                 matches!(element, crate::HirClassElement::PublicField(field) if !field.is_static)
+                    || matches!(element, crate::HirClassElement::PrivateField(_))
             })
             .count();
         let mut instance_fields = Vec::with_capacity(instance_field_count);
@@ -682,9 +717,30 @@ impl Lowerer<'_> {
                             key,
                             initializer,
                             infer_name: field.infer_name,
+                            private: false,
                             span: field.span,
                         });
                     }
+                }
+                crate::HirClassElement::PrivateField(field) => {
+                    let key = self.load_private_name(&field.name, field.span)?;
+                    let initializer = field
+                        .initializer
+                        .map(|initializer| {
+                            self.create_class_initializer(
+                                initializer,
+                                instance_target.expect("private field requires class prototype"),
+                                field.span,
+                            )
+                        })
+                        .transpose()?;
+                    instance_fields.push(PendingInstanceField {
+                        key: LoweredClassKey::Computed(key),
+                        initializer,
+                        infer_name: false,
+                        private: true,
+                        span: field.span,
+                    });
                 }
                 crate::HirClassElement::StaticBlock(block) => {
                     let initializer =
@@ -702,7 +758,7 @@ impl Lowerer<'_> {
         if class.name_binding.is_some() {
             self.emit(
                 Opcode::InitializeClassEnvironment,
-                &[destination.index()],
+                &[destination.index(), 0],
                 span,
             )?;
         }
@@ -716,7 +772,7 @@ impl Lowerer<'_> {
                 }
             }
         }
-        if class.name_binding.is_some() {
+        if class_environment_slots != 0 {
             self.emit(Opcode::LeaveClassEnvironment, &[], span)?;
             self.environment_depth = self
                 .environment_depth
@@ -725,6 +781,18 @@ impl Lowerer<'_> {
             self.active_scope = previous_scope;
         }
         Ok(destination)
+    }
+
+    /// Loads one engine-private name identity from its active class lexical environment.
+    fn load_private_name(
+        &mut self,
+        private_name: &crate::hir::HirPrivateName,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let (depth, slot) = self.private_reference(private_name)?;
+        let value = self.register()?;
+        self.emit(Opcode::LoadEnvironment, &[value.index(), depth, slot], span)?;
+        Ok(value)
     }
 
     /// Creates one hidden class initializer and publishes its static or instance home object.
@@ -890,7 +958,7 @@ impl Lowerer<'_> {
         Ok(value)
     }
 
-    /// Freezes key/initializer/name triples into one verified contiguous constructor record window.
+    /// Freezes field metadata into one verified contiguous constructor record window.
     fn attach_instance_fields(
         &mut self,
         constructor: RegisterId,
@@ -898,7 +966,7 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         let count = u32::try_from(fields.len()).map_err(|_| CompileError::RegisterOverflow)?;
-        let register_count = count.checked_mul(3).ok_or(CompileError::RegisterOverflow)?;
+        let register_count = count.checked_mul(4).ok_or(CompileError::RegisterOverflow)?;
         let record_base = self.register()?;
         for _ in 1..register_count {
             self.register()?;
@@ -906,7 +974,7 @@ impl Lowerer<'_> {
         for (index, field) in fields.iter().enumerate() {
             let offset = u32::try_from(index)
                 .map_err(|_| CompileError::RegisterOverflow)?
-                .checked_mul(3)
+                .checked_mul(4)
                 .ok_or(CompileError::RegisterOverflow)?;
             let key_slot = record_base
                 .index()
@@ -918,6 +986,9 @@ impl Lowerer<'_> {
             let infer_name_slot = key_slot
                 .checked_add(2)
                 .ok_or(CompileError::RegisterOverflow)?;
+            let private_slot = key_slot
+                .checked_add(3)
+                .ok_or(CompileError::RegisterOverflow)?;
             let key = self.class_key_value(field.key, field.span)?;
             self.emit(Opcode::Move, &[key_slot, key.index()], field.span)?;
             let initializer = match field.initializer {
@@ -927,6 +998,15 @@ impl Lowerer<'_> {
             self.emit(
                 Opcode::Move,
                 &[initializer_slot, initializer.index()],
+                field.span,
+            )?;
+            self.emit(
+                if field.private {
+                    Opcode::LoadTrue
+                } else {
+                    Opcode::LoadFalse
+                },
+                &[private_slot],
                 field.span,
             )?;
             self.emit(
@@ -1146,6 +1226,33 @@ impl Lowerer<'_> {
                 }
                 Ok(result)
             }
+            HirAssignmentTarget::PrivateMember { object, name } => {
+                if matches!(operator, HirAssignmentOperator::Logical(_)) {
+                    return Err(self.unsupported(span, "logical private assignment"));
+                }
+                let receiver = self.expression(object)?;
+                let key = self.load_private_name(name, span)?;
+                let result = match operator {
+                    HirAssignmentOperator::Assign => self.expression(value)?,
+                    HirAssignmentOperator::Binary(operator) => {
+                        let old = self.register()?;
+                        self.emit(
+                            Opcode::GetPrivate,
+                            &[old.index(), receiver.index(), key.index()],
+                            span,
+                        )?;
+                        let right = self.expression(value)?;
+                        self.emit_binary(operator, old, right, span)?
+                    }
+                    HirAssignmentOperator::Logical(_) => unreachable!(),
+                };
+                self.emit(
+                    Opcode::SetPrivate,
+                    &[receiver.index(), result.index(), key.index()],
+                    span,
+                )?;
+                Ok(result)
+            }
         }
     }
 
@@ -1355,6 +1462,31 @@ impl Lowerer<'_> {
                 self.emit(
                     Opcode::SetByValue,
                     &[receiver.index(), updated.index(), property.index()],
+                    span,
+                )?;
+                Ok(result.unwrap_or(updated))
+            }
+            HirAssignmentTarget::PrivateMember { object, name } => {
+                let receiver = self.expression(object)?;
+                let key = self.load_private_name(name, span)?;
+                let old = self.register()?;
+                self.emit(
+                    Opcode::GetPrivate,
+                    &[old.index(), receiver.index(), key.index()],
+                    span,
+                )?;
+                let result = if prefix {
+                    None
+                } else {
+                    let snapshot = self.register()?;
+                    self.emit(Opcode::Move, &[snapshot.index(), old.index()], span)?;
+                    Some(snapshot)
+                };
+                let one = self.load_immediate(1, span)?;
+                let updated = self.emit_binary(opcode, old, one, span)?;
+                self.emit(
+                    Opcode::SetPrivate,
+                    &[receiver.index(), updated.index(), key.index()],
                     span,
                 )?;
                 Ok(result.unwrap_or(updated))

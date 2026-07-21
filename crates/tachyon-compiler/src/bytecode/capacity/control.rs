@@ -553,6 +553,7 @@ fn for_in_left_label_count(left: &HirForInLeft) -> Result<usize, CompileError> {
             expression_label_count(property)?,
             "bytecode labels",
         ),
+        HirAssignmentTarget::PrivateMember { object, .. } => expression_label_count(object),
     }
 }
 
@@ -789,6 +790,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                 let key = match element {
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(crate::HirObjectPropertyKey::Computed(key)) = key {
@@ -883,6 +885,9 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                     expression_label_count(property)?,
                     "bytecode labels",
                 )?,
+                HirAssignmentTarget::PrivateMember { object, .. } => {
+                    expression_label_count(object)?
+                }
             };
             let nested =
                 checked_count_add(target, expression_label_count(value)?, "bytecode labels")?;
@@ -900,6 +905,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                 expression_label_count(property)?,
                 "bytecode labels",
             ),
+            HirAssignmentTarget::PrivateMember { object, .. } => expression_label_count(object),
         },
         HirExpressionKind::Unary { argument, .. } => expression_label_count(argument),
         HirExpressionKind::Conditional {

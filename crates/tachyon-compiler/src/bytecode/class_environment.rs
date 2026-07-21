@@ -1,14 +1,22 @@
 //! Discovery of named class-expression environments across owned HIR trees.
 
+use crate::hir::HirPrivateName;
 use crate::hir::{HirForInLeft, HirObjectExpressionPart};
 use crate::{
     HirAssignmentTarget, HirBinding, HirExpression, HirExpressionKind, HirForInitializer,
     HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind, HirProgram,
-    HirStatement, HirStatementKind, HirVariableDeclaration,
+    HirStatement, HirStatementKind, HirVariableDeclaration, ScopeId,
 };
 
-/// Collects each private class-name binding once while keeping function stencils as traversal roots.
-pub(super) fn collect(hir: &HirProgram) -> Vec<HirBinding> {
+#[derive(Clone, Debug)]
+pub(super) struct ClassEnvironment {
+    pub(super) scope: ScopeId,
+    pub(super) name_binding: Option<HirBinding>,
+    pub(super) private_names: Box<[HirPrivateName]>,
+}
+
+/// Collects each class lexical environment once while keeping function stencils as traversal roots.
+pub(super) fn collect(hir: &HirProgram) -> Vec<ClassEnvironment> {
     let capacity = hir.statements().len().saturating_add(hir.functions().len());
     let mut bindings = Vec::with_capacity(capacity);
     collect_statements(hir.statements(), &mut bindings);
@@ -28,7 +36,7 @@ pub(super) fn collect(hir: &HirProgram) -> Vec<HirBinding> {
 }
 
 /// Traverses statement-owned expressions without re-entering separately-owned function stencils.
-fn collect_statements(statements: &[HirStatement], bindings: &mut Vec<HirBinding>) {
+fn collect_statements(statements: &[HirStatement], bindings: &mut Vec<ClassEnvironment>) {
     for statement in statements {
         match &statement.kind {
             HirStatementKind::Expression(expression) | HirStatementKind::Throw(expression) => {
@@ -126,7 +134,7 @@ fn collect_statements(statements: &[HirStatement], bindings: &mut Vec<HirBinding
     }
 }
 
-fn collect_declaration(declaration: &HirVariableDeclaration, bindings: &mut Vec<HirBinding>) {
+fn collect_declaration(declaration: &HirVariableDeclaration, bindings: &mut Vec<ClassEnvironment>) {
     for declarator in declaration.declarators.iter() {
         collect_pattern(&declarator.pattern, bindings);
         if let Some(initializer) = &declarator.initializer {
@@ -135,7 +143,7 @@ fn collect_declaration(declaration: &HirVariableDeclaration, bindings: &mut Vec<
     }
 }
 
-fn collect_for_in_left(left: &HirForInLeft, bindings: &mut Vec<HirBinding>) {
+fn collect_for_in_left(left: &HirForInLeft, bindings: &mut Vec<ClassEnvironment>) {
     match left {
         HirForInLeft::Variable(declaration) => collect_declaration(declaration, bindings),
         HirForInLeft::Assignment(pattern) => collect_pattern(pattern, bindings),
@@ -143,7 +151,7 @@ fn collect_for_in_left(left: &HirForInLeft, bindings: &mut Vec<HirBinding>) {
 }
 
 /// Traverses defaults and computed keys embedded in binding and assignment patterns.
-fn collect_pattern(pattern: &HirPattern, bindings: &mut Vec<HirBinding>) {
+fn collect_pattern(pattern: &HirPattern, bindings: &mut Vec<ClassEnvironment>) {
     match &pattern.kind {
         HirPatternKind::Binding(_) => {}
         HirPatternKind::Assignment(target) => collect_assignment_target(target, bindings),
@@ -176,7 +184,7 @@ fn collect_pattern(pattern: &HirPattern, bindings: &mut Vec<HirBinding>) {
     }
 }
 
-fn collect_assignment_target(target: &HirAssignmentTarget, bindings: &mut Vec<HirBinding>) {
+fn collect_assignment_target(target: &HirAssignmentTarget, bindings: &mut Vec<ClassEnvironment>) {
     match target {
         HirAssignmentTarget::Identifier(_) => {}
         HirAssignmentTarget::StaticMember { object, .. } => collect_expression(object, bindings),
@@ -184,17 +192,24 @@ fn collect_assignment_target(target: &HirAssignmentTarget, bindings: &mut Vec<Hi
             collect_expression(object, bindings);
             collect_expression(property, bindings);
         }
+        HirAssignmentTarget::PrivateMember { object, .. } => collect_expression(object, bindings),
     }
 }
 
 /// Walks every expression-owned child and records class bindings before their nested definitions.
-fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>) {
+fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnvironment>) {
     match &expression.kind {
         HirExpressionKind::Class(class) => {
-            if let Some(binding) = &class.name_binding {
-                let mut binding = binding.clone();
-                binding.scope = class.scope;
-                bindings.push(binding);
+            if class.name_binding.is_some() || !class.private_names.is_empty() {
+                let mut name_binding = class.name_binding.clone();
+                if let Some(binding) = &mut name_binding {
+                    binding.scope = class.scope;
+                }
+                bindings.push(ClassEnvironment {
+                    scope: class.scope,
+                    name_binding,
+                    private_names: class.private_names.as_ref().into(),
+                });
             }
             if let Some(super_class) = &class.super_class {
                 collect_expression(super_class, bindings);
@@ -203,6 +218,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>
                 let key = match element {
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {
@@ -237,6 +253,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>
             collect_expression(object, bindings);
             collect_expression(property, bindings);
         }
+        HirExpressionKind::PrivateMember { object, .. } => collect_expression(object, bindings),
         HirExpressionKind::SuperComputedMember(property)
         | HirExpressionKind::Unary {
             argument: property, ..
@@ -288,7 +305,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<HirBinding>
 fn collect_property(
     key: &HirObjectPropertyKey,
     value: &HirObjectPropertyValue,
-    bindings: &mut Vec<HirBinding>,
+    bindings: &mut Vec<ClassEnvironment>,
 ) {
     if let HirObjectPropertyKey::Computed(key) = key {
         collect_expression(key, bindings);

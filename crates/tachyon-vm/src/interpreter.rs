@@ -811,6 +811,9 @@ impl Isolate {
                     let key = match key {
                         PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
                         PropertyKey::Symbol(symbol) => symbol.value(),
+                        PropertyKey::Private(_) => {
+                            return Err(ExecutionError::PrivatePropertyKeyEscaped);
+                        }
                     };
                     let receiver = self.read(base, operands[1])?;
                     return self.dispatch_delete_property(site, receiver, key, mode);
@@ -949,6 +952,24 @@ impl Isolate {
             }
             Opcode::AttachInstanceFields => {
                 self.attach_instance_fields(base, operands[0], operands[1], operands[2])?;
+            }
+            Opcode::CreatePrivateName => {
+                let name = self.scope_atom(code, operands[1])?;
+                let _ = name;
+                let private_name = self.allocate_symbol(None)?;
+                self.write(base, operands[0], private_name)?;
+            }
+            Opcode::GetPrivate => {
+                let object = self.read(base, operands[1])?;
+                let name = self.read(base, operands[2])?;
+                let value = self.get_private_field(object, name)?;
+                self.write(base, operands[0], value)?;
+            }
+            Opcode::SetPrivate => {
+                let object = self.read(base, operands[0])?;
+                let value = self.read(base, operands[1])?;
+                let name = self.read(base, operands[2])?;
+                self.set_private_field(object, name, value)?;
             }
             Opcode::InitializeInstanceElements => {
                 return self.initialize_instance_elements(NativeContinuationSite {
@@ -1093,10 +1114,10 @@ impl Isolate {
                     key,
                 );
             }
-            Opcode::EnterClassEnvironment => self.enter_class_environment()?,
+            Opcode::EnterClassEnvironment => self.enter_class_environment(operands[0])?,
             Opcode::InitializeClassEnvironment => {
                 let value = self.read(base, operands[0])?;
-                self.initialize_class_environment(value)?;
+                self.initialize_class_environment(operands[1], value)?;
             }
             Opcode::LeaveClassEnvironment => self.leave_class_environment()?,
             Opcode::SetById => {
@@ -2004,8 +2025,8 @@ impl Isolate {
         Ok(())
     }
 
-    /// Enters one exact single-slot immutable environment for named class evaluation.
-    fn enter_class_environment(&mut self) -> Result<(), ExecutionError> {
+    /// Enters one exact immutable environment for class name and private-name identities.
+    fn enter_class_environment(&mut self, slot_count: u32) -> Result<(), ExecutionError> {
         if self.fiber.class_environments.len() == self.fiber.class_environments.capacity() {
             self.fiber
                 .class_environments
@@ -2013,7 +2034,8 @@ impl Isolate {
                 .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         }
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
-        let slot_count = NonZeroU32::new(1).expect("class name environment has one slot");
+        let slot_count = NonZeroU32::new(slot_count)
+            .ok_or(ExecutionError::EnvironmentStorageAllocationFailed)?;
         let environment =
             Environment::try_bindings(EnvironmentKind::Declarative, parent, slot_count, |_| {
                 BindingState::new(false, false)
@@ -2047,8 +2069,12 @@ impl Isolate {
         Ok(())
     }
 
-    /// Initializes the active class-name slot once and publishes its constructor edge.
-    fn initialize_class_environment(&mut self, value: Value) -> Result<(), ExecutionError> {
+    /// Initializes one active class-environment slot and publishes its managed edge.
+    fn initialize_class_environment(
+        &mut self,
+        slot: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
         let frame_depth = self.fiber.frames.len();
         if !self
             .fiber
@@ -2064,8 +2090,8 @@ impl Isolate {
                 no_gc
                     .borrow_reference_mut(environment, self.types.environment)
                     .map_err(ExecutionError::NoGcBorrow)?
-                    .initialize(0, value)
-                    .map_err(|error| environment_access_error(0, 0, error))
+                    .initialize(slot, value)
+                    .map_err(|error| environment_access_error(0, slot, error))
             })
         })?;
         if let Some(target) = value.as_heap_ref() {
@@ -2444,7 +2470,7 @@ impl Isolate {
             .map_err(|_| ExecutionError::ClassFieldAllocationFailed)?;
         for index in 0..count {
             let offset = index
-                .checked_mul(3)
+                .checked_mul(4)
                 .ok_or(ExecutionError::InvalidClassFieldPlan)?;
             let key_value = self.read(
                 base,
@@ -2466,6 +2492,13 @@ impl Isolate {
                     .and_then(|slot| slot.checked_add(2))
                     .ok_or(ExecutionError::InvalidClassFieldPlan)?,
             )?;
+            let private = self.read(
+                base,
+                record_base
+                    .checked_add(offset)
+                    .and_then(|slot| slot.checked_add(3))
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+            )?;
             let initializer = if initializer.as_immediate() == Some(Immediate::Undefined) {
                 None
             } else {
@@ -2478,10 +2511,20 @@ impl Isolate {
                 Some(Immediate::False) => false,
                 _ => return Err(ExecutionError::InvalidClassFieldPlan),
             };
+            let private = match private.as_immediate() {
+                Some(Immediate::True) => true,
+                Some(Immediate::False) => false,
+                _ => return Err(ExecutionError::InvalidClassFieldPlan),
+            };
             records.push(ClassFieldRecord {
-                key: self.property_key(key_value)?,
+                key: if private {
+                    self.private_property_key(key_value)?
+                } else {
+                    self.property_key(key_value)?
+                },
                 initializer,
                 infer_name,
+                private,
             });
         }
         let roots = &mut VmRoots {
@@ -2721,6 +2764,27 @@ impl Isolate {
             enumerable: Some(true),
             configurable: Some(true),
         };
+        if record.private {
+            self.define_private_field(
+                receiver,
+                record
+                    .key
+                    .symbol_identity()
+                    .map(SymbolId::value)
+                    .ok_or(ExecutionError::InvalidClassFieldPlan)?,
+                value,
+            )?;
+            if parent_pushed {
+                let continuation = self.pop_native_continuation()?;
+                if continuation.kind()
+                    != NativeContinuationKind::InstanceElements(InstanceElementStage::Define)
+                {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            }
+            self.increment_instance_element_index(state)?;
+            return Ok(false);
+        }
         if !self.is_proxy_value(receiver) {
             self.define_data_property(receiver, record.key, descriptor)?;
             if parent_pushed {

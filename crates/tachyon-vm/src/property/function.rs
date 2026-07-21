@@ -67,6 +67,9 @@ impl Isolate {
                     description,
                 )
             }
+            PropertyKey::Private(_) => {
+                return Err(ExecutionError::PrivatePropertyKeyEscaped);
+            }
         };
         let capacity = prefix
             .len()
@@ -97,6 +100,9 @@ impl Isolate {
                     self.append_primitive_string_units(description, &mut units)?;
                 }
                 units.push(u16::from(b']'));
+            }
+            PropertyKey::Private(_) => {
+                return Err(ExecutionError::PrivatePropertyKeyEscaped);
             }
         }
         debug_assert_eq!(units.len(), capacity);

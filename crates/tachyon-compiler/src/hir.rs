@@ -9,7 +9,8 @@ pub use expression::{
     HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirClass, HirClassElement,
     HirClassField, HirClassMethod, HirClassMethodKind, HirExpression, HirExpressionKind,
     HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty, HirObjectPropertyKey,
-    HirObjectPropertyValue, HirUnaryOperator, HirUpdateOperator,
+    HirObjectPropertyValue, HirPrivateField, HirPrivateName, HirPrivateNameId, HirUnaryOperator,
+    HirUpdateOperator,
 };
 pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
 pub(crate) use program::lower;

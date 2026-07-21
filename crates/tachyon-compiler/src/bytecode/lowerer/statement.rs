@@ -764,6 +764,17 @@ impl Lowerer<'_> {
                     span,
                 )
             }
+            HirAssignmentTarget::PrivateMember { object, name } => {
+                let receiver = self.expression(object)?;
+                let (depth, slot) = self.private_reference(name)?;
+                let key = self.register()?;
+                self.emit(Opcode::LoadEnvironment, &[key.index(), depth, slot], span)?;
+                self.emit(
+                    Opcode::SetPrivate,
+                    &[receiver.index(), value.index(), key.index()],
+                    span,
+                )
+            }
         }
     }
 

@@ -6,6 +6,7 @@ mod descriptor;
 mod descriptor_parse;
 mod function;
 mod keys;
+mod private_field;
 mod storage;
 
 use super::*;

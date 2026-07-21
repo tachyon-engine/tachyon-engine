@@ -414,6 +414,7 @@ pub(super) fn validate_class_environments(
 ) -> Result<(), ModuleBuildError> {
     let words = bytecode.bytecode().words();
     let mut depth_at = vec![None; words.len().saturating_add(1)];
+    let mut slot_counts = Vec::new();
     let mut depth = 0_u32;
     let mut offset = 0_u32;
     while (offset as usize) < words.len() {
@@ -427,6 +428,7 @@ pub(super) fn validate_class_environments(
         })?;
         match instruction.opcode {
             Opcode::EnterClassEnvironment => {
+                slot_counts.push(instruction.operands[0]);
                 depth =
                     depth
                         .checked_add(1)
@@ -437,15 +439,26 @@ pub(super) fn validate_class_environments(
                             actual: depth,
                         })?;
             }
-            Opcode::InitializeClassEnvironment if depth == 0 => {
-                return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
-                    function,
-                    offset: word_offset,
-                    expected: 1,
-                    actual: 0,
-                });
+            Opcode::InitializeClassEnvironment => {
+                let Some(&slot_count) = slot_counts.last() else {
+                    return Err(ModuleBuildError::InvalidClassEnvironmentDepth {
+                        function,
+                        offset: word_offset,
+                        expected: 1,
+                        actual: 0,
+                    });
+                };
+                if instruction.operands[1] >= slot_count {
+                    return Err(ModuleBuildError::ClassEnvironmentSlotOutOfRange {
+                        function,
+                        offset: word_offset,
+                        slot: instruction.operands[1],
+                        slot_count,
+                    });
+                }
             }
             Opcode::LeaveClassEnvironment => {
+                slot_counts.pop();
                 depth =
                     depth
                         .checked_sub(1)
@@ -587,13 +600,6 @@ pub(super) fn validate_binding_plan(
                     function,
                     binding: binding.clone(),
                     environment_slot_count: max_environment_slot_count,
-                });
-            }
-            BindingLocation::ClassEnvironment { slot, .. } if slot != 0 => {
-                return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
-                    function,
-                    binding: binding.clone(),
-                    environment_slot_count: 1,
                 });
             }
             _ => {}
@@ -826,8 +832,16 @@ fn verify_instruction(
         | Opcode::ReturnUndefined
         | Opcode::DeclareScope
         | Opcode::DeclareGlobalLexical
-        | Opcode::EnterClassEnvironment
         | Opcode::LeaveClassEnvironment => {}
+        Opcode::EnterClassEnvironment => {
+            if operands[0] == 0 || operands[0] > context.max_environment_slot_count {
+                return Err(VerifyError::EnvironmentSlotOutOfRange {
+                    offset,
+                    slot: operands[0].saturating_sub(1),
+                    max_environment_slot_count: context.max_environment_slot_count,
+                });
+            }
+        }
         Opcode::LoadUndefined
         | Opcode::LoadNull
         | Opcode::LoadFalse
@@ -835,6 +849,16 @@ fn verify_instruction(
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
         | Opcode::LoadScope => check_register(operands[0])?,
+        Opcode::CreatePrivateName => {
+            check_register(operands[0])?;
+            if operands[1] >= context.scope_name_count {
+                return Err(VerifyError::ScopeNameOutOfRange {
+                    offset,
+                    scope_name: operands[1],
+                    scope_name_count: context.scope_name_count,
+                });
+            }
+        }
         Opcode::CreateObject
         | Opcode::CreateArray
         | Opcode::LoadException
@@ -845,8 +869,17 @@ fn verify_instruction(
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
-        | Opcode::LoadSuperBase
-        | Opcode::InitializeClassEnvironment => check_register(operands[0])?,
+        | Opcode::LoadSuperBase => check_register(operands[0])?,
+        Opcode::InitializeClassEnvironment => {
+            check_register(operands[0])?;
+            if operands[1] >= context.max_environment_slot_count {
+                return Err(VerifyError::EnvironmentSlotOutOfRange {
+                    offset,
+                    slot: operands[1],
+                    max_environment_slot_count: context.max_environment_slot_count,
+                });
+            }
+        }
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -903,6 +936,8 @@ fn verify_instruction(
         | Opcode::DefineClassGetterByValue
         | Opcode::DefineClassSetterByValue
         | Opcode::DefineFieldByValue
+        | Opcode::GetPrivate
+        | Opcode::SetPrivate
         | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;

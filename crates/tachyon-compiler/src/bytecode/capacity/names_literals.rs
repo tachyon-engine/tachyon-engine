@@ -204,6 +204,7 @@ fn assignment_target_scope_name_count(target: &HirAssignmentTarget) -> Result<us
             expression_scope_name_count(property)?,
             "scope names",
         ),
+        HirAssignmentTarget::PrivateMember { object, .. } => expression_scope_name_count(object),
     }
 }
 
@@ -241,10 +242,12 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             if class.name.is_some() {
                 count = checked_count_add(count, 1, "scope names")?;
             }
+            count = checked_count_add(count, class.private_names.len(), "scope names")?;
             for element in class.elements.iter() {
                 let key = match element {
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(key) = key {
@@ -331,6 +334,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             expression_scope_name_count(property)?,
             "scope names",
         ),
+        HirExpressionKind::PrivateMember { object, .. } => expression_scope_name_count(object),
         HirExpressionKind::Unary { argument, .. } => expression_scope_name_count(argument),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_scope_name_count(left)?,
@@ -356,6 +360,9 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                     expression_scope_name_count(property)?,
                     "scope names",
                 )?,
+                HirAssignmentTarget::PrivateMember { object, .. } => {
+                    expression_scope_name_count(object)?
+                }
             };
             checked_count_add(target, expression_scope_name_count(value)?, "scope names")
         }
@@ -369,6 +376,9 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                 expression_scope_name_count(property)?,
                 "scope names",
             ),
+            HirAssignmentTarget::PrivateMember { object, .. } => {
+                expression_scope_name_count(object)
+            }
         },
         HirExpressionKind::Conditional {
             test,
@@ -599,6 +609,7 @@ fn for_in_left_literal_count(left: &HirForInLeft) -> Result<usize, CompileError>
             expression_literal_count(property)?,
             "bytecode constants",
         ),
+        HirAssignmentTarget::PrivateMember { object, .. } => expression_literal_count(object),
     }
 }
 
@@ -649,6 +660,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 let key = match element {
                     crate::HirClassElement::Method(method) => Some(&method.key),
                     crate::HirClassElement::PublicField(field) => Some(&field.key),
+                    crate::HirClassElement::PrivateField(_) => None,
                     crate::HirClassElement::StaticBlock(_) => None,
                 };
                 if let Some(HirObjectPropertyKey::Computed(key)) = key {
@@ -731,6 +743,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             expression_literal_count(property)?,
             "bytecode constants",
         ),
+        HirExpressionKind::PrivateMember { object, .. } => expression_literal_count(object),
         HirExpressionKind::Assignment { target, value, .. } => {
             let Some(target) = target.assignment_target() else {
                 return expression_literal_count(value);
@@ -745,6 +758,9 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                     expression_literal_count(property)?,
                     "bytecode constants",
                 )?,
+                HirAssignmentTarget::PrivateMember { object, .. } => {
+                    expression_literal_count(object)?
+                }
             };
             checked_count_add(
                 target,
@@ -760,6 +776,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 expression_literal_count(property)?,
                 "bytecode constants",
             ),
+            HirAssignmentTarget::PrivateMember { object, .. } => expression_literal_count(object),
         },
         HirExpressionKind::Unary { argument, .. } => expression_literal_count(argument),
         HirExpressionKind::Conditional {

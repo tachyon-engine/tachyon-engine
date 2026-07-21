@@ -156,6 +156,29 @@ var value = new Derived();
 definitions === 3 && value.first === 7 && value[symbol] === undefined && value.named.name === "named";
 "#;
 
+const PRIVATE_FIELD_SOURCE: &str = r#"
+var traps = 0;
+class Base {
+  constructor() {
+    return new Proxy({}, {
+      get() { traps = traps + 1; },
+      set() { traps = traps + 1; },
+      defineProperty() { traps = traps + 1; }
+    });
+  }
+}
+class Derived extends Base {
+  #value = 2;
+  read() { return this.#value; }
+  update() { return ++this.#value; }
+  constructor() { super(); }
+}
+var value = new Derived();
+var read = Derived.prototype.read;
+var update = Derived.prototype.update;
+read.call(value) === 2 && update.call(value) === 3 && read.call(value) === 3 && traps === 0;
+"#;
+
 const STATIC_BLOCK_SOURCE: &str = r#"
 var order = "";
 function make(seed) {
@@ -298,6 +321,24 @@ fn instance_field_plans_survive_forced_major_collections() {
     ] {
         assert_forced_major_source(source, source_id);
     }
+}
+
+#[test]
+fn private_fields_execute_for_every_dispatch_batch() {
+    assert_private_field_batch::<1>();
+    assert_private_field_batch::<2>();
+    assert_private_field_batch::<4>();
+    assert_private_field_batch::<8>();
+    assert_private_field_batch::<16>();
+}
+
+#[test]
+fn private_field_identity_and_proxy_sidecars_survive_forced_major_collections() {
+    assert_forced_major_source(PRIVATE_FIELD_SOURCE, 167);
+    assert_forced_major_source(
+        "class Outer { #outer = 1; make() { return class Inner { #inner = 2; read(value) { return value.#outer + this.#inner; } }; } } var outer = new Outer(); var Inner = outer.make(); new Inner().read(outer) === 3;",
+        168,
+    );
 }
 
 #[test]
@@ -593,6 +634,25 @@ fn assert_instance_field_batch<const N: usize>() {
             },
         )
         .expect("instance field fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes hidden private-name slots, brand checks, and Proxy sidecars with one dispatch batch.
+fn assert_private_field_batch<const N: usize>() {
+    let module = compile_source(PRIVATE_FIELD_SOURCE, 180 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("private field fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

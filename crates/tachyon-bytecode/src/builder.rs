@@ -249,8 +249,8 @@ impl BytecodeBuilder {
             | Opcode::ReturnUndefined
             | Opcode::DeclareScope
             | Opcode::DeclareGlobalLexical
-            | Opcode::EnterClassEnvironment
             | Opcode::LeaveClassEnvironment => &[],
+            Opcode::EnterClassEnvironment => &[],
             Opcode::LoadUndefined
             | Opcode::LoadNull
             | Opcode::LoadFalse
@@ -264,6 +264,7 @@ impl BytecodeBuilder {
             | Opcode::StoreResolvedScope
             | Opcode::InitializeGlobalLexical
             | Opcode::InitializeClassEnvironment
+            | Opcode::CreatePrivateName
             | Opcode::Return
             | Opcode::Throw => &[0],
             Opcode::CreateObject
@@ -322,7 +323,9 @@ impl BytecodeBuilder {
             | Opcode::DefineSetterById
             | Opcode::DefineGetterByValue
             | Opcode::DefineSetterByValue
-            | Opcode::CopyDataProperties => &[0, 1, 2],
+            | Opcode::CopyDataProperties
+            | Opcode::GetPrivate
+            | Opcode::SetPrivate => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],

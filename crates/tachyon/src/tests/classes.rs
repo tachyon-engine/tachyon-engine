@@ -263,3 +263,52 @@ fn class_static_block_semantics() {
         );
     }
 }
+
+#[test]
+/// Keeps instance private data unforgeable while preserving field evaluation and update semantics.
+fn private_instance_field_semantics() {
+    for (source_id, source) in [
+        (
+            1_107,
+            "class C { #value; read() { return this.#value; } write(value) { return this.#value = value; } } var value = new C(); value.read() === undefined && value.write(4) === 4 && value.read() === 4 && Reflect.ownKeys(value).length === 0;",
+        ),
+        (
+            1_108,
+            "var order = ''; class C { first = (order = order + 'a', 1); #second = (order = order + 'b', 2); third = (order = order + 'c', 3); read() { return this.#second; } } var value = new C(); order === 'abc' && value.first === 1 && value.read() === 2 && value.third === 3;",
+        ),
+        (
+            1_109,
+            "class C { #value = 1; update() { var a = this.#value++; var b = ++this.#value; this.#value += 4; return a === 1 && b === 3 && this.#value === 7; } } new C().update();",
+        ),
+        (
+            1_110,
+            "class C { #value = 1; method() { return function() { return this.#value; }; } } var value = new C(); value.method().call(value) === 1;",
+        ),
+        (
+            1_111,
+            "class Outer { #value = 1; make() { return class Inner { #value = 2; read(value) { return value.#value; } }; } } var outer = new Outer(); var Inner = outer.make(); var inner = new Inner(); var threw = false; try { inner.read(outer); } catch (error) { threw = error instanceof TypeError; } inner.read(inner) === 2 && threw;",
+        ),
+        (
+            1_114,
+            "class Outer { #outer = 1; make() { return class Inner { #inner = 2; read(value) { return value.#outer + this.#inner; } }; } } var outer = new Outer(); var Inner = outer.make(); new Inner().read(outer) === 3;",
+        ),
+        (
+            1_112,
+            "class C { #value = 1; read() { return this.#value; } } var read = C.prototype.read; var threw = false; try { read.call({}); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_113,
+            "class Base { constructor() { return Object.preventExtensions({}); } } class Derived extends Base { #value = 3; read() { return this.#value; } constructor() { super(); } } var value = new Derived(); Derived.prototype.read.call(value) === 3 && Reflect.ownKeys(value).length === 0;",
+        ),
+        (
+            1_115,
+            "var traps = 0; class Base { constructor() { return new Proxy({}, { get() { traps = traps + 1; }, set() { traps = traps + 1; }, defineProperty() { traps = traps + 1; } }); } } class Derived extends Base { #value = 3; read() { return this.#value; } write(value) { this.#value = value; } update() { return ++this.#value; } constructor() { super(); } } var value = new Derived(); var first = Derived.prototype.read.call(value); Derived.prototype.write.call(value, 4); var next = Derived.prototype.update.call(value); first === 3 && next === 5 && Derived.prototype.read.call(value) === 5 && traps === 0;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}

@@ -59,6 +59,9 @@ impl Isolate {
             let value = match key {
                 PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
                 PropertyKey::Symbol(symbol) => symbol.value(),
+                PropertyKey::Private(_) => {
+                    return Err(ExecutionError::PrivatePropertyKeyEscaped);
+                }
             };
             let output = self.safe_integer_property_atom(index)?;
             self.set_own_data_property(result, output, value)?;

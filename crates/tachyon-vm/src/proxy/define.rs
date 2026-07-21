@@ -265,6 +265,9 @@ impl Isolate {
         let key = match pending.key {
             PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
             PropertyKey::Symbol(symbol) => symbol.value(),
+            PropertyKey::Private(_) => {
+                return Err(ExecutionError::PrivatePropertyKeyEscaped);
+            }
         };
         let pending_value = self.read(site.caller_base, site.destination)?;
         let pending_state = self.pending_proxy_define_reference(pending_value)?;

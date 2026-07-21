@@ -51,7 +51,6 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::ReturnUndefined,
                 Opcode::EnterFinally,
                 Opcode::ResumeCompletion,
-                Opcode::EnterClassEnvironment,
                 Opcode::LeaveClassEnvironment,
             ],
         ),
@@ -78,7 +77,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CheckConstructor,
                 Opcode::BreakThroughFinally,
                 Opcode::ContinueThroughFinally,
-                Opcode::InitializeClassEnvironment,
+                Opcode::EnterClassEnvironment,
             ],
         ),
         (
@@ -108,6 +107,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CreateExclusionList,
                 Opcode::ExcludePropertyKey,
                 Opcode::CollectRestArguments,
+                Opcode::InitializeClassEnvironment,
             ],
         ),
         (
@@ -167,6 +167,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineFieldById,
                 Opcode::DefineFieldByValue,
                 Opcode::AttachInstanceFields,
+                Opcode::GetPrivate,
+                Opcode::SetPrivate,
             ],
         ),
         (
@@ -181,7 +183,7 @@ fn operand_count_table_covers_every_opcode_once() {
             1,
             &[Opcode::LoadSuperBase, Opcode::InitializeInstanceElements],
         ),
-        (2, &[Opcode::CreateBaseClass]),
+        (2, &[Opcode::CreateBaseClass, Opcode::CreatePrivateName]),
     ];
     let mut seen = [false; OPCODE_COUNT];
     let mut visited = 0;
@@ -695,21 +697,28 @@ fn compiled_module_enforces_class_kind_and_opcode_contracts() {
         })
     ));
 
-    let mut balanced_environment = encode_instruction(Opcode::EnterClassEnvironment, &[]).unwrap();
+    let mut balanced_environment = encode_instruction(Opcode::EnterClassEnvironment, &[1]).unwrap();
     balanced_environment
-        .extend(encode_instruction(Opcode::InitializeClassEnvironment, &[0]).unwrap());
+        .extend(encode_instruction(Opcode::InitializeClassEnvironment, &[0, 0]).unwrap());
     balanced_environment.extend(encode_instruction(Opcode::LeaveClassEnvironment, &[]).unwrap());
     balanced_environment.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let mut balanced_metadata = FunctionMetadata::new(
+        FunctionKind::Script,
+        FunctionLayout {
+            register_count: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    balanced_metadata.binding_plan = vec![BindingPlanEntry {
+        name: Arc::from("C"),
+        location: BindingLocation::ClassEnvironment { depth: 0, slot: 0 },
+        mutable: false,
+    }]
+    .into();
     let balanced = CompiledFunctionTemplate::new(
         FunctionId::new(0),
         Bytecode::from_words(balanced_environment),
-        FunctionMetadata::new(
-            FunctionKind::Script,
-            FunctionLayout {
-                register_count: 1,
-                ..FunctionLayout::default()
-            },
-        ),
+        balanced_metadata,
     );
     assert!(
         CompiledModule::new(
@@ -723,12 +732,20 @@ fn compiled_module_enforces_class_kind_and_opcode_contracts() {
     );
 
     let mut unbalanced_environment =
-        encode_instruction(Opcode::EnterClassEnvironment, &[]).unwrap();
+        encode_instruction(Opcode::EnterClassEnvironment, &[1]).unwrap();
     unbalanced_environment.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let mut unbalanced_metadata =
+        FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default());
+    unbalanced_metadata.binding_plan = vec![BindingPlanEntry {
+        name: Arc::from("C"),
+        location: BindingLocation::ClassEnvironment { depth: 0, slot: 0 },
+        mutable: false,
+    }]
+    .into();
     let unbalanced = CompiledFunctionTemplate::new(
         FunctionId::new(0),
         Bytecode::from_words(unbalanced_environment),
-        FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default()),
+        unbalanced_metadata,
     );
     assert!(matches!(
         CompiledModule::new(
@@ -741,6 +758,38 @@ fn compiled_module_enforces_class_kind_and_opcode_contracts() {
         Err(ModuleBuildError::InvalidClassEnvironmentDepth {
             expected: 0,
             actual: 1,
+            ..
+        })
+    ));
+
+    let mut invalid_slot = encode_instruction(Opcode::EnterClassEnvironment, &[2]).unwrap();
+    invalid_slot.extend(encode_instruction(Opcode::LeaveClassEnvironment, &[]).unwrap());
+    invalid_slot.extend(encode_instruction(Opcode::EnterClassEnvironment, &[1]).unwrap());
+    invalid_slot.extend(encode_instruction(Opcode::InitializeClassEnvironment, &[0, 1]).unwrap());
+    invalid_slot.extend(encode_instruction(Opcode::LeaveClassEnvironment, &[]).unwrap());
+    invalid_slot.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let invalid_slot = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(invalid_slot),
+        FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 1,
+                ..FunctionLayout::default()
+            },
+        ),
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![invalid_slot],
+            FunctionId::new(0),
+        ),
+        Err(ModuleBuildError::ClassEnvironmentSlotOutOfRange {
+            slot: 1,
+            slot_count: 1,
             ..
         })
     ));

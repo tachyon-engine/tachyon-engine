@@ -605,6 +605,12 @@ pub enum ModuleBuildError {
         expected: u32,
         actual: u32,
     },
+    ClassEnvironmentSlotOutOfRange {
+        function: FunctionId,
+        offset: WordOffset,
+        slot: u32,
+        slot_count: u32,
+    },
     VerifyFunction {
         function: FunctionId,
         error: VerifyError,
@@ -748,16 +754,32 @@ impl CompiledModule {
             .iter()
             .map(|template| template.metadata.kind)
             .collect();
+        let encoded_class_environment_slots = templates
+            .iter()
+            .map(|template| {
+                let mut offset = 0_u32;
+                let mut maximum = 0_u32;
+                while (offset as usize) < template.bytecode.words().len() {
+                    let Ok(instruction) =
+                        decode_instruction(template.bytecode.words(), WordOffset::new(offset))
+                    else {
+                        break;
+                    };
+                    if instruction.opcode == Opcode::EnterClassEnvironment {
+                        maximum = maximum.max(instruction.operands[0]);
+                    }
+                    offset = offset.saturating_add(u32::from(instruction.word_len));
+                }
+                maximum
+            })
+            .max()
+            .unwrap_or(0);
         let max_environment_slot_count = templates
             .iter()
             .map(|template| template.metadata.layout.environment_slot_count)
             .max()
             .unwrap_or(0)
-            .max(u32::from(templates.iter().any(|template| {
-                template.metadata.binding_plan.iter().any(|binding| {
-                    matches!(binding.location, BindingLocation::ClassEnvironment { .. })
-                })
-            })));
+            .max(encoded_class_environment_slots);
         let context = VerifyContext {
             register_count: 0,
             constant_count,

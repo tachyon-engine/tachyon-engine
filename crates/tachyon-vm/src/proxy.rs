@@ -18,6 +18,7 @@ pub(crate) use get::PROXY_GET_ACTIVE;
 pub(crate) struct ProxyObject {
     pub(crate) target: Value,
     pub(crate) handler: Value,
+    pub(crate) private_storage: Option<GcRef<OrdinaryObject>>,
 }
 
 impl Trace for ProxyObject {
@@ -25,6 +26,7 @@ impl Trace for ProxyObject {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.target.trace(tracer);
         self.handler.trace(tracer);
+        self.private_storage.trace(tracer);
     }
 }
 
@@ -120,6 +122,7 @@ impl Isolate {
                 ProxyObject {
                     target: roots.target,
                     handler: roots.handler,
+                    private_storage: None,
                 },
                 AllocationSpace::Young,
                 &mut roots,
@@ -257,6 +260,7 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)?;
                 proxy.target = Value::from_immediate(Immediate::Null);
                 proxy.handler = Value::from_immediate(Immediate::Null);
+                proxy.private_storage = None;
                 Ok(())
             })
         })

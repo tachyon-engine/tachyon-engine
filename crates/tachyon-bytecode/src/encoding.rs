@@ -265,9 +265,15 @@ pub enum Opcode {
     AttachInstanceFields = 109,
     /// Runs the active class constructor's instance field plan against its bound `this` value.
     InitializeInstanceElements = 110,
+    /// Allocates one fresh engine-private name identity with an optional diagnostic spelling.
+    CreatePrivateName = 111,
+    /// Reads one own private data slot using an engine-private name value.
+    GetPrivate = 112,
+    /// Writes one existing own private data slot using an engine-private name value.
+    SetPrivate = 113,
 }
 
-pub(super) const OPCODE_COUNT: usize = 111;
+pub(super) const OPCODE_COUNT: usize = 114;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -372,18 +378,21 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // LoadSuperBase
     2, // GetSuperById
     3, // GetSuperByValue
-    0, // EnterClassEnvironment
-    1, // InitializeClassEnvironment
+    1, // EnterClassEnvironment
+    2, // InitializeClassEnvironment
     0, // LeaveClassEnvironment
     2, // SetFunctionHomeObject
     3, // DefineFieldById
     3, // DefineFieldByValue
     3, // AttachInstanceFields
     1, // InitializeInstanceElements
+    2, // CreatePrivateName
+    3, // GetPrivate
+    3, // SetPrivate
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::InitializeInstanceElements as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::SetPrivate as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -540,6 +549,9 @@ impl Opcode {
             44 => Some(Self::DefineFieldByValue),
             45 => Some(Self::AttachInstanceFields),
             46 => Some(Self::InitializeInstanceElements),
+            47 => Some(Self::CreatePrivateName),
+            48 => Some(Self::GetPrivate),
+            49 => Some(Self::SetPrivate),
             _ => None,
         }
     }

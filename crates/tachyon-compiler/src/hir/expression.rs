@@ -65,6 +65,7 @@ pub struct HirClass {
     pub scope: super::program::ScopeId,
     pub super_class: Option<Box<HirExpression>>,
     pub constructor: FunctionStencilId,
+    pub private_names: Arc<[HirPrivateName]>,
     pub elements: Arc<[HirClassElement]>,
 }
 
@@ -72,7 +73,27 @@ pub struct HirClass {
 pub enum HirClassElement {
     Method(HirClassMethod),
     PublicField(HirClassField),
+    PrivateField(HirPrivateField),
     StaticBlock(HirClassStaticBlock),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct HirPrivateNameId {
+    pub class: u32,
+    pub element: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HirPrivateName {
+    pub id: HirPrivateNameId,
+    pub name: Arc<str>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirPrivateField {
+    pub span: SourceSpan,
+    pub name: HirPrivateName,
+    pub initializer: Option<FunctionStencilId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -117,6 +138,10 @@ pub enum HirAssignmentTarget {
         object: Box<HirExpression>,
         property: Box<HirExpression>,
     },
+    PrivateMember {
+        object: Box<HirExpression>,
+        name: HirPrivateName,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +177,10 @@ pub enum HirExpressionKind {
     ComputedMember {
         object: Box<HirExpression>,
         property: Box<HirExpression>,
+    },
+    PrivateMember {
+        object: Box<HirExpression>,
+        name: HirPrivateName,
     },
     SuperStaticMember(Arc<str>),
     SuperComputedMember(Box<HirExpression>),
@@ -548,6 +577,17 @@ pub(super) fn lower_expression(
                 )?),
             }
         }
+        Expression::PrivateFieldExpression(expression) if !expression.optional => {
+            HirExpressionKind::PrivateMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    semantic,
+                    functions,
+                )?),
+                name: private_name_reference(&expression.field, source, semantic)?,
+            }
+        }
         Expression::UnaryExpression(expression) => HirExpressionKind::Unary {
             operator: lower_unary_operator(expression.operator),
             argument: Box::new(lower_expression(
@@ -803,6 +843,25 @@ pub(super) fn lower_class(
         };
     }
     stencil.strict = true;
+    let mut private_names = Vec::with_capacity(class.body.body.len());
+    for element in &class.body.body {
+        let oxc::ast::ast::ClassElement::PropertyDefinition(field) = element else {
+            continue;
+        };
+        let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
+            continue;
+        };
+        if field.r#static {
+            return Err(unsupported(
+                source.name(),
+                source_span(field.span),
+                "static private class field",
+            ));
+        }
+        private_names.push(private_name_definition(
+            class, identifier, source, semantic,
+        )?);
+    }
     let mut elements = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
         match element {
@@ -864,14 +923,6 @@ pub(super) fn lower_class(
                         "TypeScript class field",
                     ));
                 }
-                let key = lower_class_key(
-                    &field.key,
-                    field.computed,
-                    "class field key",
-                    source,
-                    semantic,
-                    functions,
-                )?;
                 let infer_name = field
                     .value
                     .as_ref()
@@ -906,6 +957,23 @@ pub(super) fn lower_class(
                         Ok(id)
                     })
                     .transpose()?;
+                if let PropertyKey::PrivateIdentifier(identifier) = &field.key {
+                    let name = private_name_definition(class, identifier, source, semantic)?;
+                    elements.push(HirClassElement::PrivateField(HirPrivateField {
+                        span: source_span(field.span),
+                        name,
+                        initializer,
+                    }));
+                    continue;
+                }
+                let key = lower_class_key(
+                    &field.key,
+                    field.computed,
+                    "class field key",
+                    source,
+                    semantic,
+                    functions,
+                )?;
                 elements.push(HirClassElement::PublicField(HirClassField {
                     span: source_span(field.span),
                     key,
@@ -959,10 +1027,10 @@ pub(super) fn lower_class(
             }
         }
     }
-    if elements
-        .iter()
-        .any(|element| matches!(element, HirClassElement::PublicField(field) if !field.is_static))
-    {
+    if elements.iter().any(|element| {
+        matches!(element, HirClassElement::PublicField(field) if !field.is_static)
+            || matches!(element, HirClassElement::PrivateField(_))
+    }) {
         functions
             .get_mut(constructor.index() as usize)
             .expect("class constructor stencil remains at its stable index")
@@ -980,7 +1048,102 @@ pub(super) fn lower_class(
             })
             .transpose()?,
         constructor,
+        private_names: private_names.into(),
         elements: elements.into(),
+    })
+}
+
+/// Resolves one private declaration to a stable module-local class/element identity.
+fn private_name_definition(
+    class: &oxc::ast::ast::Class<'_>,
+    identifier: &oxc::ast::ast::PrivateIdentifier<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+) -> Result<HirPrivateName, CompileError> {
+    let classes = semantic.classes();
+    let class_node = class.node_id();
+    let (class_ordinal, class_id) = classes
+        .iter_enumerated()
+        .enumerate()
+        .find_map(|(ordinal, (class_id, node))| {
+            (*node == class_node).then_some((ordinal, class_id))
+        })
+        .ok_or_else(|| {
+            missing_semantic(
+                source,
+                source_span(identifier.span),
+                "private-name declaring class",
+            )
+        })?;
+    private_name_in_class(class_ordinal, class_id, identifier, source, semantic)
+}
+
+/// Resolves a private use through the nearest enclosing class that declares the same spelling.
+fn private_name_reference(
+    identifier: &oxc::ast::ast::PrivateIdentifier<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+) -> Result<HirPrivateName, CompileError> {
+    let classes = semantic.classes();
+    let reference_node = identifier.node_id();
+    let reference_class = classes
+        .iter_enumerated()
+        .find_map(|(class_id, _)| {
+            classes
+                .iter_private_identifiers(class_id)
+                .any(|reference| reference.id == reference_node)
+                .then_some(class_id)
+        })
+        .ok_or_else(|| {
+            missing_semantic(
+                source,
+                source_span(identifier.span),
+                "private-name reference class",
+            )
+        })?;
+    let owner = classes
+        .ancestors(reference_class)
+        .find(|class_id| classes.has_private_definition(*class_id, identifier.name))
+        .ok_or_else(|| {
+            missing_semantic(
+                source,
+                source_span(identifier.span),
+                "private-name declaration",
+            )
+        })?;
+    let class_ordinal = classes
+        .iter_enumerated()
+        .position(|(class_id, _)| class_id == owner)
+        .ok_or_else(|| {
+            missing_semantic(
+                source,
+                source_span(identifier.span),
+                "private-name owner ordinal",
+            )
+        })?;
+    private_name_in_class(class_ordinal, owner, identifier, source, semantic)
+}
+
+/// Produces the shared identity used by a declaration and all of its lexical references.
+fn private_name_in_class(
+    class_ordinal: usize,
+    class_id: oxc::syntax::class::ClassId,
+    identifier: &oxc::ast::ast::PrivateIdentifier<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+) -> Result<HirPrivateName, CompileError> {
+    let element = semantic.classes().elements[class_id]
+        .iter()
+        .position(|element| element.is_private && element.name == identifier.name)
+        .ok_or_else(|| {
+            missing_semantic(source, source_span(identifier.span), "private-name element")
+        })?;
+    Ok(HirPrivateName {
+        id: HirPrivateNameId {
+            class: u32::try_from(class_ordinal).map_err(|_| CompileError::BindingOverflow)?,
+            element: u32::try_from(element).map_err(|_| CompileError::BindingOverflow)?,
+        },
+        name: Arc::from(identifier.name.as_str()),
     })
 }
 
@@ -1154,6 +1317,17 @@ pub(super) fn lower_assignment_target(
                 )?),
             })
         }
+        AssignmentTarget::PrivateFieldExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::PrivateMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    semantic,
+                    functions,
+                )?),
+                name: private_name_reference(&expression.field, source, semantic)?,
+            })
+        }
         _ => Err(unsupported(
             source.name(),
             source_span(target.span()),
@@ -1198,6 +1372,17 @@ fn lower_update_target(
                     semantic,
                     functions,
                 )?),
+            })
+        }
+        SimpleAssignmentTarget::PrivateFieldExpression(expression) if !expression.optional => {
+            Ok(HirAssignmentTarget::PrivateMember {
+                object: Box::new(lower_expression(
+                    &expression.object,
+                    source,
+                    semantic,
+                    functions,
+                )?),
+                name: private_name_reference(&expression.field, source, semantic)?,
             })
         }
         _ => Err(unsupported(

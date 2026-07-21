@@ -1354,6 +1354,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ReadOnlyProperty(_)
         | ExecutionError::InvalidPropertyDescriptor(_)
         | ExecutionError::InvalidPropertyRedefinition(_)
+        | ExecutionError::PrivateBrandCheckFailed(_)
         | ExecutionError::ArrayLengthOverflow
         | ExecutionError::NotObject(_)
         | ExecutionError::ProxyConstructorRequiresNew

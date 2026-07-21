@@ -203,6 +203,11 @@ fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileEr
                 )?;
                 checked_count_add(nested, 2, "bytecode instructions")
             }
+            Some(HirAssignmentTarget::PrivateMember { object, .. }) => checked_count_add(
+                expression_instruction_count(object)?,
+                2,
+                "bytecode instructions",
+            ),
         },
     }
 }
@@ -265,6 +270,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 let (key, fixed) = match element {
                     crate::HirClassElement::Method(method) => (Some(&method.key), 2),
                     crate::HirClassElement::PublicField(field) => (Some(&field.key), 7),
+                    crate::HirClassElement::PrivateField(_) => (None, 7),
                     crate::HirClassElement::StaticBlock(_) => (None, 5),
                 };
                 element_instructions =
@@ -285,10 +291,14 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             let fixed = checked_count_add(
                 class_create_instructions
                     + usize::from(class.name.is_some())
-                    + usize::from(class.name_binding.is_some()) * 3,
+                    + usize::from(class.name_binding.is_some())
+                    + usize::from(class.name_binding.is_some() || !class.private_names.is_empty())
+                        * 2
+                    + class.private_names.len() * 2,
                 usize::from(class.elements.iter().any(|element| match element {
                     crate::HirClassElement::Method(method) => !method.is_static,
                     crate::HirClassElement::PublicField(field) => !field.is_static,
+                    crate::HirClassElement::PrivateField(_) => true,
                     crate::HirClassElement::StaticBlock(_) => false,
                 })),
                 "bytecode instructions",
@@ -407,6 +417,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             )?;
             checked_count_add(operands, 2, "bytecode instructions")
         }
+        HirExpressionKind::PrivateMember { object, .. } => checked_count_add(
+            expression_instruction_count(object)?,
+            2,
+            "bytecode instructions",
+        ),
         HirExpressionKind::Assignment {
             operator,
             target,
@@ -416,6 +431,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 return expression_instruction_count(value);
             };
             let computed_target = matches!(target, HirAssignmentTarget::ComputedMember { .. });
+            let private_target = matches!(target, HirAssignmentTarget::PrivateMember { .. });
             let target = match target {
                 HirAssignmentTarget::Identifier(_) => 0,
                 HirAssignmentTarget::StaticMember { object, .. } => {
@@ -426,6 +442,9 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     expression_instruction_count(property)?,
                     "bytecode instructions",
                 )?,
+                HirAssignmentTarget::PrivateMember { object, .. } => {
+                    expression_instruction_count(object)?
+                }
             };
             let operands = checked_count_add(
                 target,
@@ -439,7 +458,7 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             };
             checked_count_add(
                 operands,
-                own_instructions + usize::from(computed_target),
+                own_instructions + usize::from(computed_target) + usize::from(private_target),
                 "bytecode instructions",
             )
         }
@@ -460,6 +479,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     )?;
                     checked_count_add(operands, 2, "bytecode instructions")?
                 }
+                HirAssignmentTarget::PrivateMember { object, .. } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    2,
+                    "bytecode instructions",
+                )?,
             };
             let own = match (identifier_target, *prefix) {
                 (true, true) => 4,

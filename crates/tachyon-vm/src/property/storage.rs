@@ -273,7 +273,7 @@ impl Isolate {
             scope
                 .write_value_barrier(storage_local, value)
                 .map_err(ExecutionError::HeapReference)?;
-            if let Some(symbol) = key.symbol()
+            if let Some(symbol) = key.symbol_identity()
                 && value.as_immediate() != Some(Immediate::Hole)
             {
                 scope
@@ -332,7 +332,7 @@ impl Isolate {
                         .map_err(ExecutionError::NoGcBorrow)?;
                     let symbol_key_count = old
                         .symbol_key_count()
-                        .checked_add(usize::from(key.symbol().is_some()))
+                        .checked_add(usize::from(key.symbol_identity().is_some()))
                         .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
                     symbol_keys
                         .try_reserve_exact(symbol_key_count)
@@ -342,13 +342,13 @@ impl Isolate {
                     Ok::<(), ExecutionError>(())
                 })
             })?;
-        } else if key.symbol().is_some() {
+        } else if key.symbol_identity().is_some() {
             symbol_keys
                 .try_reserve_exact(1)
                 .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
         }
         slots.push(value);
-        if let Some(symbol) = key.symbol() {
+        if let Some(symbol) = key.symbol_identity() {
             symbol_keys.push(SymbolPropertyKey::new(
                 u32::try_from(new_length - 1)
                     .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?,
@@ -368,7 +368,7 @@ impl Isolate {
                 },
                 receiver: object.value(),
                 value,
-                symbol_key: key.symbol().map(SymbolId::value),
+                symbol_key: key.symbol_identity().map(SymbolId::value),
             };
             let storage = self
                 .heap
@@ -1519,7 +1519,7 @@ fn compact_property_storage(
         .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
     let symbol_count = retained
         .iter()
-        .filter(|property| property.key.symbol().is_some())
+        .filter(|property| property.key.symbol_identity().is_some())
         .count();
     let mut symbol_keys = Vec::new();
     symbol_keys
@@ -1527,7 +1527,7 @@ fn compact_property_storage(
         .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
     for (slot, property) in retained.iter().enumerate() {
         slots.push(property.value);
-        if let Some(symbol) = property.key.symbol() {
+        if let Some(symbol) = property.key.symbol_identity() {
             symbol_keys.push(SymbolPropertyKey::new(
                 u32::try_from(slot).map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?,
                 symbol,
