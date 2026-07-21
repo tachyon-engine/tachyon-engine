@@ -33,6 +33,10 @@ fn promise_static_resolution_allocates_branded_objects() {
             1_024,
             "Object.getPrototypeOf(Promise.resolve(1)) === Promise.prototype;",
         ),
+        (
+            1_056,
+            "var p = new Promise(function() {}); p.constructor = null; Promise.resolve(p) !== p;",
+        ),
     ] {
         assert_eq!(
             execute_source(source_id, source).as_immediate(),

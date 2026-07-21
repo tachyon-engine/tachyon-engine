@@ -2927,7 +2927,21 @@ impl Isolate {
                                 | PromiseState::Rejected
                         );
                         if intrinsic_promise && site.this_value == intrinsic {
-                            return self.write(site.caller_base, site.destination, value);
+                            // An own data `constructor` override suppresses the identity fast path.
+                            let (_, ordinary) = self.object_snapshot(value)?;
+                            let constructor_atom = self.constructor_atom()?;
+                            let identity_fast_path =
+                                match self.shapes.lookup(ordinary.shape, constructor_atom) {
+                                    None => true,
+                                    Some(property) if property.kind == PropertyKind::Data => {
+                                        self.property_value_from_snapshot(ordinary, property)?
+                                            == Some(intrinsic)
+                                    }
+                                    Some(_) => false,
+                                };
+                            if identity_fast_path {
+                                return self.write(site.caller_base, site.destination, value);
+                            }
                         }
                     }
                     let promise = self.create_promise(
