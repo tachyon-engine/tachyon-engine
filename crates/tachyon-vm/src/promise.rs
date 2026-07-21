@@ -514,59 +514,68 @@ impl Isolate {
         self.enqueue_promise_reaction_list(reactions, result, state == PromiseState::Rejected)
     }
 
-    /// Implements the intrinsic `%Promise.prototype.then%` capability fast path.
-    pub(crate) fn promise_then(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let source = site.this_value;
-        let on_fulfilled = self
-            .call_argument(site, 0)?
-            .filter(|value| self.resolve_function_object(*value).is_ok());
-        let on_rejected = self
-            .call_argument(site, 1)?
-            .filter(|value| self.resolve_function_object(*value).is_ok());
-        self.perform_intrinsic_promise_then(source, on_fulfilled, on_rejected, site)
-    }
-
     /// Implements the current intrinsic catch path through the shared reaction substrate.
     pub(crate) fn promise_catch(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let on_rejected = self
             .call_argument(site, 0)?
             .filter(|value| self.resolve_function_object(*value).is_ok());
-        self.perform_intrinsic_promise_then(site.this_value, None, on_rejected, site)
+        self.perform_intrinsic_promise_then(
+            site.this_value,
+            None,
+            on_rejected,
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+        )
     }
 
     /// Creates the intrinsic result capability and publishes or enqueues both reactions.
-    fn perform_intrinsic_promise_then(
+    pub(crate) fn perform_intrinsic_promise_then(
         &mut self,
         source: Value,
         on_fulfilled: Option<Value>,
         on_rejected: Option<Value>,
-        site: &CallSite,
+        site: NativeContinuationSite,
     ) -> Result<Value, ExecutionError> {
-        let snapshot = self.promise_snapshot(source)?;
         let result = self.create_promise(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
         )?;
         self.write(site.caller_base, site.destination, result)?;
+        self.perform_promise_then_with_capability(source, on_fulfilled, on_rejected, result)?;
+        Ok(result)
+    }
+
+    /// Publishes both reactions using either a direct Promise or a generic capability record.
+    pub(crate) fn perform_promise_then_with_capability(
+        &mut self,
+        source: Value,
+        on_fulfilled: Option<Value>,
+        on_rejected: Option<Value>,
+        capability: Value,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.promise_snapshot(source)?;
         match snapshot.state {
             PromiseState::Pending => {
-                self.append_promise_reaction(source, result, on_fulfilled, false)?;
-                self.append_promise_reaction(source, result, on_rejected, true)?;
+                self.append_promise_reaction(source, capability, on_fulfilled, false)?;
+                self.append_promise_reaction(source, capability, on_rejected, true)?;
             }
             PromiseState::Fulfilled => self.promise_jobs.push(PromiseJob::Reaction {
                 handler: on_fulfilled.unwrap_or(Value::from_immediate(Immediate::Undefined)),
-                capability: result,
+                capability,
                 argument: snapshot.result,
                 rejected: false,
             }),
             PromiseState::Rejected => self.promise_jobs.push(PromiseJob::Reaction {
                 handler: on_rejected.unwrap_or(Value::from_immediate(Immediate::Undefined)),
-                capability: result,
+                capability,
                 argument: snapshot.result,
                 rejected: true,
             }),
         }
-        Ok(result)
+        Ok(())
     }
 
     /// Appends one fixed reaction node and records both Promise and tail-node barriers.
@@ -703,13 +712,23 @@ impl Isolate {
                     rejected,
                 } => {
                     if self.resolve_function_object(handler).is_err() {
-                        let state = if rejected {
-                            PromiseState::Rejected
-                        } else {
-                            PromiseState::Fulfilled
-                        };
-                        self.settle_promise(capability, state, argument)?;
-                        self.promise_jobs.finish_active();
+                        if self.begin_promise_reaction_settlement(
+                            capability,
+                            argument,
+                            rejected,
+                            NativeContinuationSite {
+                                caller_base: self
+                                    .fiber
+                                    .frames
+                                    .last()
+                                    .ok_or(ExecutionError::MissingEnvironment)?
+                                    .base,
+                                destination: 0,
+                                call_site: return_site,
+                            },
+                        )? {
+                            return Ok(None);
+                        }
                         continue;
                     }
                     return self.call_promise_reaction_handler(
@@ -751,6 +770,7 @@ impl Isolate {
             destination: 0,
             call_site: return_site,
         };
+        let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
             .push_native(NativeContinuation::promise_reaction(site, capability))
@@ -784,60 +804,30 @@ impl Isolate {
             frame.return_continuation = true;
             return Ok(None);
         }
+        if self.fiber.completions.len() <= completion_depth {
+            return self.promise_checkpoint(
+                self.promise_jobs
+                    .checkpoint_result
+                    .expect("completed reaction retains its checkpoint result"),
+                return_site,
+            );
+        }
         let continuation = self
             .fiber
             .completions
             .pop_native()
             .ok_or(ExecutionError::MissingNativeContinuation)?;
         let returned = self.read(site.caller_base, site.destination)?;
+        let settlement_frame_depth = self.fiber.frames.len();
         self.finish_promise_reaction(continuation, returned)?;
+        if self.fiber.frames.len() != settlement_frame_depth {
+            return Ok(None);
+        }
         self.promise_checkpoint(
             self.promise_jobs
                 .checkpoint_result
                 .expect("active checkpoint retains its result"),
             return_site,
-        )
-    }
-
-    /// Allocates one traced argument source for a Promise job callback.
-    fn allocate_promise_job_arguments(
-        &mut self,
-        argument: Value,
-    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
-        let undefined = Value::from_immediate(Immediate::Undefined);
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            promise_jobs: &mut self.promise_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
-        };
-        self.heap
-            .try_allocate_with_gc(
-                self.types.native_call_state,
-                0,
-                0,
-                NativeCallState {
-                    values: [argument, undefined, undefined, undefined, undefined],
-                    count: 1,
-                },
-                AllocationSpace::Young,
-                roots,
-            )
-            .map_err(ExecutionError::HeapAllocation)
-    }
-
-    /// Settles a reaction capability after its handler returns and resumes checkpoint dispatch.
-    pub(crate) fn finish_promise_reaction(
-        &mut self,
-        continuation: NativeContinuation,
-        returned: Value,
-    ) -> Result<(), ExecutionError> {
-        self.begin_promise_resolution(
-            continuation.first(),
-            returned,
-            continuation.site(),
-            PromiseResolutionMode::Reaction,
         )
     }
 
@@ -865,6 +855,7 @@ impl Isolate {
             promise,
             Value::from_heap_ref(arguments.raw()),
         );
+        let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
             .push_native(continuation)
@@ -903,6 +894,9 @@ impl Isolate {
             frame.return_register = None;
             frame.return_continuation = true;
             return Ok(true);
+        }
+        if self.fiber.completions.len() <= completion_depth {
+            return Ok(false);
         }
         let continuation = self.pop_native_continuation()?;
         debug_assert_eq!(continuation.kind(), NativeContinuationKind::PromiseThenable);

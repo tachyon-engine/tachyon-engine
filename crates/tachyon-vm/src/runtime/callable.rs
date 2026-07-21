@@ -107,6 +107,7 @@ pub(crate) enum NativeFunction {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    SpeciesGetter,
     PromiseThen,
     PromiseCatch,
     ArrayConstructor,
@@ -652,6 +653,7 @@ impl NativeFunction {
             | Self::SymbolConstructor
             | Self::NumberValueOf
             | Self::FunctionPrototype
+            | Self::SpeciesGetter
             | Self::ArrayToString => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
@@ -772,6 +774,7 @@ impl NativeFunction {
             Self::PromiseConstructor => "Promise",
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
+            Self::SpeciesGetter => "get [Symbol.species]",
             Self::PromiseThen => "then",
             Self::PromiseCatch => "catch",
             Self::ArrayConstructor => "Array",
@@ -1018,6 +1021,7 @@ pub(crate) enum FunctionExecutable {
         cell: GcRef<PromiseResolutionCell>,
         reject: bool,
     },
+    PromiseCapabilityExecutor(GcRef<PromiseCapability>),
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1223,6 +1227,9 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::PromiseResolver { cell, .. } = &mut self.executable {
             cell.trace(tracer);
         }
+        if let FunctionExecutable::PromiseCapabilityExecutor(capability) = &mut self.executable {
+            capability.trace(tracer);
+        }
         self.function_prototype.trace(tracer);
         self.ordinary.trace(tracer);
     }
@@ -1254,6 +1261,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_proxy_define: GcType<PendingProxyDefine>,
     pub(crate) promise_object: GcType<PromiseObject>,
+    pub(crate) promise_capability: GcType<PromiseCapability>,
     pub(crate) promise_resolution_cell: GcType<PromiseResolutionCell>,
     #[allow(dead_code, reason = "allocated by the Promise.then reaction slice")]
     pub(crate) promise_reaction: GcType<PromiseReaction>,

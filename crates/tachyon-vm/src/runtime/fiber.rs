@@ -324,6 +324,15 @@ pub(crate) enum PromiseResolutionMode {
     StaticResolve,
 }
 
+/// One observable SpeciesConstructor lookup performed by Promise.prototype.then.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PromiseThenStage {
+    Constructor,
+    Species,
+    Capability,
+}
+
 /// One observable boundary in an Array.prototype.forEach iteration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -489,6 +498,8 @@ pub(crate) enum NativeContinuationKind {
     MapGetOrInsertComputed,
     PromiseExecutor,
     PromiseReaction,
+    PromiseCapabilityCall,
+    PromiseThen(PromiseThenStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
     ConversionCallRoot,
@@ -743,6 +754,36 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PromiseReaction,
             first: capability,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots a generic capability while its captured resolve or reject callback executes.
+    #[inline]
+    pub(crate) const fn promise_capability_call(
+        site: NativeContinuationSite,
+        capability: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseCapabilityCall,
+            first: capability,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots staged Promise.then SpeciesConstructor state across observable Get callbacks.
+    #[inline]
+    pub(crate) const fn promise_then(
+        site: NativeContinuationSite,
+        stage: PromiseThenStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseThen(stage),
+            first: state,
+            second: retained,
         }
     }
 

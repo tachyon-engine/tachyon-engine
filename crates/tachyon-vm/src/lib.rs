@@ -29,7 +29,9 @@ mod iterator;
 mod number;
 mod object;
 mod promise;
+mod promise_capability;
 mod promise_state;
+mod promise_then;
 mod property;
 mod proxy;
 mod realm;
@@ -94,8 +96,9 @@ use object::{
     SymbolObject, SymbolPropertyKey,
 };
 use promise_state::{
-    PromiseCapabilityRoots, PromiseJob, PromiseJobQueue, PromiseObject, PromiseReaction,
-    PromiseReactionRoots, PromiseResolutionCell, PromiseState,
+    GenericPromiseCapabilityRoots, PromiseCapability, PromiseCapabilityRoots, PromiseJob,
+    PromiseJobQueue, PromiseObject, PromiseReaction, PromiseReactionRoots, PromiseResolutionCell,
+    PromiseState,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
 use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
@@ -121,7 +124,7 @@ use runtime::{
         CodeLoadRoots, CollectionInitializerStage, ConversionCallbackStage, ConversionConsumer,
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PromiseResolutionMode,
-        PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
+        PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
         PrototypeInitializationRoots, ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage,
         ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage,
         ProxyHasStage, ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage,

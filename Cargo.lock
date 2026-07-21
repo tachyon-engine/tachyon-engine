@@ -1832,6 +1832,7 @@ dependencies = [
 name = "tachyon"
 version = "0.1.0"
 dependencies = [
+ "tachyon-bytecode",
  "tachyon-compiler",
  "tachyon-gc",
  "tachyon-value",

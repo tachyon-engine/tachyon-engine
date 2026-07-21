@@ -145,6 +145,9 @@ impl Isolate {
             promise_object: registry
                 .try_register("PromiseObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            promise_capability: registry
+                .try_register("PromiseCapability")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             promise_resolution_cell: registry
                 .try_register("PromiseResolutionCell")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1184,7 +1187,8 @@ impl Isolate {
                     FunctionExecutable::Native(_) => 3,
                     FunctionExecutable::Bound(_)
                     | FunctionExecutable::ProxyRevoker(_)
-                    | FunctionExecutable::PromiseResolver { .. } => 2,
+                    | FunctionExecutable::PromiseResolver { .. }
+                    | FunctionExecutable::PromiseCapabilityExecutor(_) => 2,
                     FunctionExecutable::Bytecode { .. } => 3,
                 },
                 Err(_) => 0,

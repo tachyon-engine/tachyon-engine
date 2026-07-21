@@ -79,3 +79,35 @@ fn resolving_functions_share_the_first_call_guard_across_forced_major() {
     assert_eq!(snapshot.state, PromiseState::Fulfilled);
     assert_eq!(snapshot.result.as_i32(), Some(7));
 }
+
+#[test]
+fn promise_species_accessor_descriptor_round_trips() {
+    let mut isolate = test_isolate();
+    let constructor = isolate.realm.promise_constructor.unwrap();
+    let species = isolate.realm.well_known_symbols.species.unwrap();
+    let key = isolate.property_key(species).unwrap();
+    let descriptor = isolate
+        .complete_own_property_descriptor(constructor, key)
+        .unwrap()
+        .unwrap();
+    let PropertyDescriptor::Accessor(accessor) = descriptor else {
+        panic!("Promise @@species must remain an accessor")
+    };
+    assert!(accessor.getter.is_some_and(|getter| {
+        matches!(
+            isolate.resolve_function_object(getter).unwrap().executable,
+            FunctionExecutable::Native(NativeFunction::SpeciesGetter)
+        )
+    }));
+    assert_eq!(
+        accessor.setter.and_then(Value::as_immediate),
+        Some(Immediate::Undefined)
+    );
+    assert_eq!(accessor.enumerable, Some(false));
+    assert_eq!(accessor.configurable, Some(true));
+
+    let result = isolate.create_ordinary_object().unwrap();
+    isolate
+        .materialize_property_descriptor(result, descriptor)
+        .unwrap();
+}

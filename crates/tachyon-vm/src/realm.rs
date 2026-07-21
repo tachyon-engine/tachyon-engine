@@ -675,6 +675,8 @@ impl Isolate {
             self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
             if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag = Some(symbol);
+            } else if name == b"species" {
+                self.realm.well_known_symbols.species = Some(symbol);
             }
         }
         Ok(())
@@ -941,6 +943,7 @@ impl Isolate {
         self.set_function_prototype(constructor, prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        self.install_species_accessor(constructor, function_prototype)?;
         let is_array = self.allocate_native_function(
             NativeFunction::ArrayIsArray,
             OrdinaryObject {
@@ -1876,6 +1879,7 @@ impl Isolate {
         self.realm.promise_constructor = Some(constructor);
         self.realm.promise_prototype = Some(prototype);
         self.set_function_prototype(constructor, prototype)?;
+        self.install_species_accessor(constructor, function_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
         for (name, native) in [
@@ -1921,6 +1925,39 @@ impl Isolate {
             }
         }
         Ok(())
+    }
+
+    /// Installs the standard inherited-constructor species accessor on one intrinsic constructor.
+    fn install_species_accessor(
+        &mut self,
+        constructor: Value,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let getter = self.allocate_native_function(
+            NativeFunction::SpeciesGetter,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let species = self
+            .realm
+            .well_known_symbols
+            .species
+            .expect("Symbol.species initializes before intrinsic constructors");
+        let key = self.property_key(species)?;
+        self.define_property(
+            constructor,
+            key,
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(getter),
+                setter: Some(Value::from_immediate(Immediate::Undefined)),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.

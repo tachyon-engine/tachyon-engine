@@ -1462,6 +1462,12 @@ impl Isolate {
             NativeContinuationKind::PromiseReaction => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseCapabilityCall => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::PromiseThen(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseResolution(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::PromiseThenable => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -2133,6 +2139,9 @@ impl Isolate {
                 FunctionExecutable::PromiseResolver { .. } => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::PromiseCapabilityExecutor(_) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
             }
         }
         let prototype_atom = self.prototype_atom()?;
@@ -2226,6 +2235,9 @@ impl Isolate {
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     return self.begin_promise_resolver_call(&site, cell, reject, resolution);
+                }
+                FunctionExecutable::PromiseCapabilityExecutor(capability) => {
+                    return self.call_promise_capability_executor(&site, capability);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
                     return self.write(
@@ -2779,9 +2791,11 @@ impl Isolate {
                     let promise = self.create_promise(PromiseState::Rejected, reason)?;
                     return self.write(site.caller_base, site.destination, promise);
                 }
+                FunctionExecutable::Native(NativeFunction::SpeciesGetter) => {
+                    return self.write(site.caller_base, site.destination, site.this_value);
+                }
                 FunctionExecutable::Native(NativeFunction::PromiseThen) => {
-                    let result = self.promise_then(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_promise_then(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::PromiseCatch) => {
                     let result = self.promise_catch(&site)?;
@@ -3177,6 +3191,7 @@ impl Isolate {
             }
             FunctionExecutable::ProxyRevoker(_) => false,
             FunctionExecutable::PromiseResolver { .. } => false,
+            FunctionExecutable::PromiseCapabilityExecutor(_) => false,
             FunctionExecutable::Bytecode { .. } => true,
         })
     }
@@ -3655,6 +3670,13 @@ impl Isolate {
                 NativeContinuationKind::PromiseReaction => {
                     self.finish_promise_reaction(continuation, value)
                 }
+                NativeContinuationKind::PromiseCapabilityCall => {
+                    self.finish_promise_capability_call(continuation)
+                }
+                NativeContinuationKind::PromiseThen(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_promise_then(site, state, stage, value)
+                }
                 NativeContinuationKind::PromiseResolution(mode) => {
                     self.finish_promise_resolution(continuation, mode, value)
                 }
@@ -3804,15 +3826,12 @@ impl Isolate {
                     return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseReaction {
-                    self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
-                    self.promise_jobs.finish_active();
-                    let site = continuation.site();
-                    self.fiber
-                        .frames
-                        .last_mut()
-                        .ok_or(ExecutionError::MissingEnvironment)?
-                        .pc = site.call_site;
+                    self.begin_promise_reaction_rejection(continuation, value)?;
                     return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::PromiseCapabilityCall {
+                    self.promise_jobs.finish_active();
+                    return Ok(self.unhandled_throw(value));
                 }
                 if let NativeContinuationKind::PromiseResolution(mode) = continuation.kind() {
                     self.reject_promise_resolution(continuation, mode, value)?;

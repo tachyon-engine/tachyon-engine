@@ -12,6 +12,12 @@ pub(crate) struct PromiseCapabilityRoots<'a> {
     pub(crate) reject: Value,
 }
 
+pub(crate) struct GenericPromiseCapabilityRoots<'a> {
+    pub(crate) vm: VmRoots<'a>,
+    pub(crate) capability: Option<GcRef<PromiseCapability>>,
+    pub(crate) executor: Value,
+}
+
 pub(crate) struct PromiseReactionRoots<'a> {
     pub(crate) vm: VmRoots<'a>,
     pub(crate) source: Value,
@@ -40,6 +46,15 @@ impl Trace for PromiseCapabilityRoots<'_> {
     }
 }
 
+impl Trace for GenericPromiseCapabilityRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.capability.trace(tracer);
+        self.executor.trace(tracer);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum PromiseState {
@@ -62,6 +77,25 @@ pub(crate) struct PromiseResolutionCell {
     pub(crate) promise: Value,
     pub(crate) already_resolved: bool,
 }
+
+/// Generic NewPromiseCapability fields captured by its one native executor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromiseCapability {
+    pub(crate) promise: Value,
+    pub(crate) resolve: Value,
+    pub(crate) reject: Value,
+}
+
+impl Trace for PromiseCapability {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.promise.trace(tracer);
+        self.resolve.trace(tracer);
+        self.reject.trace(tracer);
+    }
+}
+
+const _: [(); 24] = [(); core::mem::size_of::<PromiseCapability>()];
 
 impl Trace for PromiseResolutionCell {
     #[inline(always)]
