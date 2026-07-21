@@ -1224,6 +1224,7 @@ pub(crate) struct VmTypes {
     pub(crate) symbol_object: GcType<SymbolObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
+    pub(crate) pending_proxy_define: GcType<PendingProxyDefine>,
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) native_call_state: GcType<NativeCallState>,

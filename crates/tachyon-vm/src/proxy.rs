@@ -2,11 +2,13 @@
 
 use super::*;
 
+mod define;
 mod delete;
 mod get;
 mod get_own;
 mod has;
 
+pub(crate) use define::{PROXY_DEFINE_HANDLER, PendingProxyDefine};
 pub(crate) use delete::PROXY_DELETE_ACTIVE;
 pub(crate) use get::PROXY_GET_ACTIVE;
 

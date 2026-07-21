@@ -433,13 +433,13 @@ impl Isolate {
             Some(self.parse_property_descriptor(pending.values[PROXY_GET_OWN_TARGET_DESCRIPTOR])?)
         };
         let extensible = self.is_truthy_value(pending.values[PROXY_ACTIVE_OBJECT])?;
-        self.validate_proxy_get_own_descriptor(descriptor, target_descriptor, extensible)?;
+        self.validate_proxy_descriptor_compatibility(descriptor, target_descriptor, extensible)?;
         self.finish_proxy_get_own_mode(site, mode, Some(descriptor))
             .map(|_| ())
     }
 
     /// Enforces the non-configurable/non-writable subset of IsCompatiblePropertyDescriptor.
-    fn validate_proxy_get_own_descriptor(
+    pub(super) fn validate_proxy_descriptor_compatibility(
         &mut self,
         descriptor: PropertyDescriptor,
         target: Option<PropertyDescriptor>,

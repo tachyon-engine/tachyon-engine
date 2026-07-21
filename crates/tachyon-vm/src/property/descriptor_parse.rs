@@ -433,6 +433,16 @@ impl Isolate {
                 descriptor.complete(),
             );
         }
+        if self.is_proxy_value(pending.target) {
+            let mode = if pending.consumer == PropertyDescriptorConsumer::ReflectDefine {
+                ProxyDefineMode::Reflect
+            } else {
+                ProxyDefineMode::Object
+            };
+            return self
+                .dispatch_proxy_define(site, pending.target, pending.key, descriptor, mode)
+                .map(|_| ());
+        }
         let defined = match self.define_property(pending.target, pending.key, descriptor) {
             Ok(()) => true,
             Err(
