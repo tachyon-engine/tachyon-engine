@@ -146,6 +146,8 @@ pub enum HirFunctionKind {
     Ordinary,
     DerivedClassConstructor,
     DefaultDerivedConstructor,
+    BaseClassConstructor,
+    DefaultBaseConstructor,
     ClassMethod,
 }
 

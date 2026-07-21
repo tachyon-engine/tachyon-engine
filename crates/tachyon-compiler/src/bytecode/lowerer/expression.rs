@@ -495,46 +495,54 @@ impl Lowerer<'_> {
         }
     }
 
-    /// Evaluates class heritage once and uses ordinary Get before allocating the constructor pair.
+    /// Creates a base class directly or evaluates derived heritage once before publishing its pair.
     fn class_expression(
         &mut self,
         class: &crate::HirClass,
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
-        let superclass = self.expression(&class.super_class)?;
-        let heritage_base = self.register()?;
-        self.emit(
-            Opcode::Move,
-            &[heritage_base.index(), superclass.index()],
-            class.super_class.span,
-        )?;
-        let superclass_prototype = self.register()?;
-        self.emit(
-            Opcode::CheckConstructor,
-            &[heritage_base.index()],
-            class.super_class.span,
-        )?;
         let prototype_name = self.scope_name(&std::sync::Arc::from("prototype"))?;
-        self.emit(
-            Opcode::GetById,
-            &[
-                superclass_prototype.index(),
-                heritage_base.index(),
-                prototype_name,
-            ],
-            class.super_class.span,
-        )?;
         let destination = self.register()?;
         let function = class
             .constructor
             .index()
             .checked_add(1)
             .ok_or(CompileError::RegisterOverflow)?;
-        self.emit(
-            Opcode::CreateClass,
-            &[destination.index(), function, heritage_base.index()],
-            span,
-        )?;
+        if let Some(super_class) = &class.super_class {
+            let superclass = self.expression(super_class)?;
+            let heritage_base = self.register()?;
+            self.emit(
+                Opcode::Move,
+                &[heritage_base.index(), superclass.index()],
+                super_class.span,
+            )?;
+            let superclass_prototype = self.register()?;
+            self.emit(
+                Opcode::CheckConstructor,
+                &[heritage_base.index()],
+                super_class.span,
+            )?;
+            self.emit(
+                Opcode::GetById,
+                &[
+                    superclass_prototype.index(),
+                    heritage_base.index(),
+                    prototype_name,
+                ],
+                super_class.span,
+            )?;
+            self.emit(
+                Opcode::CreateClass,
+                &[destination.index(), function, heritage_base.index()],
+                span,
+            )?;
+        } else {
+            self.emit(
+                Opcode::CreateBaseClass,
+                &[destination.index(), function],
+                span,
+            )?;
+        }
         if let Some(name) = &class.name {
             let name = self.scope_name(name)?;
             self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;

@@ -351,10 +351,18 @@ pub(super) fn validate_class_instructions(
                 opcode: instruction.opcode,
             });
         }
-        if instruction.opcode == Opcode::CreateClass {
+        if matches!(
+            instruction.opcode,
+            Opcode::CreateClass | Opcode::CreateBaseClass
+        ) {
             let target = FunctionId::new(instruction.operands[1]);
             let target_kind = function_kinds[target.index() as usize];
-            if target_kind != FunctionKind::DerivedClassConstructor {
+            let expected_kind = if instruction.opcode == Opcode::CreateClass {
+                FunctionKind::DerivedClassConstructor
+            } else {
+                FunctionKind::BaseClassConstructor
+            };
+            if target_kind != expected_kind {
                 return Err(ModuleBuildError::InvalidClassConstructorTarget {
                     function,
                     offset: word_offset,
@@ -792,7 +800,7 @@ fn verify_instruction(
             check_register(operands[0])?
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
-        Opcode::CreateClosure => check_register(operands[0])?,
+        Opcode::CreateClosure | Opcode::CreateBaseClass => check_register(operands[0])?,
         Opcode::CreateClass => {
             check_register(operands[0])?;
             check_register(operands[2])?;
@@ -838,7 +846,7 @@ fn verify_instruction(
     }
     if matches!(
         instruction.opcode,
-        Opcode::CreateClosure | Opcode::CreateClass
+        Opcode::CreateClosure | Opcode::CreateClass | Opcode::CreateBaseClass
     ) && operands[1] >= context.function_count
     {
         return Err(VerifyError::FunctionOutOfRange {

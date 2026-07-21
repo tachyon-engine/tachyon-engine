@@ -58,7 +58,7 @@ pub struct HirExpression {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirClass {
     pub name: Option<Arc<str>>,
-    pub super_class: Box<HirExpression>,
+    pub super_class: Option<Box<HirExpression>>,
     pub constructor: FunctionStencilId,
     pub methods: Arc<[HirClassMethod]>,
 }
@@ -651,7 +651,7 @@ pub(super) fn lower_expression(
     Ok(HirExpression { span, kind })
 }
 
-/// Copies a derived constructor and static-name methods while rejecting unsupported class elements.
+/// Copies one base/derived constructor and static-name methods while rejecting unsupported elements.
 pub(super) fn lower_class(
     class: &oxc::ast::ast::Class<'_>,
     declaration_name: Option<Arc<str>>,
@@ -678,10 +678,6 @@ pub(super) fn lower_class(
             "named class expression",
         ));
     }
-    let super_class = class
-        .super_class
-        .as_ref()
-        .ok_or_else(|| unsupported(source.name(), source_span(class.span), "base class"))?;
     let mut constructor = None;
     let mut methods = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
@@ -791,7 +787,11 @@ pub(super) fn lower_class(
                 body: Arc::from([]),
                 scope: to_scope_id(scope),
                 strict: true,
-                kind: super::program::HirFunctionKind::DefaultDerivedConstructor,
+                kind: if class.super_class.is_some() {
+                    super::program::HirFunctionKind::DefaultDerivedConstructor
+                } else {
+                    super::program::HirFunctionKind::DefaultBaseConstructor
+                },
             });
             id
         }
@@ -799,13 +799,23 @@ pub(super) fn lower_class(
     let stencil = functions
         .get_mut(constructor.index() as usize)
         .expect("new class constructor stencil is published at its stable index");
-    if stencil.kind != super::program::HirFunctionKind::DefaultDerivedConstructor {
-        stencil.kind = super::program::HirFunctionKind::DerivedClassConstructor;
+    if stencil.kind == super::program::HirFunctionKind::Ordinary {
+        stencil.kind = if class.super_class.is_some() {
+            super::program::HirFunctionKind::DerivedClassConstructor
+        } else {
+            super::program::HirFunctionKind::BaseClassConstructor
+        };
     }
     stencil.strict = true;
     Ok(HirClass {
         name: declaration_name,
-        super_class: Box::new(lower_expression(super_class, source, semantic, functions)?),
+        super_class: class
+            .super_class
+            .as_ref()
+            .map(|super_class| {
+                lower_expression(super_class, source, semantic, functions).map(Box::new)
+            })
+            .transpose()?,
         constructor,
         methods: methods.into(),
     })

@@ -265,14 +265,20 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     collection: "bytecode instructions",
                 },
             )?;
+            let class_create_instructions = if class.super_class.is_some() { 4 } else { 1 };
             let fixed = checked_count_add(
-                4 + usize::from(class.name.is_some()),
+                class_create_instructions + usize::from(class.name.is_some()),
                 usize::from(class.methods.iter().any(|method| !method.is_static)),
                 "bytecode instructions",
             )?;
             let fixed = checked_count_add(fixed, method_instructions, "bytecode instructions")?;
             checked_count_add(
-                expression_instruction_count(&class.super_class)?,
+                class
+                    .super_class
+                    .as_deref()
+                    .map(expression_instruction_count)
+                    .transpose()?
+                    .unwrap_or(0),
                 fixed,
                 "bytecode instructions",
             )

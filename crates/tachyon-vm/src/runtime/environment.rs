@@ -21,6 +21,7 @@ impl EnvironmentKind {
             FunctionKind::Module => Self::Module,
             FunctionKind::Ordinary
             | FunctionKind::DerivedClassConstructor
+            | FunctionKind::BaseClassConstructor
             | FunctionKind::ClassMethod
             | FunctionKind::Generator
             | FunctionKind::Async

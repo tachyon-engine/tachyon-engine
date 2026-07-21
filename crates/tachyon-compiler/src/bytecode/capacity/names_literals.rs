@@ -231,7 +231,12 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
         HirExpressionKind::Class(class) => {
-            let mut count = expression_scope_name_count(&class.super_class)?;
+            let mut count = class
+                .super_class
+                .as_deref()
+                .map(expression_scope_name_count)
+                .transpose()?
+                .unwrap_or(0);
             count = checked_count_add(count, 1, "scope names")?;
             if class.name.is_some() {
                 count = checked_count_add(count, 1, "scope names")?;

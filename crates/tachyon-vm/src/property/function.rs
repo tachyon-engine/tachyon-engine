@@ -284,10 +284,7 @@ impl Isolate {
     }
 
     /// Classifies the immutable public prototype slot without adding flags to every function.
-    pub(crate) fn is_derived_class_constructor(
-        &mut self,
-        receiver: Value,
-    ) -> Result<bool, ExecutionError> {
+    pub(crate) fn is_class_constructor(&mut self, receiver: Value) -> Result<bool, ExecutionError> {
         let function = self.resolve_function_object(receiver)?;
         let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
             return Ok(false);
@@ -298,7 +295,10 @@ impl Isolate {
             .function(function)
             .ok_or(ExecutionError::MissingEntryFunction(function))?
             .kind();
-        Ok(kind == FunctionKind::DerivedClassConstructor)
+        Ok(matches!(
+            kind,
+            FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+        ))
     }
 
     /// Materializes the spec-visible function prototype only on first observation or construction.

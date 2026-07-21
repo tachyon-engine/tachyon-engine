@@ -157,6 +157,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineClassMethodById,
             ],
         ),
+        (2, &[Opcode::CreateBaseClass]),
     ];
     let mut seen = [false; OPCODE_COUNT];
     let mut visited = 0;

@@ -257,6 +257,7 @@ impl BytecodeBuilder {
             | Opcode::LoadConstant
             | Opcode::LoadScope
             | Opcode::CreateClosure
+            | Opcode::CreateBaseClass
             | Opcode::StoreScope
             | Opcode::StoreResolvedScope
             | Opcode::InitializeGlobalLexical

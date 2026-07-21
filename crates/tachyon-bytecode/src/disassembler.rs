@@ -184,6 +184,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, function={}, superclass=r{}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::CreateBaseClass => write!(output, " r{}, function={}", operands[0], operands[1])?,
         Opcode::LoadScope => write!(output, " r{}, scope={}", operands[0], operands[1])?,
         Opcode::StoreScope | Opcode::StoreResolvedScope => {
             write!(output, " r{}, scope={}", operands[0], operands[1])?

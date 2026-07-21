@@ -655,6 +655,48 @@ fn compiler_emits_default_derived_constructor_forwarding() {
     assert!(constructor.contains("InitializeThis"));
 }
 
+#[test]
+/// Freezes explicit/default base constructors without derived-only initialization bytecode.
+fn compiler_freezes_base_class_constructor_contracts() {
+    let explicit = source(
+        MediaType::JavaScript,
+        "class A { constructor(value) { this.value = value; } } new A(1);",
+    );
+    let hir = Compiler
+        .lower_to_hir(explicit.clone(), CompileOptions::default())
+        .unwrap();
+    assert_eq!(
+        hir.functions()[0].kind,
+        HirFunctionKind::BaseClassConstructor
+    );
+    assert!(hir.functions()[0].strict);
+    let module = Compiler
+        .compile(explicit, CompileOptions::default())
+        .unwrap();
+    assert_eq!(
+        module.functions()[1].kind(),
+        tachyon_bytecode::FunctionKind::BaseClassConstructor
+    );
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert!(entry.contains("CreateBaseClass"));
+    assert!(!entry.contains("CheckConstructor"));
+
+    let default = source(MediaType::JavaScript, "class A {} new A();");
+    let hir = Compiler
+        .lower_to_hir(default.clone(), CompileOptions::default())
+        .unwrap();
+    assert_eq!(
+        hir.functions()[0].kind,
+        HirFunctionKind::DefaultBaseConstructor
+    );
+    let module = Compiler
+        .compile(default, CompileOptions::default())
+        .unwrap();
+    let constructor = tachyon_bytecode::disassemble(&module.functions()[1]).unwrap();
+    assert!(constructor.contains("ReturnUndefined"));
+    assert!(!constructor.contains("SuperConstruct"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

@@ -778,7 +778,12 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
 /// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
 fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Class(class) => expression_label_count(&class.super_class),
+        HirExpressionKind::Class(class) => class
+            .super_class
+            .as_deref()
+            .map(expression_label_count)
+            .transpose()
+            .map(|count| count.unwrap_or(0)),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

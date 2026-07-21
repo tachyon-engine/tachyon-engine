@@ -668,6 +668,13 @@ fn lower_function(
         lowerer.emit(Opcode::InitializeThis, &[result.index()], function.span)?;
         lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
         true
+    } else if function.kind == HirFunctionKind::DefaultBaseConstructor {
+        debug_assert!(function.parameters.is_empty());
+        debug_assert!(function.parameter_initializers.is_empty());
+        debug_assert!(function.rest_parameter.is_none());
+        debug_assert!(function.body.is_empty());
+        lowerer.emit(Opcode::ReturnUndefined, &[], function.span)?;
+        true
     } else {
         false
     };
@@ -765,6 +772,9 @@ fn lower_function(
                 HirFunctionKind::DerivedClassConstructor
                 | HirFunctionKind::DefaultDerivedConstructor => {
                     FunctionKind::DerivedClassConstructor
+                }
+                HirFunctionKind::BaseClassConstructor | HirFunctionKind::DefaultBaseConstructor => {
+                    FunctionKind::BaseClassConstructor
                 }
                 HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
             },

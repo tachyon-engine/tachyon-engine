@@ -278,6 +278,7 @@ pub enum FunctionKind {
     Module,
     Ordinary,
     DerivedClassConstructor,
+    BaseClassConstructor,
     ClassMethod,
     Generator,
     Async,
@@ -302,6 +303,7 @@ impl EnvironmentRecordKind {
             FunctionKind::Module => Self::Module,
             FunctionKind::Ordinary
             | FunctionKind::DerivedClassConstructor
+            | FunctionKind::BaseClassConstructor
             | FunctionKind::ClassMethod
             | FunctionKind::Generator
             | FunctionKind::Async
@@ -419,6 +421,7 @@ impl FunctionMetadata {
             kind,
             FunctionKind::Module
                 | FunctionKind::DerivedClassConstructor
+                | FunctionKind::BaseClassConstructor
                 | FunctionKind::ClassMethod
         ) {
             FunctionStrictness::Strict
@@ -751,6 +754,7 @@ impl CompiledModule {
                 template.metadata.kind,
                 FunctionKind::Module
                     | FunctionKind::DerivedClassConstructor
+                    | FunctionKind::BaseClassConstructor
                     | FunctionKind::ClassMethod
             ) && template.metadata.strictness != FunctionStrictness::Strict
             {

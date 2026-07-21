@@ -66,6 +66,7 @@ fn execute_source_with_heap(
 }
 
 mod builtins;
+mod classes;
 mod control_flow;
 mod execution;
 mod expressions;

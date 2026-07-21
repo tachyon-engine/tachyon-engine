@@ -899,6 +899,9 @@ impl Isolate {
                 FunctionId::new(operands[1]),
                 operands[2],
             )?,
+            Opcode::CreateBaseClass => {
+                self.create_base_class(code, base, operands[0], FunctionId::new(operands[1]))?
+            }
             Opcode::CheckConstructor => {
                 let constructor = self.read(base, operands[0])?;
                 if !self.is_constructor_value(constructor)? {
@@ -2105,6 +2108,41 @@ impl Isolate {
         Ok(())
     }
 
+    /// Creates a base class using the current realm's standard intrinsic prototype pair.
+    fn create_base_class(
+        &mut self,
+        code: CodeId,
+        base: u32,
+        destination: u32,
+        function: FunctionId,
+    ) -> Result<(), ExecutionError> {
+        let constructor_prototype = self
+            .realm
+            .function_prototype
+            .expect("realm initialization publishes Function.prototype");
+        let instance_prototype = self
+            .realm
+            .object_prototype
+            .expect("realm initialization publishes Object.prototype");
+        self.create_closure(code, base, destination, function)?;
+        let constructor = self.read(base, destination)?;
+        self.set_function_internal_prototype(constructor, constructor_prototype)?;
+        let prototype = self.create_ordinary_object_with_prototype(instance_prototype)?;
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.define_data_property(
+            prototype,
+            constructor_atom,
+            DataPropertyDescriptor {
+                value: Some(constructor),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        Ok(())
+    }
+
     /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
     #[inline(never)]
     fn construct(
@@ -2426,8 +2464,10 @@ impl Isolate {
                             function_template.strictness(),
                         )
                     };
-                    if kind == FunctionKind::DerivedClassConstructor
-                        && site.new_target.as_immediate() == Some(Immediate::Undefined)
+                    if matches!(
+                        kind,
+                        FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+                    ) && site.new_target.as_immediate() == Some(Immediate::Undefined)
                     {
                         return Err(ExecutionError::ClassConstructorCalledWithoutNew(
                             site.callee,

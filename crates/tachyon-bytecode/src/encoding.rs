@@ -229,9 +229,11 @@ pub enum Opcode {
     DefineClassMethodById = 91,
     /// Constructs the active derived superclass with the current activation's complete arguments.
     SuperConstructForwardAll = 92,
+    /// Creates one base class constructor with the realm's standard prototype pair.
+    CreateBaseClass = 93,
 }
 
-pub(super) const OPCODE_COUNT: usize = 93;
+pub(super) const OPCODE_COUNT: usize = 94;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -326,10 +328,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // CheckConstructor
     3, // DefineClassMethodById
     1, // SuperConstructForwardAll
+    2, // CreateBaseClass
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::SuperConstructForwardAll as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CreateBaseClass as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -468,6 +471,7 @@ impl Opcode {
             26 => Some(Self::CheckConstructor),
             27 => Some(Self::DefineClassMethodById),
             28 => Some(Self::SuperConstructForwardAll),
+            29 => Some(Self::CreateBaseClass),
             _ => None,
         }
     }

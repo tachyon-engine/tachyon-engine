@@ -33,6 +33,15 @@ var value = new P(2, 3);
 value.sum === 5 && value instanceof P && value instanceof Base;
 "#;
 
+const BASE_CLASS_SOURCE: &str = r#"
+class A {
+  constructor(a, b) { this.sum = a + b; }
+  value() { return this.sum; }
+}
+var instance = new A(2, 3);
+instance.value() === 5 && instance instanceof A;
+"#;
+
 #[test]
 fn derived_class_promise_trampoline_works_for_every_dispatch_batch() {
     assert_class_promise_batch::<1>();
@@ -49,6 +58,15 @@ fn default_derived_constructor_forwards_for_every_dispatch_batch() {
     assert_default_derived_batch::<4>();
     assert_default_derived_batch::<8>();
     assert_default_derived_batch::<16>();
+}
+
+#[test]
+fn base_class_constructs_for_every_dispatch_batch() {
+    assert_base_class_batch::<1>();
+    assert_base_class_batch::<2>();
+    assert_base_class_batch::<4>();
+    assert_base_class_batch::<8>();
+    assert_base_class_batch::<16>();
 }
 
 #[test]
@@ -94,6 +112,11 @@ fn default_derived_promise_constructor_survives_forced_major_collections() {
         "class P extends Promise {} var value = P.resolve(1); value instanceof P && value instanceof Promise;",
         37,
     );
+}
+
+#[test]
+fn base_class_creation_survives_forced_major_collections() {
+    assert_forced_major_source(BASE_CLASS_SOURCE, 38);
 }
 
 /// Executes a focused class fixture with collection before every managed allocation.
@@ -150,6 +173,25 @@ fn assert_default_derived_batch<const N: usize>() {
             },
         )
         .expect("default derived fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes base allocation, body initialization, and method dispatch with each batch size.
+fn assert_base_class_batch<const N: usize>() {
+    let module = compile_source(BASE_CLASS_SOURCE, 50 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        )
+        .expect("base class fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"
