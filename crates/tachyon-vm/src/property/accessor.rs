@@ -19,6 +19,12 @@ pub(crate) enum PropertyRead {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) enum PropertyReadResolution {
+    Read(PropertyRead),
+    Proxy(Value),
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum PropertyWrite {
     Complete(bool),
     Setter(Value),
@@ -59,6 +65,18 @@ impl Isolate {
         target: Value,
         key: PropertyKey,
     ) -> Result<PropertyRead, ExecutionError> {
+        match self.resolve_property_read_until_proxy(target, key)? {
+            PropertyReadResolution::Read(read) => Ok(read),
+            PropertyReadResolution::Proxy(proxy) => Err(ExecutionError::NotObject(proxy)),
+        }
+    }
+
+    /// Performs the ordinary read loop once and returns when an exotic Proxy owns the remainder.
+    pub(crate) fn resolve_property_read_until_proxy(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<PropertyReadResolution, ExecutionError> {
         if let Some(raw) = target.as_heap_ref()
             && self
                 .heap
@@ -69,10 +87,14 @@ impl Isolate {
             let flags = self.intern_intrinsic_name(b"flags")?;
             let (regexp_source, regexp_flags) = self.regexp_data(target)?;
             if key == PropertyKey::Atom(source) {
-                return Ok(PropertyRead::Data(regexp_source));
+                return Ok(PropertyReadResolution::Read(PropertyRead::Data(
+                    regexp_source,
+                )));
             }
             if key == PropertyKey::Atom(flags) {
-                return Ok(PropertyRead::Data(regexp_flags));
+                return Ok(PropertyReadResolution::Read(PropertyRead::Data(
+                    regexp_flags,
+                )));
             }
             for (name, flag) in [
                 (b"hasIndices".as_slice(), 100_u16),
@@ -87,11 +109,13 @@ impl Isolate {
                 let atom = self.intern_intrinsic_name(name)?;
                 if key == PropertyKey::Atom(atom) {
                     return self.regexp_flag_enabled(target, flag).map(|enabled| {
-                        PropertyRead::Data(Value::from_immediate(if enabled {
-                            Immediate::True
-                        } else {
-                            Immediate::False
-                        }))
+                        PropertyReadResolution::Read(PropertyRead::Data(Value::from_immediate(
+                            if enabled {
+                                Immediate::True
+                            } else {
+                                Immediate::False
+                            },
+                        )))
                     });
                 }
             }
@@ -102,7 +126,7 @@ impl Isolate {
                 return self.string_value_length(target).and_then(|length| {
                     i32::try_from(length)
                         .map(Value::from_i32)
-                        .map(PropertyRead::Data)
+                        .map(|value| PropertyReadResolution::Read(PropertyRead::Data(value)))
                         .map_err(|_| ExecutionError::ArrayLengthOverflow)
                 });
             }
@@ -135,7 +159,7 @@ impl Isolate {
                 let value = self.allocate_runtime_string(
                     JsString::try_from_utf16(&[unit]).map_err(ExecutionError::PropertyKeyString)?,
                 )?;
-                return Ok(PropertyRead::Data(value));
+                return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
             }
             self.realm
                 .string_prototype
@@ -152,28 +176,35 @@ impl Isolate {
             target
         };
         loop {
+            if self.is_proxy_value(current) {
+                return Ok(PropertyReadResolution::Proxy(current));
+            }
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
-                    Some(StoredProperty::Data(value)) => return Ok(PropertyRead::Data(value)),
+                    Some(StoredProperty::Data(value)) => {
+                        return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
+                    }
                     Some(StoredProperty::Accessor { pair, .. }) => {
-                        return Ok(PropertyRead::Accessor(pair.getter));
+                        return Ok(PropertyReadResolution::Read(PropertyRead::Accessor(
+                            pair.getter,
+                        )));
                     }
                     None => {}
                 }
             } else {
                 if let Some(value) = self.function_metadata_property(current, key)? {
-                    return Ok(PropertyRead::Data(value));
+                    return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
                 }
                 if self.is_function_prototype_property(current, key) {
                     self.intrinsic_property_atoms.prototype = key.atom();
                     return self
                         .ensure_function_prototype(current)
-                        .map(PropertyRead::Data);
+                        .map(|value| PropertyReadResolution::Read(PropertyRead::Data(value)));
                 }
             }
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
-                return Ok(PropertyRead::Missing);
+                return Ok(PropertyReadResolution::Read(PropertyRead::Missing));
             }
             if !self.is_object_value(snapshot.prototype) {
                 return Err(ExecutionError::NotObject(snapshot.prototype));

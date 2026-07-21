@@ -9,7 +9,7 @@ mod keys;
 mod storage;
 
 use super::*;
-pub(crate) use accessor::{PropertyRead, PropertyWrite};
+pub(crate) use accessor::{PropertyRead, PropertyReadResolution, PropertyWrite};
 pub(crate) use descriptor_parse::PendingPropertyDescriptor;
 
 impl Isolate {

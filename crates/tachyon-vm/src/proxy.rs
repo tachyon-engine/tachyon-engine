@@ -2,8 +2,11 @@
 
 use super::*;
 
+mod get;
 mod get_own;
 mod has;
+
+pub(crate) use get::PROXY_GET_ACTIVE;
 
 /// A Proxy has no ordinary-property base; every object internal method must use exotic dispatch.
 #[derive(Clone, Copy, Debug)]

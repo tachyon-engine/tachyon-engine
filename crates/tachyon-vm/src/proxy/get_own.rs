@@ -500,7 +500,7 @@ impl Isolate {
     }
 
     /// Publishes one retained Proxy state value with the matching old-to-young barrier.
-    fn update_proxy_state_value(
+    pub(super) fn update_proxy_state_value(
         &mut self,
         state: GcRef<NativeCallState>,
         index: usize,

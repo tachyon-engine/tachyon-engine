@@ -91,8 +91,8 @@ use object::{
     SymbolObject, SymbolPropertyKey,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
-use property::{PendingPropertyDescriptor, PropertyRead, PropertyWrite};
-use proxy::{PROXY_ACTIVE_OBJECT, ProxyObject};
+use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
+use proxy::{PROXY_ACTIVE_OBJECT, PROXY_GET_ACTIVE, ProxyObject};
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{
@@ -112,7 +112,7 @@ use runtime::{
         ConversionContinuation, ConversionNativeFunction, Fiber, Frame, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, PreferredType, PropertyCallbackMode,
         PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots,
-        ProxyContinuationStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyHasStage,
+        ProxyContinuationStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxySetPrototypeMode, ProxySetPrototypeStage, SymbolAllocationRoots,
         ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },

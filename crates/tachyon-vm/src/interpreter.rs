@@ -1193,42 +1193,16 @@ impl Isolate {
         key: PropertyKey,
         call_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        match self.resolve_property_read(receiver, key)? {
-            PropertyRead::Missing => {
-                self.write(
-                    caller_base,
-                    destination,
-                    Value::from_immediate(Immediate::Undefined),
-                )?;
-                Ok(None)
-            }
-            PropertyRead::Data(value) => {
-                self.write(caller_base, destination, value)?;
-                Ok(None)
-            }
-            PropertyRead::Accessor(getter)
-                if getter.as_immediate() == Some(Immediate::Undefined) =>
-            {
-                self.write(
-                    caller_base,
-                    destination,
-                    Value::from_immediate(Immediate::Undefined),
-                )?;
-                Ok(None)
-            }
-            PropertyRead::Accessor(callee) => self.dispatch_property_callback(
-                NativeContinuation::property_get(
-                    NativeContinuationSite {
-                        caller_base,
-                        destination,
-                        call_site,
-                    },
-                    PropertyCallbackMode::Ordinary,
-                    receiver,
-                ),
-                callee,
-            ),
-        }
+        self.dispatch_proxy_aware_property_read(
+            NativeContinuationSite {
+                caller_base,
+                destination,
+                call_site,
+            },
+            receiver,
+            receiver,
+            key,
+        )
     }
 
     /// Executes Reflect.get with the target used for lookup and receiver used for an accessor call.
@@ -1239,32 +1213,7 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        match self.resolve_property_read_from(target, key)? {
-            PropertyRead::Missing => self
-                .write(
-                    site.caller_base,
-                    site.destination,
-                    Value::from_immediate(Immediate::Undefined),
-                )
-                .map(|()| None),
-            PropertyRead::Data(value) => self
-                .write(site.caller_base, site.destination, value)
-                .map(|()| None),
-            PropertyRead::Accessor(getter)
-                if getter.as_immediate() == Some(Immediate::Undefined) =>
-            {
-                self.write(
-                    site.caller_base,
-                    site.destination,
-                    Value::from_immediate(Immediate::Undefined),
-                )
-                .map(|()| None)
-            }
-            PropertyRead::Accessor(callee) => self.dispatch_property_callback(
-                NativeContinuation::property_get(site, PropertyCallbackMode::Ordinary, receiver),
-                callee,
-            ),
-        }
+        self.dispatch_proxy_aware_property_read(site, target, receiver, key)
     }
 
     /// Applies assignment rejection at the strict boundary or suspends on one setter callback.
@@ -1412,6 +1361,27 @@ impl Isolate {
                     ProxyGetOwnStage::TrapGetter => (handler, 0, None, 0),
                     ProxyGetOwnStage::TrapCall => (handler, 0, Some(state), 2),
                     ProxyGetOwnStage::TargetGetOwn | ProxyGetOwnStage::TargetIsExtensible => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
+                }
+            }
+            NativeContinuationKind::ProxyGet(stage) => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                match stage {
+                    ProxyGetStage::TrapGetter => {
+                        let handler = self
+                            .proxy_snapshot(pending.values[PROXY_GET_ACTIVE])?
+                            .handler;
+                        (handler, 0, None, 0)
+                    }
+                    ProxyGetStage::TrapCall => {
+                        let handler = self
+                            .proxy_snapshot(pending.values[PROXY_GET_ACTIVE])?
+                            .handler;
+                        (handler, 0, Some(state), 3)
+                    }
+                    ProxyGetStage::TargetGetOwn => {
                         return Err(ExecutionError::MissingNativeContinuation);
                     }
                 }
@@ -3511,6 +3481,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxyGetOwn { mode, stage } => self
                     .resume_proxy_get_own(continuation, mode, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyGet(stage) => self
+                    .resume_proxy_get(continuation, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =
