@@ -555,6 +555,49 @@ fn compiler_owns_anonymous_and_nested_function_expression_stencils() {
     assert_eq!(module.functions().len(), 3);
 }
 
+#[test]
+fn compiler_freezes_derived_class_and_super_call_contracts() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "class P extends Promise { constructor(executor) { return super(executor); } } new P(function() {});",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(hir.functions().len(), 2);
+    assert_eq!(
+        hir.functions()[0].kind,
+        HirFunctionKind::DerivedClassConstructor
+    );
+    assert!(hir.functions()[0].strict);
+
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "class P extends Promise { constructor(executor) { return super(executor); } } new P(function() {});",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        module.functions()[1].kind(),
+        tachyon_bytecode::FunctionKind::DerivedClassConstructor
+    );
+    assert_eq!(
+        module.functions()[1].strictness(),
+        tachyon_bytecode::FunctionStrictness::Strict
+    );
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    let constructor = tachyon_bytecode::disassemble(&module.functions()[1]).unwrap();
+    assert!(entry.contains("CheckConstructor"));
+    assert!(entry.contains("CreateClass"));
+    assert!(constructor.contains("SuperConstruct"));
+    assert!(constructor.contains("InitializeThis"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

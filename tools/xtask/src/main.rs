@@ -968,11 +968,33 @@ fn check_manifest(crate_name: &str, manifest: &str, violations: &mut Vec<String>
     }
 }
 
+/// Checks production dependency tables while allowing test-only cross-layer fixtures.
 fn manifest_has_dependency(manifest: &str, dependency: &str) -> bool {
-    manifest.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with(dependency) && line[dependency.len()..].trim_start().starts_with('=')
-    })
+    let mut production_dependencies = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = &line[1..line.len() - 1];
+            if section.strip_prefix("dependencies.") == Some(dependency)
+                || section
+                    .strip_prefix("target.")
+                    .and_then(|section| section.rsplit_once(".dependencies."))
+                    .is_some_and(|(_, name)| name == dependency)
+            {
+                return true;
+            }
+            production_dependencies = section == "dependencies"
+                || (section.starts_with("target.") && section.ends_with(".dependencies"));
+            continue;
+        }
+        if production_dependencies
+            && line.starts_with(dependency)
+            && line[dependency.len()..].trim_start().starts_with('=')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -984,11 +1006,19 @@ mod tests {
     #[test]
     fn dependency_lookup_does_not_match_package_name_prefixes() {
         assert!(!manifest_has_dependency(
-            "name = \"tachyon-value\"",
+            "[package]\nname = \"tachyon-value\"",
             "tachyon"
         ));
         assert!(manifest_has_dependency(
-            "tachyon = { path = \"../tachyon\" }",
+            "[dependencies]\ntachyon = { path = \"../tachyon\" }",
+            "tachyon"
+        ));
+        assert!(!manifest_has_dependency(
+            "[dev-dependencies]\ntachyon = { path = \"../tachyon\" }",
+            "tachyon"
+        ));
+        assert!(manifest_has_dependency(
+            "[target.'cfg(unix)'.dependencies]\ntachyon = { path = \"../tachyon\" }",
             "tachyon"
         ));
     }

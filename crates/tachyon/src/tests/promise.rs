@@ -184,6 +184,92 @@ fn promise_checkpoint_drains_nested_reactions_in_fifo_order() {
 }
 
 #[test]
+/// Preserves custom derived capability identity while delivering the fulfilled reaction value.
+fn promise_reaction_uses_custom_class_capability_without_cycle_rejection() {
+    let setup = compile_promise_fixture(
+        1_054,
+        "promise-derived-capability",
+        "var createBadPromise = false; var object = {}; var status = 0; var returned = false; class P extends Promise { constructor(executor) { if (createBadPromise) { executor(function(value) { status = value === object ? 1 : 2; }, function() { status = 3; }); return object; } return super(executor); } } var promise = P.resolve(object); createBadPromise = true; var result = promise.then(); createBadPromise = false; returned = result === object;",
+    );
+    let probe = compile_promise_fixture(
+        1_055,
+        "promise-derived-capability",
+        "status * 10 + (returned ? 1 : 0);",
+    );
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512
+            }
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    let outcome = isolate.execute(
+        &probe,
+        ExecutionBudget {
+            fuel: 64,
+            quantum: 64,
+        },
+    );
+    assert!(
+        matches!(outcome, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(11)),
+        "unexpected derived capability state: {outcome:?}"
+    );
+}
+
+#[test]
+/// Applies derived constructor object-return and Promise-super initialization rules.
+fn derived_promise_class_constructor_preserves_branch_and_return_semantics() {
+    for (source_id, source) in [
+        (
+            1_056,
+            "var flag = true; var object = {}; class P extends Promise { constructor(executor) { if (flag) return object; return super(executor); } } new P(function() {}) === object;",
+        ),
+        (
+            1_057,
+            "var P = class extends Promise { constructor(executor) { return super(executor); } }; var value = new P(function() {}); value instanceof P && value instanceof Promise;",
+        ),
+        (
+            1_058,
+            "class P extends Promise { constructor(executor) { return super(executor); } } var descriptor = Object.getOwnPropertyDescriptor(P, 'prototype'); descriptor.writable === false && descriptor.enumerable === false && descriptor.configurable === false && P.prototype.constructor === P && Object.getPrototypeOf(P) === Promise && Object.getPrototypeOf(P.prototype) === Promise.prototype;",
+        ),
+        (
+            1_059,
+            "class P extends Promise { constructor(executor) { return super(executor); } } var threw = false; try { P(function() {}); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_060,
+            "class P extends Promise { constructor() { return 1; } } var threw = false; try { new P(); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_061,
+            "class P extends Promise { constructor() { return undefined; } } var threw = false; try { new P(); } catch (error) { threw = error instanceof ReferenceError; } threw;",
+        ),
+        (
+            1_062,
+            "class P extends Promise { constructor() { this.value = 1; } } var threw = false; try { new P(); } catch (error) { threw = error instanceof ReferenceError; } threw;",
+        ),
+        (
+            1_063,
+            "var calls = 0; class P extends Promise { constructor() { super(function() { calls = calls + 1; }); super(function() { calls = calls + 1; }); } } var threw = false; try { new P(); } catch (error) { threw = error instanceof ReferenceError; } threw && calls === 2;",
+        ),
+        (
+            1_064,
+            "function Other() { this.marker = 9; } class P extends Promise { constructor() { super(); } } Object.setPrototypeOf(P, Other); var value = new P(); value.marker === 9 && value instanceof P;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(tachyon_value::Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Keeps sibling Promise chains in FIFO order while each handler appends another reaction.
 fn promise_checkpoint_preserves_sibling_chain_order() {
     let setup = compile_promise_fixture(

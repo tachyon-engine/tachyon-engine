@@ -1884,6 +1884,7 @@ dependencies = [
  "regress 0.11.1",
  "ryu-js",
  "tachyon-bytecode",
+ "tachyon-compiler",
  "tachyon-gc",
  "tachyon-value",
 ]

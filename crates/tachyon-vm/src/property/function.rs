@@ -228,15 +228,11 @@ impl Isolate {
         .map_err(ExecutionError::PropertyKeyString)?;
         let value = self.allocate_runtime_string(text)?;
         let name_key = self.name_atom()?;
-        self.define_data_property(
+        self.define_fresh_data_property(
             receiver,
             name_key,
-            DataPropertyDescriptor {
-                value: Some(value),
-                writable: Some(false),
-                enumerable: Some(false),
-                configurable: Some(true),
-            },
+            value,
+            PropertyAttributes::data(false, false, true),
         )
     }
 
@@ -281,6 +277,24 @@ impl Isolate {
                 | FunctionExecutable::PromiseResolver { .. }
                 | FunctionExecutable::PromiseCapabilityExecutor(_) => false,
             })
+    }
+
+    /// Classifies the immutable public prototype slot without adding flags to every function.
+    pub(crate) fn is_derived_class_constructor(
+        &mut self,
+        receiver: Value,
+    ) -> Result<bool, ExecutionError> {
+        let function = self.resolve_function_object(receiver)?;
+        let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
+            return Ok(false);
+        };
+        let kind = self
+            .loaded_code(code)?
+            .module
+            .function(function)
+            .ok_or(ExecutionError::MissingEntryFunction(function))?
+            .kind();
+        Ok(kind == FunctionKind::DerivedClassConstructor)
     }
 
     /// Materializes the spec-visible function prototype only on first observation or construction.

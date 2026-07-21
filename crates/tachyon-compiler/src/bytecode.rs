@@ -13,9 +13,9 @@ use tachyon_bytecode::{
 
 use crate::hir::HirForInLeft;
 use crate::{
-    BindingId, CompileError, HirForInitializer, HirFunction, HirProgram, HirStatement,
-    HirStatementKind, HirVariableDeclaration, HirVariableDeclarationKind, ProgramKind, ScopeId,
-    SourceSpan, SourceText,
+    BindingId, CompileError, HirForInitializer, HirFunction, HirFunctionKind, HirProgram,
+    HirStatement, HirStatementKind, HirVariableDeclaration, HirVariableDeclarationKind,
+    ProgramKind, ScopeId, SourceSpan, SourceText,
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
@@ -743,7 +743,10 @@ fn lower_function(
         function_id,
         bytecode,
         FunctionMetadata {
-            kind: FunctionKind::Ordinary,
+            kind: match function.kind {
+                HirFunctionKind::Ordinary => FunctionKind::Ordinary,
+                HirFunctionKind::DerivedClassConstructor => FunctionKind::DerivedClassConstructor,
+            },
             strictness: if function.strict {
                 FunctionStrictness::Strict
             } else {

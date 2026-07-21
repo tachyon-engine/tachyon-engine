@@ -2,7 +2,236 @@
 
 use super::*;
 
+const STATIC_CAPABILITY: usize = 0;
+const STATIC_RESOLUTION: usize = 1;
+
+struct PromiseStaticResolveRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: NativeCallState,
+}
+
+impl Trace for PromiseStaticResolveRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
+
 impl Isolate {
+    /// Runs generic NewPromiseCapability for Promise.resolve without recursing into bytecode.
+    pub(crate) fn begin_generic_promise_resolve(
+        &mut self,
+        site: &CallSite,
+        constructor: Value,
+        resolution: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_constructor_value(constructor)? {
+            return Err(ExecutionError::NonConstructor(constructor));
+        }
+        let (capability, executor) = self.allocate_generic_promise_capability()?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_promise_static_resolve_state(NativeCallState {
+            values: [
+                Value::from_heap_ref(capability.raw()),
+                resolution,
+                executor,
+                undefined,
+                undefined,
+            ],
+            count: 3,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::promise_static_resolve(
+                continuation_site,
+                PromiseStaticResolveStage::Constructor,
+                Value::from_heap_ref(state.raw()),
+            ))
+            .map_err(Isolate::completion_stack_error)?;
+        // Publish the state before creating the bound prefix: that allocation may trigger GC.
+        let prefix = match self.create_apply_argument_prefix(constructor, undefined, vec![executor])
+        {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        };
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.construct_site(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: constructor,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: 1,
+            argument_count: 1,
+            this_value: undefined,
+            new_target: constructor,
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            if self.fiber.frames.len() != frame_depth {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("generic Promise.resolve constructor publishes a frame");
+                frame.return_register = None;
+                frame.return_continuation = true;
+            }
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let promise = self.read(site.caller_base, site.destination)?;
+        self.resume_generic_promise_resolve(
+            continuation,
+            PromiseStaticResolveStage::Constructor,
+            promise,
+        )
+    }
+
+    /// Resumes generic Promise.resolve after either the constructor or resolve callback returns.
+    pub(crate) fn resume_generic_promise_resolve(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: PromiseStaticResolveStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            PromiseStaticResolveStage::Constructor => {
+                self.finish_generic_resolve_constructor(continuation, value)
+            }
+            PromiseStaticResolveStage::Resolve => self.finish_generic_promise_resolve(continuation),
+        }
+    }
+
+    /// Validates constructor capture and invokes its resolve callback with the source value.
+    fn finish_generic_resolve_constructor(
+        &mut self,
+        continuation: NativeContinuation,
+        promise: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(promise) {
+            return Err(ExecutionError::NotObject(promise));
+        }
+        let state = self.native_call_state_reference(continuation.first())?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let capability = self.promise_capability_reference(pending.values[STATIC_CAPABILITY])?;
+        let snapshot = self.promise_capability_snapshot(capability)?;
+        self.resolve_function_object(snapshot.resolve)?;
+        self.resolve_function_object(snapshot.reject)?;
+        self.set_promise_capability_promise(capability, promise)?;
+        let arguments = self.allocate_promise_job_arguments(pending.values[STATIC_RESOLUTION])?;
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::promise_static_resolve(
+                continuation.site(),
+                PromiseStaticResolveStage::Resolve,
+                continuation.first(),
+            ))
+            .map_err(Isolate::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: continuation.site().caller_base,
+            destination: continuation.site().destination,
+            callee: snapshot.resolve,
+            argument_base: 0,
+            argument_source: Some(arguments),
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 1,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: continuation.site().call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            if self.fiber.frames.len() != frame_depth {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("generic Promise.resolve callback publishes a frame");
+                frame.return_register = None;
+                frame.return_continuation = true;
+            }
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        self.finish_generic_promise_resolve(continuation)
+    }
+
+    /// Returns the constructor result after its resolve callback completes normally.
+    fn finish_generic_promise_resolve(
+        &mut self,
+        continuation: NativeContinuation,
+    ) -> Result<(), ExecutionError> {
+        let state = self.native_call_state_reference(continuation.first())?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let capability = self.promise_capability_reference(pending.values[STATIC_CAPABILITY])?;
+        let promise = self.promise_capability_snapshot(capability)?.promise;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            promise,
+        )
+    }
+
+    /// Allocates one fixed generic resolve state under the complete VM root set.
+    fn allocate_promise_static_resolve_state(
+        &mut self,
+        pending: NativeCallState,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let mut roots = PromiseStaticResolveRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
     /// Allocates one empty capability and its strict two-argument capture executor.
     pub(crate) fn allocate_generic_promise_capability(
         &mut self,

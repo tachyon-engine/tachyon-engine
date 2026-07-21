@@ -71,6 +71,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::LoadNewTarget,
                 Opcode::LoadArgumentsLength,
                 Opcode::LoadArgumentsObject,
+                Opcode::InitializeThis,
+                Opcode::CheckConstructor,
                 Opcode::BreakThroughFinally,
                 Opcode::ContinueThroughFinally,
             ],
@@ -149,6 +151,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefineSetterByValue,
                 Opcode::SetAccessorFunctionName,
                 Opcode::CopyDataProperties,
+                Opcode::CreateClass,
+                Opcode::SuperConstruct,
             ],
         ),
     ];
@@ -635,6 +639,95 @@ fn compiled_module_rejects_sloppy_module_metadata() {
     ));
 }
 
+#[test]
+fn compiled_module_enforces_class_kind_and_opcode_contracts() {
+    let mut sloppy = FunctionMetadata::new(
+        FunctionKind::DerivedClassConstructor,
+        FunctionLayout {
+            register_count: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    sloppy.strictness = FunctionStrictness::Sloppy;
+    let derived = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+        sloppy,
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![derived],
+            FunctionId::new(0)
+        ),
+        Err(ModuleBuildError::InvalidFunctionStrictness {
+            kind: FunctionKind::DerivedClassConstructor,
+            ..
+        })
+    ));
+
+    let mut invalid_super = encode_instruction(Opcode::SuperConstruct, &[0, 1, 0]).unwrap();
+    invalid_super.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let ordinary = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(invalid_super),
+        FunctionMetadata::new(
+            FunctionKind::Ordinary,
+            FunctionLayout {
+                register_count: 2,
+                ..FunctionLayout::default()
+            },
+        ),
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![ordinary],
+            FunctionId::new(0)
+        ),
+        Err(ModuleBuildError::InvalidClassInstruction {
+            opcode: Opcode::SuperConstruct,
+            ..
+        })
+    ));
+
+    let mut create = encode_instruction(Opcode::CreateClass, &[0, 1, 1]).unwrap();
+    create.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let entry = CompiledFunctionTemplate::new(
+        FunctionId::new(0),
+        Bytecode::from_words(create),
+        FunctionMetadata::new(
+            FunctionKind::Script,
+            FunctionLayout {
+                register_count: 3,
+                ..FunctionLayout::default()
+            },
+        ),
+    );
+    let target = CompiledFunctionTemplate::new(
+        FunctionId::new(1),
+        Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+        FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default()),
+    );
+    assert!(matches!(
+        CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![entry, target],
+            FunctionId::new(0)
+        ),
+        Err(ModuleBuildError::InvalidClassConstructorTarget {
+            target_kind: FunctionKind::Ordinary,
+            ..
+        })
+    ));
+}
+
 /// Builds one terminal function around caller-selected binding metadata for verifier tests.
 fn binding_plan_module(
     binding: BindingPlanEntry,
@@ -701,6 +794,10 @@ fn environment_record_kind_defaults_cover_every_function_kind() {
         (FunctionKind::Script, EnvironmentRecordKind::Global),
         (FunctionKind::Module, EnvironmentRecordKind::Module),
         (FunctionKind::Ordinary, EnvironmentRecordKind::Function),
+        (
+            FunctionKind::DerivedClassConstructor,
+            EnvironmentRecordKind::Function,
+        ),
         (FunctionKind::Generator, EnvironmentRecordKind::Function),
         (FunctionKind::Async, EnvironmentRecordKind::Function),
         (

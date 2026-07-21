@@ -217,9 +217,17 @@ pub enum Opcode {
     CollectRestArguments = 85,
     /// Materializes the active function's actual arguments as one independent Array-like object.
     LoadArgumentsObject = 86,
+    /// Creates one derived class constructor from a function template and evaluated superclass.
+    CreateClass = 87,
+    /// Constructs the active derived class's superclass with the current `new.target`.
+    SuperConstruct = 88,
+    /// Publishes a completed `super()` result as the active derived constructor's `this` value.
+    InitializeThis = 89,
+    /// Validates class heritage before its observable `prototype` property access.
+    CheckConstructor = 90,
 }
 
-pub(super) const OPCODE_COUNT: usize = 87;
+pub(super) const OPCODE_COUNT: usize = 91;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -308,10 +316,14 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // CopyDataProperties
     2, // CollectRestArguments
     1, // LoadArgumentsObject
+    3, // CreateClass
+    3, // SuperConstruct
+    1, // InitializeThis
+    1, // CheckConstructor
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::LoadArgumentsObject as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CheckConstructor as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -444,6 +456,10 @@ impl Opcode {
             20 => Some(Self::CopyDataProperties),
             21 => Some(Self::CollectRestArguments),
             22 => Some(Self::LoadArgumentsObject),
+            23 => Some(Self::CreateClass),
+            24 => Some(Self::SuperConstruct),
+            25 => Some(Self::InitializeThis),
+            26 => Some(Self::CheckConstructor),
             _ => None,
         }
     }

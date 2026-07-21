@@ -56,6 +56,13 @@ pub struct HirExpression {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct HirClass {
+    pub name: Option<Arc<str>>,
+    pub super_class: Box<HirExpression>,
+    pub constructor: FunctionStencilId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum HirAssignmentTarget {
     Identifier(HirIdentifierReference),
     StaticMember {
@@ -87,6 +94,7 @@ pub enum HirExpressionKind {
     Null,
     Identifier(HirIdentifierReference),
     Function(FunctionStencilId),
+    Class(HirClass),
     This,
     NewTarget,
     Sequence(Arc<[HirExpression]>),
@@ -134,6 +142,7 @@ pub enum HirExpressionKind {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
     },
+    SuperCall(Arc<[HirExpression]>),
     New {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
@@ -560,6 +569,22 @@ pub(super) fn lower_expression(
                 functions,
             )?),
         },
+        Expression::CallExpression(expression)
+            if !expression.optional && matches!(expression.callee, Expression::Super(_)) =>
+        {
+            let mut arguments = Vec::with_capacity(expression.arguments.len());
+            for argument in &expression.arguments {
+                let argument = argument.as_expression().ok_or_else(|| {
+                    unsupported(
+                        source.name(),
+                        source_span(argument.span()),
+                        "spread super argument",
+                    )
+                })?;
+                arguments.push(lower_expression(argument, source, semantic, functions)?);
+            }
+            HirExpressionKind::SuperCall(arguments.into())
+        }
         Expression::CallExpression(expression) if !expression.optional => {
             let mut arguments = Vec::with_capacity(expression.arguments.len());
             for argument in &expression.arguments {
@@ -604,6 +629,9 @@ pub(super) fn lower_expression(
                 arguments: arguments.into(),
             }
         }
+        Expression::ClassExpression(class) => {
+            HirExpressionKind::Class(lower_class(class, None, source, semantic, functions)?)
+        }
         Expression::ParenthesizedExpression(expression) => {
             let mut lowered =
                 lower_expression(&expression.expression, source, semantic, functions)?;
@@ -613,6 +641,71 @@ pub(super) fn lower_expression(
         _ => return Err(unsupported(source.name(), span, "expression")),
     };
     Ok(HirExpression { span, kind })
+}
+
+/// Copies one explicit derived constructor while rejecting class elements outside this slice.
+pub(super) fn lower_class(
+    class: &oxc::ast::ast::Class<'_>,
+    declaration_name: Option<Arc<str>>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirClass, CompileError> {
+    if !class.decorators.is_empty()
+        || class.super_type_arguments.is_some()
+        || !class.implements.is_empty()
+        || class.r#abstract
+        || class.declare
+    {
+        return Err(unsupported(
+            source.name(),
+            source_span(class.span),
+            "decorated or TypeScript class",
+        ));
+    }
+    if declaration_name.is_none() && class.id.is_some() {
+        return Err(unsupported(
+            source.name(),
+            source_span(class.span),
+            "named class expression",
+        ));
+    }
+    let super_class = class
+        .super_class
+        .as_ref()
+        .ok_or_else(|| unsupported(source.name(), source_span(class.span), "base class"))?;
+    let [oxc::ast::ast::ClassElement::MethodDefinition(method)] = class.body.body.as_slice() else {
+        return Err(unsupported(
+            source.name(),
+            source_span(class.body.span),
+            "class elements other than one constructor",
+        ));
+    };
+    if method.kind != oxc::ast::ast::MethodDefinitionKind::Constructor || method.r#static {
+        return Err(unsupported(
+            source.name(),
+            source_span(method.span),
+            "class element other than constructor",
+        ));
+    }
+    let constructor = lower_function_stencil(
+        &method.value,
+        declaration_name.clone(),
+        None,
+        source,
+        semantic,
+        functions,
+    )?;
+    let stencil = functions
+        .get_mut(constructor.index() as usize)
+        .expect("new class constructor stencil is published at its stable index");
+    stencil.kind = super::program::HirFunctionKind::DerivedClassConstructor;
+    stencil.strict = true;
+    Ok(HirClass {
+        name: declaration_name,
+        super_class: Box::new(lower_expression(super_class, source, semantic, functions)?),
+        constructor,
+    })
 }
 
 /// Builds one owned array chunk used by spread lowering and sparse-element preservation.

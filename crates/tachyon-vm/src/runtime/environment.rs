@@ -20,6 +20,7 @@ impl EnvironmentKind {
             FunctionKind::Script => Self::Global,
             FunctionKind::Module => Self::Module,
             FunctionKind::Ordinary
+            | FunctionKind::DerivedClassConstructor
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,

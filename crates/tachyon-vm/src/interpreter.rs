@@ -892,6 +892,19 @@ impl Isolate {
             Opcode::CreateClosure => {
                 self.create_closure(code, base, operands[0], FunctionId::new(operands[1]))?
             }
+            Opcode::CreateClass => self.create_derived_class(
+                code,
+                base,
+                operands[0],
+                FunctionId::new(operands[1]),
+                operands[2],
+            )?,
+            Opcode::CheckConstructor => {
+                let constructor = self.read(base, operands[0])?;
+                if !self.is_constructor_value(constructor)? {
+                    return Err(ExecutionError::NonConstructor(constructor));
+                }
+            }
             Opcode::SetFunctionName => {
                 let function = self.read(base, operands[0])?;
                 let name = self.scope_atom(code, operands[1])?;
@@ -963,6 +976,9 @@ impl Isolate {
                     .last()
                     .expect("this load always has an active frame")
                     .this_value;
+                if value.as_immediate() == Some(Immediate::Uninitialized) {
+                    return Err(ExecutionError::UninitializedThis);
+                }
                 self.write(base, operands[0], value)?;
             }
             Opcode::LoadNewTarget => {
@@ -1135,6 +1151,17 @@ impl Isolate {
                 operands[2],
                 instruction_offset,
             )?,
+            Opcode::SuperConstruct => self.super_construct(
+                base,
+                operands[0],
+                operands[1],
+                operands[2],
+                instruction_offset,
+            )?,
+            Opcode::InitializeThis => {
+                let value = self.read(base, operands[0])?;
+                self.initialize_derived_this(value)?;
+            }
             Opcode::Return => {
                 let value = self.read(base, operands[0])?;
                 if !self
@@ -1466,6 +1493,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseThen(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseResolution(_) => (continuation.second(), 0, None, 0),
@@ -1917,6 +1947,7 @@ impl Isolate {
         self.fiber.frames.clear();
         self.fiber.argument_objects.clear();
         self.fiber.argument_sources.clear();
+        self.fiber.derived_activations.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -2016,6 +2047,46 @@ impl Isolate {
         self.write(base, destination, Value::from_heap_ref(closure.raw()))
     }
 
+    /// Creates a derived class constructor and its prototype pair from one evaluated heritage.
+    fn create_derived_class(
+        &mut self,
+        code: CodeId,
+        base: u32,
+        destination: u32,
+        function: FunctionId,
+        superclass_register: u32,
+    ) -> Result<(), ExecutionError> {
+        let superclass = self.read(base, superclass_register)?;
+        let superclass_prototype = self.read(
+            base,
+            superclass_register
+                .checked_add(1)
+                .ok_or(ExecutionError::InvalidRegister(RegisterId::new(u32::MAX)))?,
+        )?;
+        if superclass_prototype.as_immediate() != Some(Immediate::Null)
+            && !self.is_object_value(superclass_prototype)
+        {
+            return Err(ExecutionError::NotObject(superclass_prototype));
+        }
+        self.create_closure(code, base, destination, function)?;
+        let constructor = self.read(base, destination)?;
+        self.set_function_internal_prototype(constructor, superclass)?;
+        let prototype = self.create_ordinary_object_with_prototype(superclass_prototype)?;
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.define_data_property(
+            prototype,
+            constructor_atom,
+            DataPropertyDescriptor {
+                value: Some(constructor),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        Ok(())
+    }
+
     /// Validates the constructor before allocation, creates its receiver, and pushes one JS frame.
     #[inline(never)]
     fn construct(
@@ -2047,9 +2118,81 @@ impl Isolate {
         })
     }
 
+    /// Constructs the dynamically current superclass while forwarding the active `new.target`.
+    fn super_construct(
+        &mut self,
+        caller_base: u32,
+        destination: u32,
+        argument_base_register: u32,
+        argument_count: u32,
+        call_site: WordOffset,
+    ) -> Result<(), ExecutionError> {
+        let activation = self
+            .fiber
+            .derived_activations
+            .last()
+            .copied()
+            .filter(|activation| activation.frame_depth as usize == self.fiber.frames.len())
+            .ok_or(ExecutionError::UninitializedThis)?;
+        let superclass = self.object_snapshot(activation.function)?.1.prototype;
+        if !self.is_constructor_value(superclass)? {
+            return Err(ExecutionError::NonConstructor(superclass));
+        }
+        let new_target = self
+            .fiber
+            .frames
+            .last()
+            .expect("super construction retains its derived frame")
+            .new_target;
+        self.construct_site(CallSite {
+            caller_base,
+            destination,
+            callee: superclass,
+            argument_base: caller_base
+                .checked_add(argument_base_register)
+                .and_then(|base| base.checked_add(1))
+                .ok_or(ExecutionError::RegisterWindowTooLarge(argument_count))?,
+            argument_source: None,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target,
+            construct_receiver: None,
+            call_site,
+        })
+    }
+
+    /// Binds the object returned by `super()` exactly once to the active derived constructor.
+    fn initialize_derived_this(&mut self, value: Value) -> Result<(), ExecutionError> {
+        if !self.is_object_value(value) {
+            return Err(ExecutionError::NotObject(value));
+        }
+        let is_derived = self
+            .fiber
+            .derived_activations
+            .last()
+            .is_some_and(|activation| activation.frame_depth as usize == self.fiber.frames.len());
+        if !is_derived {
+            return Err(ExecutionError::UninitializedThis);
+        }
+        let frame = self
+            .fiber
+            .frames
+            .last_mut()
+            .expect("derived this initialization retains its frame");
+        if frame.this_value.as_immediate() != Some(Immediate::Uninitialized) {
+            return Err(ExecutionError::SuperAlreadyCalled);
+        }
+        frame.this_value = value;
+        frame.construct_receiver = Some(value);
+        Ok(())
+    }
+
     /// Drives a pre-built construct call site through bound forwarding and receiver allocation.
     pub(crate) fn construct_site(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
-        loop {
+        let derived = loop {
             let callable = self
                 .resolve_function_object(site.callee)
                 .map_err(|_| ExecutionError::NonConstructor(site.callee))?;
@@ -2129,7 +2272,15 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
-                FunctionExecutable::Bytecode { .. } => break,
+                FunctionExecutable::Bytecode { code, function, .. } => {
+                    let kind = self
+                        .loaded_code(code)?
+                        .module
+                        .function(function)
+                        .ok_or(ExecutionError::MissingEntryFunction(function))?
+                        .kind();
+                    break kind == FunctionKind::DerivedClassConstructor;
+                }
                 FunctionExecutable::Native(_) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
@@ -2143,6 +2294,9 @@ impl Isolate {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
             }
+        };
+        if derived {
+            return self.call(site);
         }
         let prototype_atom = self.prototype_atom()?;
         let prototype = self
@@ -2210,6 +2364,13 @@ impl Isolate {
                             function_template.strictness(),
                         )
                     };
+                    if kind == FunctionKind::DerivedClassConstructor
+                        && site.new_target.as_immediate() == Some(Immediate::Undefined)
+                    {
+                        return Err(ExecutionError::ClassConstructorCalledWithoutNew(
+                            site.callee,
+                        ));
+                    }
                     return self.push_call_frame(
                         ResolvedCallTarget {
                             code,
@@ -2754,6 +2915,10 @@ impl Isolate {
                     let value = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let intrinsic = self.realm.promise_constructor.expect("initialized");
+                    if site.this_value != intrinsic {
+                        return self.begin_generic_promise_resolve(&site, site.this_value, value);
+                    }
                     if let Ok(snapshot) = self.promise_snapshot(value) {
                         let intrinsic_promise = matches!(
                             snapshot.state,
@@ -2761,10 +2926,7 @@ impl Isolate {
                                 | PromiseState::Fulfilled
                                 | PromiseState::Rejected
                         );
-                        if intrinsic_promise
-                            && site.this_value
-                                == self.realm.promise_constructor.expect("initialized")
-                        {
+                        if intrinsic_promise && site.this_value == intrinsic {
                             return self.write(site.caller_base, site.destination, value);
                         }
                     }
@@ -3178,7 +3340,7 @@ impl Isolate {
     }
 
     /// Reports whether the current staged callable set may be used as a construct newTarget.
-    fn is_constructor_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+    pub(crate) fn is_constructor_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
         let function = match self.resolve_function_object(value) {
             Ok(function) => function,
             Err(_) => return Ok(false),
@@ -3393,6 +3555,12 @@ impl Isolate {
                 .try_reserve_exact(1)
                 .map_err(|_| ExecutionError::FrameAllocationFailed)?;
         }
+        if target.kind == FunctionKind::DerivedClassConstructor {
+            self.fiber
+                .derived_activations
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        }
         if target.layout.max_handler_depth != 0 {
             let handler_depth = usize::try_from(target.layout.max_handler_depth).map_err(|_| {
                 ExecutionError::HandlerStackTooLarge(target.layout.max_handler_depth)
@@ -3456,6 +3624,17 @@ impl Isolate {
         });
         self.fiber.argument_objects.push(None);
         self.fiber.argument_sources.push(site.argument_source);
+        if target.kind == FunctionKind::DerivedClassConstructor {
+            self.fiber.derived_activations.push(DerivedActivation {
+                frame_depth: self.fiber.frames.len() as u32,
+                function: site.callee,
+            });
+            self.fiber
+                .frames
+                .last_mut()
+                .expect("derived activation retains its frame")
+                .this_value = Value::from_immediate(Immediate::Uninitialized);
+        }
         if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count)
             && let Err(error) = self.allocate_current_environment(
                 target.kind,
@@ -3469,6 +3648,14 @@ impl Isolate {
             self.fiber.frames.pop();
             self.fiber.argument_objects.pop();
             self.fiber.argument_sources.pop();
+            if self
+                .fiber
+                .derived_activations
+                .last()
+                .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
+            {
+                self.fiber.derived_activations.pop();
+            }
             self.fiber.registers.truncate(callee_base as usize);
             return Err(error);
         }
@@ -3502,6 +3689,32 @@ impl Isolate {
     /// Pops a non-entry frame and restores caller checkpoints on the ordinary call hot path.
     #[inline(always)]
     fn return_from_callee(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
+        let derived = self
+            .fiber
+            .derived_activations
+            .last()
+            .copied()
+            .is_some_and(|activation| activation.frame_depth as usize == self.fiber.frames.len());
+        let value = if derived {
+            if self.is_object_value(value) {
+                value
+            } else if value.as_immediate() == Some(Immediate::Undefined) {
+                let this_value = self
+                    .fiber
+                    .frames
+                    .last()
+                    .expect("derived return retains its frame")
+                    .this_value;
+                if this_value.as_immediate() == Some(Immediate::Uninitialized) {
+                    return Err(ExecutionError::UninitializedThis);
+                }
+                this_value
+            } else {
+                return Err(ExecutionError::InvalidDerivedConstructorReturn(value));
+            }
+        } else {
+            value
+        };
         let frame = self
             .fiber
             .frames
@@ -3515,6 +3728,9 @@ impl Isolate {
             .argument_sources
             .pop()
             .expect("argument sources stay aligned with active frames");
+        if derived {
+            self.fiber.derived_activations.pop();
+        }
         let value = match frame.construct_receiver {
             Some(receiver) if !self.is_object_value(value) => receiver,
             _ => value,
@@ -3677,6 +3893,9 @@ impl Isolate {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_promise_then(site, state, stage, value)
                 }
+                NativeContinuationKind::PromiseStaticResolve(stage) => {
+                    self.resume_generic_promise_resolve(continuation, stage, value)
+                }
                 NativeContinuationKind::PromiseResolution(mode) => {
                     self.finish_promise_resolution(continuation, mode, value)
                 }
@@ -3812,6 +4031,14 @@ impl Isolate {
                 .argument_sources
                 .pop()
                 .expect("argument sources stay aligned with abrupt frame unwinding");
+            if self
+                .fiber
+                .derived_activations
+                .last()
+                .is_some_and(|activation| activation.frame_depth as usize > self.fiber.frames.len())
+            {
+                self.fiber.derived_activations.pop();
+            }
             self.fiber.registers.truncate(frame.base as usize);
             self.fiber.handlers.truncate(frame.handler_base as usize);
             self.fiber

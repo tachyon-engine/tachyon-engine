@@ -259,6 +259,11 @@ fn declaration_instruction_count(
 
 fn expression_instruction_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Class(class) => checked_count_add(
+            expression_instruction_count(&class.super_class)?,
+            4 + usize::from(class.name.is_some()),
+            "bytecode instructions",
+        ),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -443,6 +448,18 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
         | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_instruction_count(callee)?;
             count = checked_count_add(count, 2, "bytecode instructions")?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(argument)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::SuperCall(arguments) => {
+            let mut count = 2;
             for argument in arguments.iter() {
                 count = checked_count_add(
                     count,

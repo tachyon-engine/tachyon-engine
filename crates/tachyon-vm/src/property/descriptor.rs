@@ -658,9 +658,10 @@ impl Isolate {
             if self.is_function_prototype_property(receiver, key) {
                 self.intrinsic_property_atoms.prototype = key.atom();
                 let value = self.ensure_function_prototype(receiver)?;
+                let class = self.is_derived_class_constructor(receiver)?;
                 return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
                     value: Some(value),
-                    writable: Some(true),
+                    writable: Some(!class),
                     enumerable: Some(false),
                     configurable: Some(false),
                 })));

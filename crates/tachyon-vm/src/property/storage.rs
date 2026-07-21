@@ -39,22 +39,27 @@ impl Isolate {
             }
             candidate = self.object_snapshot(candidate)?.1.prototype;
         }
-        let ObjectReceiver::Ordinary(object) = receiver else {
-            return Err(ExecutionError::UnsupportedAccessorDescriptor);
-        };
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(object, self.types.ordinary_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .prototype = prototype;
-                Ok::<(), ExecutionError>(())
-            })?;
-            scope
-                .write_value_barrier(object, prototype)
-                .map_err(ExecutionError::HeapReference)
-        })?;
+        match receiver {
+            ObjectReceiver::Ordinary(object) => {
+                self.heap.with_running_scope(|scope| {
+                    let object = scope.root(object).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(object, self.types.ordinary_object)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .prototype = prototype;
+                        Ok::<(), ExecutionError>(())
+                    })?;
+                    scope
+                        .write_value_barrier(object, prototype)
+                        .map_err(ExecutionError::HeapReference)
+                })?;
+            }
+            ObjectReceiver::Function(_) => {
+                self.set_function_internal_prototype(target, prototype)?;
+            }
+            _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
+        }
         Ok(true)
     }
 
@@ -126,6 +131,9 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let key = key.into();
         if self.is_function_prototype_property(receiver, key) {
+            if self.is_derived_class_constructor(receiver)? {
+                return Err(ExecutionError::ReadOnlyProperty(receiver));
+            }
             self.intrinsic_property_atoms.prototype = key.atom();
             return self.set_function_prototype(receiver, value);
         }

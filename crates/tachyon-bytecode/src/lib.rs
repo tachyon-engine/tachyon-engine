@@ -277,6 +277,7 @@ pub enum FunctionKind {
     Script,
     Module,
     Ordinary,
+    DerivedClassConstructor,
     Generator,
     Async,
     AsyncGenerator,
@@ -299,6 +300,7 @@ impl EnvironmentRecordKind {
             FunctionKind::Script => Self::Global,
             FunctionKind::Module => Self::Module,
             FunctionKind::Ordinary
+            | FunctionKind::DerivedClassConstructor
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,
@@ -411,7 +413,10 @@ pub struct FunctionMetadata {
 impl FunctionMetadata {
     #[must_use]
     pub fn new(kind: FunctionKind, layout: FunctionLayout) -> Self {
-        let strictness = if matches!(kind, FunctionKind::Module) {
+        let strictness = if matches!(
+            kind,
+            FunctionKind::Module | FunctionKind::DerivedClassConstructor
+        ) {
             FunctionStrictness::Strict
         } else {
             FunctionStrictness::Sloppy
@@ -562,6 +567,18 @@ pub enum ModuleBuildError {
         kind: FunctionKind,
         strictness: FunctionStrictness,
     },
+    InvalidClassInstruction {
+        function: FunctionId,
+        kind: FunctionKind,
+        offset: WordOffset,
+        opcode: Opcode,
+    },
+    InvalidClassConstructorTarget {
+        function: FunctionId,
+        offset: WordOffset,
+        target: FunctionId,
+        target_kind: FunctionKind,
+    },
     VerifyFunction {
         function: FunctionId,
         error: VerifyError,
@@ -701,6 +718,10 @@ impl CompiledModule {
             });
         }
 
+        let function_kinds: Vec<_> = templates
+            .iter()
+            .map(|template| template.metadata.kind)
+            .collect();
         let max_environment_slot_count = templates
             .iter()
             .map(|template| template.metadata.layout.environment_slot_count)
@@ -722,8 +743,10 @@ impl CompiledModule {
                     actual: template.id,
                 });
             }
-            if matches!(template.metadata.kind, FunctionKind::Module)
-                && template.metadata.strictness != FunctionStrictness::Strict
+            if matches!(
+                template.metadata.kind,
+                FunctionKind::Module | FunctionKind::DerivedClassConstructor
+            ) && template.metadata.strictness != FunctionStrictness::Strict
             {
                 return Err(ModuleBuildError::InvalidFunctionStrictness {
                     function: template.id,
@@ -753,6 +776,12 @@ impl CompiledModule {
                 template.id,
                 &template.metadata.handlers,
                 &bytecode,
+            )?;
+            verify::validate_class_instructions(
+                template.id,
+                template.metadata.kind,
+                &bytecode,
+                &function_kinds,
             )?;
             verify::validate_function_layout(
                 template.id,

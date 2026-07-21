@@ -10,7 +10,7 @@ use oxc::{
 
 use crate::{CompileError, SourceSpan, SourceText};
 
-use super::expression::{HirExpression, lower_expression};
+use super::expression::{HirExpression, HirExpressionKind, lower_class, lower_expression};
 use super::pattern::{HirPattern, lower_assignment_pattern, lower_binding_pattern, new_binding};
 use super::program::{FunctionStencilId, HirFunction, HirFunctionDeclaration, StatementCompletion};
 use super::{missing_semantic, source_span, to_scope_id, unsupported};
@@ -174,6 +174,43 @@ pub(super) fn lower_statement(
                 functions,
             )?),
         }),
+        Statement::ClassDeclaration(class) => {
+            let identifier = class.id.as_ref().ok_or_else(|| {
+                unsupported(
+                    source.name(),
+                    source_span(class.span),
+                    "anonymous class declaration",
+                )
+            })?;
+            let binding = new_binding(identifier, source, semantic)?;
+            let name: Arc<str> = Arc::from(identifier.name.as_str());
+            let class_expression = HirExpression {
+                span: source_span(class.span),
+                kind: HirExpressionKind::Class(lower_class(
+                    class,
+                    Some(name),
+                    source,
+                    semantic,
+                    functions,
+                )?),
+            };
+            Ok(HirStatement {
+                span: source_span(class.span),
+                completion: StatementCompletion::Empty,
+                kind: HirStatementKind::VariableDeclaration(HirVariableDeclaration {
+                    kind: HirVariableDeclarationKind::Let,
+                    declarators: vec![HirVariableDeclarator {
+                        span: source_span(class.span),
+                        pattern: HirPattern {
+                            span: binding.span,
+                            kind: super::pattern::HirPatternKind::Binding(binding),
+                        },
+                        initializer: Some(class_expression),
+                    }]
+                    .into(),
+                }),
+            })
+        }
         Statement::FunctionDeclaration(function)
             if matches!(
                 context,
@@ -682,6 +719,7 @@ pub(super) fn lower_function_stencil(
             .scoping()
             .scope_flags(oxc_scope)
             .contains(OxcScopeFlags::StrictMode),
+        kind: super::program::HirFunctionKind::Ordinary,
     });
     Ok(id)
 }
@@ -775,6 +813,7 @@ pub(super) fn lower_arrow_function_stencil(
             .scoping()
             .scope_flags(oxc_scope)
             .contains(OxcScopeFlags::StrictMode),
+        kind: super::program::HirFunctionKind::Ordinary,
     });
     Ok(id)
 }

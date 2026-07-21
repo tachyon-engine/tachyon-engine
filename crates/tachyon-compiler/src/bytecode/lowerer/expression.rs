@@ -244,6 +244,7 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Class(class) => self.class_expression(class, expression.span),
             HirExpressionKind::This => {
                 let destination = self.register()?;
                 self.emit(Opcode::LoadThis, &[destination.index()], expression.span)?;
@@ -485,10 +486,86 @@ impl Lowerer<'_> {
             HirExpressionKind::Call { callee, arguments } => {
                 self.call_expression(callee, arguments, expression.span)
             }
+            HirExpressionKind::SuperCall(arguments) => {
+                self.super_call_expression(arguments, expression.span)
+            }
             HirExpressionKind::New { callee, arguments } => {
                 self.construct_expression(callee, arguments, expression.span)
             }
         }
+    }
+
+    /// Evaluates class heritage once and uses ordinary Get before allocating the constructor pair.
+    fn class_expression(
+        &mut self,
+        class: &crate::HirClass,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let superclass = self.expression(&class.super_class)?;
+        let heritage_base = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[heritage_base.index(), superclass.index()],
+            class.super_class.span,
+        )?;
+        let superclass_prototype = self.register()?;
+        self.emit(
+            Opcode::CheckConstructor,
+            &[heritage_base.index()],
+            class.super_class.span,
+        )?;
+        let prototype_name = self.scope_name(&std::sync::Arc::from("prototype"))?;
+        self.emit(
+            Opcode::GetById,
+            &[
+                superclass_prototype.index(),
+                heritage_base.index(),
+                prototype_name,
+            ],
+            class.super_class.span,
+        )?;
+        let destination = self.register()?;
+        let function = class
+            .constructor
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::CreateClass,
+            &[destination.index(), function, heritage_base.index()],
+            span,
+        )?;
+        if let Some(name) = &class.name {
+            let name = self.scope_name(name)?;
+            self.emit(Opcode::SetFunctionName, &[destination.index(), name], span)?;
+        }
+        Ok(destination)
+    }
+
+    /// Evaluates super arguments into one verified contiguous window before construction.
+    fn super_call_expression(
+        &mut self,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let argument_base = self.register()?;
+        let mut slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(slots) {
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let destination = self.register()?;
+        let count = u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            Opcode::SuperConstruct,
+            &[destination.index(), argument_base.index(), count],
+            span,
+        )?;
+        self.emit(Opcode::InitializeThis, &[destination.index()], span)?;
+        Ok(destination)
     }
 
     /// Reads a compound target before its RHS, computes once, and publishes the resulting value.

@@ -272,6 +272,9 @@ impl Isolate {
             } else if self.is_function_metadata_property(current, key)? {
                 return Ok(PropertyWrite::Complete(false));
             } else if self.is_function_prototype_property(current, key) {
+                if self.is_derived_class_constructor(current)? {
+                    return Ok(PropertyWrite::Complete(false));
+                }
                 return self.write_data_property_boolean(receiver, key, value);
             }
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {

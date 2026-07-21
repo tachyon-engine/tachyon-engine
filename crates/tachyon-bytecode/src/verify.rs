@@ -322,6 +322,52 @@ pub(super) fn validate_finally_instructions(
     Ok(())
 }
 
+/// Restricts derived-constructor opcodes and class template references after stream verification.
+pub(super) fn validate_class_instructions(
+    function: FunctionId,
+    kind: FunctionKind,
+    bytecode: &VerifiedBytecode,
+    function_kinds: &[FunctionKind],
+) -> Result<(), ModuleBuildError> {
+    let words = bytecode.bytecode().words();
+    let mut offset = 0u32;
+    while (offset as usize) < words.len() {
+        let word_offset = WordOffset::new(offset);
+        let instruction = decode_instruction(words, word_offset).map_err(|_| {
+            ModuleBuildError::VerifiedBytecodeDecodeInvariant {
+                function,
+                offset: word_offset,
+            }
+        })?;
+        if matches!(
+            instruction.opcode,
+            Opcode::SuperConstruct | Opcode::InitializeThis
+        ) && kind != FunctionKind::DerivedClassConstructor
+        {
+            return Err(ModuleBuildError::InvalidClassInstruction {
+                function,
+                kind,
+                offset: word_offset,
+                opcode: instruction.opcode,
+            });
+        }
+        if instruction.opcode == Opcode::CreateClass {
+            let target = FunctionId::new(instruction.operands[1]);
+            let target_kind = function_kinds[target.index() as usize];
+            if target_kind != FunctionKind::DerivedClassConstructor {
+                return Err(ModuleBuildError::InvalidClassConstructorTarget {
+                    function,
+                    offset: word_offset,
+                    target,
+                    target_kind,
+                });
+            }
+        }
+        offset += u32::from(instruction.word_len);
+    }
+    Ok(())
+}
+
 /// Feedback sites have stable ordering and bounds, while their mutable feedback stays isolate-local.
 pub(super) fn validate_feedback_sites(
     function: FunctionId,
@@ -632,7 +678,9 @@ fn verify_instruction(
         | Opcode::LoadThis
         | Opcode::LoadNewTarget
         | Opcode::LoadArgumentsLength
-        | Opcode::LoadArgumentsObject => check_register(operands[0])?,
+        | Opcode::LoadArgumentsObject
+        | Opcode::InitializeThis
+        | Opcode::CheckConstructor => check_register(operands[0])?,
         Opcode::Move => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -703,7 +751,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Call | Opcode::Construct => {
+        Opcode::Call | Opcode::Construct | Opcode::SuperConstruct => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             if operands[1]
@@ -744,6 +792,19 @@ fn verify_instruction(
         }
         Opcode::Return | Opcode::Throw => check_register(operands[0])?,
         Opcode::CreateClosure => check_register(operands[0])?,
+        Opcode::CreateClass => {
+            check_register(operands[0])?;
+            check_register(operands[2])?;
+            check_register(
+                operands[2]
+                    .checked_add(1)
+                    .ok_or(VerifyError::RegisterOutOfRange {
+                        offset,
+                        register: u32::MAX,
+                        register_count: context.register_count,
+                    })?,
+            )?;
+        }
         Opcode::StoreScope | Opcode::StoreResolvedScope | Opcode::InitializeGlobalLexical => {
             check_register(operands[0])?
         }
@@ -772,7 +833,11 @@ fn verify_instruction(
             scope_name_count: context.scope_name_count,
         });
     }
-    if instruction.opcode == Opcode::CreateClosure && operands[1] >= context.function_count {
+    if matches!(
+        instruction.opcode,
+        Opcode::CreateClosure | Opcode::CreateClass
+    ) && operands[1] >= context.function_count
+    {
         return Err(VerifyError::FunctionOutOfRange {
             offset,
             function: operands[1],

@@ -13,6 +13,7 @@ use super::*;
 
 mod accessors;
 mod calls;
+mod class;
 mod control;
 mod conversion;
 mod dispatch;

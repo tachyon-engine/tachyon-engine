@@ -333,6 +333,13 @@ pub(crate) enum PromiseThenStage {
     Capability,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PromiseStaticResolveStage {
+    Constructor,
+    Resolve,
+}
+
 /// One observable boundary in an Array.prototype.forEach iteration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -500,6 +507,7 @@ pub(crate) enum NativeContinuationKind {
     PromiseReaction,
     PromiseCapabilityCall,
     PromiseThen(PromiseThenStage),
+    PromiseStaticResolve(PromiseStaticResolveStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
     ConversionCallRoot,
@@ -787,6 +795,21 @@ impl NativeContinuation {
         }
     }
 
+    /// Roots generic Promise.resolve state across constructor and resolver callbacks.
+    #[inline]
+    pub(crate) const fn promise_static_resolve(
+        site: NativeContinuationSite,
+        stage: PromiseStaticResolveStage,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseStaticResolve(stage),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     /// Roots a Promise and its resolution while observable `then` lookup executes.
     #[inline]
     pub(crate) const fn promise_resolution(
@@ -1005,6 +1028,20 @@ pub(crate) struct Frame {
 
 const _: [(); 104] = [(); core::mem::size_of::<Frame>()];
 
+/// Sparse derived-constructor state kept outside the hot `Frame` and ordinary-call path.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DerivedActivation {
+    pub(crate) frame_depth: u32,
+    pub(crate) function: Value,
+}
+
+impl Trace for DerivedActivation {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.function.trace(tracer);
+    }
+}
+
 /// The dynamic handler state selected from immutable bytecode handler metadata.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ActiveHandler {
@@ -1020,6 +1057,8 @@ pub(crate) struct Fiber {
     pub(crate) argument_objects: Vec<Option<Value>>,
     /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.
     pub(crate) argument_sources: Vec<Option<GcRef<NativeCallState>>>,
+    /// Only derived constructors enter this stack, preserving the ordinary call hot path.
+    pub(crate) derived_activations: Vec<DerivedActivation>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -1035,8 +1074,12 @@ impl Fiber {
         self.registers.trace(tracer);
         self.argument_objects.trace(tracer);
         self.argument_sources.trace(tracer);
+        self.derived_activations.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         debug_assert_eq!(self.argument_sources.len(), self.frames.len());
+        debug_assert!(self.derived_activations.iter().all(|activation| {
+            activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
+        }));
         for frame in &mut self.frames {
             frame.environment.trace(tracer);
             frame.this_value.trace(tracer);

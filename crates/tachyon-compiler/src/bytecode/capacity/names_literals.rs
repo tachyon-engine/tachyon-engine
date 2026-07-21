@@ -230,6 +230,14 @@ fn switch_scope_name_count(
 fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
         HirExpressionKind::Identifier(_) => Ok(1),
+        HirExpressionKind::Class(class) => {
+            let mut count = expression_scope_name_count(&class.super_class)?;
+            count = checked_count_add(count, 1, "scope names")?;
+            if class.name.is_some() {
+                count = checked_count_add(count, 1, "scope names")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -352,6 +360,17 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         HirExpressionKind::Call { callee, arguments }
         | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_scope_name_count(callee)?;
+            for argument in arguments.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(argument)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::SuperCall(arguments) => {
+            let mut count = 0;
             for argument in arguments.iter() {
                 count = checked_count_add(
                     count,

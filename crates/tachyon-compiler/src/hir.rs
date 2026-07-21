@@ -6,14 +6,14 @@ mod program;
 mod statement;
 
 pub use expression::{
-    HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirExpression,
+    HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator, HirClass, HirExpression,
     HirExpressionKind, HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty,
     HirObjectPropertyKey, HirObjectPropertyValue, HirUnaryOperator, HirUpdateOperator,
 };
 pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
 pub(crate) use program::lower;
 pub use program::{
-    BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration,
+    BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration, HirFunctionKind,
     HirIdentifierReference, HirProgram, HirScope, HirScopeFlags, ReferenceId, ScopeId,
     StatementCompletion,
 };

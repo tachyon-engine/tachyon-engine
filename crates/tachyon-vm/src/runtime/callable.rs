@@ -1331,11 +1331,13 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
     match error {
         ExecutionError::UnresolvedBinding(_)
         | ExecutionError::UninitializedBinding(_)
-        | ExecutionError::UninitializedEnvironmentBinding { .. } => {
-            Some(NativeErrorKind::Reference)
-        }
+        | ExecutionError::UninitializedEnvironmentBinding { .. }
+        | ExecutionError::UninitializedThis
+        | ExecutionError::SuperAlreadyCalled => Some(NativeErrorKind::Reference),
         ExecutionError::NonCallable(_)
         | ExecutionError::NonConstructor(_)
+        | ExecutionError::ClassConstructorCalledWithoutNew(_)
+        | ExecutionError::InvalidDerivedConstructorReturn(_)
         | ExecutionError::InvalidInstanceofPrototype(_)
         | ExecutionError::ReadOnlyBinding(_)
         | ExecutionError::ImmutableBinding(_)

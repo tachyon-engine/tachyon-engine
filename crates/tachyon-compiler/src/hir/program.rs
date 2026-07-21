@@ -138,6 +138,13 @@ pub struct HirFunction {
     pub body: Arc<[HirStatement]>,
     pub scope: ScopeId,
     pub strict: bool,
+    pub kind: HirFunctionKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirFunctionKind {
+    Ordinary,
+    DerivedClassConstructor,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.

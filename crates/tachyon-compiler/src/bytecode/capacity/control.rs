@@ -778,6 +778,7 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
 /// Counts nested conditional arms, each of which consumes exactly two symbolic labels.
 fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
+        HirExpressionKind::Class(class) => expression_label_count(&class.super_class),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -900,6 +901,14 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
         HirExpressionKind::Call { callee, arguments }
         | HirExpressionKind::New { callee, arguments } => {
             let mut count = expression_label_count(callee)?;
+            for argument in arguments.iter() {
+                count =
+                    checked_count_add(count, expression_label_count(argument)?, "bytecode labels")?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::SuperCall(arguments) => {
+            let mut count = 0;
             for argument in arguments.iter() {
                 count =
                     checked_count_add(count, expression_label_count(argument)?, "bytecode labels")?;

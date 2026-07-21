@@ -268,7 +268,9 @@ impl BytecodeBuilder {
             | Opcode::LoadThis
             | Opcode::LoadNewTarget
             | Opcode::LoadArgumentsLength
-            | Opcode::LoadArgumentsObject => &[0],
+            | Opcode::LoadArgumentsObject
+            | Opcode::InitializeThis
+            | Opcode::CheckConstructor => &[0],
             Opcode::Move
             | Opcode::Not
             | Opcode::Negate
@@ -318,7 +320,7 @@ impl BytecodeBuilder {
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],
             Opcode::GetById | Opcode::SetById => &[0, 1],
-            Opcode::Call | Opcode::Construct => {
+            Opcode::Call | Opcode::Construct | Opcode::SuperConstruct => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {
                         self.note_register(register)?;
@@ -335,6 +337,7 @@ impl BytecodeBuilder {
                 }
                 return Ok(());
             }
+            Opcode::CreateClass => &[0, 2],
             Opcode::CallWithReceiver => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {

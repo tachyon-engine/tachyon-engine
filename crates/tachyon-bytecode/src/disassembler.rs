@@ -75,7 +75,9 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::LoadThis
         | Opcode::LoadNewTarget
         | Opcode::LoadArgumentsLength
-        | Opcode::LoadArgumentsObject => write!(output, " r{}", operands[0])?,
+        | Opcode::LoadArgumentsObject
+        | Opcode::InitializeThis
+        | Opcode::CheckConstructor => write!(output, " r{}", operands[0])?,
         Opcode::LoadNull => write!(output, " r{}", operands[0])?,
         Opcode::LoadFalse => write!(output, " r{}", operands[0])?,
         Opcode::LoadTrue => write!(output, " r{}", operands[0])?,
@@ -160,12 +162,22 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, constructor=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::SuperConstruct => write!(
+            output,
+            " r{}, arguments=r{}, argc={}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::CallWithReceiver => write!(
             output,
             " r{}, receiver=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
         Opcode::CreateClosure => write!(output, " r{}, function={}", operands[0], operands[1])?,
+        Opcode::CreateClass => write!(
+            output,
+            " r{}, function={}, superclass=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::LoadScope => write!(output, " r{}, scope={}", operands[0], operands[1])?,
         Opcode::StoreScope | Opcode::StoreResolvedScope => {
             write!(output, " r{}, scope={}", operands[0], operands[1])?
