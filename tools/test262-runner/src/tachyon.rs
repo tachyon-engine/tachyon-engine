@@ -63,7 +63,7 @@ fn eval_script_callback(
         },
     )? {
         RunOutcome::Completed(value) => Ok(value),
-        RunOutcome::Thrown(value) => Ok(value),
+        RunOutcome::Thrown(value) => Err(ExecutionError::HostThrown(value)),
         RunOutcome::BudgetExhausted => Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
     }
 }

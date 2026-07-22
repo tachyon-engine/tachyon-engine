@@ -306,6 +306,7 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     MissingNativeContinuation,
+    HostThrown(Value),
     MissingCompletionRecord,
     UnsupportedExceptionHandler(HandlerKind),
     CallStackLimit { limit: u32 },

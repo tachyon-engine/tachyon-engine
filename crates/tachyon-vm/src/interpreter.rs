@@ -411,17 +411,28 @@ impl Isolate {
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    let Some(kind) = execution_error_kind(&error) else {
-                        #[cfg(feature = "opcode-profile")]
-                        self.execution_profile.record_fault_slow_exit();
-                        return Err(error);
-                    };
-                    match self.throw_native_error(kind, instruction_offset) {
-                        Ok(outcome) => outcome,
-                        Err(error) => {
+                    if let ExecutionError::HostThrown(value) = error {
+                        match self.throw_value(value, instruction_offset) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                #[cfg(feature = "opcode-profile")]
+                                self.execution_profile.record_fault_slow_exit();
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        let Some(kind) = execution_error_kind(&error) else {
                             #[cfg(feature = "opcode-profile")]
                             self.execution_profile.record_fault_slow_exit();
                             return Err(error);
+                        };
+                        match self.throw_native_error(kind, instruction_offset) {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                #[cfg(feature = "opcode-profile")]
+                                self.execution_profile.record_fault_slow_exit();
+                                return Err(error);
+                            }
                         }
                     }
                 }

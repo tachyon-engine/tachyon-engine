@@ -21,6 +21,7 @@ mod define_properties;
 mod dispatch;
 mod environments;
 mod errors;
+mod eval;
 mod finally;
 mod fixtures;
 mod grouping;

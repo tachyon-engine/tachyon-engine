@@ -7,10 +7,12 @@ use oxc::{
 
 use crate::{CompileError, ProgramKind, SourceId, SourceSpan, SourceText};
 
-use super::expression::HirExpression;
+use super::expression::{HirExpression, HirExpressionKind};
 use super::pattern::HirPattern;
-use super::statement::{HirStatement, StatementContext, lower_statement};
-use super::to_scope_id;
+use super::statement::{
+    HirStatement, HirStatementKind, StatementCompletion, StatementContext, lower_statement,
+};
+use super::{source_span, to_scope_id};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
@@ -183,8 +185,25 @@ pub(crate) fn lower(
     source: &SourceText,
     semantic: &Semantic<'_>,
 ) -> Result<HirProgram, CompileError> {
-    let mut statements = Vec::with_capacity(program.body.len());
+    let statement_capacity = program
+        .directives
+        .len()
+        .checked_add(program.body.len())
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "program statements",
+        })?;
+    let mut statements = Vec::with_capacity(statement_capacity);
     let mut functions = Vec::with_capacity(program.body.len());
+    for directive in &program.directives {
+        statements.push(HirStatement {
+            span: source_span(directive.span),
+            completion: StatementCompletion::Value,
+            kind: HirStatementKind::Expression(HirExpression {
+                span: source_span(directive.expression.span),
+                kind: HirExpressionKind::String(Arc::from(directive.expression.value.as_str())),
+            }),
+        });
+    }
     for statement in &program.body {
         statements.push(lower_statement(
             statement,
