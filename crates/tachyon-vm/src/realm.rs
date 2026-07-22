@@ -1454,6 +1454,28 @@ impl Isolate {
                 .expect("Object prototype initializes before Math"),
         })?;
         self.realm.math_object = Some(object);
+        for (name, value) in [
+            (b"E".as_slice(), core::f64::consts::E),
+            (b"LN10".as_slice(), core::f64::consts::LN_10),
+            (b"LN2".as_slice(), core::f64::consts::LN_2),
+            (b"LOG10E".as_slice(), core::f64::consts::LOG10_E),
+            (b"LOG2E".as_slice(), core::f64::consts::LOG2_E),
+            (b"PI".as_slice(), core::f64::consts::PI),
+            (b"SQRT1_2".as_slice(), core::f64::consts::FRAC_1_SQRT_2),
+            (b"SQRT2".as_slice(), core::f64::consts::SQRT_2),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            self.define_data_property(
+                object,
+                atom,
+                DataPropertyDescriptor {
+                    value: Some(Value::from_f64(value)),
+                    writable: Some(false),
+                    enumerable: Some(false),
+                    configurable: Some(false),
+                },
+            )?;
+        }
         let function_prototype = self
             .realm
             .function_prototype
