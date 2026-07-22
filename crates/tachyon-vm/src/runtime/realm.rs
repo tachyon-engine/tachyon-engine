@@ -397,7 +397,7 @@ impl Realm {
         Some(slot)
     }
 
-    #[inline(always)]
+    #[cfg(test)]
     pub(crate) fn intrinsic_value(&self, slot: IntrinsicSlotId) -> Value {
         self.intrinsic_bindings[slot.index()].value
     }

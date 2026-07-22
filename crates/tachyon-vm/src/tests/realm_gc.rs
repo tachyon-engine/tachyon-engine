@@ -1,4 +1,5 @@
 use super::{fixtures::*, *};
+use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
 #[test]
 fn child_realms_have_distinct_globals_and_remain_gc_roots() {
@@ -59,6 +60,44 @@ fn global_lexical_access_works_for_every_dispatch_batch() {
     assert_global_lexical_batch::<4>();
     assert_global_lexical_batch::<8>();
     assert_global_lexical_batch::<16>();
+}
+
+#[test]
+fn global_intrinsic_overrides_work_for_every_dispatch_batch() {
+    assert_global_intrinsic_override_batch::<1>();
+    assert_global_intrinsic_override_batch::<2>();
+    assert_global_intrinsic_override_batch::<4>();
+    assert_global_intrinsic_override_batch::<8>();
+    assert_global_intrinsic_override_batch::<16>();
+}
+
+/// Proves identifier reads observe the global object's current intrinsic-valued property.
+fn assert_global_intrinsic_override_batch<const N: usize>() {
+    let source = "function fakeObject() {}\nfunction secondObject() {}\nvar global = this;\nglobal.Object = fakeObject;\nvar memberWrite = Object === fakeObject;\nObject = secondObject;\nmemberWrite && Object === secondObject && global.Object === secondObject;";
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(700 + N as u32),
+                SourceName::new("global-intrinsic-override"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("global intrinsic override fixture compiles");
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_024,
+                quantum: 1_024,
+            },
+        )
+        .expect("global intrinsic override fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
 }
 
 #[test]

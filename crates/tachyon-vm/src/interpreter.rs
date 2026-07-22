@@ -2284,14 +2284,18 @@ impl Isolate {
 
     #[inline(always)]
     pub(crate) fn scope_value(
-        &self,
+        &mut self,
         resolution: ScopeResolution,
     ) -> Result<Option<Value>, ExecutionError> {
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.lexical_value(slot).map(Some);
         }
-        if let Some(slot) = resolution.intrinsic_slot {
-            return Ok(Some(self.realm.intrinsic_value(slot)));
+        if resolution.intrinsic_slot.is_some() {
+            let global = self
+                .realm
+                .global_object
+                .expect("initialized realm publishes a global object");
+            return self.get_data_property(global, resolution.atom);
         }
         Ok(resolution
             .global_slot
@@ -2307,8 +2311,12 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
-        if let Some(slot) = resolution.intrinsic_slot {
-            return self.realm.set_intrinsic(slot, value);
+        if resolution.intrinsic_slot.is_some() {
+            let global = self
+                .realm
+                .global_object
+                .expect("initialized realm publishes a global object");
+            return self.set_own_data_property(global, resolution.atom, value);
         }
         if let Some(slot) = resolution.global_slot {
             self.realm.set_slot(slot, value);
@@ -2349,14 +2357,18 @@ impl Isolate {
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.set_lexical(slot, value);
         }
-        if let Some(slot) = resolution.intrinsic_slot {
+        if resolution.intrinsic_slot.is_some() {
             let strict = self
                 .fiber
                 .frames
                 .last()
                 .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
-            return match self.realm.set_intrinsic(slot, value) {
-                Err(ExecutionError::ReadOnlyBinding(_)) if !strict => Ok(()),
+            let global = self
+                .realm
+                .global_object
+                .expect("initialized realm publishes a global object");
+            return match self.set_own_data_property(global, resolution.atom, value) {
+                Err(ExecutionError::ReadOnlyProperty(_)) if !strict => Ok(()),
                 result => result,
             };
         }
