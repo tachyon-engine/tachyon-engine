@@ -303,9 +303,14 @@ impl Isolate {
                 })?;
                 let pending = self.pending_collection_initializer(state)?;
                 if pending.kind == CollectionInitializerKind::ObjectFromEntries {
-                    let key = self.property_key(pending.key)?;
-                    self.set_own_data_property(pending.target, key, pending.result)?;
-                    return self.call_collection_next(site, state);
+                    return self.dispatch_builtin_property_key_native(
+                        site,
+                        BuiltinPropertyKeyConsumer::ObjectFromEntries,
+                        pending.target,
+                        pending.key,
+                        pending.result,
+                        Value::from_heap_ref(state.raw()),
+                    );
                 }
                 self.call_collection_adder(site, state, &[pending.key, pending.result])
             }
@@ -500,6 +505,20 @@ impl Isolate {
         self.heap
             .checked_reference(raw, self.types.pending_collection_initializer)
             .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    /// Defines one converted fromEntries key and resumes the cached iterator.
+    pub(crate) fn finish_object_from_entries_key(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        key: PropertyKey,
+        value: Value,
+        state: Value,
+    ) -> Result<(), ExecutionError> {
+        self.set_own_data_property(target, key, value)?;
+        let state = self.pending_collection_initializer_reference(state)?;
+        self.call_collection_next(site, state)
     }
 
     fn pending_collection_initializer(

@@ -63,6 +63,19 @@ impl Isolate {
             destination: site.destination,
             call_site: site.call_site,
         };
+        self.dispatch_builtin_property_key_native(native_site, consumer, first, key, second, third)
+    }
+
+    /// Dispatches ToPropertyKey when the caller already owns a native continuation site.
+    pub(crate) fn dispatch_builtin_property_key_native(
+        &mut self,
+        native_site: NativeContinuationSite,
+        consumer: BuiltinPropertyKeyConsumer,
+        first: Value,
+        key: Value,
+        second: Value,
+        third: Value,
+    ) -> Result<(), ExecutionError> {
         let pending = PendingNativePropertyKey::new(first, second, third);
         if !self.is_object_value(key) {
             return self.finish_builtin_property_key(native_site, consumer, pending, key);
@@ -70,11 +83,11 @@ impl Isolate {
         let state = self.allocate_pending_native_property_key(pending, key)?;
         self.dispatch_object_primitive_conversion(
             ConversionConsumer::BuiltinPropertyKey(consumer),
-            site.caller_base,
-            site.destination,
+            native_site.caller_base,
+            native_site.destination,
             Value::from_heap_ref(state.raw()),
             key,
-            site.call_site,
+            native_site.call_site,
         )
     }
 
@@ -229,6 +242,13 @@ impl Isolate {
                     )
                     .map(|_| ())
                 }),
+            BuiltinPropertyKeyConsumer::ObjectFromEntries => self.finish_object_from_entries_key(
+                site,
+                pending.first,
+                key,
+                pending.second,
+                pending.third,
+            ),
         }
     }
 

@@ -132,6 +132,7 @@ pub(crate) enum BuiltinPropertyKeyConsumer {
     ReflectHas,
     ReflectGet,
     ReflectSet,
+    ObjectFromEntries,
 }
 
 const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
