@@ -188,6 +188,23 @@ impl Isolate {
                 self.validate_accessor_callable(setter)?;
             }
         }
+        if self.is_string_wrapper(receiver) {
+            let length = self.length_atom()?;
+            let existing_index = key.atom().is_some_and(|atom| {
+                self.atoms
+                    .get(atom)
+                    .and_then(|name| crate::property::keys::array_index(name.as_view()))
+                    .is_some_and(|index| {
+                        self.string_index_value(receiver, index as usize)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+            });
+            if key == PropertyKey::Atom(length) || existing_index {
+                return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+            }
+        }
         if self.is_array_value(receiver)?
             && key == PropertyKey::Atom(self.length_atom()?)
             && let PropertyDescriptor::Data(data) = descriptor
@@ -239,6 +256,39 @@ impl Isolate {
 
     /// Creates a normalized payload, reusing a retained tombstone slot when one exists.
     fn define_missing_property(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        self.define_missing_property_raw(receiver, key, descriptor)?;
+        if self.is_array_value(receiver)?
+            && let Some(atom) = key.atom()
+            && let Some(name) = self.atoms.get(atom)
+            && let Some(index) = crate::property::keys::array_index(name.as_view())
+        {
+            let length_key = PropertyKey::Atom(self.length_atom()?);
+            let current_length = self
+                .complete_own_property_descriptor(receiver, length_key)?
+                .and_then(|descriptor| match descriptor {
+                    PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
+                    _ => None,
+                })
+                .unwrap_or(0.0);
+            let next_length = f64::from(index) + 1.0;
+            if next_length > current_length {
+                self.set_own_data_property(
+                    receiver,
+                    length_key,
+                    safe_integer_value(next_length as u64),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes a missing ordinary slot before applying Array index length growth.
+    fn define_missing_property_raw(
         &mut self,
         receiver: Value,
         key: PropertyKey,

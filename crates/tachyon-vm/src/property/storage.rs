@@ -284,6 +284,23 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         let key = key.into();
+        if self.is_string_wrapper(receiver) {
+            let length = self.length_atom()?;
+            let existing_index = key.atom().is_some_and(|atom| {
+                self.atoms
+                    .get(atom)
+                    .and_then(|name| crate::property::keys::array_index(name.as_view()))
+                    .is_some_and(|index| {
+                        self.string_index_value(receiver, index as usize)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    })
+            });
+            if key == PropertyKey::Atom(length) || existing_index {
+                return Ok(false);
+            }
+        }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             if self.is_function_prototype_property(receiver, key) {
