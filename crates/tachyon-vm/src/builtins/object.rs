@@ -884,38 +884,121 @@ impl Isolate {
         Ok(())
     }
 
-    /// Implements Object.prototype.isPrototypeOf for its receiver and first argument.
-    pub(crate) fn object_is_prototype_of(
+    /// Begins Object.prototype.isPrototypeOf with its required argument/receiver ordering.
+    pub(crate) fn begin_object_is_prototype_of(
         &mut self,
         site: &CallSite,
-    ) -> Result<bool, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let value = self.call_argument(site, 0)?;
-        self.is_prototype_of(site.this_value, value)
+        let Some(value) = value else {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::False),
+            );
+        };
+        if !self.is_object_value(value) {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::False),
+            );
+        }
+        let prototype = self.object_value_of(site.this_value)?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.continue_object_is_prototype_of(native_site, prototype, value)
+            .map(|_| ())
     }
 
-    /// Walks one ordinary prototype chain without invoking user code or allocating.
-    pub(crate) fn is_prototype_of(
+    /// Walks the prototype chain, routing Proxy targets through observable [[GetPrototypeOf]].
+    fn continue_object_is_prototype_of(
         &mut self,
+        site: NativeContinuationSite,
         prototype: Value,
-        value: Option<Value>,
-    ) -> Result<bool, ExecutionError> {
-        let Some(value) = value else {
-            return Ok(false);
-        };
-        if !self.is_object_value(prototype) || !self.is_object_value(value) {
-            return Ok(false);
-        }
-        let (_, mut snapshot) = self.object_snapshot(value)?;
+        mut value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
-            if snapshot.prototype == prototype {
-                return Ok(true);
+            let next = if self.is_proxy_value(value) {
+                return self.dispatch_object_is_prototype_of_proxy(site, prototype, value);
+            } else {
+                self.object_snapshot(value)?.1.prototype
+            };
+            if next == prototype {
+                self.write(site.caller_base, site.destination, boolean_value(true))?;
+                return Ok(None);
             }
-            if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
-                return Ok(false);
+            if next.as_immediate() == Some(Immediate::Null) {
+                self.write(site.caller_base, site.destination, boolean_value(false))?;
+                return Ok(None);
             }
-            let (_, next) = self.object_snapshot(snapshot.prototype)?;
-            snapshot = next;
+            value = next;
         }
+    }
+
+    /// Publishes the receiver identity around one possibly suspended Proxy prototype lookup.
+    fn dispatch_object_is_prototype_of_proxy(
+        &mut self,
+        site: NativeContinuationSite,
+        prototype: Value,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::object_is_prototype_of(site, prototype))
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = match self.dispatch_proxy_internal_method(
+            site,
+            value,
+            ProxyInternalMethod::GetPrototypeOf,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_object_is_prototype_of(continuation, value)
+    }
+
+    /// Resumes a Proxy [[GetPrototypeOf]] step and continues the chain without Rust recursion.
+    pub(crate) fn resume_object_is_prototype_of(
+        &mut self,
+        continuation: NativeContinuation,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let prototype = continuation.first();
+        if value.as_immediate() == Some(Immediate::Null) {
+            self.write(
+                continuation.site().caller_base,
+                continuation.site().destination,
+                Value::from_immediate(Immediate::False),
+            )?;
+            return Ok(None);
+        }
+        if value == prototype {
+            self.write(
+                continuation.site().caller_base,
+                continuation.site().destination,
+                Value::from_immediate(Immediate::True),
+            )?;
+            return Ok(None);
+        }
+        self.continue_object_is_prototype_of(continuation.site(), prototype, value)
     }
 
     /// Implements Object.isExtensible for ordinary object values.

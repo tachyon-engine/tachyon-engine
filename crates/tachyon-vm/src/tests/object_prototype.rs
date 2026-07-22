@@ -60,6 +60,32 @@ proxyResult === "proxy" && trace === "cgbxp" &&
 nonCallableThrows && abrupt && locale.name === "toLocaleString" && locale.length === 0;
 "#;
 
+const OBJECT_IS_PROTOTYPE_OF_SOURCE: &str = r#"
+function A() {}
+function B() {}
+var proto = new A();
+B.prototype = proto;
+var value = new B();
+var trapGets = 0;
+var trapCalls = 0;
+var proxyProto = {};
+var handler = {
+  get getPrototypeOf() {
+    trapGets += 1;
+    return function(target) { trapCalls += 1; return proxyProto; };
+  }
+};
+var proxy = new Proxy({}, handler);
+var nullishThrows = false;
+try { Object.prototype.isPrototypeOf.call(null, value); }
+catch (error) { nullishThrows = error instanceof TypeError; }
+var primitiveArgumentSkipsReceiver = Object.prototype.isPrototypeOf.call(null, 1) === false;
+proto.isPrototypeOf(value) && A.prototype.isPrototypeOf(value) &&
+!Number.isPrototypeOf(value) && proxyProto.isPrototypeOf(proxy) &&
+!Object.prototype.isPrototypeOf.call(true, proxy) &&
+trapGets === 2 && trapCalls === 2 && nullishThrows && primitiveArgumentSkipsReceiver;
+"#;
+
 #[test]
 fn object_value_of_executes_for_every_dispatch_batch() {
     assert_object_value_of_batch::<1>();
@@ -124,6 +150,38 @@ fn object_to_locale_string_survives_forced_major_collections() {
     ));
 }
 
+#[test]
+fn object_is_prototype_of_resumes_for_every_dispatch_batch() {
+    assert_is_prototype_of_batch::<1>();
+    assert_is_prototype_of_batch::<2>();
+    assert_is_prototype_of_batch::<4>();
+    assert_is_prototype_of_batch::<8>();
+    assert_is_prototype_of_batch::<16>();
+}
+
+#[test]
+/// Forces collection while the Proxy trap getter and returned trap function are suspended.
+fn object_is_prototype_of_survives_forced_major_collections() {
+    let module = compile_object_source(OBJECT_IS_PROTOTYPE_OF_SOURCE, 122);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("forced-major Object.prototype.isPrototypeOf fixture executes");
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
 /// Executes the Object.prototype.valueOf contract with one selected dispatch monomorphization.
 fn assert_object_value_of_batch<const N: usize>() {
     let module = compile_object_value_of_source(100 + N as u32);
@@ -160,6 +218,25 @@ fn assert_to_locale_string_batch<const N: usize>() {
             },
         )
         .expect("Object.prototype.toLocaleString fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes ordinary and Proxy prototype walks with one dispatch monomorphization.
+fn assert_is_prototype_of_batch<const N: usize>() {
+    let module = compile_object_source(OBJECT_IS_PROTOTYPE_OF_SOURCE, 120 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("Object.prototype.isPrototypeOf fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

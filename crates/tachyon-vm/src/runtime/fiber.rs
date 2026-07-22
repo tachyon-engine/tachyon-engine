@@ -26,6 +26,7 @@ pub(crate) struct SymbolAllocationRoots<'a> {
 pub(crate) struct PrototypeInitializationRoots<'a> {
     pub(crate) vm: VmRoots<'a>,
     pub(crate) function: Value,
+    pub(crate) object_prototype: Value,
 }
 
 pub(crate) struct ArrayAllocationRoots<'a> {
@@ -56,6 +57,7 @@ impl Trace for PrototypeInitializationRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.function.trace(tracer);
+        self.object_prototype.trace(tracer);
     }
 }
 
@@ -549,6 +551,7 @@ pub(crate) enum NativeContinuationKind {
     InstanceElements(InstanceElementStage),
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
+    ObjectIsPrototypeOf,
     ObjectToLocaleString(ObjectToLocaleStringStage),
     PromiseExecutor,
     PromiseReaction,
@@ -570,6 +573,19 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn object_is_prototype_of(
+        site: NativeContinuationSite,
+        prototype: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ObjectIsPrototypeOf,
+            first: prototype,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     #[inline]
     pub(crate) const fn object_to_locale_string(
         site: NativeContinuationSite,

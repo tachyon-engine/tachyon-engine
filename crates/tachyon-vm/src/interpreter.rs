@@ -1770,6 +1770,9 @@ impl Isolate {
             NativeContinuationKind::ErrorToString(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ObjectIsPrototypeOf => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectToLocaleString(stage) => {
                 if stage != ObjectToLocaleStringStage::Call {
                     return Err(ExecutionError::MissingNativeContinuation);
@@ -4055,16 +4058,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIsPrototypeOf) => {
-                    let result = self.object_is_prototype_of(&site)?;
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(if result {
-                            Immediate::True
-                        } else {
-                            Immediate::False
-                        }),
-                    );
+                    return self.begin_object_is_prototype_of(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectSetPrototypeOf) => {
                     if self.dispatch_proxy_set_prototype_from_site(
@@ -5377,6 +5371,9 @@ impl Isolate {
                 NativeContinuationKind::ErrorToString(stage) => {
                     self.resume_error_to_string(continuation, stage, value)
                 }
+                NativeContinuationKind::ObjectIsPrototypeOf => self
+                    .resume_object_is_prototype_of(continuation, value)
+                    .map(|_| ()),
                 NativeContinuationKind::ObjectToLocaleString(stage) => {
                     self.resume_object_to_locale_string(continuation, stage, value)
                 }

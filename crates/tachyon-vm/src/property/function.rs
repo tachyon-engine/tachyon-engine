@@ -391,6 +391,10 @@ impl Isolate {
     /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
     fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
         let constructor_atom = self.constructor_atom()?;
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before function prototype");
         let shape = self
             .shapes
             .transition_add(
@@ -408,6 +412,7 @@ impl Isolate {
                 loaded_code: &mut self.loaded_code,
             },
             function,
+            object_prototype,
         };
         let storage = self
             .heap
@@ -429,7 +434,7 @@ impl Isolate {
                     shape,
                     extensible: true,
                     storage: Some(storage),
-                    prototype: Value::from_immediate(Immediate::Null),
+                    prototype: roots.object_prototype,
                 },
                 AllocationSpace::Young,
                 &mut roots,
