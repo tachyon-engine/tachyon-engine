@@ -145,6 +145,40 @@ impl Isolate {
         Ok(value)
     }
 
+    /// Implements TestIntegrityLevel for ordinary objects using complete own descriptors.
+    pub(crate) fn object_test_integrity_level(
+        &mut self,
+        value: Value,
+        freeze: bool,
+    ) -> Result<bool, ExecutionError> {
+        if !self.is_object_value(value) {
+            return Ok(true);
+        }
+        let (_, snapshot) = self.object_snapshot(value)?;
+        if snapshot.extensible {
+            return Ok(false);
+        }
+        let keys = self.ordinary_own_property_keys(value, snapshot)?;
+        for key in keys {
+            let Some(descriptor) = self.complete_own_property_descriptor(value, key)? else {
+                continue;
+            };
+            if descriptor.configurable() == Some(true)
+                || (freeze
+                    && matches!(
+                        descriptor,
+                        PropertyDescriptor::Data(DataPropertyDescriptor {
+                            writable: Some(true),
+                            ..
+                        })
+                    ))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Materializes every own String and Symbol key in the specified ordinary order.
     pub(crate) fn reflect_own_keys(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let target = self

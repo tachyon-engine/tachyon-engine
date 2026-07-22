@@ -46,6 +46,8 @@ pub(crate) enum NativeFunction {
     ObjectPreventExtensions,
     ObjectSeal,
     ObjectFreeze,
+    ObjectIsSealed,
+    ObjectIsFrozen,
     ReflectApply,
     ReflectConstruct,
     ReflectOwnKeys,
@@ -536,6 +538,8 @@ impl NativeFunction {
             | Self::ObjectPreventExtensions
             | Self::ObjectSeal
             | Self::ObjectFreeze
+            | Self::ObjectIsSealed
+            | Self::ObjectIsFrozen
             | Self::ReflectOwnKeys
             | Self::ReflectGetPrototypeOf
             | Self::ReflectIsExtensible
@@ -738,6 +742,8 @@ impl NativeFunction {
             Self::ObjectPreventExtensions => "preventExtensions",
             Self::ObjectSeal => "seal",
             Self::ObjectFreeze => "freeze",
+            Self::ObjectIsSealed => "isSealed",
+            Self::ObjectIsFrozen => "isFrozen",
             Self::ReflectOwnKeys => "ownKeys",
             Self::ReflectApply => "apply",
             Self::ReflectConstruct => "construct",

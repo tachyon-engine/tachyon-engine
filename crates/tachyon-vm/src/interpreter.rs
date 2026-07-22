@@ -4656,6 +4656,36 @@ impl Isolate {
                     let value = self.object_set_integrity_level(value, true)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectIsSealed) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.object_test_integrity_level(value, false)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectIsFrozen) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.object_test_integrity_level(value, true)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(if result {
+                            Immediate::True
+                        } else {
+                            Immediate::False
+                        }),
+                    );
+                }
                 FunctionExecutable::Native(NativeFunction::ReflectOwnKeys) => {
                     if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Reflect)? {
                         return Ok(());

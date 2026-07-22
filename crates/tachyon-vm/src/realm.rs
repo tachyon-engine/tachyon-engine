@@ -462,6 +462,8 @@ impl Isolate {
         for (name, native) in [
             (b"seal".as_slice(), NativeFunction::ObjectSeal),
             (b"freeze".as_slice(), NativeFunction::ObjectFreeze),
+            (b"isSealed".as_slice(), NativeFunction::ObjectIsSealed),
+            (b"isFrozen".as_slice(), NativeFunction::ObjectIsFrozen),
         ] {
             let function = self.allocate_native_function(
                 native,
