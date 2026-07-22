@@ -298,11 +298,8 @@ impl Isolate {
         if is_nullish(object) {
             return Err(ExecutionError::NotObject(object));
         }
-        let result = if self.is_object_value(object) {
-            self.has_own_property(object, key)?
-        } else {
-            false
-        };
+        let object = self.object_value_of(object)?;
+        let result = self.has_own_property(object, key)?;
         self.write(site.caller_base, site.destination, boolean_value(result))
     }
 
@@ -316,12 +313,10 @@ impl Isolate {
         if is_nullish(object) {
             return Err(ExecutionError::NotObject(object));
         }
-        let enumerable = if self.is_object_value(object) {
-            self.complete_own_property_descriptor(object, key)?
-                .is_some_and(|descriptor| descriptor.enumerable().unwrap_or(false))
-        } else {
-            false
-        };
+        let object = self.object_value_of(object)?;
+        let enumerable = self
+            .complete_own_property_descriptor(object, key)?
+            .is_some_and(|descriptor| descriptor.enumerable().unwrap_or(false));
         self.write(
             site.caller_base,
             site.destination,

@@ -82,6 +82,9 @@ var nanDesc = Object.getOwnPropertyDescriptor(global, "NaN");
 var infinityDesc = Object.getOwnPropertyDescriptor(global, "Infinity");
 var stringIndexDesc = Object.getOwnPropertyDescriptor("foo", "0");
 var stringLengthDesc = Object.getOwnPropertyDescriptor("foo", "length");
+var primitiveOwnQueries = Object.hasOwn("foo", "0") &&
+    Object.prototype.hasOwnProperty.call("foo", "0") &&
+    Object.prototype.propertyIsEnumerable.call("foo", "0");
 var constantDescriptors = undefinedDesc.writable === false && undefinedDesc.enumerable === false &&
     undefinedDesc.configurable === false && nanDesc.writable === false &&
     nanDesc.enumerable === false && nanDesc.configurable === false &&
@@ -90,7 +93,7 @@ var constantDescriptors = undefinedDesc.writable === false && undefinedDesc.enum
     stringIndexDesc.writable === false && stringIndexDesc.enumerable === true &&
     stringIndexDesc.configurable === false && stringLengthDesc.value === 3 &&
     stringLengthDesc.writable === false && stringLengthDesc.enumerable === false &&
-    stringLengthDesc.configurable === false;
+    stringLengthDesc.configurable === false && primitiveOwnQueries;
 global.Object = fakeObject;
 var memberWrite = Object === fakeObject;
 Object = secondObject;
