@@ -9,9 +9,7 @@ use crate::{CompileError, ProgramKind, SourceId, SourceSpan, SourceText};
 
 use super::expression::{HirExpression, HirExpressionKind};
 use super::pattern::HirPattern;
-use super::statement::{
-    HirStatement, HirStatementKind, StatementCompletion, StatementContext, lower_statement,
-};
+use super::statement::{HirStatement, HirStatementKind, StatementContext, lower_statement};
 use super::{source_span, to_scope_id};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
