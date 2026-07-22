@@ -1424,7 +1424,17 @@ impl Isolate {
                     let callback = self
                         .eval_script_callback
                         .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
-                    let result = callback(self, self.active_realm, EvalKind::Direct, source)?;
+                    let strict_caller = self
+                        .fiber
+                        .frames
+                        .last()
+                        .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
+                    let result = callback(
+                        self,
+                        self.active_realm,
+                        EvalKind::Direct { strict_caller },
+                        source,
+                    )?;
                     self.write(base, operands[0], result)?;
                 } else {
                     self.call(CallSite {

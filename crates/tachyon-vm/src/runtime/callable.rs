@@ -1521,7 +1521,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }
-        | ExecutionError::InvalidJsonText => Some(NativeErrorKind::Syntax),
+        | ExecutionError::InvalidJsonText
+        | ExecutionError::InvalidEvalSource => Some(NativeErrorKind::Syntax),
         ExecutionError::InvalidRegExpFlags | ExecutionError::InvalidRegExpPattern => {
             Some(NativeErrorKind::Syntax)
         }

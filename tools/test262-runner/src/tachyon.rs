@@ -43,7 +43,14 @@ fn eval_script_callback(
     source: Value,
 ) -> Result<Value, ExecutionError> {
     let units = isolate.string_value_to_utf16(source)?;
-    let source = String::from_utf16_lossy(&units);
+    let mut source = String::from_utf16_lossy(&units);
+    if kind.inherits_strict() {
+        const STRICT_PROLOGUE: &str = "\"use strict\";\nvoid 0;\n";
+        source
+            .try_reserve_exact(STRICT_PROLOGUE.len())
+            .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        source.insert_str(0, STRICT_PROLOGUE);
+    }
     let module = Compiler
         .compile(
             SourceText::new(
@@ -54,13 +61,16 @@ fn eval_script_callback(
             ),
             options(SourceMode::Script),
         )
-        .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        .map_err(|error| match error {
+            CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
+            _ => ExecutionError::UnsupportedDynamicFunctionConstructor,
+        })?;
     let budget = ExecutionBudget {
         fuel: EXECUTION_FUEL_LIMIT,
         quantum: u32::MAX,
     };
     let outcome = match kind {
-        tachyon_vm::EvalKind::Direct => {
+        tachyon_vm::EvalKind::Direct { .. } => {
             isolate.execute_direct_eval_in_realm(realm, &module, budget)
         }
         tachyon_vm::EvalKind::Indirect => isolate.execute_in_realm(realm, &module, budget),

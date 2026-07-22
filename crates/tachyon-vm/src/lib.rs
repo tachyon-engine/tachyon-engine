@@ -87,8 +87,20 @@ impl RealmId {
 /// Whether the parser proved the syntactic direct-eval form before the runtime identity check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvalKind {
-    Direct,
+    Direct { strict_caller: bool },
     Indirect,
+}
+
+impl EvalKind {
+    #[must_use]
+    pub const fn inherits_strict(self) -> bool {
+        matches!(
+            self,
+            Self::Direct {
+                strict_caller: true
+            }
+        )
+    }
 }
 
 /// Host callback used by embedding harnesses to compile and execute eval source in one Realm.
@@ -388,6 +400,7 @@ pub enum ExecutionError {
     UnsupportedStringValue(Value),
     UnsupportedPrimitiveStringConversion(Value),
     InvalidJsonText,
+    InvalidEvalSource,
     InvalidRegExpFlags,
     InvalidRegExpPattern,
     InvalidJsonCircularStructure,

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
+use tachyon_compiler::{
+    CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText,
+};
 
 use super::{fixtures::test_isolate, *};
 
@@ -12,14 +14,34 @@ fn eval_script_callback(
     source: Value,
 ) -> Result<Value, ExecutionError> {
     let units = isolate.string_value_to_utf16(source)?;
-    let source = String::from_utf16_lossy(&units);
-    let module = compile_source(&source, u32::MAX - 10);
+    let mut source = String::from_utf16_lossy(&units);
+    if kind.inherits_strict() {
+        const STRICT_PROLOGUE: &str = "\"use strict\";\nvoid 0;\n";
+        source
+            .try_reserve_exact(STRICT_PROLOGUE.len())
+            .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        source.insert_str(0, STRICT_PROLOGUE);
+    }
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(u32::MAX - 10),
+                SourceName::new("direct-eval"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .map_err(|error| match error {
+            CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
+            _ => ExecutionError::UnsupportedDynamicFunctionConstructor,
+        })?;
     let budget = ExecutionBudget {
         fuel: 8_192,
         quantum: 8_192,
     };
     let outcome = match kind {
-        EvalKind::Direct => isolate.execute_direct_eval_in_realm(realm, &module, budget),
+        EvalKind::Direct { .. } => isolate.execute_direct_eval_in_realm(realm, &module, budget),
         EvalKind::Indirect => isolate.execute_in_realm(realm, &module, budget),
     }?;
     match outcome {
@@ -151,6 +173,19 @@ fn direct_and_indirect_eval_return_non_string_inputs_without_coercion() {
     let module = compile_source(
         "var object = {}; eval(7) === 7 && eval(object) === object && (0, eval)(null) === null;",
         1_164,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+fn direct_eval_inherits_caller_strictness_for_parse_and_assignment_rules() {
+    let module = compile_source(
+        "function run() { 'use strict'; var syntax = false; var reference = false; try { eval('var public = 1;'); } catch (error) { syntax = error instanceof SyntaxError; } try { eval('missing = 1;'); } catch (error) { reference = error instanceof ReferenceError; } return syntax && reference; } run();",
+        1_165,
     );
     assert_direct_eval_batch::<1>(&module, false);
     assert_direct_eval_batch::<2>(&module, false);
