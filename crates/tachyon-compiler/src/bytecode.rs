@@ -325,6 +325,10 @@ impl EnvironmentPlans {
         });
         let mut functions = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
+            let force_dynamic_bindings = hir
+                .scopes()
+                .get(function.scope.index() as usize)
+                .is_some_and(|scope| scope.flags.direct_eval);
             let parameter_binding_count = function
                 .parameters
                 .iter()
@@ -353,15 +357,35 @@ impl EnvironmentPlans {
             }
             for parameter in function.parameters.iter() {
                 for binding in pattern_bindings(parameter) {
-                    push_captured_slot(&binding, true, true, &forced_captures, &mut slots)?;
+                    push_captured_slot(
+                        &binding,
+                        true,
+                        true,
+                        force_dynamic_bindings,
+                        &forced_captures,
+                        &mut slots,
+                    )?;
                 }
             }
             if let Some(rest) = &function.rest_parameter {
                 for binding in pattern_bindings(rest) {
-                    push_captured_slot(&binding, true, true, &forced_captures, &mut slots)?;
+                    push_captured_slot(
+                        &binding,
+                        true,
+                        true,
+                        force_dynamic_bindings,
+                        &forced_captures,
+                        &mut slots,
+                    )?;
                 }
             }
-            collect_captured_slots(source, &function.body, &forced_captures, &mut slots)?;
+            collect_captured_slots(
+                source,
+                &function.body,
+                force_dynamic_bindings,
+                &forced_captures,
+                &mut slots,
+            )?;
             functions.push(FunctionEnvironmentPlan {
                 scope: function.scope,
                 slots,
@@ -515,10 +539,11 @@ fn push_captured_slot(
     binding: &crate::HirBinding,
     mutable: bool,
     initialized: bool,
+    force_dynamic_binding: bool,
     forced_captures: &[BindingId],
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
-    if (!binding.captured && !forced_captures.contains(&binding.id))
+    if (!force_dynamic_binding && !binding.captured && !forced_captures.contains(&binding.id))
         || slots.iter().any(|slot| slot.id == binding.id)
     {
         return Ok(());
@@ -603,6 +628,7 @@ fn collect_pattern_bindings(pattern: &crate::HirPattern, bindings: &mut Vec<crat
 fn collect_captured_slots(
     source: &SourceText,
     statements: &[HirStatement],
+    force_dynamic_bindings: bool,
     forced_captures: &[BindingId],
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
@@ -613,16 +639,34 @@ fn collect_captured_slots(
                 let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
                     for binding in pattern_bindings(&declarator.pattern) {
-                        push_captured_slot(&binding, mutable, initialized, forced_captures, slots)?;
+                        push_captured_slot(
+                            &binding,
+                            mutable,
+                            initialized,
+                            force_dynamic_bindings,
+                            forced_captures,
+                            slots,
+                        )?;
                     }
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
-                push_captured_slot(&declaration.binding, true, true, forced_captures, slots)?;
+                push_captured_slot(
+                    &declaration.binding,
+                    true,
+                    true,
+                    force_dynamic_bindings,
+                    forced_captures,
+                    slots,
+                )?;
             }
-            HirStatementKind::Block(body) => {
-                collect_captured_slots(source, body, forced_captures, slots)?
-            }
+            HirStatementKind::Block(body) => collect_captured_slots(
+                source,
+                body,
+                force_dynamic_bindings,
+                forced_captures,
+                slots,
+            )?,
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -631,6 +675,7 @@ fn collect_captured_slots(
                 collect_captured_slots(
                     source,
                     core::slice::from_ref(consequent),
+                    force_dynamic_bindings,
                     forced_captures,
                     slots,
                 )?;
@@ -638,6 +683,7 @@ fn collect_captured_slots(
                     collect_captured_slots(
                         source,
                         core::slice::from_ref(alternate),
+                        force_dynamic_bindings,
                         forced_captures,
                         slots,
                     )?;
@@ -655,6 +701,7 @@ fn collect_captured_slots(
                                 &binding,
                                 mutable,
                                 initialized,
+                                force_dynamic_bindings,
                                 forced_captures,
                                 slots,
                             )?;
@@ -664,6 +711,7 @@ fn collect_captured_slots(
                 collect_captured_slots(
                     source,
                     core::slice::from_ref(body),
+                    force_dynamic_bindings,
                     forced_captures,
                     slots,
                 )?;
@@ -678,6 +726,7 @@ fn collect_captured_slots(
                                 &binding,
                                 mutable,
                                 initialized,
+                                force_dynamic_bindings,
                                 forced_captures,
                                 slots,
                             )?;
@@ -687,6 +736,7 @@ fn collect_captured_slots(
                 collect_captured_slots(
                     source,
                     core::slice::from_ref(body),
+                    force_dynamic_bindings,
                     forced_captures,
                     slots,
                 )?;
@@ -701,6 +751,7 @@ fn collect_captured_slots(
                                 &binding,
                                 mutable,
                                 initialized,
+                                force_dynamic_bindings,
                                 forced_captures,
                                 slots,
                             )?;
@@ -710,6 +761,7 @@ fn collect_captured_slots(
                 collect_captured_slots(
                     source,
                     core::slice::from_ref(body),
+                    force_dynamic_bindings,
                     forced_captures,
                     slots,
                 )?;
@@ -718,13 +770,20 @@ fn collect_captured_slots(
                 collect_captured_slots(
                     source,
                     core::slice::from_ref(body),
+                    force_dynamic_bindings,
                     forced_captures,
                     slots,
                 )?;
             }
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
-                    collect_captured_slots(source, &case.consequent, forced_captures, slots)?;
+                    collect_captured_slots(
+                        source,
+                        &case.consequent,
+                        force_dynamic_bindings,
+                        forced_captures,
+                        slots,
+                    )?;
                 }
             }
             HirStatementKind::Try {
@@ -732,21 +791,40 @@ fn collect_captured_slots(
                 handler,
                 finalizer,
             } => {
-                collect_captured_slots(source, block, forced_captures, slots)?;
+                collect_captured_slots(
+                    source,
+                    block,
+                    force_dynamic_bindings,
+                    forced_captures,
+                    slots,
+                )?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
                         push_captured_slot(
                             simple_binding(source, parameter)?,
                             true,
                             false,
+                            force_dynamic_bindings,
                             forced_captures,
                             slots,
                         )?;
                     }
-                    collect_captured_slots(source, &handler.body, forced_captures, slots)?;
+                    collect_captured_slots(
+                        source,
+                        &handler.body,
+                        force_dynamic_bindings,
+                        forced_captures,
+                        slots,
+                    )?;
                 }
                 if let Some(finalizer) = finalizer {
-                    collect_captured_slots(source, finalizer, forced_captures, slots)?;
+                    collect_captured_slots(
+                        source,
+                        finalizer,
+                        force_dynamic_bindings,
+                        forced_captures,
+                        slots,
+                    )?;
                 }
             }
             HirStatementKind::Expression(_)
@@ -893,7 +971,10 @@ fn lower_function(
         if lowerer.local_by_id(binding.id).is_some() {
             continue;
         }
-        if binding.captured {
+        if environments
+            .local_slot(function.scope, binding.id)
+            .is_some()
+        {
             lowerer.add_local(binding, None, true)?;
         } else {
             let register = lowerer.load_undefined(function.span)?;

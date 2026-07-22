@@ -211,7 +211,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             write!(output, " r{}, pc={}", operands[0], operands[1])?
         }
         Opcode::Return | Opcode::Throw => write!(output, " r{}", operands[0])?,
-        Opcode::Call | Opcode::TailCall => write!(
+        Opcode::Call | Opcode::TailCall | Opcode::DirectEval => write!(
             output,
             " r{}, callee=r{}, argc={}",
             operands[0], operands[1], operands[2]

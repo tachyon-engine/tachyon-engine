@@ -1851,7 +1851,18 @@ impl Lowerer<'_> {
         if let HirExpressionKind::SuperComputedMember(property) = &callee.kind {
             return self.super_method_call_expression(None, Some(property), arguments, span, tail);
         }
-        let opcode = if tail { Opcode::TailCall } else { Opcode::Call };
+        let direct_eval = matches!(
+            &callee.kind,
+            HirExpressionKind::Identifier(reference)
+                if reference.binding.is_none() && reference.name.as_ref() == "eval"
+        );
+        let opcode = if direct_eval {
+            Opcode::DirectEval
+        } else if tail {
+            Opcode::TailCall
+        } else {
+            Opcode::Call
+        };
         let callee_value = self.expression(callee)?;
         if arguments.is_empty() {
             let destination = self.register()?;

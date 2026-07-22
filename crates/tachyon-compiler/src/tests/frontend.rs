@@ -236,6 +236,38 @@ fn hir_copies_direct_eval_scope_capability() {
 }
 
 #[test]
+fn direct_eval_promotes_every_activation_binding_into_named_environment_slots() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function run(param) { var hoisted = 1; let lexical = 2; eval('param + hoisted + lexical'); return param; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let function = module
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .expect("run function is the first stencil");
+    let slots = function
+        .environment_slots()
+        .iter()
+        .map(|metadata| metadata.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(slots, vec!["param", "hoisted", "lexical"]);
+    assert_eq!(function.layout().environment_slot_count, 3);
+    for name in ["param", "hoisted", "lexical"] {
+        assert!(function.binding_plan().iter().any(|binding| {
+            binding.name.as_ref() == name
+                && matches!(
+                    binding.location,
+                    tachyon_bytecode::BindingLocation::Environment { depth: 0, .. }
+                )
+        }));
+    }
+}
+
+#[test]
 fn compiler_emits_owned_and_inherited_environment_binding_plans() {
     let module = Compiler
         .compile(

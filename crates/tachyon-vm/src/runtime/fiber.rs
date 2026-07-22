@@ -1498,6 +1498,8 @@ pub(crate) struct ActiveHandler {
 #[derive(Debug, Default)]
 pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
+    /// Only direct-eval/debugger fibers enable runtime name lookup before global resolution.
+    pub(crate) dynamic_scope: bool,
     /// Activation-aligned lazy Arguments object roots; avoids growing the hot Frame layout.
     pub(crate) argument_objects: Vec<Option<Value>>,
     /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.

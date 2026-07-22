@@ -84,8 +84,16 @@ impl RealmId {
     }
 }
 
-/// Host callback used by embedding harnesses to compile and execute `evalScript` in one Realm.
-pub type EvalScriptCallback = fn(&mut Isolate, RealmId, Value) -> Result<Value, ExecutionError>;
+/// Whether the parser proved the syntactic direct-eval form before the runtime identity check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvalKind {
+    Direct,
+    Indirect,
+}
+
+/// Host callback used by embedding harnesses to compile and execute eval source in one Realm.
+pub type EvalScriptCallback =
+    fn(&mut Isolate, RealmId, EvalKind, Value) -> Result<Value, ExecutionError>;
 
 /// Host callback used to compile dynamic `Function` constructor source in one Realm.
 pub type DynamicFunctionCallback = fn(&mut Isolate, RealmId) -> Result<Value, ExecutionError>;
@@ -156,7 +164,9 @@ use runtime::{
     },
     code::{BytecodeCursor, HotControl, LoadedCode, RegisterWindow, ScopeResolution},
     completion::{CompletionKind, CompletionRecord, CompletionStackError},
-    environment::{BindingState, Environment, EnvironmentAccessError, EnvironmentKind},
+    environment::{
+        BindingState, Environment, EnvironmentAccessError, EnvironmentKind, EnvironmentOwner,
+    },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, BuiltinPropertyKeyConsumer,
         ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,

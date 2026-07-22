@@ -330,10 +330,33 @@ impl Isolate {
     fn execute_loaded_loop<const N: usize, const UNBOUNDED: bool>(
         &mut self,
         code: CodeId,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None)
+    }
+
+    /// Runs eval code with an explicitly retained caller lexical environment.
+    pub(crate) fn execute_loaded_with_parent(
+        &mut self,
+        code: CodeId,
+        budget: ExecutionBudget,
+        parent: Option<GcRef<Environment>>,
+    ) -> Result<RunOutcome, ExecutionError> {
+        self.fiber.dynamic_scope = true;
+        self.execute_loaded_loop_with_parent::<{ tuning::dispatch::DEFAULT_DISPATCH_BATCH }, false>(
+            code, budget, parent,
+        )
+    }
+
+    /// Shares the dispatch loop while allowing only direct eval to seed an entry parent.
+    fn execute_loaded_loop_with_parent<const N: usize, const UNBOUNDED: bool>(
+        &mut self,
+        code: CodeId,
         mut budget: ExecutionBudget,
+        parent: Option<GcRef<Environment>>,
     ) -> Result<RunOutcome, ExecutionError> {
         let entry_function = self.loaded_code(code)?.module.entry_function();
-        self.enter(code, entry_function)?;
+        self.enter_with_parent(code, entry_function, parent)?;
         loop {
             if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
                 return Ok(RunOutcome::BudgetExhausted);
@@ -808,9 +831,12 @@ impl Isolate {
             }
             Opcode::TypeofScope => {
                 let resolution = self.scope_resolution(code, operands[1])?;
-                let value = self
-                    .scope_value(resolution)?
-                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                let value = match self.dynamic_environment_value(resolution.atom)? {
+                    Some(value) => value,
+                    None => self
+                        .scope_value(resolution)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                };
                 let value = self.typeof_value(value)?;
                 self.write(base, operands[0], value)?;
             }
@@ -887,9 +913,12 @@ impl Isolate {
             }
             Opcode::LoadScope => {
                 let resolution = self.scope_resolution(code, operands[1])?;
-                let value = self
-                    .scope_value(resolution)?
-                    .ok_or(ExecutionError::UnresolvedBinding(resolution.atom))?;
+                let value = match self.dynamic_environment_value(resolution.atom)? {
+                    Some(value) => value,
+                    None => self
+                        .scope_value(resolution)?
+                        .ok_or(ExecutionError::UnresolvedBinding(resolution.atom))?,
+                };
                 self.write(base, operands[0], value)?;
             }
             Opcode::StoreScope => {
@@ -1375,6 +1404,44 @@ impl Isolate {
                     construct_receiver: None,
                     call_site: instruction_offset,
                 })?;
+            }
+            Opcode::DirectEval => {
+                let callee = self.read(base, operands[1])?;
+                let is_current_eval = matches!(
+                    self.resolve_function_executable(callee)?,
+                    FunctionExecutable::Native(NativeFunction::HostEvalScript)
+                ) && self.realm_for_callable(callee)? == self.active_realm;
+                if is_current_eval {
+                    let source = if operands[2] == 0 {
+                        Value::from_immediate(Immediate::Undefined)
+                    } else {
+                        self.read(base, operands[1] + 1)?
+                    };
+                    let callback = self
+                        .eval_script_callback
+                        .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+                    let result = callback(self, self.active_realm, EvalKind::Direct, source)?;
+                    self.write(base, operands[0], result)?;
+                } else {
+                    self.call(CallSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        callee,
+                        argument_base: base
+                            .checked_add(operands[1])
+                            .and_then(|base| base.checked_add(1))
+                            .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                        argument_source: None,
+                        argument_prefix: None,
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: 0,
+                        argument_count: operands[2],
+                        this_value: Value::from_immediate(Immediate::Undefined),
+                        new_target: Value::from_immediate(Immediate::Undefined),
+                        construct_receiver: None,
+                        call_site: instruction_offset,
+                    })?;
+                }
             }
             Opcode::TailCall => {
                 self.tail_call(CallSite {
@@ -2316,6 +2383,97 @@ impl Isolate {
             .and_then(|slot| self.realm.get_slot(slot)))
     }
 
+    /// Resolves a name through cold runtime environments used by direct eval and debugger code.
+    fn dynamic_environment_binding(
+        &mut self,
+        atom: AtomId,
+    ) -> Result<Option<(GcRef<Environment>, u32)>, ExecutionError> {
+        if !self.fiber.dynamic_scope {
+            return Ok(None);
+        }
+        let mut cursor = self.fiber.frames.last().and_then(|frame| frame.environment);
+        while let Some(environment) = cursor {
+            let (owner, parent) = self.heap.with_running_scope(|scope| {
+                scope.with_no_gc_scope(|no_gc| {
+                    let environment = no_gc
+                        .borrow_reference(environment, self.types.environment)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    Ok::<_, ExecutionError>((environment.owner(), environment.parent()))
+                })
+            })?;
+            if let Some(owner) = owner {
+                let function = self
+                    .loaded_code(owner.code)?
+                    .module
+                    .function(owner.function)
+                    .ok_or(ExecutionError::MissingEntryFunction(owner.function))?;
+                let atom_string = self
+                    .atoms
+                    .get(atom)
+                    .ok_or(ExecutionError::InvalidAtom(atom))?;
+                if let Some(slot) = function
+                    .environment_slots()
+                    .iter()
+                    .position(|metadata| atom_string.equals_str(&metadata.name))
+                {
+                    return Ok(Some((
+                        environment,
+                        u32::try_from(slot).map_err(|_| {
+                            ExecutionError::InvalidEnvironmentSlot {
+                                depth: 0,
+                                slot: u32::MAX,
+                            }
+                        })?,
+                    )));
+                }
+            }
+            cursor = parent;
+        }
+        Ok(None)
+    }
+
+    fn dynamic_environment_value(&mut self, atom: AtomId) -> Result<Option<Value>, ExecutionError> {
+        let Some((environment, slot)) = self.dynamic_environment_binding(atom)? else {
+            return Ok(None);
+        };
+        self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .load(slot)
+                    .map(Some)
+                    .map_err(|error| environment_access_error(0, slot, error))
+            })
+        })
+    }
+
+    /// Writes one dynamically resolved slot and preserves the normal generational barrier.
+    fn store_dynamic_environment(
+        &mut self,
+        atom: AtomId,
+        value: Value,
+    ) -> Result<bool, ExecutionError> {
+        let Some((environment, slot)) = self.dynamic_environment_binding(atom)? else {
+            return Ok(false);
+        };
+        self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference_mut(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .store(slot, value)
+                    .map_err(|error| environment_access_error(0, slot, error))
+            })
+        })?;
+        if let Some(target) = value.as_heap_ref() {
+            self.heap
+                .write_barrier(environment.raw(), target)
+                .map_err(ExecutionError::HeapReference)?;
+        }
+        Ok(true)
+    }
+
     /// Writes through a cached global slot or publishes the binding once on the cold path.
     #[inline(always)]
     fn store_scope(
@@ -2325,6 +2483,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
+        if self.store_dynamic_environment(resolution.atom, value)? {
+            return Ok(());
+        }
         if resolution.intrinsic_slot.is_some() {
             let global = self
                 .realm
@@ -2368,6 +2529,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
+        if self.store_dynamic_environment(resolution.atom, value)? {
+            return Ok(());
+        }
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.set_lexical(slot, value);
         }
@@ -2502,11 +2666,14 @@ impl Isolate {
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
         let slot_count = NonZeroU32::new(slot_count)
             .ok_or(ExecutionError::EnvironmentStorageAllocationFailed)?;
-        let environment =
-            Environment::try_bindings(EnvironmentKind::Declarative, parent, slot_count, |_| {
-                BindingState::new(false, false)
-            })
-            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        let environment = Environment::try_bindings(
+            EnvironmentKind::Declarative,
+            parent,
+            None,
+            slot_count,
+            |_| BindingState::new(false, false),
+        )
+        .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -2645,9 +2812,18 @@ impl Isolate {
         slot_count: NonZeroU32,
         self_binding: Option<(u32, Value)>,
     ) -> Result<(), ExecutionError> {
-        let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .expect("activation environment requires a rooted frame");
+        let parent = frame.environment;
+        let owner = EnvironmentOwner {
+            code: frame.code,
+            function: frame.function,
+        };
         let environment =
-            self.allocate_activation_environment(kind, parent, slot_count, self_binding)?;
+            self.allocate_activation_environment(kind, parent, owner, slot_count, self_binding)?;
         self.fiber
             .frames
             .last_mut()
@@ -2661,20 +2837,21 @@ impl Isolate {
         &mut self,
         kind: FunctionKind,
         parent: Option<GcRef<Environment>>,
+        owner: EnvironmentOwner,
         slot_count: NonZeroU32,
         self_binding: Option<(u32, Value)>,
     ) -> Result<GcRef<Environment>, ExecutionError> {
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
         let mut environment = if kind == FunctionKind::Module {
-            Environment::try_bindings(environment_kind, parent, slot_count, |_| {
+            Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |_| {
                 BindingState::new(true, false)
             })
         } else if let Some((self_slot, _)) = self_binding {
-            Environment::try_bindings(environment_kind, parent, slot_count, |slot| {
+            Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
                 BindingState::new(slot != self_slot, slot != self_slot)
             })
         } else {
-            Environment::try_captured(environment_kind, parent, slot_count)
+            Environment::try_captured(environment_kind, parent, Some(owner), slot_count)
         }
         .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         if kind == FunctionKind::Module {
@@ -2707,10 +2884,21 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
+    #[cfg(test)]
     pub(crate) fn enter(
         &mut self,
         code: CodeId,
         function_id: FunctionId,
+    ) -> Result<(), ExecutionError> {
+        self.enter_with_parent(code, function_id, None)
+    }
+
+    /// Initializes one entry frame and optionally exposes a suspended direct-eval parent chain.
+    fn enter_with_parent(
+        &mut self,
+        code: CodeId,
+        function_id: FunctionId,
+        parent: Option<GcRef<Environment>>,
     ) -> Result<(), ExecutionError> {
         let (layout, kind, strictness) = {
             let function = self
@@ -2753,7 +2941,7 @@ impl Isolate {
             function: function_id,
             pc: WordOffset::new(0),
             base: 0,
-            environment: None,
+            environment: parent,
             return_register: None,
             return_continuation: false,
             this_value: if matches!(kind, FunctionKind::Module) {
@@ -4010,6 +4198,10 @@ impl Isolate {
                     self.allocate_activation_environment(
                         target.kind,
                         target.environment,
+                        EnvironmentOwner {
+                            code: target.code,
+                            function: target.function,
+                        },
                         slot_count,
                         target
                             .layout
@@ -4335,7 +4527,7 @@ impl Isolate {
                         .eval_script_callback
                         .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
                     let realm = self.realm_for_callable(site.callee)?;
-                    let result = callback(self, realm, source)?;
+                    let result = callback(self, realm, EvalKind::Indirect, source)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(

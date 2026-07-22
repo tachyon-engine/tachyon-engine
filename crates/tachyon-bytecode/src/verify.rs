@@ -978,7 +978,11 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::Call | Opcode::TailCall | Opcode::Construct | Opcode::SuperConstruct => {
+        Opcode::Call
+        | Opcode::TailCall
+        | Opcode::DirectEval
+        | Opcode::Construct
+        | Opcode::SuperConstruct => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             if operands[1]

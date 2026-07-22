@@ -148,6 +148,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::SetById,
                 Opcode::CallWithReceiver,
                 Opcode::TailCallWithReceiver,
+                Opcode::DirectEval,
                 Opcode::Construct,
                 Opcode::ToPropertyKey,
                 Opcode::ToPropertyKeyForIn,

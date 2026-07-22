@@ -81,13 +81,14 @@ fn allocate_managed_environment(
 /// Checks all record categories without changing their current activation ownership rules.
 fn environment_record_kinds_and_storage_accounting_are_explicit() {
     let one = NonZeroU32::new(1).unwrap();
-    let global = Environment::try_captured(EnvironmentKind::Global, None, one).unwrap();
-    let function = Environment::try_captured(EnvironmentKind::Function, None, one).unwrap();
-    let declarative = Environment::try_bindings(EnvironmentKind::Declarative, None, one, |_| {
-        BindingState::new(true, false)
-    })
-    .unwrap();
-    let module = Environment::try_bindings(EnvironmentKind::Module, None, one, |_| {
+    let global = Environment::try_captured(EnvironmentKind::Global, None, None, one).unwrap();
+    let function = Environment::try_captured(EnvironmentKind::Function, None, None, one).unwrap();
+    let declarative =
+        Environment::try_bindings(EnvironmentKind::Declarative, None, None, one, |_| {
+            BindingState::new(true, false)
+        })
+        .unwrap();
+    let module = Environment::try_bindings(EnvironmentKind::Module, None, None, one, |_| {
         BindingState::new(false, false)
     })
     .unwrap();
@@ -146,6 +147,7 @@ fn binding_storage_enforces_tdz_mutability_and_single_initialization() {
     ];
     let mut environment = Environment::try_bindings(
         EnvironmentKind::Declarative,
+        None,
         None,
         NonZeroU32::new(states.len() as u32).unwrap(),
         |slot| states[slot as usize],
@@ -208,6 +210,7 @@ fn binding_environment_state_and_value_survive_forced_major() {
         .unwrap();
     let mut environment = Environment::try_bindings(
         EnvironmentKind::Declarative,
+        None,
         None,
         NonZeroU32::new(1).unwrap(),
         |_| BindingState::new(false, false),

@@ -285,9 +285,11 @@ pub enum Opcode {
     TailCall = 119,
     /// Calls with a receiver and permits the VM to replace an eligible strict caller frame.
     TailCallWithReceiver = 120,
+    /// Calls the realm eval intrinsic with the caller lexical environment when identity still matches.
+    DirectEval = 121,
 }
 
-pub(super) const OPCODE_COUNT: usize = 121;
+pub(super) const OPCODE_COUNT: usize = 122;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -410,10 +412,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // HasPrivate
     3, // TailCall
     3, // TailCallWithReceiver
+    3, // DirectEval
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::TailCallWithReceiver as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DirectEval as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -580,6 +583,7 @@ impl Opcode {
             54 => Some(Self::HasPrivate),
             55 => Some(Self::TailCall),
             56 => Some(Self::TailCallWithReceiver),
+            57 => Some(Self::DirectEval),
             _ => None,
         }
     }

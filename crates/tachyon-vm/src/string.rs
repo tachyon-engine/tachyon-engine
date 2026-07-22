@@ -171,6 +171,16 @@ impl JsString {
                 .all(|(index, byte)| view.code_unit_at(index) == Some(u16::from(*byte)))
     }
 
+    #[must_use]
+    pub(crate) fn equals_str(&self, value: &str) -> bool {
+        let view = self.as_view();
+        view.len() == value.encode_utf16().count()
+            && value
+                .encode_utf16()
+                .enumerate()
+                .all(|(index, unit)| view.code_unit_at(index) == Some(unit))
+    }
+
     /// Caches the one isolate seed normally used by this string and recomputes if ownership changes.
     pub(crate) fn hash_with_seed(&self, seed: AtomHashSeed) -> u64 {
         if let Some(cached) = self.cached_hash.get()

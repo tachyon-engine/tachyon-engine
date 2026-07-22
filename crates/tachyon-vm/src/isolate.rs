@@ -235,6 +235,30 @@ impl Isolate {
         outcome
     }
 
+    /// Executes syntactic direct eval with the active frame's lexical environment as its parent.
+    pub fn execute_direct_eval_in_realm(
+        &mut self,
+        realm: RealmId,
+        module: &CompiledModule,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        if realm != self.active_realm || self.fiber.frames.is_empty() {
+            return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+        }
+        let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let code = self.load_module(module)?;
+        let suspended_fiber = mem::take(&mut self.fiber);
+        self.suspended_fibers.push(suspended_fiber);
+        let outcome = self.execute_loaded_with_parent(code, budget, parent);
+        let suspended_fiber = self
+            .suspended_fibers
+            .pop()
+            .expect("direct eval retains its suspended caller fiber");
+        let child_fiber = mem::replace(&mut self.fiber, suspended_fiber);
+        debug_assert!(child_fiber.frames.is_empty());
+        outcome
+    }
+
     /// Copies one class constructor header without retaining a borrow across VM work.
     pub(crate) fn class_constructor_snapshot(
         &mut self,

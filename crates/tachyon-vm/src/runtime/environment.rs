@@ -81,9 +81,17 @@ pub(crate) enum EnvironmentAccessError {
     AlreadyInitialized,
 }
 
+/// Immutable-code identity used only by dynamic name lookup and debugger materialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EnvironmentOwner {
+    pub(crate) code: CodeId,
+    pub(crate) function: FunctionId,
+}
+
 #[derive(Debug)]
 pub(crate) struct Environment {
     parent: Option<GcRef<Environment>>,
+    owner: Option<EnvironmentOwner>,
     kind: EnvironmentKind,
     storage: EnvironmentStorage,
 }
@@ -93,6 +101,7 @@ impl Environment {
     pub(crate) fn try_captured(
         kind: EnvironmentKind,
         parent: Option<GcRef<Self>>,
+        owner: Option<EnvironmentOwner>,
         slot_count: NonZeroU32,
     ) -> Result<Self, std::collections::TryReserveError> {
         let slot_count = usize::try_from(slot_count.get()).expect("u32 fits supported usize");
@@ -101,6 +110,7 @@ impl Environment {
         values.resize(slot_count, Value::from_immediate(Immediate::Undefined));
         Ok(Self {
             parent,
+            owner,
             kind,
             storage: EnvironmentStorage::Captured(values.into_boxed_slice()),
         })
@@ -110,6 +120,7 @@ impl Environment {
     pub(crate) fn try_bindings(
         kind: EnvironmentKind,
         parent: Option<GcRef<Self>>,
+        owner: Option<EnvironmentOwner>,
         slot_count: NonZeroU32,
         mut state_for_slot: impl FnMut(u32) -> BindingState,
     ) -> Result<Self, std::collections::TryReserveError> {
@@ -124,6 +135,7 @@ impl Environment {
         }
         Ok(Self {
             parent,
+            owner,
             kind,
             storage: EnvironmentStorage::Bindings {
                 values: values.into_boxed_slice(),
@@ -140,6 +152,11 @@ impl Environment {
     #[inline(always)]
     pub(crate) const fn parent(&self) -> Option<GcRef<Self>> {
         self.parent
+    }
+
+    #[inline(always)]
+    pub(crate) const fn owner(&self) -> Option<EnvironmentOwner> {
+        self.owner
     }
 
     #[inline(always)]

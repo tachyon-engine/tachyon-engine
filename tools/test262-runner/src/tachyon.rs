@@ -39,6 +39,7 @@ const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
 fn eval_script_callback(
     isolate: &mut Isolate,
     realm: RealmId,
+    kind: tachyon_vm::EvalKind,
     source: Value,
 ) -> Result<Value, ExecutionError> {
     let units = isolate.string_value_to_utf16(source)?;
@@ -54,14 +55,17 @@ fn eval_script_callback(
             options(SourceMode::Script),
         )
         .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
-    match isolate.execute_in_realm(
-        realm,
-        &module,
-        ExecutionBudget {
-            fuel: EXECUTION_FUEL_LIMIT,
-            quantum: u32::MAX,
-        },
-    )? {
+    let budget = ExecutionBudget {
+        fuel: EXECUTION_FUEL_LIMIT,
+        quantum: u32::MAX,
+    };
+    let outcome = match kind {
+        tachyon_vm::EvalKind::Direct => {
+            isolate.execute_direct_eval_in_realm(realm, &module, budget)
+        }
+        tachyon_vm::EvalKind::Indirect => isolate.execute_in_realm(realm, &module, budget),
+    }?;
+    match outcome {
         RunOutcome::Completed(value) => Ok(value),
         RunOutcome::Thrown(value) => Err(ExecutionError::HostThrown(value)),
         RunOutcome::BudgetExhausted => Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
