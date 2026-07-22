@@ -1,6 +1,49 @@
 use super::{fixtures::*, *};
 
 #[test]
+fn child_realms_have_distinct_globals_and_remain_gc_roots() {
+    let mut isolate = test_isolate();
+    let (first_id, first_global) = isolate.create_realm().unwrap();
+    let (second_id, second_global) = isolate.create_realm().unwrap();
+    assert_ne!(first_id, second_id);
+    assert_ne!(first_global, second_global);
+    assert_eq!(isolate.inactive_realms.len(), 2);
+    isolate
+        .allocate_runtime_string(JsString::try_from_latin1(b"realm-root").unwrap())
+        .unwrap();
+    assert!(isolate.native_error_kind(first_global).unwrap().is_none());
+}
+
+#[test]
+fn compiled_code_can_be_loaded_once_per_realm() {
+    let mut isolate = test_isolate();
+    let (realm, _) = isolate.create_realm().unwrap();
+    let module = arithmetic_module();
+    let first = isolate
+        .execute(
+            &module,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        )
+        .unwrap();
+    let second = isolate
+        .execute_in_realm(
+            realm,
+            &module,
+            ExecutionBudget {
+                fuel: 64,
+                quantum: 64,
+            },
+        )
+        .unwrap();
+    assert!(matches!(first, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    assert!(matches!(second, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    assert_eq!(isolate.loaded_code.len(), 2);
+}
+
+#[test]
 fn script_var_declaration_works_for_every_dispatch_batch() {
     assert_scope_batch::<1>();
     assert_scope_batch::<2>();

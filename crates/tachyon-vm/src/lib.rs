@@ -69,6 +69,20 @@ use tachyon_gc::{
 };
 use tachyon_value::{Immediate, Value};
 
+/// Isolate-local identity for one independent ECMAScript Realm.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(transparent)]
+pub struct RealmId(NonZeroU32);
+
+impl RealmId {
+    pub(crate) const MAIN: Self = Self(NonZeroU32::MIN);
+
+    #[inline(always)]
+    const fn from_non_zero(value: NonZeroU32) -> Self {
+        Self(value)
+    }
+}
+
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
@@ -280,6 +294,7 @@ pub enum ExecutionError {
     CallStackLimit { limit: u32 },
     RegisterStackLimit { limit: u32, requested: u32 },
     LoadedModuleLimit { limit: u32 },
+    RealmLimit { limit: u32 },
     LoadedCodeAllocationFailed,
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),

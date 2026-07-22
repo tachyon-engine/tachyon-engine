@@ -1,5 +1,7 @@
 //! Isolate construction and allocation-oriented runtime orchestration.
 
+use core::mem;
+
 use super::*;
 
 struct CollectionAllocationRoots<'a> {
@@ -40,6 +42,9 @@ pub struct Isolate {
     pub(crate) atoms: AtomTable,
     pub(crate) shapes: ShapeTable,
     pub(crate) realm: Realm,
+    pub(crate) inactive_realms: Vec<(RealmId, Realm)>,
+    pub(crate) active_realm: RealmId,
+    pub(crate) next_realm_serial: NonZeroU32,
     pub(crate) loaded_code: Vec<LoadedCode>,
     pub(crate) heap: Heap,
     pub(crate) types: VmTypes,
@@ -53,6 +58,84 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    /// Creates an independent Realm in the same GC heap and returns its global object identity.
+    pub fn create_realm(&mut self) -> Result<(RealmId, Value), ExecutionError> {
+        let id = RealmId::from_non_zero(self.next_realm_serial);
+        self.next_realm_serial = NonZeroU32::new(
+            self.next_realm_serial
+                .get()
+                .checked_add(1)
+                .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?,
+        )
+        .expect("checked realm serial remains non-zero");
+        let limits = self.realm.limits;
+        let typeof_strings = self.realm.typeof_strings;
+        let primitive_hint_strings = self.realm.primitive_hint_strings;
+        let current_id = self.active_realm;
+        let current = mem::replace(
+            &mut self.realm,
+            Realm::new(limits, typeof_strings, primitive_hint_strings),
+        );
+        self.inactive_realms.push((current_id, current));
+        self.active_realm = id;
+        let initialized = self.initialize_realm_intrinsics();
+        if let Err(error) = initialized {
+            let (_, current) = self
+                .inactive_realms
+                .pop()
+                .expect("realm swap retains the previous active realm");
+            self.realm = current;
+            self.active_realm = current_id;
+            return Err(error);
+        }
+        let child = mem::replace(
+            &mut self.realm,
+            self.inactive_realms
+                .pop()
+                .expect("realm swap retains the previous active realm")
+                .1,
+        );
+        let global = child
+            .global_object
+            .expect("initialized realm publishes a global object");
+        self.inactive_realms.push((id, child));
+        self.active_realm = current_id;
+        Ok((id, global))
+    }
+
+    /// Executes one compiled module with a selected Realm as the active execution context.
+    pub fn execute_in_realm(
+        &mut self,
+        realm: RealmId,
+        module: &CompiledModule,
+        budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        if realm == RealmId::MAIN {
+            return self.execute(module, budget);
+        }
+        let position = self
+            .inactive_realms
+            .iter()
+            .position(|(id, _)| *id == realm)
+            .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?;
+        let (_, selected) = self.inactive_realms.swap_remove(position);
+        let current_id = self.active_realm;
+        let current = mem::replace(&mut self.realm, selected);
+        self.inactive_realms.push((current_id, current));
+        self.active_realm = realm;
+        let outcome = self.execute(module, budget);
+        let position = self
+            .inactive_realms
+            .iter()
+            .position(|(id, _)| *id == current_id)
+            .expect("active realm swap retains the previous realm");
+        let (_, current) = self.inactive_realms.swap_remove(position);
+        let selected = mem::replace(&mut self.realm, current);
+        self.inactive_realms.push((realm, selected));
+        self.active_realm = current_id;
+        outcome
+    }
+
     /// Copies one class constructor header without retaining a borrow across VM work.
     pub(crate) fn class_constructor_snapshot(
         &mut self,
@@ -234,6 +317,9 @@ impl Isolate {
             atoms: AtomTable::new(config.atom_table),
             shapes,
             realm: Realm::new(config.realm_limits, typeof_strings, primitive_hint_strings),
+            inactive_realms: Vec::new(),
+            active_realm: RealmId::MAIN,
+            next_realm_serial: NonZeroU32::new(2).expect("two is non-zero"),
             loaded_code: Vec::new(),
             heap,
             types,

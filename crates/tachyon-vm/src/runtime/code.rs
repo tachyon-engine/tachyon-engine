@@ -26,6 +26,7 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<CodeId>>()];
 
 #[derive(Debug)]
 pub(crate) struct LoadedCode {
+    pub(crate) realm: RealmId,
     pub(crate) module: CompiledModule,
     pub(crate) scope_resolutions: Box<[ScopeResolution]>,
     pub(crate) constant_values: Box<[Option<Value>]>,

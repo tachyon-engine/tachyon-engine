@@ -34,6 +34,9 @@ impl Isolate {
         self.finalization_jobs.trace(tracer);
         self.promise_jobs.trace(tracer);
         self.realm.trace(tracer);
+        for (_, realm) in &mut self.inactive_realms {
+            realm.trace(tracer);
+        }
         for code in &mut self.loaded_code {
             code.trace(tracer);
         }
@@ -54,7 +57,7 @@ impl Isolate {
         if let Some(index) = self
             .loaded_code
             .iter()
-            .position(|loaded| loaded.module.ptr_eq(module))
+            .position(|loaded| loaded.realm == self.active_realm && loaded.module.ptr_eq(module))
         {
             return CodeId::from_index(index)
                 .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX });
@@ -142,6 +145,7 @@ impl Isolate {
         let code = CodeId::from_index(self.loaded_code.len())
             .ok_or(ExecutionError::LoadedModuleLimit { limit: u32::MAX })?;
         self.loaded_code.push(LoadedCode {
+            realm: self.active_realm,
             module: module.clone(),
             scope_resolutions: scope_resolutions.into_boxed_slice(),
             constant_values: constant_values.into_boxed_slice(),
