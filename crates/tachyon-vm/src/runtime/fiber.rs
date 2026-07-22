@@ -425,6 +425,14 @@ pub(crate) enum ProxyContinuationStage {
     ForwardResult,
 }
 
+/// Resumable callable Proxy apply/construct trap lookup and invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyCallStage {
+    TrapGetter,
+    TrapCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ProxySetPrototypeMode {
@@ -581,6 +589,10 @@ pub(crate) enum NativeContinuationKind {
     Proxy {
         operation: ProxyInternalMethod,
         stage: ProxyContinuationStage,
+    },
+    ProxyCall {
+        construct: bool,
+        stage: ProxyCallStage,
     },
     ProxySetPrototype {
         mode: ProxySetPrototypeMode,
@@ -844,6 +856,44 @@ impl NativeContinuation {
                 stage: ProxyContinuationStage::TrapCall,
             },
             first: proxy,
+            second: trap,
+        }
+    }
+
+    /// Roots a Proxy and its handler while an apply/construct trap getter runs.
+    #[inline]
+    pub(crate) const fn proxy_call_getter(
+        site: NativeContinuationSite,
+        state: Value,
+        handler: Value,
+        construct: bool,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxyCall {
+                construct,
+                stage: ProxyCallStage::TrapGetter,
+            },
+            first: state,
+            second: handler,
+        }
+    }
+
+    /// Roots the active Proxy and trap while the trap call executes.
+    #[inline]
+    pub(crate) const fn proxy_call_trap(
+        site: NativeContinuationSite,
+        state: Value,
+        trap: Value,
+        construct: bool,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxyCall {
+                construct,
+                stage: ProxyCallStage::TrapCall,
+            },
+            first: state,
             second: trap,
         }
     }

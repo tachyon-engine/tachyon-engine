@@ -1679,6 +1679,12 @@ impl Isolate {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             },
+            NativeContinuationKind::ProxyCall { stage, .. } => match stage {
+                ProxyCallStage::TrapGetter => (continuation.second(), 0, None, 0),
+                ProxyCallStage::TrapCall => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            },
             NativeContinuationKind::ProxySetPrototype { stage, .. } => match stage {
                 ProxySetPrototypeStage::TrapGetter | ProxySetPrototypeStage::TrapCall => {
                     let state = self.native_call_state_reference(continuation.first())?;
@@ -1963,6 +1969,162 @@ impl Isolate {
             mode,
         )?;
         Ok(true)
+    }
+
+    /// Starts one callable Proxy trap after constructing its mandated argument array.
+    fn dispatch_proxy_call_trap(
+        &mut self,
+        original: CallSite,
+        proxy: Value,
+        trap: Value,
+        construct: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.resolve_function_object(trap)?;
+        let arguments = self.create_array_from_site(&original)?;
+        let state = self.allocate_proxy_call_state(
+            proxy,
+            arguments,
+            original.this_value,
+            original.new_target,
+        )?;
+        let site = NativeContinuationSite {
+            caller_base: original.caller_base,
+            destination: original.destination,
+            call_site: original.call_site,
+        };
+        self.dispatch_proxy_call_trap_state(site, state, trap, construct)
+    }
+
+    /// Invokes an apply/construct trap using a previously materialized argument array.
+    fn dispatch_proxy_call_trap_state(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        trap: Value,
+        construct: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.resolve_function_object(trap)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let proxy = pending.values[0];
+        let snapshot = self.proxy_snapshot(proxy)?;
+        let target = snapshot.target;
+        let handler = snapshot.handler;
+        let arguments = pending.values[1];
+        let this_value = pending.values[2];
+        let new_target = pending.values[3];
+        let prefix_values = if construct {
+            vec![target, arguments, new_target]
+        } else {
+            vec![target, this_value, arguments]
+        };
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let prefix = self.create_apply_argument_prefix(target, handler, prefix_values)?;
+        let continuation = NativeContinuation::proxy_call_trap(
+            site,
+            Value::from_heap_ref(state.raw()),
+            trap,
+            construct,
+        );
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let frame_depth = self.fiber.frames.len();
+        let trap_site = CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: trap,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: 3,
+            argument_count: 3,
+            this_value: handler,
+            new_target: undefined,
+            construct_receiver: None,
+            call_site: site.call_site,
+        };
+        if let Err(error) = self.call(trap_site) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(None);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_call(continuation, ProxyCallStage::TrapCall, value)
+    }
+
+    /// Resumes a Proxy trap getter or validates the completed construct trap result.
+    fn resume_proxy_call(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: ProxyCallStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let NativeContinuationKind::ProxyCall { construct, .. } = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        match stage {
+            ProxyCallStage::TrapGetter => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                if matches!(
+                    value.as_immediate(),
+                    Some(Immediate::Undefined | Immediate::Null)
+                ) {
+                    let target = self.proxy_snapshot(pending.values[0])?.target;
+                    let call = CallSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        callee: target,
+                        argument_base: 0,
+                        argument_source: None,
+                        argument_prefix: None,
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: 0,
+                        argument_count: 0,
+                        this_value: pending.values[2],
+                        new_target: pending.values[3],
+                        construct_receiver: None,
+                        call_site: site.call_site,
+                    };
+                    let operation = if construct {
+                        ArgumentListOperation::ReflectConstruct
+                    } else {
+                        ArgumentListOperation::ReflectApply
+                    };
+                    return self
+                        .begin_argument_list(
+                            &call,
+                            pending.values[1],
+                            target,
+                            pending.values[2],
+                            pending.values[3],
+                            operation,
+                        )
+                        .map(|_| None);
+                }
+                self.dispatch_proxy_call_trap_state(site, state, value, construct)
+            }
+            ProxyCallStage::TrapCall => {
+                if construct && !self.is_object_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
+                self.write(site.caller_base, site.destination, value)?;
+                Ok(None)
+            }
+        }
     }
 
     /// Calls one descriptor-field getter while keeping synchronous errors at the bytecode boundary.
@@ -3414,25 +3576,33 @@ impl Isolate {
                         continue;
                     }
                     PropertyRead::Data(trap) => {
-                        self.resolve_function_object(trap)?;
-                        let arguments = self.create_array_from_site(&site)?;
-                        let prefix = self.create_apply_argument_prefix(
-                            snapshot.target,
-                            Value::from_immediate(Immediate::Undefined),
-                            vec![snapshot.target, arguments, site.new_target],
-                        )?;
-                        site.callee = trap;
-                        site.argument_base = 0;
-                        site.argument_source = None;
-                        site.argument_prefix = Some(prefix);
-                        site.argument_prefix_offset = 0;
-                        site.argument_prefix_count = 3;
-                        site.argument_count = 3;
-                        site.this_value = Value::from_immediate(Immediate::Undefined);
-                        return self.call(site);
+                        return self
+                            .dispatch_proxy_call_trap(site, proxy, trap, true)
+                            .map(|_| ());
                     }
-                    PropertyRead::Accessor(_) => {
-                        return Err(ExecutionError::MissingNativeContinuation);
+                    PropertyRead::Accessor(getter) => {
+                        let arguments = self.create_array_from_site(&site)?;
+                        let state = self.allocate_proxy_call_state(
+                            proxy,
+                            arguments,
+                            site.this_value,
+                            site.new_target,
+                        )?;
+                        return self
+                            .dispatch_property_callback(
+                                NativeContinuation::proxy_call_getter(
+                                    NativeContinuationSite {
+                                        caller_base: site.caller_base,
+                                        destination: site.destination,
+                                        call_site: site.call_site,
+                                    },
+                                    Value::from_heap_ref(state.raw()),
+                                    snapshot.handler,
+                                    true,
+                                ),
+                                getter,
+                            )
+                            .map(|_| ());
                     }
                 }
             }
@@ -3860,25 +4030,33 @@ impl Isolate {
                         continue;
                     }
                     PropertyRead::Data(trap) => {
-                        self.resolve_function_object(trap)?;
-                        let arguments = self.create_array_from_site(&site)?;
-                        let prefix = self.create_apply_argument_prefix(
-                            snapshot.target,
-                            site.this_value,
-                            vec![snapshot.target, site.this_value, arguments],
-                        )?;
-                        site.callee = trap;
-                        site.argument_base = 0;
-                        site.argument_source = None;
-                        site.argument_prefix = Some(prefix);
-                        site.argument_prefix_offset = 0;
-                        site.argument_prefix_count = 3;
-                        site.argument_count = 3;
-                        site.this_value = Value::from_immediate(Immediate::Undefined);
-                        continue;
+                        return self
+                            .dispatch_proxy_call_trap(site, proxy, trap, false)
+                            .map(|_| ());
                     }
-                    PropertyRead::Accessor(_) => {
-                        return Err(ExecutionError::MissingNativeContinuation);
+                    PropertyRead::Accessor(getter) => {
+                        let arguments = self.create_array_from_site(&site)?;
+                        let state = self.allocate_proxy_call_state(
+                            proxy,
+                            arguments,
+                            site.this_value,
+                            site.new_target,
+                        )?;
+                        return self
+                            .dispatch_property_callback(
+                                NativeContinuation::proxy_call_getter(
+                                    NativeContinuationSite {
+                                        caller_base: site.caller_base,
+                                        destination: site.destination,
+                                        call_site: site.call_site,
+                                    },
+                                    Value::from_heap_ref(state.raw()),
+                                    snapshot.handler,
+                                    false,
+                                ),
+                                getter,
+                            )
+                            .map(|_| ());
                     }
                 }
             }
@@ -4461,7 +4639,9 @@ impl Isolate {
                     if !self.is_object_value(argument_list) {
                         return Err(ExecutionError::NotObject(argument_list));
                     }
-                    self.resolve_function_object(target)?;
+                    if !self.is_callable_value(target)? {
+                        return Err(ExecutionError::NonCallable(target));
+                    }
                     return self.begin_argument_list(
                         &site,
                         argument_list,
@@ -5008,6 +5188,15 @@ impl Isolate {
         })
     }
 
+    /// Reports whether a value has a callable internal method, including nested Proxies.
+    pub(crate) fn is_callable_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        if self.is_proxy_value(value) {
+            let target = self.proxy_snapshot(value)?.target;
+            return self.is_callable_value(target);
+        }
+        Ok(self.resolve_function_object(value).is_ok())
+    }
+
     /// Copies only callable dispatch metadata through a checked no-GC borrow on the hot path.
     #[inline(always)]
     fn resolve_function_executable(
@@ -5541,6 +5730,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::Proxy { operation, stage } => self
                     .resume_proxy_internal_method(continuation, operation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyCall { stage, .. } => self
+                    .resume_proxy_call(continuation, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::ProxySetPrototype { mode, stage } => self
                     .resume_proxy_set_prototype(continuation, mode, stage, value)

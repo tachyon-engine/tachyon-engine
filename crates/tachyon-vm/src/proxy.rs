@@ -90,6 +90,41 @@ const PROXY_GET_OWN_DESCRIPTOR: usize = 3;
 const PROXY_GET_OWN_TARGET_DESCRIPTOR: usize = 4;
 
 impl Isolate {
+    /// Allocates the four rooted values needed to resume a callable Proxy trap.
+    pub(crate) fn allocate_proxy_call_state(
+        &mut self,
+        proxy: Value,
+        arguments: Value,
+        this_value: Value,
+        new_target: Value,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let values = [proxy, arguments, this_value, new_target, undefined];
+        let mut roots = NativeCallStateRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            values,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                NativeCallState {
+                    values: roots.values,
+                    count: 4,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
     /// Validates ProxyCreate arguments before allocating the independently branded exotic payload.
     pub(crate) fn create_proxy_from_site(
         &mut self,
