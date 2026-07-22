@@ -2057,6 +2057,13 @@ impl Isolate {
             return Err(error);
         }
         if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("a Proxy trap publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
             return Ok(None);
         }
         let continuation = self.pop_native_continuation()?;
