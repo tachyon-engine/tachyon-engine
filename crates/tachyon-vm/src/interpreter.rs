@@ -1846,6 +1846,9 @@ impl Isolate {
             NativeContinuationKind::DefineProperties(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::GetOwnPropertyDescriptors(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4522,8 +4525,7 @@ impl Isolate {
                     return self.object_get_own_property_descriptor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptors) => {
-                    let value = self.object_get_own_property_descriptors(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_object_get_own_property_descriptors(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyNames) => {
                     if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Names)? {
@@ -5986,6 +5988,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::DefineProperties(stage) => self
                     .resume_define_properties_stage(continuation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::GetOwnPropertyDescriptors(stage) => self
+                    .resume_get_own_property_descriptors(continuation, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionForEach => {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;

@@ -101,6 +101,7 @@ pub(crate) enum IntrinsicPrototypeKind {
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
+use builtins::object::PendingGetOwnPropertyDescriptors;
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
     PendingCollectionInitializer, PendingMapGetOrInsertComputed, SetObject,
@@ -161,8 +162,8 @@ use runtime::{
         ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
         ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
         ConversionNativeFunction, CopyDataPropertiesStage, DefinePropertiesStage,
-        ErrorConstructorStage, ErrorToStringStage, Fiber, Frame, InstanceElementStage,
-        NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        ErrorConstructorStage, ErrorToStringStage, Fiber, Frame, GetOwnPropertyDescriptorsStage,
+        InstanceElementStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseResolutionMode,
         PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots,
         PropertyWriteMode, PrototypeInitializationRoots, ProxyCallStage, ProxyContinuationStage,

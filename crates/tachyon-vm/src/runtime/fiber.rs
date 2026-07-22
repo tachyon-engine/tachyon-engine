@@ -375,6 +375,13 @@ pub(crate) enum DefinePropertiesStage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+pub(crate) enum GetOwnPropertyDescriptorsStage {
+    OwnKeys,
+    Descriptor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub(crate) enum ProxySetMode {
     Assignment,
     Reflect,
@@ -650,6 +657,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionIteratorClose(CollectionIteratorCloseStage),
     CopyDataProperties(CopyDataPropertiesStage),
     DefineProperties(DefinePropertiesStage),
+    GetOwnPropertyDescriptors(GetOwnPropertyDescriptorsStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
@@ -1294,6 +1302,21 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::DefineProperties(stage),
+            first: state,
+            second: key,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn get_own_property_descriptors_stage(
+        site: NativeContinuationSite,
+        stage: GetOwnPropertyDescriptorsStage,
+        state: Value,
+        key: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::GetOwnPropertyDescriptors(stage),
             first: state,
             second: key,
         }

@@ -2,6 +2,38 @@
 
 use super::super::*;
 
+/// GC-managed state for observable Proxy ownKeys/descriptor enumeration.
+#[derive(Debug)]
+pub(crate) struct PendingGetOwnPropertyDescriptors {
+    pub(crate) result: Value,
+    pub(crate) source: Value,
+    pub(crate) keys: Box<[PropertyKey]>,
+    pub(crate) index: usize,
+}
+
+impl Trace for PendingGetOwnPropertyDescriptors {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.result.trace(tracer);
+        self.source.trace(tracer);
+        self.keys.trace(tracer);
+    }
+}
+
+impl GcExternalMemory for PendingGetOwnPropertyDescriptors {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.keys.len() * core::mem::size_of::<PropertyKey>()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GetOwnPropertyDescriptorsSnapshot {
+    result: Value,
+    source: Value,
+    key: Option<PropertyKey>,
+}
+
 impl Isolate {
     /// Begins the observable Get/Call sequence for Object.prototype.toLocaleString.
     pub(crate) fn begin_object_to_locale_string(
@@ -498,11 +530,11 @@ impl Isolate {
         )
     }
 
-    /// Materializes every ordinary own descriptor under its original String or Symbol key.
-    pub(crate) fn object_get_own_property_descriptors(
+    /// Starts ordinary or Proxy-aware Object.getOwnPropertyDescriptors enumeration.
+    pub(crate) fn begin_object_get_own_property_descriptors(
         &mut self,
         site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let source = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -511,6 +543,32 @@ impl Isolate {
         }
         let source = self.object_value_of(source)?;
         let result = self.create_ordinary_object()?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_proxy_value(source) {
+            let state =
+                self.allocate_get_own_property_descriptors_state(result, source, Vec::new())?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            return self
+                .dispatch_get_own_property_descriptors_own_keys(native_site, state, source)
+                .map(|_| ());
+        }
+        self.materialize_ordinary_own_property_descriptors(source, result)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
+    fn materialize_ordinary_own_property_descriptors(
+        &mut self,
+        source: Value,
+        result: Value,
+    ) -> Result<(), ExecutionError> {
         let (_, snapshot) = self.object_snapshot(source)?;
         let keys = self.ordinary_own_property_keys(source, snapshot)?;
         for key in keys {
@@ -521,7 +579,225 @@ impl Isolate {
             self.materialize_property_descriptor(descriptor_object, descriptor)?;
             self.set_own_data_property(result, key, descriptor_object)?;
         }
-        Ok(result)
+        Ok(())
+    }
+
+    /// Resumes Proxy ownKeys or one materialized getOwnPropertyDescriptor result.
+    pub(crate) fn resume_get_own_property_descriptors(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: GetOwnPropertyDescriptorsStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let state = self.get_own_property_descriptors_reference(continuation.first())?;
+        match stage {
+            GetOwnPropertyDescriptorsStage::OwnKeys => {
+                self.resume_get_own_property_descriptors_own_keys(site, state, value)
+            }
+            GetOwnPropertyDescriptorsStage::Descriptor => {
+                let key = self.property_key(continuation.second())?;
+                if value.as_immediate() != Some(Immediate::Undefined) {
+                    let result = self.get_own_property_descriptors_snapshot(state)?.result;
+                    self.set_own_data_property(result, key, value)?;
+                }
+                self.advance_get_own_property_descriptors_index(state)?;
+                self.advance_get_own_property_descriptors(site, state)
+            }
+        }
+    }
+
+    fn resume_get_own_property_descriptors_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        old_state: GcRef<PendingGetOwnPropertyDescriptors>,
+        keys_array: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let length = self
+            .get_data_property(keys_array, length_key)?
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::ArrayLengthOverflow)? as usize;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(length)
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        for index in 0..length {
+            let index_key = PropertyKey::Atom(self.safe_integer_property_atom(index as u64)?);
+            let key = self
+                .get_data_property(keys_array, index_key)?
+                .ok_or(ExecutionError::ProxyInvariantViolation)?;
+            keys.push(self.property_key(key)?);
+        }
+        let pending = self.get_own_property_descriptors_snapshot(old_state)?;
+        let state =
+            self.allocate_get_own_property_descriptors_state(pending.result, pending.source, keys)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_get_own_property_descriptors(site, state)
+    }
+
+    fn advance_get_own_property_descriptors(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingGetOwnPropertyDescriptors>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.get_own_property_descriptors_snapshot(state)?;
+        let Some(key) = pending.key else {
+            self.write(site.caller_base, site.destination, pending.result)?;
+            return Ok(None);
+        };
+        let key_value = self.object_descriptor_key_value(key)?;
+        let continuation = NativeContinuation::get_own_property_descriptors_stage(
+            site,
+            GetOwnPropertyDescriptorsStage::Descriptor,
+            Value::from_heap_ref(state.raw()),
+            key_value,
+        );
+        self.dispatch_get_own_property_descriptors_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_get_own(
+                site,
+                pending.source,
+                key_value,
+                ProxyGetOwnMode::Descriptor,
+            )
+        })
+    }
+
+    fn dispatch_get_own_property_descriptors_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingGetOwnPropertyDescriptors>,
+        source: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::get_own_property_descriptors_stage(
+            site,
+            GetOwnPropertyDescriptorsStage::OwnKeys,
+            Value::from_heap_ref(state.raw()),
+            Value::from_immediate(Immediate::Undefined),
+        );
+        self.dispatch_get_own_property_descriptors_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_own_keys(site, source, ProxyOwnKeysMode::Internal)
+        })
+    }
+
+    /// Runs one Proxy operation and drains its parent on synchronous completion.
+    fn dispatch_get_own_property_descriptors_proxy_operation(
+        &mut self,
+        continuation: NativeContinuation,
+        operation: impl FnOnce(&mut Self) -> Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let outcome = operation(self);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let site = continuation.site();
+        let value = self.read(site.caller_base, site.destination)?;
+        let NativeContinuationKind::GetOwnPropertyDescriptors(stage) = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        self.resume_get_own_property_descriptors(continuation, stage, value)
+    }
+
+    fn object_descriptor_key_value(&mut self, key: PropertyKey) -> Result<Value, ExecutionError> {
+        match key {
+            PropertyKey::Atom(atom) => self.atom_string_value(atom),
+            PropertyKey::Symbol(symbol) => Ok(symbol.value()),
+            PropertyKey::Private(_) => Err(ExecutionError::PrivatePropertyKeyEscaped),
+        }
+    }
+
+    fn allocate_get_own_property_descriptors_state(
+        &mut self,
+        result: Value,
+        source: Value,
+        keys: Vec<PropertyKey>,
+    ) -> Result<GcRef<PendingGetOwnPropertyDescriptors>, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.pending_get_own_property_descriptors,
+                0,
+                PendingGetOwnPropertyDescriptors {
+                    result,
+                    source,
+                    keys: keys.into_boxed_slice(),
+                    index: 0,
+                },
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    pub(crate) fn get_own_property_descriptors_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<PendingGetOwnPropertyDescriptors>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_get_own_property_descriptors)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    fn get_own_property_descriptors_snapshot(
+        &mut self,
+        state: GcRef<PendingGetOwnPropertyDescriptors>,
+    ) -> Result<GetOwnPropertyDescriptorsSnapshot, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_get_own_property_descriptors)
+                    .map(|pending| GetOwnPropertyDescriptorsSnapshot {
+                        result: pending.result,
+                        source: pending.source,
+                        key: pending.keys.get(pending.index).copied(),
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn advance_get_own_property_descriptors_index(
+        &mut self,
+        state: GcRef<PendingGetOwnPropertyDescriptors>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_get_own_property_descriptors)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                pending.index = pending.index.saturating_add(1);
+                Ok(())
+            })
+        })
     }
 
     /// Implements Object.prototype.hasOwnProperty for the currently supported ordinary properties.

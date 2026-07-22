@@ -352,6 +352,9 @@ impl Isolate {
             pending_define_properties: registry
                 .try_register("PendingDefineProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_get_own_property_descriptors: registry
+                .try_register("PendingGetOwnPropertyDescriptors")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_proxy_define: registry
                 .try_register("PendingProxyDefine")
                 .map_err(IsolateCreationError::TypeRegistration)?,

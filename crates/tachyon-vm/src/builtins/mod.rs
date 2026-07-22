@@ -7,7 +7,7 @@ mod global;
 mod json;
 mod map_upsert;
 mod math;
-mod object;
+pub(crate) mod object;
 mod regexp;
 mod string;
 mod symbol;
