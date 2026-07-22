@@ -31,6 +31,13 @@ pub(crate) struct PendingDefineProperties {
     source: Value,
     keys: Box<[PropertyKey]>,
     index: usize,
+    descriptors: Vec<PendingDefinedProperty>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingDefinedProperty {
+    key: PropertyKey,
+    descriptor: PropertyDescriptor,
 }
 
 impl Trace for PendingDefineProperties {
@@ -39,6 +46,13 @@ impl Trace for PendingDefineProperties {
         self.target.trace(tracer);
         self.source.trace(tracer);
         self.keys.trace(tracer);
+        for property in &mut self.descriptors {
+            if let Some(symbol) = property.key.symbol() {
+                let mut value = symbol.value();
+                value.trace(tracer);
+            }
+            trace_property_descriptor(&mut property.descriptor, tracer);
+        }
     }
 }
 
@@ -46,6 +60,7 @@ impl GcExternalMemory for PendingDefineProperties {
     #[inline(always)]
     fn external_memory_bytes(&self) -> usize {
         self.keys.len() * core::mem::size_of::<PropertyKey>()
+            + self.descriptors.capacity() * core::mem::size_of::<PendingDefinedProperty>()
     }
 }
 
@@ -236,11 +251,17 @@ impl Isolate {
                 keys.push(entry.key);
             }
         }
+        let descriptor_capacity = keys.len();
+        let mut descriptors = Vec::new();
+        descriptors
+            .try_reserve_exact(descriptor_capacity)
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
         let state = self.allocate_pending_define_properties(PendingDefineProperties {
             target,
             source,
             keys: keys.into_boxed_slice(),
             index: 0,
+            descriptors,
         })?;
         self.write(
             site.caller_base,
@@ -322,8 +343,7 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
-        let target = self.pending_define_properties(state)?.target;
-        self.define_property(target, key, descriptor)?;
+        self.push_pending_define_property(state, key, descriptor)?;
         self.advance_pending_define_properties(state)?;
         self.advance_define_properties(site, state)
     }
@@ -337,7 +357,7 @@ impl Isolate {
         loop {
             let pending = self.pending_define_properties(state)?;
             let Some(key) = pending.key else {
-                return self.write(site.caller_base, site.destination, pending.target);
+                return self.apply_pending_define_properties(site, state);
             };
             match self.resolve_property_read(pending.source, key)? {
                 PropertyRead::Missing => self.advance_pending_define_properties(state)?,
@@ -596,6 +616,67 @@ impl Isolate {
         })
     }
 
+    /// Appends one parsed descriptor without growing the pre-reserved vector.
+    fn push_pending_define_property(
+        &mut self,
+        state: GcRef<PendingDefineProperties>,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_define_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if pending.descriptors.len() == pending.descriptors.capacity() {
+                    return Err(ExecutionError::OwnPropertyKeyAllocationFailed);
+                }
+                pending
+                    .descriptors
+                    .push(PendingDefinedProperty { key, descriptor });
+                Ok(())
+            })?;
+            if let Some(symbol) = key.symbol() {
+                scope
+                    .write_value_barrier(state, symbol.value())
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            for value in property_descriptor_edges(descriptor) {
+                scope
+                    .write_value_barrier(state, value)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Applies the fully validated descriptor list only after every getter has succeeded.
+    fn apply_pending_define_properties(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<(), ExecutionError> {
+        let (target, descriptors) = self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow(state, self.types.pending_define_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let mut descriptors = Vec::new();
+                descriptors
+                    .try_reserve_exact(pending.descriptors.len())
+                    .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+                descriptors.extend_from_slice(&pending.descriptors);
+                Ok((pending.target, descriptors))
+            })
+        })?;
+        for property in descriptors {
+            self.define_property(target, property.key, property.descriptor)?;
+        }
+        self.write(site.caller_base, site.destination, target)
+    }
+
     /// Copies managed state without retaining a heap borrow across lookup or allocation.
     fn pending_property_descriptor(
         &mut self,
@@ -704,4 +785,24 @@ struct PendingDefinePropertiesSnapshot {
     target: Value,
     source: Value,
     key: Option<PropertyKey>,
+}
+
+fn trace_property_descriptor(descriptor: &mut PropertyDescriptor, tracer: &mut dyn Tracer) {
+    match descriptor {
+        PropertyDescriptor::Data(descriptor) => descriptor.value.trace(tracer),
+        PropertyDescriptor::Accessor(descriptor) => {
+            descriptor.getter.trace(tracer);
+            descriptor.setter.trace(tracer);
+        }
+        PropertyDescriptor::Generic(_) => {}
+    }
+}
+
+fn property_descriptor_edges(descriptor: PropertyDescriptor) -> impl Iterator<Item = Value> {
+    let values = match descriptor {
+        PropertyDescriptor::Data(descriptor) => [descriptor.value, None],
+        PropertyDescriptor::Accessor(descriptor) => [descriptor.getter, descriptor.setter],
+        PropertyDescriptor::Generic(_) => [None, None],
+    };
+    values.into_iter().flatten()
 }
