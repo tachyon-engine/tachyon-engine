@@ -10,7 +10,9 @@ mod private_field;
 mod storage;
 
 use super::*;
-pub(crate) use accessor::{PropertyRead, PropertyReadResolution, PropertyWrite};
+pub(crate) use accessor::{
+    PropertyRead, PropertyReadResolution, PropertyWrite, PropertyWriteResolution,
+};
 pub(crate) use descriptor_parse::PendingPropertyDescriptor;
 
 impl Isolate {

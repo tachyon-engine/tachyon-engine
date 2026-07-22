@@ -159,6 +159,19 @@ var marker = {};
 var abruptProxy = new Proxy({}, { get set() { throw marker; } });
 var abrupt = false;
 try { abruptProxy.__proto__ = second; } catch (error) { abrupt = error === marker; }
+var frozenTarget = {};
+Object.defineProperty(frozenTarget, "locked", {
+  value: 1, writable: false, configurable: false
+});
+var frozenProxy = new Proxy(frozenTarget, { set() { return true; } });
+var invariantThrows = false;
+try { frozenProxy.locked = 2; } catch (error) { invariantThrows = error instanceof TypeError; }
+var observedReceiver;
+var prototypeProxy = new Proxy({}, {
+  set(target, key, value, receiver) { observedReceiver = receiver; return true; }
+});
+var inheritedReceiver = Object.create(prototypeProxy);
+inheritedReceiver.value = 3;
 var root = {};
 var intermediary = Object.create(root);
 var leaf = Object.create(intermediary);
@@ -166,7 +179,8 @@ var cycleThrows = false;
 try { descriptor.set.call(root, leaf); } catch (error) { cycleThrows = error instanceof TypeError; }
 before === first && after === second && afterAssignment === first &&
 setResult === undefined && ignored === undefined && trace === "gsgsg" &&
-abrupt && cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
+abrupt && invariantThrows && observedReceiver === inheritedReceiver &&
+cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
 descriptor.get.name === "get __proto__" && descriptor.set.name === "set __proto__";
 "#;
 

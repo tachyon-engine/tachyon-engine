@@ -108,19 +108,75 @@ impl Isolate {
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let key = self.property_key(pending.values[SET_KEY])?;
-        let result = self.resolve_reflect_property_write(
+        let resolution = self.resolve_reflect_property_write_until_proxy(
             pending.values[SET_TARGET],
             pending.values[SET_RECEIVER],
             key,
             pending.values[SET_VALUE],
-        )?;
-        self.finish_proxy_set_result(
-            site,
-            mode,
-            pending.values[SET_RECEIVER],
-            pending.values[SET_VALUE],
-            result,
-        )
+        );
+        let resolution = match resolution {
+            Ok(resolution) => resolution,
+            Err(ExecutionError::NotObject(receiver))
+                if receiver == pending.values[SET_RECEIVER]
+                    && self.proxy_receiver_has_no_descriptor_write_traps(receiver)? =>
+            {
+                let success = match self.set_own_data_property(
+                    pending.values[SET_TARGET],
+                    key,
+                    pending.values[SET_VALUE],
+                ) {
+                    Ok(()) => true,
+                    Err(
+                        ExecutionError::NonExtensibleObject(_)
+                        | ExecutionError::ReadOnlyProperty(_),
+                    ) => false,
+                    Err(error) => return Err(error),
+                };
+                PropertyWriteResolution::Write(PropertyWrite::Complete(success))
+            }
+            Err(error) => return Err(error),
+        };
+        match resolution {
+            PropertyWriteResolution::Proxy(proxy) => self.dispatch_proxy_set(
+                site,
+                proxy,
+                pending.values[SET_KEY],
+                pending.values[SET_VALUE],
+                pending.values[SET_RECEIVER],
+                mode,
+            ),
+            PropertyWriteResolution::Write(result) => self.finish_proxy_set_result(
+                site,
+                mode,
+                pending.values[SET_RECEIVER],
+                pending.values[SET_VALUE],
+                result,
+            ),
+        }
+    }
+
+    /// Detects the side-effect-free receiver case where Proxy descriptor operations forward.
+    fn proxy_receiver_has_no_descriptor_write_traps(
+        &mut self,
+        receiver: Value,
+    ) -> Result<bool, ExecutionError> {
+        let handler = self.proxy_snapshot(receiver)?.handler;
+        for name in [
+            b"getOwnPropertyDescriptor".as_slice(),
+            b"defineProperty".as_slice(),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            match self.resolve_property_read(handler, atom.into())? {
+                PropertyRead::Missing => {}
+                PropertyRead::Data(value)
+                    if matches!(
+                        value.as_immediate(),
+                        Some(Immediate::Undefined | Immediate::Null)
+                    ) => {}
+                PropertyRead::Data(_) | PropertyRead::Accessor(_) => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 
     /// Resumes a trap getter/call and maps the result to assignment or Reflect semantics.
@@ -138,11 +194,11 @@ impl Isolate {
             }
             ProxySetStage::TrapCall => {
                 let pending = self.native_call_state_snapshot(state)?;
-                let result = if self.is_truthy_value(value)? {
-                    PropertyWrite::Complete(true)
-                } else {
-                    PropertyWrite::Complete(false)
-                };
+                let success = self.is_truthy_value(value)?;
+                if success {
+                    self.validate_proxy_set_result(pending)?;
+                }
+                let result = PropertyWrite::Complete(success);
                 self.finish_proxy_set_result(
                     continuation.site(),
                     mode,
@@ -152,6 +208,41 @@ impl Isolate {
                 )
             }
         }
+    }
+
+    /// Enforces the frozen data and setter-less accessor restrictions on a truthy trap result.
+    fn validate_proxy_set_result(
+        &mut self,
+        pending: NativeCallState,
+    ) -> Result<(), ExecutionError> {
+        let key = self.property_key(pending.values[SET_KEY])?;
+        let Some(descriptor) =
+            self.complete_own_property_descriptor(pending.values[SET_TARGET], key)?
+        else {
+            return Ok(());
+        };
+        match descriptor {
+            PropertyDescriptor::Data(descriptor)
+                if descriptor.configurable == Some(false) && descriptor.writable == Some(false) =>
+            {
+                let current = descriptor
+                    .value
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                if !self.same_value(pending.values[SET_VALUE], current)? {
+                    return Err(ExecutionError::ProxyInvariantViolation);
+                }
+            }
+            PropertyDescriptor::Accessor(descriptor)
+                if descriptor.configurable == Some(false)
+                    && descriptor.setter.is_none_or(|setter| {
+                        setter.as_immediate() == Some(Immediate::Undefined)
+                    }) =>
+            {
+                return Err(ExecutionError::ProxyInvariantViolation);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Applies the public boolean/strict assignment result after Proxy trap completion.

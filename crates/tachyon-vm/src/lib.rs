@@ -101,7 +101,10 @@ use promise_state::{
     PromiseState,
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties};
-use property::{PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite};
+use property::{
+    PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite,
+    PropertyWriteResolution,
+};
 use proxy::{
     PROXY_ACTIVE_OBJECT, PROXY_DEFINE_HANDLER, PROXY_DELETE_ACTIVE, PROXY_GET_ACTIVE,
     PendingProxyDefine, ProxyObject,

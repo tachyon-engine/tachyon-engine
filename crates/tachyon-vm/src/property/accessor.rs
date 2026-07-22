@@ -30,6 +30,12 @@ pub(crate) enum PropertyWrite {
     Setter(Value),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PropertyWriteResolution {
+    Write(PropertyWrite),
+    Proxy(Value),
+}
+
 struct AccessorAllocationRoots<'a> {
     vm: VmRoots<'a>,
     receiver: Value,
@@ -227,6 +233,19 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWrite, ExecutionError> {
+        match self.resolve_property_write_until_proxy(receiver, key, value)? {
+            PropertyWriteResolution::Write(write) => Ok(write),
+            PropertyWriteResolution::Proxy(proxy) => Err(ExecutionError::NotObject(proxy)),
+        }
+    }
+
+    /// Runs ordinary assignment until one Proxy owns the remaining prototype-chain operation.
+    pub(crate) fn resolve_property_write_until_proxy(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWriteResolution, ExecutionError> {
         if let Some(raw) = receiver.as_heap_ref()
             && self
                 .heap
@@ -236,11 +255,15 @@ impl Isolate {
             let source = self.intern_intrinsic_name(b"source")?;
             let flags = self.intern_intrinsic_name(b"flags")?;
             if key == PropertyKey::Atom(source) || key == PropertyKey::Atom(flags) {
-                return Ok(PropertyWrite::Complete(false));
+                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                    false,
+                )));
             }
         }
         let mut current = if self.is_string_value(receiver) {
-            return Ok(PropertyWrite::Complete(false));
+            return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                false,
+            )));
         } else if numeric_value(receiver).is_some() {
             self.realm
                 .number_prototype
@@ -260,39 +283,56 @@ impl Isolate {
             receiver
         };
         loop {
+            if self.is_proxy_value(current) {
+                return Ok(PropertyWriteResolution::Proxy(current));
+            }
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
                     Some(StoredProperty::Data(_)) => {
                         if !property.attributes.writable() {
-                            return Ok(PropertyWrite::Complete(false));
+                            return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                                false,
+                            )));
                         }
-                        return self.write_data_property_boolean(receiver, key, value);
+                        return self
+                            .write_data_property_boolean(receiver, key, value)
+                            .map(PropertyWriteResolution::Write);
                     }
                     Some(StoredProperty::Accessor { pair, .. }) => {
-                        return Ok(
+                        return Ok(PropertyWriteResolution::Write(
                             if pair.setter.as_immediate() == Some(Immediate::Undefined) {
                                 PropertyWrite::Complete(false)
                             } else {
                                 PropertyWrite::Setter(pair.setter)
                             },
-                        );
+                        ));
                     }
                     None if current == receiver => {
-                        return self.write_data_property_boolean(receiver, key, value);
+                        return self
+                            .write_data_property_boolean(receiver, key, value)
+                            .map(PropertyWriteResolution::Write);
                     }
                     None => {}
                 }
             } else if self.is_function_metadata_property(current, key)? {
-                return Ok(PropertyWrite::Complete(false));
+                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                    false,
+                )));
             } else if self.is_function_prototype_property(current, key) {
                 if self.has_read_only_prototype(current)? {
-                    return Ok(PropertyWrite::Complete(false));
+                    return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                        false,
+                    )));
                 }
-                return self.write_data_property_boolean(receiver, key, value);
+                return self
+                    .write_data_property_boolean(receiver, key, value)
+                    .map(PropertyWriteResolution::Write);
             }
             if snapshot.prototype.as_immediate() == Some(Immediate::Null) {
-                return self.write_data_property_boolean(receiver, key, value);
+                return self
+                    .write_data_property_boolean(receiver, key, value)
+                    .map(PropertyWriteResolution::Write);
             }
             if !self.is_object_value(snapshot.prototype) {
                 return Err(ExecutionError::NotObject(snapshot.prototype));
@@ -309,23 +349,44 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWrite, ExecutionError> {
+        match self.resolve_reflect_property_write_until_proxy(target, receiver, key, value)? {
+            PropertyWriteResolution::Write(write) => Ok(write),
+            PropertyWriteResolution::Proxy(proxy) => Err(ExecutionError::NotObject(proxy)),
+        }
+    }
+
+    /// Runs Reflect/OrdinarySet until a Proxy receiver or prototype owns the next operation.
+    pub(crate) fn resolve_reflect_property_write_until_proxy(
+        &mut self,
+        target: Value,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<PropertyWriteResolution, ExecutionError> {
         let mut current = target;
         loop {
+            if self.is_proxy_value(current) {
+                return Ok(PropertyWriteResolution::Proxy(current));
+            }
             let descriptor = self.complete_own_property_descriptor(current, key)?;
             match descriptor {
                 Some(PropertyDescriptor::Data(descriptor)) => {
                     if !descriptor.writable.unwrap_or(false) {
-                        return Ok(PropertyWrite::Complete(false));
+                        return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                            false,
+                        )));
                     }
-                    return self.write_reflect_receiver(receiver, key, value);
+                    return self
+                        .write_reflect_receiver(receiver, key, value)
+                        .map(PropertyWriteResolution::Write);
                 }
                 Some(PropertyDescriptor::Accessor(descriptor)) => {
-                    return Ok(match descriptor.setter {
+                    return Ok(PropertyWriteResolution::Write(match descriptor.setter {
                         Some(setter) if setter.as_immediate() != Some(Immediate::Undefined) => {
                             PropertyWrite::Setter(setter)
                         }
                         _ => PropertyWrite::Complete(false),
-                    });
+                    }));
                 }
                 Some(PropertyDescriptor::Generic(_)) => {
                     return Err(ExecutionError::InvalidPropertyDescriptor(current));
@@ -333,7 +394,9 @@ impl Isolate {
                 None => {
                     let prototype = self.object_snapshot(current)?.1.prototype;
                     if prototype.as_immediate() == Some(Immediate::Null) {
-                        return self.write_reflect_receiver(receiver, key, value);
+                        return self
+                            .write_reflect_receiver(receiver, key, value)
+                            .map(PropertyWriteResolution::Write);
                     }
                     if !self.is_object_value(prototype) {
                         return Err(ExecutionError::NotObject(prototype));

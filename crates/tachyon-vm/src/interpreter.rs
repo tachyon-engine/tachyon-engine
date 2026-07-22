@@ -1560,37 +1560,37 @@ impl Isolate {
         value: Value,
         call_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        if self.is_proxy_value(receiver) {
-            return self.dispatch_proxy_aware_property_write(
+        match self.resolve_property_write_until_proxy(receiver, key, value)? {
+            PropertyWriteResolution::Proxy(proxy) => self.dispatch_proxy_aware_property_write(
                 NativeContinuationSite {
                     caller_base,
                     destination: value_register,
                     call_site,
                 },
-                receiver,
+                proxy,
                 receiver,
                 key,
                 value,
                 ProxySetMode::Assignment,
-            );
-        }
-        match self.resolve_property_write(receiver, key, value)? {
-            PropertyWrite::Complete(success) => {
-                self.finish_property_write(receiver, success)?;
-                Ok(None)
-            }
-            PropertyWrite::Setter(callee) => self.dispatch_property_callback(
-                NativeContinuation::property_set(
-                    NativeContinuationSite {
-                        caller_base,
-                        destination: value_register,
-                        call_site,
-                    },
-                    receiver,
-                    value,
-                ),
-                callee,
             ),
+            PropertyWriteResolution::Write(write) => match write {
+                PropertyWrite::Complete(success) => {
+                    self.finish_property_write(receiver, success)?;
+                    Ok(None)
+                }
+                PropertyWrite::Setter(callee) => self.dispatch_property_callback(
+                    NativeContinuation::property_set(
+                        NativeContinuationSite {
+                            caller_base,
+                            destination: value_register,
+                            call_site,
+                        },
+                        receiver,
+                        value,
+                    ),
+                    callee,
+                ),
+            },
         }
     }
 
