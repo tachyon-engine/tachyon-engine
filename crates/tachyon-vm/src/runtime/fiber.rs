@@ -338,6 +338,8 @@ pub(crate) enum ProxyOwnKeysMode {
     Names,
     Symbols,
     EnumerableNames,
+    IntegritySealed,
+    IntegrityFrozen,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,6 +350,8 @@ pub(crate) enum ProxyOwnKeysStage {
     LengthGet,
     ElementGet,
     TargetOwnKeys,
+    IntegrityExtensible,
+    IntegrityDescriptor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

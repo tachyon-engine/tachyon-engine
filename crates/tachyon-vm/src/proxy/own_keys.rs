@@ -161,7 +161,9 @@ impl Isolate {
         stage: ProxyOwnKeysStage,
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let _ = mode;
+        if stage == ProxyOwnKeysStage::IntegrityExtensible {
+            return self.resume_proxy_test_integrity_extensible(continuation, mode, value);
+        }
         let state = self.pending_proxy_own_keys_reference(continuation.first())?;
         match stage {
             ProxyOwnKeysStage::TrapGetter => {
@@ -179,7 +181,49 @@ impl Isolate {
             ProxyOwnKeysStage::TargetOwnKeys => {
                 self.finish_proxy_own_keys_nested_target(continuation.site(), state, value)
             }
+            ProxyOwnKeysStage::IntegrityDescriptor => {
+                self.resume_proxy_integrity_descriptor(continuation, state, value)
+            }
+            ProxyOwnKeysStage::IntegrityExtensible => unreachable!("handled before state lookup"),
         }
+    }
+
+    /// Starts Proxy TestIntegrityLevel with the required [[IsExtensible]] observation.
+    pub(crate) fn begin_proxy_test_integrity(
+        &mut self,
+        site: NativeContinuationSite,
+        proxy: Value,
+        freeze: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let mode = if freeze {
+            ProxyOwnKeysMode::IntegrityFrozen
+        } else {
+            ProxyOwnKeysMode::IntegritySealed
+        };
+        let continuation = NativeContinuation::proxy_own_keys(
+            site,
+            mode,
+            ProxyOwnKeysStage::IntegrityExtensible,
+            proxy,
+            Value::from_immediate(Immediate::Undefined),
+        );
+        self.dispatch_proxy_integrity_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_internal_method(site, proxy, ProxyInternalMethod::IsExtensible)
+        })
+    }
+
+    fn resume_proxy_test_integrity_extensible(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: ProxyOwnKeysMode,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        if self.is_truthy_value(value)? {
+            self.write(site.caller_base, site.destination, boolean_value(false))?;
+            return Ok(None);
+        }
+        self.dispatch_proxy_own_keys(site, continuation.first(), mode)
     }
 
     /// Returns a checked state reference for the eventual ownKeys consumer.
@@ -664,6 +708,13 @@ impl Isolate {
         state: GcRef<PendingProxyOwnKeys>,
         mode: ProxyOwnKeysMode,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if matches!(
+            mode,
+            ProxyOwnKeysMode::IntegritySealed | ProxyOwnKeysMode::IntegrityFrozen
+        ) {
+            self.reset_proxy_own_keys_index(state)?;
+            return self.advance_proxy_integrity_descriptors(site, state);
+        }
         let pending = self.proxy_own_keys_snapshot(state)?;
         let keys = self.pending_proxy_own_keys_values(state)?;
         let result = self.create_array_from_site(&CallSite {
@@ -676,6 +727,9 @@ impl Isolate {
                 ProxyOwnKeysMode::Internal | ProxyOwnKeysMode::Reflect => true,
                 ProxyOwnKeysMode::Names | ProxyOwnKeysMode::EnumerableNames => key.atom().is_some(),
                 ProxyOwnKeysMode::Symbols => key.symbol().is_some(),
+                ProxyOwnKeysMode::IntegritySealed | ProxyOwnKeysMode::IntegrityFrozen => {
+                    unreachable!("integrity modes do not materialize key arrays")
+                }
             };
             if !include {
                 continue;
@@ -705,6 +759,101 @@ impl Isolate {
         self.set_own_data_property(result, length, safe_integer_value(output_index))?;
         self.write(site.caller_base, site.destination, result)?;
         Ok(None)
+    }
+
+    /// Dispatches one ordered Proxy [[GetOwnProperty]] query or completes the integrity result.
+    fn advance_proxy_integrity_descriptors(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingProxyOwnKeys>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.proxy_own_keys_snapshot(state)?;
+        let Some(key) = self.proxy_own_keys_current_key(state)? else {
+            self.write(site.caller_base, site.destination, boolean_value(true))?;
+            return Ok(None);
+        };
+        let key_value = match key {
+            PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
+            PropertyKey::Symbol(symbol) => symbol.value(),
+            PropertyKey::Private(_) => return Err(ExecutionError::PrivatePropertyKeyEscaped),
+        };
+        let continuation = NativeContinuation::proxy_own_keys(
+            site,
+            pending.mode,
+            ProxyOwnKeysStage::IntegrityDescriptor,
+            Value::from_heap_ref(state.raw()),
+            key_value,
+        );
+        self.dispatch_proxy_integrity_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_get_own(
+                site,
+                pending.active_proxy,
+                key_value,
+                ProxyGetOwnMode::Descriptor,
+            )
+        })
+    }
+
+    fn resume_proxy_integrity_descriptor(
+        &mut self,
+        continuation: NativeContinuation,
+        state: GcRef<PendingProxyOwnKeys>,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if value.as_immediate() != Some(Immediate::Undefined) {
+            let descriptor = self.parse_property_descriptor(value)?;
+            let freeze =
+                self.proxy_own_keys_snapshot(state)?.mode == ProxyOwnKeysMode::IntegrityFrozen;
+            if descriptor.configurable() == Some(true)
+                || (freeze
+                    && matches!(
+                        descriptor,
+                        PropertyDescriptor::Data(DataPropertyDescriptor {
+                            writable: Some(true),
+                            ..
+                        })
+                    ))
+            {
+                let site = continuation.site();
+                self.write(site.caller_base, site.destination, boolean_value(false))?;
+                return Ok(None);
+            }
+        }
+        self.advance_proxy_own_keys_index(state)?;
+        self.advance_proxy_integrity_descriptors(continuation.site(), state)
+    }
+
+    /// Runs a child Proxy operation and drains the parent when it completed synchronously.
+    fn dispatch_proxy_integrity_operation(
+        &mut self,
+        continuation: NativeContinuation,
+        operation: impl FnOnce(&mut Self) -> Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let outcome = operation(self);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let site = continuation.site();
+        let value = self.read(site.caller_base, site.destination)?;
+        let NativeContinuationKind::ProxyOwnKeys { mode, stage } = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        self.resume_proxy_own_keys(continuation, mode, stage, value)
     }
 
     fn call_site_from_native(&self, site: NativeContinuationSite) -> CallSite {
@@ -845,6 +994,55 @@ impl Isolate {
                 state.keys = Box::new([]);
                 state.target_keys = Box::new([]);
                 Ok::<(), ExecutionError>(())
+            })
+        })
+    }
+
+    fn reset_proxy_own_keys_index(
+        &mut self,
+        state: GcRef<PendingProxyOwnKeys>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.pending_proxy_own_keys)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(|state| state.index = 0)
+            })
+        })
+    }
+
+    fn advance_proxy_own_keys_index(
+        &mut self,
+        state: GcRef<PendingProxyOwnKeys>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let state = no_gc
+                    .borrow_mut(state, self.types.pending_proxy_own_keys)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                state.index = state
+                    .index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
+                Ok(())
+            })
+        })
+    }
+
+    fn proxy_own_keys_current_key(
+        &mut self,
+        state: GcRef<PendingProxyOwnKeys>,
+    ) -> Result<Option<PropertyKey>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_proxy_own_keys)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(|state| state.keys.get(state.index as usize).copied())
             })
         })
     }

@@ -92,6 +92,17 @@ Object.freeze(frozenCandidate);
 var integrityQueries = Object.isSealed(sealedCandidate) &&
     !Object.isFrozen(sealedCandidate) && Object.isSealed(frozenCandidate) &&
     Object.isFrozen(frozenCandidate);
+var integrityTrace = "";
+var proxyIntegrityTarget = { value: 1 };
+Object.freeze(proxyIntegrityTarget);
+var proxyIntegrity = new Proxy(proxyIntegrityTarget, {
+    getOwnPropertyDescriptor: function(target, key) {
+        integrityTrace = integrityTrace + key;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+    }
+});
+var proxyIntegrityQueries = Object.isFrozen(proxyIntegrity) &&
+    Object.isSealed(proxyIntegrity) && integrityTrace === "valuevalue";
 var constantDescriptors = undefinedDesc.writable === false && undefinedDesc.enumerable === false &&
     undefinedDesc.configurable === false && nanDesc.writable === false &&
     nanDesc.enumerable === false && nanDesc.configurable === false &&
@@ -100,7 +111,8 @@ var constantDescriptors = undefinedDesc.writable === false && undefinedDesc.enum
     stringIndexDesc.writable === false && stringIndexDesc.enumerable === true &&
     stringIndexDesc.configurable === false && stringLengthDesc.value === 3 &&
     stringLengthDesc.writable === false && stringLengthDesc.enumerable === false &&
-    stringLengthDesc.configurable === false && primitiveOwnQueries && integrityQueries;
+    stringLengthDesc.configurable === false && primitiveOwnQueries && integrityQueries &&
+    proxyIntegrityQueries;
 global.Object = fakeObject;
 var memberWrite = Object === fakeObject;
 Object = secondObject;

@@ -1833,6 +1833,9 @@ impl Isolate {
                 ProxyOwnKeysStage::TargetOwnKeys => {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
+                ProxyOwnKeysStage::IntegrityExtensible | ProxyOwnKeysStage::IntegrityDescriptor => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
             },
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -4660,6 +4663,19 @@ impl Isolate {
                     let value = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if self.is_proxy_value(value) {
+                        return self
+                            .begin_proxy_test_integrity(
+                                NativeContinuationSite {
+                                    caller_base: site.caller_base,
+                                    destination: site.destination,
+                                    call_site: site.call_site,
+                                },
+                                value,
+                                false,
+                            )
+                            .map(|_| ());
+                    }
                     let result = self.object_test_integrity_level(value, false)?;
                     return self.write(
                         site.caller_base,
@@ -4675,6 +4691,19 @@ impl Isolate {
                     let value = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if self.is_proxy_value(value) {
+                        return self
+                            .begin_proxy_test_integrity(
+                                NativeContinuationSite {
+                                    caller_base: site.caller_base,
+                                    destination: site.destination,
+                                    call_site: site.call_site,
+                                },
+                                value,
+                                true,
+                            )
+                            .map(|_| ());
+                    }
                     let result = self.object_test_integrity_level(value, true)?;
                     return self.write(
                         site.caller_base,
