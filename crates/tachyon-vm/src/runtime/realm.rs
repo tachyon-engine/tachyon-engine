@@ -155,6 +155,7 @@ pub(crate) struct Realm {
     pub(crate) object_prototype: Option<Value>,
     pub(crate) object_define_property: Option<Value>,
     pub(crate) object_define_properties: Option<Value>,
+    pub(crate) object_from_entries: Option<Value>,
     pub(crate) object_get_own_property_descriptor: Option<Value>,
     pub(crate) object_get_own_property_names: Option<Value>,
     pub(crate) object_has_own_property: Option<Value>,
@@ -276,6 +277,7 @@ impl Realm {
             object_prototype: None,
             object_define_property: None,
             object_define_properties: None,
+            object_from_entries: None,
             object_get_own_property_descriptor: None,
             object_get_own_property_names: None,
             object_has_own_property: None,
@@ -632,6 +634,7 @@ impl Trace for Realm {
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);
         self.object_define_properties.trace(tracer);
+        self.object_from_entries.trace(tracer);
         self.object_get_own_property_descriptor.trace(tracer);
         self.object_get_own_property_names.trace(tracer);
         self.object_has_own_property.trace(tracer);

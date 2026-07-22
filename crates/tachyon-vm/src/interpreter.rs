@@ -4494,6 +4494,9 @@ impl Isolate {
                     let value = self.object_define_properties(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectFromEntries) => {
+                    return self.begin_object_from_entries(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
                     return self.object_get_own_property_descriptor(&site);
                 }

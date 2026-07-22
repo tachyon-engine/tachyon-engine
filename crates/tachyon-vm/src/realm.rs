@@ -86,6 +86,18 @@ impl Isolate {
             define_properties,
             true,
         )?;
+        let from_entries = self.allocate_native_function(
+            NativeFunction::ObjectFromEntries,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_from_entries = Some(from_entries);
+        let from_entries_atom = self.intern_intrinsic_name(b"fromEntries")?;
+        self.set_intrinsic_data_property(constructor, from_entries_atom, from_entries, true)?;
         let get_own_property_descriptor = self.allocate_native_function(
             NativeFunction::ObjectGetOwnPropertyDescriptor,
             OrdinaryObject {

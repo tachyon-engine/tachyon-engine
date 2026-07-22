@@ -39,6 +39,7 @@ pub(crate) enum CollectionInitializerKind {
     Set,
     WeakMap,
     WeakSet,
+    ObjectFromEntries,
 }
 
 /// GC-owned state that survives every observable step of `new Map(iterable)` and `new Set(iterable)`.

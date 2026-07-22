@@ -59,6 +59,25 @@ impl Isolate {
         self.begin_collection_initializer(site, target, CollectionInitializerKind::Set)
     }
 
+    /// Starts Object.fromEntries with the same resumable iterator protocol as Map.
+    pub(crate) fn begin_object_from_entries(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let iterable = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if is_nullish(iterable) {
+            return Err(ExecutionError::NotObject(iterable));
+        }
+        let target = self.create_ordinary_object()?;
+        self.begin_collection_initializer(
+            site,
+            target,
+            CollectionInitializerKind::ObjectFromEntries,
+        )
+    }
+
     /// Starts WeakMap construction with the same resumable iterable protocol as Map.
     pub(crate) fn begin_weak_map_from_site(
         &mut self,
@@ -113,12 +132,21 @@ impl Isolate {
             site.destination,
             Value::from_heap_ref(state.raw()),
         )?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if kind == CollectionInitializerKind::ObjectFromEntries {
+            return self.resume_collection_initializer(
+                native_site,
+                state,
+                CollectionInitializerStage::Adder,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
         self.get_collection_initializer_property(
-            NativeContinuationSite {
-                caller_base: site.caller_base,
-                destination: site.destination,
-                call_site: site.call_site,
-            },
+            native_site,
             state,
             CollectionInitializerStage::Adder,
             target,
@@ -151,7 +179,10 @@ impl Isolate {
         match stage {
             CollectionInitializerStage::Adder => {
                 self.update_pending_collection_initializer(state, |pending| pending.adder = value)?;
-                self.resolve_function_object(value)?;
+                let kind = self.pending_collection_initializer(state)?.kind;
+                if kind != CollectionInitializerKind::ObjectFromEntries {
+                    self.resolve_function_object(value)?;
+                }
                 let iterable = self.pending_collection_initializer(state)?.iterable;
                 let iterator_symbol = self
                     .realm
@@ -271,6 +302,11 @@ impl Isolate {
                     pending.result = value
                 })?;
                 let pending = self.pending_collection_initializer(state)?;
+                if pending.kind == CollectionInitializerKind::ObjectFromEntries {
+                    let key = self.property_key(pending.key)?;
+                    self.set_own_data_property(pending.target, key, pending.result)?;
+                    return self.call_collection_next(site, state);
+                }
                 self.call_collection_adder(site, state, &[pending.key, pending.result])
             }
             CollectionInitializerStage::AdderCall => self.call_collection_next(site, state),

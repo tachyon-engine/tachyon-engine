@@ -15,6 +15,7 @@ pub(crate) enum NativeFunction {
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
+    ObjectFromEntries,
     ObjectGetOwnPropertyDescriptor,
     ObjectGetOwnPropertyNames,
     ObjectGetOwnPropertySymbols,
@@ -491,6 +492,7 @@ impl NativeFunction {
         match self {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
+            Self::ObjectFromEntries => 1,
             Self::ObjectDefineGetter | Self::ObjectDefineSetter => 2,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
@@ -701,6 +703,7 @@ impl NativeFunction {
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",
+            Self::ObjectFromEntries => "fromEntries",
             Self::ObjectGetOwnPropertyDescriptor => "getOwnPropertyDescriptor",
             Self::ObjectGetOwnPropertyNames => "getOwnPropertyNames",
             Self::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
