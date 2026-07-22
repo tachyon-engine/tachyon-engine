@@ -92,7 +92,7 @@ impl Compiler {
         options: CompileOptions,
     ) -> Result<tachyon_bytecode::CompiledModule, CompileError> {
         let (parsed, hir) = parser::parse_with(source, options, hir::lower)?;
-        bytecode::lower(parsed.source(), &hir)
+        bytecode::lower(parsed.source(), &hir, options)
     }
 }
 

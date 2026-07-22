@@ -30,7 +30,10 @@ fn eval_script_callback(
                 MediaType::JavaScript,
                 Arc::from(source),
             ),
-            CompileOptions::default(),
+            CompileOptions {
+                direct_eval: matches!(kind, EvalKind::Direct { .. }),
+                ..CompileOptions::default()
+            },
         )
         .map_err(|error| match error {
             CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
@@ -244,6 +247,19 @@ fn nested_sloppy_eval_var_shadows_an_ancestor_eval_overlay() {
     let module = compile_source(
         "function outer() { eval('var value = 1;'); function inner() { eval('var value = 2;'); return value; } return inner() === 2 && value === 1; } outer();",
         1_170,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+fn direct_eval_lexical_record_enforces_tdz_const_and_escaping_closure_capture() {
+    let module = compile_source(
+        "var escaped; var assignment = false; eval('let hidden; const fixed = 4; escaped = function() { return fixed; }; try { fixed = 5; } catch (error) { assignment = error instanceof TypeError; }'); typeof hidden === 'undefined' && assignment && escaped() === 4;",
+        1_171,
     );
     assert_direct_eval_batch::<1>(&module, false);
     assert_direct_eval_batch::<2>(&module, false);

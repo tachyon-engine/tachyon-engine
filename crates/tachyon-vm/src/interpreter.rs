@@ -1061,16 +1061,11 @@ impl Isolate {
             }
             Opcode::StoreEnvironment => {
                 let value = self.read(base, operands[0])?;
-                if let Err(error) = self.store_environment(operands[1], operands[2], value) {
-                    let sloppy_immutable_write =
-                        matches!(error, ExecutionError::ImmutableEnvironmentBinding { .. })
-                            && self.fiber.frames.last().is_some_and(|frame| {
-                                frame.strictness == FunctionStrictness::Sloppy
-                            });
-                    if !sloppy_immutable_write {
-                        return Err(error);
-                    }
-                }
+                self.store_environment(operands[1], operands[2], value)?;
+            }
+            Opcode::InitializeEnvironment => {
+                let value = self.read(base, operands[0])?;
+                self.initialize_environment(operands[1], operands[2], value)?;
             }
             Opcode::DeclareScope => {
                 self.declare_scope(code, operands[0])?;
@@ -2882,6 +2877,31 @@ impl Isolate {
         Ok(())
     }
 
+    /// Initializes one TDZ slot exactly once and applies the standard heap write barrier.
+    fn initialize_environment(
+        &mut self,
+        depth: u32,
+        slot: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let environment = self.environment_at_depth(depth)?;
+        self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference_mut(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .initialize(slot, value)
+                    .map_err(|error| environment_access_error(depth, slot, error))
+            })
+        })?;
+        if let Some(target) = value.as_heap_ref() {
+            self.heap
+                .write_barrier(environment.raw(), target)
+                .map_err(ExecutionError::HeapReference)?;
+        }
+        Ok(())
+    }
+
     /// Enters one exact immutable environment for class name and private-name identities.
     fn enter_class_environment(&mut self, slot_count: u32) -> Result<(), ExecutionError> {
         if self.fiber.class_environments.len() == self.fiber.class_environments.capacity() {
@@ -3079,6 +3099,31 @@ impl Isolate {
         self_binding: Option<(u32, Value)>,
     ) -> Result<GcRef<Environment>, ExecutionError> {
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
+        let metadata_states = if kind != FunctionKind::Module && self_binding.is_none() {
+            let function = self
+                .loaded_code(owner.code)?
+                .module
+                .function(owner.function)
+                .ok_or(ExecutionError::MissingEntryFunction(owner.function))?;
+            if function
+                .environment_slots()
+                .iter()
+                .any(|slot| !slot.initialized || !slot.mutable)
+            {
+                let mut states = Vec::new();
+                states
+                    .try_reserve_exact(function.environment_slots().len())
+                    .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+                for slot in function.environment_slots() {
+                    states.push(BindingState::new(slot.mutable, slot.initialized));
+                }
+                Some(states.into_boxed_slice())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut environment = if kind == FunctionKind::Module {
             Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |_| {
                 BindingState::new(true, false)
@@ -3086,6 +3131,10 @@ impl Isolate {
         } else if let Some((self_slot, _)) = self_binding {
             Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
                 BindingState::new(slot != self_slot, slot != self_slot)
+            })
+        } else if let Some(states) = metadata_states.as_ref() {
+            Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
+                states[slot as usize]
             })
         } else {
             Environment::try_captured(environment_kind, parent, Some(owner), slot_count)

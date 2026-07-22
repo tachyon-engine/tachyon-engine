@@ -59,7 +59,10 @@ fn eval_script_callback(
                 MediaType::JavaScript,
                 Arc::<str>::from(source),
             ),
-            options(SourceMode::Script),
+            CompileOptions {
+                direct_eval: matches!(kind, tachyon_vm::EvalKind::Direct { .. }),
+                ..options(SourceMode::Script)
+            },
         )
         .map_err(|error| match error {
             CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
@@ -197,7 +200,10 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
 }
 
 fn options(source_mode: SourceMode) -> CompileOptions {
-    CompileOptions { source_mode }
+    CompileOptions {
+        source_mode,
+        ..CompileOptions::default()
+    }
 }
 
 fn source_id(index: usize, offset: u32) -> u32 {

@@ -58,6 +58,7 @@ fn parser_honors_script_mode_for_module_syntax() {
             source(MediaType::JavaScript, "export {};"),
             CompileOptions {
                 source_mode: SourceMode::Script,
+                ..CompileOptions::default()
             },
         ),
         Err(CompileError::Diagnostics(_))
@@ -296,7 +297,7 @@ fn compiler_emits_owned_and_inherited_environment_binding_plans() {
     )));
     let outer_bytecode = tachyon_bytecode::disassemble(outer).unwrap();
     let inner_bytecode = tachyon_bytecode::disassemble(inner).unwrap();
-    assert!(outer_bytecode.contains("StoreEnvironment r0, depth=0, slot=0"));
+    assert!(outer_bytecode.contains("InitializeEnvironment r0, depth=0, slot=0"));
     assert!(inner_bytecode.contains("LoadEnvironment r0, depth=0, slot=0"));
 }
 

@@ -242,11 +242,13 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::StoreScope | Opcode::StoreResolvedScope => {
             write!(output, " r{}, scope={}", operands[0], operands[1])?
         }
-        Opcode::LoadEnvironment | Opcode::StoreEnvironment => write!(
-            output,
-            " r{}, depth={}, slot={}",
-            operands[0], operands[1], operands[2]
-        )?,
+        Opcode::LoadEnvironment | Opcode::StoreEnvironment | Opcode::InitializeEnvironment => {
+            write!(
+                output,
+                " r{}, depth={}, slot={}",
+                operands[0], operands[1], operands[2]
+            )?
+        }
         Opcode::InitializeGlobalLexical => {
             write!(output, " r{}, scope={}", operands[0], operands[1])?
         }

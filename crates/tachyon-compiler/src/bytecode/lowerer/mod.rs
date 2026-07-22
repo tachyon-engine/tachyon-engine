@@ -676,6 +676,9 @@ impl Lowerer<'_> {
                     .is_some_and(|binding| binding.scope == self.root_scope)
             {
                 let binding = binding.as_ref().expect("checked above");
+                if let Some(local) = self.local_by_id(binding.id).cloned() {
+                    return self.initialize_local(&local, register, declarator.span);
+                }
                 let lexical = self
                     .environments
                     .global_lexical(binding.id)
@@ -695,6 +698,25 @@ impl Lowerer<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Initializes one TDZ-backed environment binding without confusing it with assignment.
+    fn initialize_local(
+        &mut self,
+        binding: &LocalBinding,
+        value: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        match binding.storage {
+            LocalStorage::Environment { depth, slot } => self.emit(
+                Opcode::InitializeEnvironment,
+                &[value.index(), depth, slot],
+                span,
+            ),
+            LocalStorage::Register(register) => {
+                self.emit(Opcode::Move, &[register.index(), value.index()], span)
+            }
+        }
     }
 
     /// Executes var initializers at their source position against bindings instantiated at entry.
@@ -1040,11 +1062,12 @@ impl Lowerer<'_> {
                 mutable: slot.mutable,
             })?;
             if let Some(register) = register {
-                self.emit(
-                    Opcode::StoreEnvironment,
-                    &[register.index(), 0, slot.slot],
-                    binding.span,
-                )?;
+                let opcode = if slot.initialized {
+                    Opcode::StoreEnvironment
+                } else {
+                    Opcode::InitializeEnvironment
+                };
+                self.emit(opcode, &[register.index(), 0, slot.slot], binding.span)?;
             }
             LocalStorage::Environment {
                 depth: 0,
@@ -1063,6 +1086,30 @@ impl Lowerer<'_> {
             id: binding.id,
             storage,
             mutable,
+        });
+        Ok(())
+    }
+
+    /// Publishes one entry-owned environment binding before script statements execute.
+    pub(super) fn add_environment_slot(
+        &mut self,
+        slot: &super::CapturedSlot,
+    ) -> Result<(), CompileError> {
+        self.add_binding_plan(BindingPlanEntry {
+            name: slot.name.clone(),
+            location: BindingLocation::Environment {
+                depth: 0,
+                slot: slot.slot,
+            },
+            mutable: slot.mutable,
+        })?;
+        self.locals.push(LocalBinding {
+            id: slot.id,
+            storage: LocalStorage::Environment {
+                depth: 0,
+                slot: slot.slot,
+            },
+            mutable: slot.mutable,
         });
         Ok(())
     }

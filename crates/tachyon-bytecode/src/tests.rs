@@ -177,6 +177,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefinePrivateMethod,
                 Opcode::DefinePrivateAccessor,
                 Opcode::HasPrivate,
+                Opcode::InitializeEnvironment,
             ],
         ),
         (

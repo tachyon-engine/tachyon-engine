@@ -333,7 +333,9 @@ impl BytecodeBuilder {
             | Opcode::HasPrivate => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
-            Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],
+            Opcode::LoadEnvironment | Opcode::StoreEnvironment | Opcode::InitializeEnvironment => {
+                &[0]
+            }
             Opcode::GetById | Opcode::SetById => &[0, 1],
             Opcode::DefineClassMethodById
             | Opcode::DefineClassGetterById

@@ -102,4 +102,6 @@ pub enum SourceMode {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompileOptions {
     pub source_mode: SourceMode,
+    /// Compiles Script root lexical bindings into an eval-local declarative environment.
+    pub direct_eval: bool,
 }

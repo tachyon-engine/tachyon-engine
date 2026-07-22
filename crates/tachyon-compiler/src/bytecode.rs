@@ -21,8 +21,12 @@ use crate::{
 };
 
 /// Lowers the currently supported HIR subset while preallocating builder and constant-pool storage from HIR counts.
-pub(crate) fn lower(source: &SourceText, hir: &HirProgram) -> Result<CompiledModule, CompileError> {
-    let environments = EnvironmentPlans::new(source, hir)?;
+pub(crate) fn lower(
+    source: &SourceText,
+    hir: &HirProgram,
+    options: crate::CompileOptions,
+) -> Result<CompiledModule, CompileError> {
+    let environments = EnvironmentPlans::new(source, hir, options.direct_eval)?;
     let module_capacity = capacity::estimate_module(hir)?;
     let mut constants = Vec::with_capacity(module_capacity.constants);
     let mut scope_names = Vec::with_capacity(module_capacity.scope_names);
@@ -116,13 +120,16 @@ fn lower_entry(
         source_name: source.name().clone(),
         script_scope: true,
         root_scope: hir.root_scope(),
-        function_scope: None,
+        function_scope: Some(hir.root_scope()),
         initialize_instance_elements: false,
         proper_tail_calls: false,
         needs_argument_source: false,
         active_scope: hir.root_scope(),
         environments,
     };
+    for slot in &environments.entry_slots {
+        lowerer.add_environment_slot(slot)?;
+    }
     for lexical in &environments.global_lexicals {
         let scope_name = lowerer.global_lexical_binding(lexical)?;
         lowerer.emit(
@@ -220,6 +227,8 @@ fn lower_entry(
         )?,
         layout: FunctionLayout {
             register_count,
+            environment_slot_count: u32::try_from(environments.entry_slots.len())
+                .map_err(|_| CompileError::BindingOverflow)?,
             max_handler_depth: entry_capacity.max_handler_depth,
             max_completion_depth: entry_capacity.max_completion_depth,
             ..FunctionLayout::default()
@@ -229,8 +238,12 @@ fn lower_entry(
         suspend_points: Default::default(),
         feedback_sites: Default::default(),
         binding_plan,
-        environment_record_kind: EnvironmentRecordKind::for_function_kind(kind),
-        environment_slots: Default::default(),
+        environment_record_kind: if environments.entry_slots.is_empty() {
+            EnvironmentRecordKind::for_function_kind(kind)
+        } else {
+            EnvironmentRecordKind::Declarative
+        },
+        environment_slots: freeze_environment_slot_metadata(&environments.entry_slots),
     };
     Ok(CompiledFunctionTemplate::new(
         FunctionId::new(0),
@@ -270,6 +283,8 @@ struct PrivateNameSlot {
 
 #[derive(Clone, Debug)]
 struct EnvironmentPlans {
+    root_scope: ScopeId,
+    entry_slots: Vec<CapturedSlot>,
     functions: Vec<FunctionEnvironmentPlan>,
     classes: Vec<ClassEnvironmentPlan>,
     global_lexicals: Vec<GlobalLexicalPlan>,
@@ -286,8 +301,10 @@ struct GlobalLexicalPlan {
 
 impl EnvironmentPlans {
     /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
-    fn new(source: &SourceText, hir: &HirProgram) -> Result<Self, CompileError> {
+    fn new(source: &SourceText, hir: &HirProgram, direct_eval: bool) -> Result<Self, CompileError> {
         let mut global_lexicals =
+            Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
+        let mut entry_slots =
             Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
         for statement in hir.statements() {
             let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
@@ -303,12 +320,24 @@ impl EnvironmentPlans {
                 let bindings = pattern_bindings(&declarator.pattern);
                 for binding in bindings {
                     if binding.scope == hir.root_scope() {
-                        global_lexicals.push(GlobalLexicalPlan {
-                            id: binding.id,
-                            name: binding.name.clone(),
-                            mutable: declaration.kind == HirVariableDeclarationKind::Let,
-                            span: declarator.span,
-                        });
+                        if direct_eval {
+                            let slot = u32::try_from(entry_slots.len())
+                                .map_err(|_| CompileError::BindingOverflow)?;
+                            entry_slots.push(CapturedSlot {
+                                id: binding.id,
+                                slot,
+                                name: binding.name.clone(),
+                                mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                                initialized: false,
+                            });
+                        } else {
+                            global_lexicals.push(GlobalLexicalPlan {
+                                id: binding.id,
+                                name: binding.name.clone(),
+                                mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                                span: declarator.span,
+                            });
+                        }
                     }
                 }
             }
@@ -426,6 +455,8 @@ impl EnvironmentPlans {
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
         Ok(Self {
+            root_scope: hir.root_scope(),
+            entry_slots,
             functions,
             classes,
             global_lexicals,
@@ -435,6 +466,9 @@ impl EnvironmentPlans {
 
     #[inline(always)]
     fn local_slot(&self, function_scope: ScopeId, binding: BindingId) -> Option<&CapturedSlot> {
+        if function_scope == self.scopes_root() {
+            return self.entry_slots.iter().find(|slot| slot.id == binding);
+        }
         self.functions
             .iter()
             .find(|function| function.scope == function_scope)?
@@ -448,6 +482,11 @@ impl EnvironmentPlans {
         self.global_lexicals
             .iter()
             .find(|lexical| lexical.id == binding)
+    }
+
+    #[inline(always)]
+    fn scopes_root(&self) -> ScopeId {
+        self.root_scope
     }
 
     /// Resolves a captured reference to the nearest allocated environment chain node.
@@ -477,6 +516,13 @@ impl EnvironmentPlans {
                 .iter()
                 .find(|function| function.scope == cursor)
                 .and_then(|function| function.slots.iter().find(|slot| slot.id == binding))
+            {
+                return Some((depth, slot, false));
+            }
+            if let Some(slot) = self
+                .entry_slots
+                .iter()
+                .find(|slot| slot.id == binding && cursor == self.scopes_root())
             {
                 return Some((depth, slot, false));
             }
@@ -517,9 +563,11 @@ impl EnvironmentPlans {
     }
 
     fn scope_has_environment(&self, scope: ScopeId) -> bool {
-        self.functions
-            .iter()
-            .any(|function| function.scope == scope && !function.slots.is_empty())
+        (scope == self.scopes_root() && !self.entry_slots.is_empty())
+            || self
+                .functions
+                .iter()
+                .any(|function| function.scope == scope && !function.slots.is_empty())
             || self.classes.iter().any(|class| class.scope == scope)
     }
 

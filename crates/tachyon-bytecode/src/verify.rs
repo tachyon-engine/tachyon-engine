@@ -968,7 +968,9 @@ fn verify_instruction(
             check_register(operands[1])?;
             check_register(operands[2])?;
         }
-        Opcode::LoadEnvironment | Opcode::StoreEnvironment => check_register(operands[0])?,
+        Opcode::LoadEnvironment | Opcode::StoreEnvironment | Opcode::InitializeEnvironment => {
+            check_register(operands[0])?
+        }
         Opcode::InitializeInstanceElements => check_register(operands[0])?,
         Opcode::GetById
         | Opcode::SetById
