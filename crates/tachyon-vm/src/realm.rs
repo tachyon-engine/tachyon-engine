@@ -148,6 +148,23 @@ impl Isolate {
             property_is_enumerable,
             true,
         )?;
+        let to_locale_string = self.allocate_native_function(
+            NativeFunction::ObjectToLocaleString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_to_locale_string = Some(to_locale_string);
+        let to_locale_string_atom = self.intern_intrinsic_name(b"toLocaleString")?;
+        self.set_intrinsic_data_property(
+            object_prototype,
+            to_locale_string_atom,
+            to_locale_string,
+            true,
+        )?;
         let to_string = self.allocate_native_function(
             NativeFunction::ObjectToString,
             OrdinaryObject {

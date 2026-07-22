@@ -158,6 +158,7 @@ pub(crate) struct Realm {
     pub(crate) object_get_own_property_names: Option<Value>,
     pub(crate) object_has_own_property: Option<Value>,
     pub(crate) object_property_is_enumerable: Option<Value>,
+    pub(crate) object_to_locale_string: Option<Value>,
     pub(crate) object_to_string: Option<Value>,
     pub(crate) object_value_of: Option<Value>,
     pub(crate) object_assign: Option<Value>,
@@ -277,6 +278,7 @@ impl Realm {
             object_get_own_property_names: None,
             object_has_own_property: None,
             object_property_is_enumerable: None,
+            object_to_locale_string: None,
             object_to_string: None,
             object_value_of: None,
             object_assign: None,
@@ -631,6 +633,7 @@ impl Trace for Realm {
         self.object_get_own_property_names.trace(tracer);
         self.object_has_own_property.trace(tracer);
         self.object_property_is_enumerable.trace(tracer);
+        self.object_to_locale_string.trace(tracer);
         self.object_to_string.trace(tracer);
         self.object_value_of.trace(tracer);
         self.object_assign.trace(tracer);

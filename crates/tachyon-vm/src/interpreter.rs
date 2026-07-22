@@ -1770,6 +1770,12 @@ impl Isolate {
             NativeContinuationKind::ErrorToString(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ObjectToLocaleString(stage) => {
+                if stage != ObjectToLocaleStringStage::Call {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                (continuation.first(), 0, None, 0)
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4170,6 +4176,9 @@ impl Isolate {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectToLocaleString) => {
+                    return self.begin_object_to_locale_string(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectValueOf) => {
                     let value = self.object_value_of(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -5367,6 +5376,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::ErrorToString(stage) => {
                     self.resume_error_to_string(continuation, stage, value)
+                }
+                NativeContinuationKind::ObjectToLocaleString(stage) => {
+                    self.resume_object_to_locale_string(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())

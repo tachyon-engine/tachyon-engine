@@ -505,6 +505,13 @@ pub(crate) enum ErrorToStringStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ObjectToLocaleStringStage {
+    Get,
+    Call,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
         consumer: ConversionConsumer,
@@ -542,6 +549,7 @@ pub(crate) enum NativeContinuationKind {
     InstanceElements(InstanceElementStage),
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
+    ObjectToLocaleString(ObjectToLocaleStringStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -562,6 +570,20 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn object_to_locale_string(
+        site: NativeContinuationSite,
+        stage: ObjectToLocaleStringStage,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ObjectToLocaleString(stage),
+            first: receiver,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     #[inline]
     pub(crate) const fn error_constructor(
         site: NativeContinuationSite,

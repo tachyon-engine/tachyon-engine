@@ -3,6 +3,79 @@
 use super::super::*;
 
 impl Isolate {
+    /// Begins the observable Get/Call sequence for Object.prototype.toLocaleString.
+    pub(crate) fn begin_object_to_locale_string(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let receiver = site.this_value;
+        if matches!(
+            receiver.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(receiver));
+        }
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let continuation = NativeContinuation::object_to_locale_string(
+            native_site,
+            ObjectToLocaleStringStage::Get,
+            receiver,
+        );
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let to_string = self.intern_intrinsic_name(b"toString")?;
+        if let Err(error) = self.dispatch_proxy_aware_property_read(
+            native_site,
+            receiver,
+            receiver,
+            to_string.into(),
+        ) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let callee = self.read(native_site.caller_base, native_site.destination)?;
+        self.resume_object_to_locale_string(continuation, ObjectToLocaleStringStage::Get, callee)
+    }
+
+    /// Resumes either the toString lookup or its receiver-preserving zero-argument call.
+    pub(crate) fn resume_object_to_locale_string(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: ObjectToLocaleStringStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            ObjectToLocaleStringStage::Get => {
+                self.resolve_function_object(value)?;
+                self.dispatch_property_callback(
+                    NativeContinuation::object_to_locale_string(
+                        continuation.site(),
+                        ObjectToLocaleStringStage::Call,
+                        continuation.first(),
+                    ),
+                    value,
+                )?;
+                Ok(())
+            }
+            ObjectToLocaleStringStage::Call => self.write(
+                continuation.site().caller_base,
+                continuation.site().destination,
+                value,
+            ),
+        }
+    }
+
     /// Applies the ordinary-object portion of SetIntegrityLevel without rebuilding storage.
     pub(crate) fn object_set_integrity_level(
         &mut self,

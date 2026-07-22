@@ -19,6 +19,7 @@ pub(crate) enum NativeFunction {
     ObjectGetOwnPropertySymbols,
     ObjectHasOwnProperty,
     ObjectPropertyIsEnumerable,
+    ObjectToLocaleString,
     ObjectToString,
     ObjectValueOf,
     ObjectAssign,
@@ -651,7 +652,8 @@ impl NativeFunction {
             | Self::GlobalIsNaN
             | Self::GlobalParseFloat
             | Self::GlobalParseInt => unreachable!(),
-            Self::ObjectToString
+            Self::ObjectToLocaleString
+            | Self::ObjectToString
             | Self::ObjectValueOf
             | Self::ErrorToString
             | Self::SymbolConstructor
@@ -686,6 +688,7 @@ impl NativeFunction {
             Self::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
             Self::ObjectHasOwnProperty => "hasOwnProperty",
             Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
+            Self::ObjectToLocaleString => "toLocaleString",
             Self::ObjectToString => "toString",
             Self::ObjectValueOf => "valueOf",
             Self::ObjectAssign => "assign",
