@@ -125,6 +125,8 @@ pub(crate) enum BuiltinPropertyKeyConsumer {
     PropertyIsEnumerable,
     DefineGetter,
     DefineSetter,
+    LookupGetter,
+    LookupSetter,
     HasOwn,
     ReflectDeleteProperty,
     ReflectHas,
@@ -427,6 +429,15 @@ pub(crate) enum ProxyGetOwnMode {
     Descriptor,
     HasOwn,
     Enumerable,
+    LookupGetter,
+    LookupSetter,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ObjectLookupAccessorStage {
+    GetOwn,
+    GetPrototype,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -555,6 +566,10 @@ pub(crate) enum NativeContinuationKind {
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ObjectIsPrototypeOf,
+    ObjectLookupAccessor {
+        stage: ObjectLookupAccessorStage,
+        setter: bool,
+    },
     ObjectToLocaleString(ObjectToLocaleStringStage),
     PromiseExecutor,
     PromiseReaction,
@@ -576,6 +591,22 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn object_lookup_accessor(
+        site: NativeContinuationSite,
+        stage: ObjectLookupAccessorStage,
+        setter: bool,
+        key: Value,
+        object: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ObjectLookupAccessor { stage, setter },
+            first: key,
+            second: object,
+        }
+    }
+
     #[inline]
     pub(crate) const fn object_is_prototype_of(
         site: NativeContinuationSite,

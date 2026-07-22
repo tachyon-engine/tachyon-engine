@@ -563,6 +563,207 @@ impl Isolate {
         )
     }
 
+    /// Starts a legacy accessor lookup after ToObject and resumable key conversion.
+    pub(crate) fn object_lookup_legacy_accessor(
+        &mut self,
+        site: &CallSite,
+        setter: bool,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.object_value_of(site.this_value)?;
+        self.write(site.caller_base, site.destination, receiver)?;
+        let key = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.dispatch_builtin_property_key(
+            if setter {
+                BuiltinPropertyKeyConsumer::LookupSetter
+            } else {
+                BuiltinPropertyKeyConsumer::LookupGetter
+            },
+            site,
+            receiver,
+            key,
+            Value::from_immediate(Immediate::Undefined),
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Walks ordinary prototypes synchronously and publishes state only at a Proxy boundary.
+    pub(crate) fn begin_object_lookup_accessor(
+        &mut self,
+        site: NativeContinuationSite,
+        mut object: Value,
+        key: Value,
+        setter: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let key_identity = self.property_key(key)?;
+        loop {
+            if self.is_proxy_value(object) {
+                return self.dispatch_object_lookup_get_own(site, object, key, setter);
+            }
+            if let Some(descriptor) = self.complete_own_property_descriptor(object, key_identity)? {
+                let result = match descriptor {
+                    PropertyDescriptor::Accessor(descriptor) if setter => descriptor.setter,
+                    PropertyDescriptor::Accessor(descriptor) => descriptor.getter,
+                    PropertyDescriptor::Data(_) | PropertyDescriptor::Generic(_) => None,
+                }
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                self.write(site.caller_base, site.destination, result)?;
+                return Ok(None);
+            }
+            let prototype = self.object_snapshot(object)?.1.prototype;
+            if prototype.as_immediate() == Some(Immediate::Null) {
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )?;
+                return Ok(None);
+            }
+            object = prototype;
+        }
+    }
+
+    /// Wraps one Proxy [[GetOwnProperty]] call with the lookup consumer continuation.
+    fn dispatch_object_lookup_get_own(
+        &mut self,
+        site: NativeContinuationSite,
+        object: Value,
+        key: Value,
+        setter: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.push_object_lookup_accessor(
+            site,
+            ObjectLookupAccessorStage::GetOwn,
+            setter,
+            key,
+            object,
+        )?;
+        let completion_depth = self.fiber.completions.len() - 1;
+        let frame_depth = self.fiber.frames.len();
+        let mode = if setter {
+            ProxyGetOwnMode::LookupSetter
+        } else {
+            ProxyGetOwnMode::LookupGetter
+        };
+        let outcome = match self.dispatch_proxy_get_own(site, object, key, mode) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_object_lookup_accessor(continuation, value)
+    }
+
+    /// Resumes either descriptor lookup or the following Proxy prototype lookup.
+    pub(crate) fn resume_object_lookup_accessor(
+        &mut self,
+        continuation: NativeContinuation,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let NativeContinuationKind::ObjectLookupAccessor { stage, setter } = continuation.kind()
+        else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        match stage {
+            ObjectLookupAccessorStage::GetOwn if value.as_immediate() != Some(Immediate::Hole) => {
+                self.write(
+                    continuation.site().caller_base,
+                    continuation.site().destination,
+                    value,
+                )?;
+                Ok(None)
+            }
+            ObjectLookupAccessorStage::GetOwn => {
+                self.dispatch_object_lookup_get_prototype(continuation, setter)
+            }
+            ObjectLookupAccessorStage::GetPrototype => {
+                if value.as_immediate() == Some(Immediate::Null) {
+                    self.write(
+                        continuation.site().caller_base,
+                        continuation.site().destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    )?;
+                    return Ok(None);
+                }
+                self.begin_object_lookup_accessor(
+                    continuation.site(),
+                    value,
+                    continuation.first(),
+                    setter,
+                )
+            }
+        }
+    }
+
+    /// Obtains a Proxy prototype after its own descriptor was absent.
+    fn dispatch_object_lookup_get_prototype(
+        &mut self,
+        continuation: NativeContinuation,
+        setter: bool,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let object = continuation.second();
+        let key = continuation.first();
+        self.push_object_lookup_accessor(
+            site,
+            ObjectLookupAccessorStage::GetPrototype,
+            setter,
+            key,
+            object,
+        )?;
+        let completion_depth = self.fiber.completions.len() - 1;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = match self.dispatch_proxy_internal_method(
+            site,
+            object,
+            ProxyInternalMethod::GetPrototypeOf,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_object_lookup_accessor(continuation, value)
+    }
+
+    #[inline]
+    fn push_object_lookup_accessor(
+        &mut self,
+        site: NativeContinuationSite,
+        stage: ObjectLookupAccessorStage,
+        setter: bool,
+        key: Value,
+        object: Value,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::object_lookup_accessor(
+                site, stage, setter, key, object,
+            ))
+            .map_err(Self::completion_stack_error)
+    }
+
     /// Implements the static Object.hasOwn nullish boundary and ordinary own-property query.
     pub(crate) fn object_has_own(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let object = self

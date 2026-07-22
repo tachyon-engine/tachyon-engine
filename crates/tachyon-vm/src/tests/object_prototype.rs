@@ -114,6 +114,28 @@ descriptor.get === getter && descriptor.set === setter && descriptor.enumerable 
 descriptor.configurable && proxy.answer === 7 && trace === "kp";
 "#;
 
+const OBJECT_LOOKUP_LEGACY_ACCESSOR_SOURCE: &str = r#"
+var trace = "";
+function getter() { return 1; }
+function setter(value) {}
+var root = {};
+root.__defineGetter__("value", getter);
+root.__defineSetter__("value", setter);
+var proxy = new Proxy({}, {
+  getOwnPropertyDescriptor(target, key) { trace += "o"; return undefined; },
+  getPrototypeOf(target) { trace += "p"; return root; }
+});
+var subject = Object.create(proxy);
+var key = { [Symbol.toPrimitive]() { trace += "k"; return "value"; } };
+var foundGetter = subject.__lookupGetter__(key);
+var foundSetter = subject.__lookupSetter__("value");
+var shadow = Object.create(root);
+Object.defineProperty(shadow, "value", { value: 1 });
+foundGetter === getter && foundSetter === setter &&
+shadow.__lookupGetter__("value") === undefined &&
+shadow.__lookupSetter__("value") === undefined && trace === "kopop";
+"#;
+
 #[test]
 fn object_value_of_executes_for_every_dispatch_batch() {
     assert_object_value_of_batch::<1>();
@@ -242,6 +264,38 @@ fn object_define_legacy_accessor_survives_forced_major_collections() {
     ));
 }
 
+#[test]
+fn object_lookup_legacy_accessor_resumes_for_every_dispatch_batch() {
+    assert_lookup_legacy_accessor_batch::<1>();
+    assert_lookup_legacy_accessor_batch::<2>();
+    assert_lookup_legacy_accessor_batch::<4>();
+    assert_lookup_legacy_accessor_batch::<8>();
+    assert_lookup_legacy_accessor_batch::<16>();
+}
+
+#[test]
+/// Forces collection across Proxy get-own/get-prototype callbacks and key conversion.
+fn object_lookup_legacy_accessor_survives_forced_major_collections() {
+    let module = compile_object_source(OBJECT_LOOKUP_LEGACY_ACCESSOR_SOURCE, 162);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("forced-major legacy accessor lookup fixture executes");
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
 /// Executes the Object.prototype.valueOf contract with one selected dispatch monomorphization.
 fn assert_object_value_of_batch<const N: usize>() {
     let module = compile_object_value_of_source(100 + N as u32);
@@ -316,6 +370,25 @@ fn assert_define_legacy_accessor_batch<const N: usize>() {
             },
         )
         .expect("legacy accessor fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes legacy getter/setter lookup through one Proxy prototype with one batch size.
+fn assert_lookup_legacy_accessor_batch<const N: usize>() {
+    let module = compile_object_source(OBJECT_LOOKUP_LEGACY_ACCESSOR_SOURCE, 160 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("legacy accessor lookup fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

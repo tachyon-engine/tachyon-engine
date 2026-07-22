@@ -379,6 +379,32 @@ impl Isolate {
                     .and_then(PropertyDescriptor::enumerable)
                     .unwrap_or(false),
             ),
+            ProxyGetOwnMode::LookupGetter | ProxyGetOwnMode::LookupSetter => {
+                let Some(descriptor) = descriptor else {
+                    self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Hole),
+                    )?;
+                    return Ok(None);
+                };
+                match descriptor {
+                    PropertyDescriptor::Accessor(descriptor) => {
+                        if mode == ProxyGetOwnMode::LookupSetter {
+                            descriptor
+                                .setter
+                                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+                        } else {
+                            descriptor
+                                .getter
+                                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+                        }
+                    }
+                    PropertyDescriptor::Data(_) | PropertyDescriptor::Generic(_) => {
+                        Value::from_immediate(Immediate::Undefined)
+                    }
+                }
+            }
         };
         self.write(site.caller_base, site.destination, result)?;
         Ok(None)

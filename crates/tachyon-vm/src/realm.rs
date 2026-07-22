@@ -157,6 +157,14 @@ impl Isolate {
                 b"__defineSetter__".as_slice(),
                 NativeFunction::ObjectDefineSetter,
             ),
+            (
+                b"__lookupGetter__".as_slice(),
+                NativeFunction::ObjectLookupGetter,
+            ),
+            (
+                b"__lookupSetter__".as_slice(),
+                NativeFunction::ObjectLookupSetter,
+            ),
         ] {
             let method = self.allocate_native_function(
                 native,

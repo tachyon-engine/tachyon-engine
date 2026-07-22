@@ -131,6 +131,15 @@ impl Isolate {
                     Value::from_immediate(Immediate::Undefined),
                 )
             }
+            BuiltinPropertyKeyConsumer::LookupGetter | BuiltinPropertyKeyConsumer::LookupSetter => {
+                self.begin_object_lookup_accessor(
+                    site,
+                    pending.first,
+                    primitive,
+                    consumer == BuiltinPropertyKeyConsumer::LookupSetter,
+                )
+                .map(|_| ())
+            }
             BuiltinPropertyKeyConsumer::ReflectDefineProperty => {
                 self.begin_property_descriptor(site, pending.first, key, pending.second, true)
             }

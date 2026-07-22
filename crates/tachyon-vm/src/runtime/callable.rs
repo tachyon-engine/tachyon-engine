@@ -21,6 +21,8 @@ pub(crate) enum NativeFunction {
     ObjectPropertyIsEnumerable,
     ObjectDefineGetter,
     ObjectDefineSetter,
+    ObjectLookupGetter,
+    ObjectLookupSetter,
     ObjectToLocaleString,
     ObjectToString,
     ObjectValueOf,
@@ -510,6 +512,8 @@ impl NativeFunction {
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
             | Self::ObjectPropertyIsEnumerable
+            | Self::ObjectLookupGetter
+            | Self::ObjectLookupSetter
             | Self::ObjectKeys
             | Self::ObjectValues
             | Self::ObjectEntries
@@ -693,6 +697,8 @@ impl NativeFunction {
             Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
             Self::ObjectDefineGetter => "__defineGetter__",
             Self::ObjectDefineSetter => "__defineSetter__",
+            Self::ObjectLookupGetter => "__lookupGetter__",
+            Self::ObjectLookupSetter => "__lookupSetter__",
             Self::ObjectToLocaleString => "toLocaleString",
             Self::ObjectToString => "toString",
             Self::ObjectValueOf => "valueOf",

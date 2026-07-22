@@ -1773,6 +1773,9 @@ impl Isolate {
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ObjectLookupAccessor { .. } => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectToLocaleString(stage) => {
                 if stage != ObjectToLocaleStringStage::Call {
                     return Err(ExecutionError::MissingNativeContinuation);
@@ -4035,6 +4038,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectDefineSetter) => {
                     return self.object_define_legacy_accessor(&site, true);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectLookupGetter) => {
+                    return self.object_lookup_legacy_accessor(&site, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectLookupSetter) => {
+                    return self.object_lookup_legacy_accessor(&site, true);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwn) => {
                     return self.object_has_own(&site);
                 }
@@ -5379,6 +5388,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::ObjectIsPrototypeOf => self
                     .resume_object_is_prototype_of(continuation, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ObjectLookupAccessor { .. } => self
+                    .resume_object_lookup_accessor(continuation, value)
                     .map(|_| ()),
                 NativeContinuationKind::ObjectToLocaleString(stage) => {
                     self.resume_object_to_locale_string(continuation, stage, value)
