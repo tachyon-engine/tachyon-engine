@@ -248,6 +248,22 @@ impl Isolate {
             .heap
             .checked_reference(raw, self.types.exclusion_list)
             .map_err(|_| ExecutionError::InvalidExclusionList(exclusions))?;
+        if self.is_proxy_value(source) {
+            let state = self.allocate_pending_copy_data_properties(PendingCopyDataProperties {
+                target,
+                source,
+                exclusions,
+                keys: Box::new([]),
+                index: 0,
+                consumer,
+            })?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            return self.dispatch_copy_data_properties_own_keys(site, state, source);
+        }
         let (_, snapshot) = self.object_snapshot(source)?;
         let keys = self.ordinary_own_property_keys(source, snapshot)?;
         let string_length = if self.is_string_wrapper(source) {
@@ -345,6 +361,80 @@ impl Isolate {
         }
     }
 
+    /// Resumes Proxy ownKeys, descriptor-enumerability, or Get for one source key.
+    pub(crate) fn resume_copy_data_properties_stage(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: CopyDataPropertiesStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let state = self.pending_copy_data_properties_reference(continuation.first())?;
+        match stage {
+            CopyDataPropertiesStage::OwnKeys => {
+                self.resume_copy_data_properties_own_keys(site, state, value)
+            }
+            CopyDataPropertiesStage::Enumerable => {
+                if !self.is_truthy_value(value)? {
+                    return self.advance_copy_data_properties(site, state);
+                }
+                let key_value = continuation.second();
+                let key = self.property_key(key_value)?;
+                let source = self.pending_copy_data_properties(state)?.source;
+                self.dispatch_copy_data_properties_get(site, state, source, key, key_value)
+            }
+            CopyDataPropertiesStage::Get => {
+                let key = self.property_key(continuation.second())?;
+                let pending = self.pending_copy_data_properties(state)?;
+                match self.write_copy_data_property(site, state, pending, key, value)? {
+                    CopyDataPropertyAction::Continue => {
+                        self.advance_copy_data_properties(site, state)
+                    }
+                    CopyDataPropertyAction::Dispatched(outcome) => Ok(outcome),
+                }
+            }
+        }
+    }
+
+    /// Converts a materialized Proxy ownKeys array into the copy state's exact key snapshot.
+    fn resume_copy_data_properties_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        old_state: GcRef<PendingCopyDataProperties>,
+        result: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let length = self
+            .get_data_property(result, length_key)?
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::ArrayLengthOverflow)? as usize;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(length)
+            .map_err(|_| ExecutionError::CopyDataPropertiesAllocationFailed)?;
+        for index in 0..length {
+            let index_key = PropertyKey::Atom(self.safe_integer_property_atom(index as u64)?);
+            let key = self
+                .get_data_property(result, index_key)?
+                .ok_or(ExecutionError::ProxyInvariantViolation)?;
+            keys.push(self.property_key(key)?);
+        }
+        let pending = self.pending_copy_data_properties(old_state)?;
+        let state = self.allocate_pending_copy_data_properties(PendingCopyDataProperties {
+            target: pending.target,
+            source: pending.source,
+            exclusions: pending.exclusions,
+            keys: keys.into_boxed_slice(),
+            index: 0,
+            consumer: pending.consumer,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_copy_data_properties(site, state)
+    }
+
     /// Processes non-accessor keys synchronously and suspends only at the next observable getter.
     fn advance_copy_data_properties(
         &mut self,
@@ -359,6 +449,15 @@ impl Isolate {
             self.advance_pending_copy_data_properties(state)?;
             if self.exclusion_list_contains_value(pending.exclusions, key)? {
                 continue;
+            }
+            if self.is_proxy_value(pending.source) {
+                let key_value = self.property_key_value(key)?;
+                return self.dispatch_copy_data_properties_enumerable(
+                    site,
+                    state,
+                    pending.source,
+                    key_value,
+                );
             }
             let Some(descriptor) = self.complete_own_property_descriptor(pending.source, key)?
             else {
@@ -400,6 +499,14 @@ impl Isolate {
                     );
                 }
             }
+        }
+    }
+
+    fn property_key_value(&mut self, key: PropertyKey) -> Result<Value, ExecutionError> {
+        match key {
+            PropertyKey::Atom(atom) => self.atom_string_value(atom),
+            PropertyKey::Symbol(symbol) => Ok(symbol.value()),
+            PropertyKey::Private(_) => Err(ExecutionError::PrivatePropertyKeyEscaped),
         }
     }
 
@@ -517,6 +624,96 @@ impl Isolate {
         self.pop_native_continuation()?;
         self.resume_object_assign_set(site, state)
             .map(CopyDataPropertyAction::Dispatched)
+    }
+
+    /// Requests Proxy [[OwnPropertyKeys]] while retaining the empty copy state as parent.
+    fn dispatch_copy_data_properties_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        source: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::copy_data_properties_stage(
+            site,
+            CopyDataPropertiesStage::OwnKeys,
+            Value::from_heap_ref(state.raw()),
+            Value::from_immediate(Immediate::Undefined),
+        );
+        self.dispatch_copy_data_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_own_keys(site, source, ProxyOwnKeysMode::Internal)
+        })
+    }
+
+    /// Requests Proxy [[GetOwnProperty]] and resumes only for enumerable keys.
+    fn dispatch_copy_data_properties_enumerable(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        source: Value,
+        key: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::copy_data_properties_stage(
+            site,
+            CopyDataPropertiesStage::Enumerable,
+            Value::from_heap_ref(state.raw()),
+            key,
+        );
+        self.dispatch_copy_data_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_get_own(site, source, key, ProxyGetOwnMode::Enumerable)
+        })
+    }
+
+    /// Requests Proxy [[Get]] for an enumerable source key.
+    fn dispatch_copy_data_properties_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        source: Value,
+        key: PropertyKey,
+        key_value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::copy_data_properties_stage(
+            site,
+            CopyDataPropertiesStage::Get,
+            Value::from_heap_ref(state.raw()),
+            key_value,
+        );
+        self.dispatch_copy_data_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_aware_property_read(site, source, source, key)
+        })
+    }
+
+    /// Runs one Proxy operation and drains its parent continuation on synchronous completion.
+    fn dispatch_copy_data_properties_proxy_operation(
+        &mut self,
+        continuation: NativeContinuation,
+        operation: impl FnOnce(&mut Self) -> Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let outcome = operation(self);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let site = continuation.site();
+        let value = self.read(site.caller_base, site.destination)?;
+        let NativeContinuationKind::CopyDataProperties(stage) = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        self.resume_copy_data_properties_stage(continuation, stage, value)
     }
 
     fn exclusion_list_contains(

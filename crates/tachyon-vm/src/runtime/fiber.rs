@@ -358,6 +358,14 @@ pub(crate) enum PropertyWriteMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+pub(crate) enum CopyDataPropertiesStage {
+    OwnKeys,
+    Enumerable,
+    Get,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub(crate) enum ProxySetMode {
     Assignment,
     Reflect,
@@ -631,6 +639,7 @@ pub(crate) enum NativeContinuationKind {
     },
     CollectionInitializer(CollectionInitializerStage),
     CollectionIteratorClose(CollectionIteratorCloseStage),
+    CopyDataProperties(CopyDataPropertiesStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
@@ -1247,6 +1256,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertyGet(PropertyCallbackMode::CopyDataProperties),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn copy_data_properties_stage(
+        site: NativeContinuationSite,
+        stage: CopyDataPropertiesStage,
+        state: Value,
+        key: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::CopyDataProperties(stage),
+            first: state,
+            second: key,
         }
     }
 

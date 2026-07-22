@@ -1839,6 +1839,9 @@ impl Isolate {
             NativeContinuationKind::CollectionIteratorClose(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::CopyDataProperties(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5967,6 +5970,9 @@ impl Isolate {
                 NativeContinuationKind::CollectionIteratorClose(_) => {
                     unreachable!("iterator close resumes before native dispatch")
                 }
+                NativeContinuationKind::CopyDataProperties(stage) => self
+                    .resume_copy_data_properties_stage(continuation, stage, value)
+                    .map(|_| ()),
                 NativeContinuationKind::CollectionForEach => {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;
                     self.resume_collection_for_each(site, state)
