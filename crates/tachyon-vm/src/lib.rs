@@ -87,6 +87,17 @@ impl RealmId {
 /// Host callback used by embedding harnesses to compile and execute `evalScript` in one Realm.
 pub type EvalScriptCallback = fn(&mut Isolate, RealmId, Value) -> Result<Value, ExecutionError>;
 
+/// Host callback used to compile dynamic `Function` constructor source in one Realm.
+pub type DynamicFunctionCallback = fn(&mut Isolate, RealmId) -> Result<Value, ExecutionError>;
+
+#[derive(Clone, Copy)]
+pub(crate) enum IntrinsicPrototypeKind {
+    Object,
+    Array,
+    Boolean,
+    String,
+}
+
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;

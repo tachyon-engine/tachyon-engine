@@ -46,6 +46,7 @@ pub struct Isolate {
     pub(crate) active_realm: RealmId,
     pub(crate) next_realm_serial: NonZeroU32,
     pub(crate) eval_script_callback: Option<EvalScriptCallback>,
+    pub(crate) dynamic_function_callback: Option<DynamicFunctionCallback>,
     pub(crate) suspended_fibers: Vec<Fiber>,
     pub(crate) loaded_code: Vec<LoadedCode>,
     pub(crate) heap: Heap,
@@ -60,6 +61,27 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    /// Returns one Realm-local intrinsic without changing the active execution context.
+    pub(crate) fn realm_intrinsic_prototype(
+        &self,
+        realm: RealmId,
+        kind: IntrinsicPrototypeKind,
+    ) -> Option<Value> {
+        let lookup = |realm: &Realm| match kind {
+            IntrinsicPrototypeKind::Object => realm.object_prototype,
+            IntrinsicPrototypeKind::Array => realm.array_prototype,
+            IntrinsicPrototypeKind::Boolean => realm.boolean_prototype,
+            IntrinsicPrototypeKind::String => realm.string_prototype,
+        };
+        if realm == self.active_realm {
+            return lookup(&self.realm);
+        }
+        self.inactive_realms
+            .iter()
+            .find(|(id, _)| *id == realm)
+            .and_then(|(_, realm)| lookup(realm))
+    }
+
     /// Creates an independent Realm in the same GC heap and returns its global object identity.
     pub fn create_realm(&mut self) -> Result<(RealmId, Value), ExecutionError> {
         let id = RealmId::from_non_zero(self.next_realm_serial);
@@ -112,8 +134,10 @@ impl Isolate {
     pub fn install_realm_hooks(
         &mut self,
         eval_script: EvalScriptCallback,
+        dynamic_function: DynamicFunctionCallback,
     ) -> Result<(), ExecutionError> {
         self.eval_script_callback = Some(eval_script);
+        self.dynamic_function_callback = Some(dynamic_function);
         self.install_realm_hooks_current()
     }
 
@@ -396,6 +420,7 @@ impl Isolate {
             active_realm: RealmId::MAIN,
             next_realm_serial: NonZeroU32::new(2).expect("two is non-zero"),
             eval_script_callback: None,
+            dynamic_function_callback: None,
             suspended_fibers: Vec::new(),
             loaded_code: Vec::new(),
             heap,

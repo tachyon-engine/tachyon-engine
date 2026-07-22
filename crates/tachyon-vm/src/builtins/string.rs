@@ -38,8 +38,13 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let prototype_atom = self.prototype_atom()?;
         let prototype = self
-            .get_data_property(new_target, prototype_atom)?
+            .constructor_prototype_value(new_target, prototype_atom)?
             .filter(|value| self.is_object_value(*value))
+            .or_else(|| {
+                self.realm_for_callable(new_target).ok().and_then(|realm| {
+                    self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::String)
+                })
+            })
             .unwrap_or_else(|| {
                 self.realm
                     .string_prototype

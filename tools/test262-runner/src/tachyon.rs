@@ -68,6 +68,37 @@ fn eval_script_callback(
     }
 }
 
+/// Compiles the empty dynamic Function used by cross-realm constructor tests.
+fn dynamic_function_callback(
+    isolate: &mut Isolate,
+    realm: RealmId,
+) -> Result<Value, ExecutionError> {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(u32::MAX - 2),
+                SourceName::new("Function"),
+                MediaType::JavaScript,
+                Arc::from("(function(){})"),
+            ),
+            options(SourceMode::Script),
+        )
+        .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+    match isolate.execute_in_realm(
+        realm,
+        &module,
+        ExecutionBudget {
+            fuel: EXECUTION_FUEL_LIMIT,
+            quantum: u32::MAX,
+        },
+    )? {
+        RunOutcome::Completed(value) => Ok(value),
+        RunOutcome::Thrown(_) | RunOutcome::BudgetExhausted => {
+            Err(ExecutionError::UnsupportedDynamicFunctionConstructor)
+        }
+    }
+}
+
 /// Stateless in-process Test262 adapter; each request owns an independent Tachyon isolate.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TachyonAdapter;
@@ -115,7 +146,8 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),
     };
-    if let Err(error) = isolate.install_realm_hooks(eval_script_callback) {
+    if let Err(error) = isolate.install_realm_hooks(eval_script_callback, dynamic_function_callback)
+    {
         return unsupported(format!("Tachyon realm hook installation failed: {error:?}"));
     }
     for (index, prelude) in request.test.preludes.iter().enumerate() {

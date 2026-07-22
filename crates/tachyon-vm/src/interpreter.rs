@@ -3728,7 +3728,8 @@ impl Isolate {
                     return self.begin_weak_set_from_site(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
-                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+                    let function = self.create_dynamic_function_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, function);
                 }
                 FunctionExecutable::Bytecode { code, function, .. } => {
                     let kind = self
@@ -3776,6 +3777,13 @@ impl Isolate {
         let prototype = self
             .constructor_prototype_value(site.new_target, prototype_atom)?
             .filter(|value| self.is_object_value(*value))
+            .or_else(|| {
+                self.realm_for_callable(site.new_target)
+                    .ok()
+                    .and_then(|realm| {
+                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Object)
+                    })
+            })
             .unwrap_or(Value::from_immediate(Immediate::Null));
         let receiver = self.create_ordinary_object_with_prototype(prototype)?;
         site.this_value = receiver;
@@ -4777,7 +4785,8 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, bound);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
-                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+                    let function = self.create_dynamic_function_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, function);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                     return self.begin_error_constructor(&site, kind);
@@ -5290,6 +5299,55 @@ impl Isolate {
             return self.is_callable_value(target);
         }
         Ok(self.resolve_function_object(value).is_ok())
+    }
+
+    /// Creates the zero-argument dynamic Function through the embedding compiler callback.
+    fn create_dynamic_function_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        if site.argument_count != 0 {
+            return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+        }
+        let callback = self
+            .dynamic_function_callback
+            .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        let realm = self.realm_for_callable(site.callee)?;
+        callback(self, realm)
+    }
+
+    /// Resolves a callable's defining Realm through Proxy and Bound exotic layers.
+    #[cold]
+    pub(crate) fn realm_for_callable(&mut self, value: Value) -> Result<RealmId, ExecutionError> {
+        if self.is_proxy_value(value) {
+            let target = self.proxy_snapshot(value)?.target;
+            return self.realm_for_callable(target);
+        }
+        let function = self.resolve_function_object(value)?;
+        match function.executable {
+            FunctionExecutable::Bytecode { code, .. } => Ok(self.loaded_code(code)?.realm),
+            FunctionExecutable::ClassBytecode(data) => {
+                let data = self.class_constructor_snapshot(data)?;
+                Ok(self.loaded_code(data.code)?.realm)
+            }
+            FunctionExecutable::Bound(data) => {
+                let target = self.bound_function_snapshot(data)?.call_target;
+                self.realm_for_callable(target)
+            }
+            FunctionExecutable::Native(_) => {
+                let prototype = function.ordinary.prototype;
+                if self.realm.function_prototype == Some(prototype) {
+                    return Ok(self.active_realm);
+                }
+                for (id, realm) in &self.inactive_realms {
+                    if realm.function_prototype == Some(prototype) {
+                        return Ok(*id);
+                    }
+                }
+                Ok(self.active_realm)
+            }
+            _ => Ok(self.active_realm),
+        }
     }
 
     /// Copies only callable dispatch metadata through a checked no-GC borrow on the hot path.

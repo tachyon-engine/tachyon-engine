@@ -38,6 +38,13 @@ impl Isolate {
             let prototype_atom = self.prototype_atom()?;
             self.constructor_prototype_value(site.new_target, prototype_atom)?
                 .filter(|value| self.is_object_value(*value))
+                .or_else(|| {
+                    self.realm_for_callable(site.new_target)
+                        .ok()
+                        .and_then(|realm| {
+                            self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Array)
+                        })
+                })
                 .unwrap_or(default_prototype)
         } else {
             default_prototype
