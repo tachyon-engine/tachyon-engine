@@ -327,6 +327,7 @@ pub(crate) enum PropertyCallbackMode {
     ArrayIteratorElement,
     ArgumentList,
     CopyDataProperties,
+    DefineProperties,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

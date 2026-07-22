@@ -131,8 +131,8 @@ use promise_state::{
 };
 use property::copy::{ExclusionList, PendingCopyDataProperties, PendingObjectAssign};
 use property::{
-    PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite,
-    PropertyWriteResolution,
+    PendingDefineProperties, PendingPropertyDescriptor, PropertyRead, PropertyReadResolution,
+    PropertyWrite, PropertyWriteResolution,
 };
 use proxy::PendingProxyOwnKeys;
 use proxy::{

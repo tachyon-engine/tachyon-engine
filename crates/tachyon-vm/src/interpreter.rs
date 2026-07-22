@@ -1650,6 +1650,7 @@ impl Isolate {
                     mode,
                     PropertyCallbackMode::ArrayIteratorLength
                         | PropertyCallbackMode::ArrayIteratorElement
+                        | PropertyCallbackMode::DefineProperties
                 ) {
                     continuation.second()
                 } else if mode == PropertyCallbackMode::CopyDataProperties {
@@ -4506,8 +4507,7 @@ impl Isolate {
                     return self.object_define_property(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectDefineProperties) => {
-                    let value = self.object_define_properties(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_object_define_properties(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectFromEntries) => {
                     return self.begin_object_from_entries(&site);
@@ -5911,6 +5911,10 @@ impl Isolate {
                             self.pending_copy_data_properties_reference(continuation.first())?;
                         self.resume_copy_data_properties(site, state, value)
                             .map(|_| ())
+                    } else if mode == PropertyCallbackMode::DefineProperties {
+                        let state =
+                            self.pending_define_properties_reference(continuation.first())?;
+                        self.resume_define_properties_descriptor_get(site, state, value)
                     } else if mode == PropertyCallbackMode::ArgumentList {
                         let state = self.pending_argument_list_reference(continuation.first())?;
                         self.resume_argument_list(site, state, value)

@@ -17,6 +17,7 @@ mod calls;
 mod class;
 mod control;
 mod conversion;
+mod define_properties;
 mod dispatch;
 mod environments;
 mod errors;

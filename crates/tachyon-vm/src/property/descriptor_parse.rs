@@ -21,6 +21,32 @@ enum PropertyDescriptorConsumer {
     Define,
     ReflectDefine,
     ProxyGetOwn(ProxyGetOwnMode),
+    DefineProperties(Value),
+}
+
+/// GC-managed Object.defineProperties key scan retained across descriptor getters.
+#[derive(Debug)]
+pub(crate) struct PendingDefineProperties {
+    target: Value,
+    source: Value,
+    keys: Box<[PropertyKey]>,
+    index: usize,
+}
+
+impl Trace for PendingDefineProperties {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.target.trace(tracer);
+        self.source.trace(tracer);
+        self.keys.trace(tracer);
+    }
+}
+
+impl GcExternalMemory for PendingDefineProperties {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.keys.len() * core::mem::size_of::<PropertyKey>()
+    }
 }
 
 impl PropertyDescriptorField {
@@ -160,6 +186,9 @@ impl Trace for PendingPropertyDescriptor {
             value.trace(tracer);
         }
         self.values.trace(tracer);
+        if let PropertyDescriptorConsumer::DefineProperties(state) = &mut self.consumer {
+            state.trace(tracer);
+        }
     }
 }
 
@@ -177,6 +206,57 @@ impl Trace for PendingPropertyDescriptorRoots<'_> {
 }
 
 impl Isolate {
+    /// Starts Object.defineProperties with an exact enumerable key snapshot.
+    pub(crate) fn begin_object_define_properties(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let source = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NotObject(target));
+        }
+        if !self.is_object_value(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let mut own_keys = self.ordinary_own_property_keys(source, snapshot)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(own_keys.len())
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        while let Some(entry) = own_keys.next_entry() {
+            if entry
+                .property
+                .is_some_and(|property| property.attributes.enumerable())
+            {
+                keys.push(entry.key);
+            }
+        }
+        let state = self.allocate_pending_define_properties(PendingDefineProperties {
+            target,
+            source,
+            keys: keys.into_boxed_slice(),
+            index: 0,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_define_properties(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            state,
+        )
+    }
+
     #[inline]
     pub(crate) fn pending_property_descriptor_reference(
         &self,
@@ -217,6 +297,91 @@ impl Isolate {
             PropertyDescriptorConsumer::Define
         };
         let mut pending = PendingPropertyDescriptor::new(target, source, key, consumer);
+        self.scan_property_descriptor(site, &mut pending)
+    }
+
+    /// Resumes the descriptor-map getter before scanning its six descriptor fields.
+    pub(crate) fn resume_define_properties_descriptor_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        descriptor: Value,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.pending_define_properties(state)?;
+        let key = pending
+            .key
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.begin_define_properties_descriptor(site, state, key, descriptor)
+    }
+
+    /// Applies one parsed descriptor and continues the descriptor-map scan.
+    fn finish_define_properties_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        let target = self.pending_define_properties(state)?.target;
+        self.define_property(target, key, descriptor)?;
+        self.advance_pending_define_properties(state)?;
+        self.advance_define_properties(site, state)
+    }
+
+    /// Scans descriptor-map properties and suspends only on observable getters.
+    fn advance_define_properties(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            let pending = self.pending_define_properties(state)?;
+            let Some(key) = pending.key else {
+                return self.write(site.caller_base, site.destination, pending.target);
+            };
+            match self.resolve_property_read(pending.source, key)? {
+                PropertyRead::Missing => self.advance_pending_define_properties(state)?,
+                PropertyRead::Data(descriptor) => {
+                    return self.begin_define_properties_descriptor(site, state, key, descriptor);
+                }
+                PropertyRead::Accessor(getter)
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    self.advance_pending_define_properties(state)?;
+                }
+                PropertyRead::Accessor(callee) => {
+                    return self
+                        .dispatch_property_callback(
+                            NativeContinuation::array_iterator_property_get(
+                                site,
+                                PropertyCallbackMode::DefineProperties,
+                                Value::from_heap_ref(state.raw()),
+                                pending.source,
+                            ),
+                            callee,
+                        )
+                        .map(|_| ());
+                }
+            }
+        }
+    }
+
+    fn begin_define_properties_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        key: PropertyKey,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let mut pending = PendingPropertyDescriptor::new(
+            self.pending_define_properties(state)?.target,
+            source,
+            key,
+            PropertyDescriptorConsumer::DefineProperties(Value::from_heap_ref(state.raw())),
+        );
         self.scan_property_descriptor(site, &mut pending)
     }
 
@@ -362,6 +527,75 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
+    fn allocate_pending_define_properties(
+        &mut self,
+        pending: PendingDefineProperties,
+    ) -> Result<GcRef<PendingDefineProperties>, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.pending_define_properties,
+                0,
+                pending,
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    pub(crate) fn pending_define_properties_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<PendingDefineProperties>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_define_properties)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    fn pending_define_properties(
+        &mut self,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<PendingDefinePropertiesSnapshot, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_define_properties)
+                    .map(|pending| PendingDefinePropertiesSnapshot {
+                        target: pending.target,
+                        source: pending.source,
+                        key: pending.keys.get(pending.index).copied(),
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn advance_pending_define_properties(
+        &mut self,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_define_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                pending.index = pending.index.saturating_add(1);
+                Ok(())
+            })
+        })
+    }
+
     /// Copies managed state without retaining a heap borrow across lookup or allocation.
     fn pending_property_descriptor(
         &mut self,
@@ -425,6 +659,10 @@ impl Isolate {
         pending: PendingPropertyDescriptor,
     ) -> Result<(), ExecutionError> {
         let descriptor = pending.finish(self)?;
+        if let PropertyDescriptorConsumer::DefineProperties(state) = pending.consumer {
+            let state = self.pending_define_properties_reference(state)?;
+            return self.finish_define_properties_descriptor(site, state, pending.key, descriptor);
+        }
         if let PropertyDescriptorConsumer::ProxyGetOwn(mode) = pending.consumer {
             let state = self.native_call_state_reference(pending.target)?;
             return self.finish_proxy_get_own_descriptor_parse(
@@ -459,4 +697,11 @@ impl Isolate {
         };
         self.write(site.caller_base, site.destination, result)
     }
+}
+
+#[derive(Clone, Copy)]
+struct PendingDefinePropertiesSnapshot {
+    target: Value,
+    source: Value,
+    key: Option<PropertyKey>,
 }

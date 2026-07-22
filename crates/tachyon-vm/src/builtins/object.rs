@@ -471,24 +471,6 @@ impl Isolate {
         )
     }
 
-    /// Implements Object.defineProperties through the shared descriptor-map application path.
-    pub(crate) fn object_define_properties(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        let object = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let descriptors = self
-            .call_argument(site, 1)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if !self.is_object_value(object) {
-            return Err(ExecutionError::NotObject(object));
-        }
-        self.define_ordinary_properties(object, descriptors)?;
-        Ok(object)
-    }
-
     /// Materializes one own data or accessor descriptor, or undefined when the key is absent.
     pub(crate) fn object_get_own_property_descriptor(
         &mut self,

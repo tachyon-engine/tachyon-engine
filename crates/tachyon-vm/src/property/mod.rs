@@ -13,6 +13,7 @@ use super::*;
 pub(crate) use accessor::{
     PropertyRead, PropertyReadResolution, PropertyWrite, PropertyWriteResolution,
 };
+pub(crate) use descriptor_parse::PendingDefineProperties;
 pub(crate) use descriptor_parse::PendingPropertyDescriptor;
 
 impl Isolate {
