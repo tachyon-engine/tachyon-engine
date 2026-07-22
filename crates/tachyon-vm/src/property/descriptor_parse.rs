@@ -255,7 +255,16 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         debug_assert!(self.is_object_value(target));
         if !self.is_object_value(source) {
-            return Err(ExecutionError::NotObject(source));
+            if matches!(
+                source.as_immediate(),
+                Some(Immediate::Undefined | Immediate::Null)
+            ) {
+                return Err(ExecutionError::NotObject(source));
+            }
+            if self.is_string_value(source) && self.string_value_length(source)? != 0 {
+                return Err(ExecutionError::NotObject(source));
+            }
+            return self.write(site.caller_base, site.destination, target);
         }
         if self.is_proxy_value(source) {
             let state = self.allocate_define_properties_state(target, source, Vec::new())?;

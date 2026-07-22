@@ -64,8 +64,12 @@ var descriptors = new Proxy({ item: { value: 7, enumerable: true } }, {
     get: function(target, key) { proxyEffects = proxyEffects + "g"; return target[key]; }
 });
 var proxied = Object.create({}, descriptors);
+var primitiveMaps = Object.create({}, true);
+Object.defineProperties(primitiveMaps, 1);
+Object.defineProperties(primitiveMaps, "");
+Object.defineProperties(primitiveMaps, Symbol("map"));
 Object.getPrototypeOf(created) === null && effects === "mv" && created.answer === 42 &&
-    proxyEffects === "odg" && proxied.item === 7;
+    proxyEffects === "odg" && proxied.item === 7 && Object.keys(primitiveMaps).length === 0;
 "#;
 
 #[test]
