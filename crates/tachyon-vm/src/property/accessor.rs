@@ -283,10 +283,13 @@ impl Isolate {
             receiver
         };
         loop {
-            if self.is_proxy_value(current) {
-                return Ok(PropertyWriteResolution::Proxy(current));
-            }
-            let (_, snapshot) = self.object_snapshot(current)?;
+            let snapshot = match self.object_snapshot(current) {
+                Ok((_, snapshot)) => snapshot,
+                Err(_error) if self.is_proxy_value(current) => {
+                    return Ok(PropertyWriteResolution::Proxy(current));
+                }
+                Err(error) => return Err(error),
+            };
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
                     Some(StoredProperty::Data(_)) => {
@@ -365,10 +368,13 @@ impl Isolate {
     ) -> Result<PropertyWriteResolution, ExecutionError> {
         let mut current = target;
         loop {
-            if self.is_proxy_value(current) {
-                return Ok(PropertyWriteResolution::Proxy(current));
-            }
-            let descriptor = self.complete_own_property_descriptor(current, key)?;
+            let descriptor = match self.complete_own_property_descriptor(current, key) {
+                Ok(descriptor) => descriptor,
+                Err(_error) if self.is_proxy_value(current) => {
+                    return Ok(PropertyWriteResolution::Proxy(current));
+                }
+                Err(error) => return Err(error),
+            };
             match descriptor {
                 Some(PropertyDescriptor::Data(descriptor)) => {
                     if !descriptor.writable.unwrap_or(false) {
