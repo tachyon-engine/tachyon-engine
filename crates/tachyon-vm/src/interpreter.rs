@@ -4271,6 +4271,12 @@ impl Isolate {
                     let result = self.create_ordinary_object()?;
                     let global_atom = self.intern_intrinsic_name(b"global")?;
                     self.set_own_data_property(result, global_atom, global)?;
+                    let eval_atom = self.intern_intrinsic_name(b"eval")?;
+                    let eval_script = self
+                        .get_data_property(global, eval_atom)?
+                        .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+                    let eval_script_atom = self.intern_intrinsic_name(b"evalScript")?;
+                    self.set_own_data_property(result, eval_script_atom, eval_script)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::HostEvalScript) => {
@@ -4280,7 +4286,8 @@ impl Isolate {
                     let callback = self
                         .eval_script_callback
                         .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
-                    let result = callback(self, self.active_realm, source)?;
+                    let realm = self.realm_for_callable(site.callee)?;
+                    let result = callback(self, realm, source)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(
