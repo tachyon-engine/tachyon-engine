@@ -146,6 +146,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::DefinePrivateField
         | Opcode::DefinePrivateMethod
         | Opcode::DefinePrivateAccessor
+        | Opcode::HasPrivate
         | Opcode::SetAccessorFunctionName => write!(
             output,
             " r{}, r{}, r{}",

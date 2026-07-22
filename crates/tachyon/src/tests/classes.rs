@@ -306,6 +306,43 @@ fn static_private_element_semantics() {
 }
 
 #[test]
+/// Checks private brands without invoking accessors, prototypes, or Proxy traps.
+fn private_brand_check_semantics() {
+    for (source_id, source) in [
+        (
+            1_144,
+            "var calls = 0; class C { #field; #method() { calls++; } get #accessor() { calls++; } static field(value) { return #field in value; } static method(value) { return #method in value; } static accessor(value) { return #accessor in value; } } var value = new C(); C.field(value) && C.method(value) && C.accessor(value) && !C.field({}) && calls === 0;",
+        ),
+        (
+            1_145,
+            "class Outer { #value; static has(value) { return #value in value; } static make() { return class Inner { #value; static has(value) { return #value in value; } }; } } var Inner = Outer.make(); var outer = new Outer(); var inner = new Inner(); Outer.has(outer) && !Outer.has(inner) && Inner.has(inner) && !Inner.has(outer);",
+        ),
+        (
+            1_146,
+            "class C { #value; static has(value) { return #value in value; } } var threw = false; try { C.has(1); } catch (error) { threw = error instanceof TypeError; } threw;",
+        ),
+        (
+            1_147,
+            "var calls = 0; class C { #value; static has() { return #value in (calls++, new C()); } } C.has() && calls === 1;",
+        ),
+        (
+            1_148,
+            "var traps = 0; class Base { constructor() { return new Proxy({}, { has() { traps++; return false; } }); } } class C extends Base { #value; static has(value) { return #value in value; } constructor() { super(); } } var stamped = new C(); var plain = new Proxy({}, { has() { traps++; return true; } }); C.has(stamped) && !C.has(plain) && traps === 0;",
+        ),
+        (
+            1_149,
+            "class C { static #value; static has(value) { return #value in value; } } class D extends C {} C.has(C) && !C.has(D) && !C.has(new C()) && !C.has(new Proxy(C, {}));",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Keeps instance private data unforgeable while preserving field evaluation and update semantics.
 fn private_instance_field_semantics() {
     for (source_id, source) in [

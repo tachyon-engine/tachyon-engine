@@ -968,6 +968,39 @@ fn compiler_freezes_static_private_elements() {
     assert!(!entry.contains("AttachInstanceFields"));
 }
 
+#[test]
+/// Freezes private brand checks without entering the public property-key or HasProperty path.
+fn compiler_freezes_private_brand_check() {
+    let source = source(
+        MediaType::JavaScript,
+        "class C { #value; static has(candidate) { return #value in candidate; } } C.has(new C());",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    assert!(hir.functions().iter().any(|function| {
+        function.body.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                HirStatementKind::Return(Some(HirExpression {
+                    kind: HirExpressionKind::PrivateIn { .. },
+                    ..
+                }))
+            )
+        })
+    }));
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let function = module
+        .functions()
+        .iter()
+        .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+        .find(|function| function.contains("HasPrivate"))
+        .expect("private brand check owns a dedicated function body");
+    assert!(!function.contains("HasProperty"));
+    assert!(!function.contains("ToPropertyKey"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

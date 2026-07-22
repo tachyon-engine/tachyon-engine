@@ -337,6 +337,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             "scope names",
         ),
         HirExpressionKind::PrivateMember { object, .. } => expression_scope_name_count(object),
+        HirExpressionKind::PrivateIn { object, .. } => expression_scope_name_count(object),
         HirExpressionKind::Unary { argument, .. } => expression_scope_name_count(argument),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_scope_name_count(left)?,
@@ -748,6 +749,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             "bytecode constants",
         ),
         HirExpressionKind::PrivateMember { object, .. } => expression_literal_count(object),
+        HirExpressionKind::PrivateIn { object, .. } => expression_literal_count(object),
         HirExpressionKind::Assignment { target, value, .. } => {
             let Some(target) = target.assignment_target() else {
                 return expression_literal_count(value);

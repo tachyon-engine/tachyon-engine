@@ -279,9 +279,11 @@ pub enum Opcode {
     DefinePrivateMethod = 116,
     /// Defines one private accessor pair during class evaluation.
     DefinePrivateAccessor = 117,
+    /// Checks one own private brand slot without invoking public object semantics.
+    HasPrivate = 118,
 }
 
-pub(super) const OPCODE_COUNT: usize = 118;
+pub(super) const OPCODE_COUNT: usize = 119;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -401,10 +403,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DefinePrivateField
     3, // DefinePrivateMethod
     3, // DefinePrivateAccessor
+    3, // HasPrivate
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DefinePrivateAccessor as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::HasPrivate as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -568,6 +571,7 @@ impl Opcode {
             51 => Some(Self::DefinePrivateField),
             52 => Some(Self::DefinePrivateMethod),
             53 => Some(Self::DefinePrivateAccessor),
+            54 => Some(Self::HasPrivate),
             _ => None,
         }
     }

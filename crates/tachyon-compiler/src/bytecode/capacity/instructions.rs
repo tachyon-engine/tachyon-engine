@@ -430,6 +430,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             2,
             "bytecode instructions",
         ),
+        HirExpressionKind::PrivateIn { object, .. } => checked_count_add(
+            expression_instruction_count(object)?,
+            2,
+            "bytecode instructions",
+        ),
         HirExpressionKind::Assignment {
             operator,
             target,

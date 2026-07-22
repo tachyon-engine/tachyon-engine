@@ -256,6 +256,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnviro
             collect_expression(property, bindings);
         }
         HirExpressionKind::PrivateMember { object, .. } => collect_expression(object, bindings),
+        HirExpressionKind::PrivateIn { object, .. } => collect_expression(object, bindings),
         HirExpressionKind::SuperComputedMember(property)
         | HirExpressionKind::Unary {
             argument: property, ..

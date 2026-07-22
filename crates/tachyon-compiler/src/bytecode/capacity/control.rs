@@ -871,6 +871,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             expression_label_count(property)?,
             "bytecode labels",
         ),
+        HirExpressionKind::PrivateIn { object, .. } => expression_label_count(object),
         HirExpressionKind::Assignment {
             operator,
             target,

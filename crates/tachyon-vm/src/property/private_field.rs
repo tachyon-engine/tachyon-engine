@@ -131,6 +131,20 @@ impl Isolate {
         }
     }
 
+    /// Checks one own private element without invoking accessors, prototypes, or Proxy traps.
+    pub(crate) fn has_private_element(
+        &mut self,
+        receiver: Value,
+        name: Value,
+    ) -> Result<bool, ExecutionError> {
+        let key = self.private_property_key(name)?;
+        let Some(storage_receiver) = self.proxy_private_storage(receiver, false)? else {
+            return Ok(false);
+        };
+        let (_, snapshot) = self.object_snapshot(storage_receiver)?;
+        Ok(self.shapes.lookup(snapshot.shape, key).is_some())
+    }
+
     /// Writes an existing own private field while preserving its unobservable shape metadata.
     pub(crate) fn set_private_field(
         &mut self,

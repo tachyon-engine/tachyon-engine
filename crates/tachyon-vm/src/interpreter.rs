@@ -763,6 +763,20 @@ impl Isolate {
                     key_value,
                 );
             }
+            Opcode::HasPrivate => {
+                let name = self.read(base, operands[1])?;
+                let receiver = self.read(base, operands[2])?;
+                let present = self.has_private_element(receiver, name)?;
+                self.write(
+                    base,
+                    operands[0],
+                    Value::from_immediate(if present {
+                        Immediate::True
+                    } else {
+                        Immediate::False
+                    }),
+                )?;
+            }
             Opcode::ToPropertyKey | Opcode::ToPropertyKeyForIn => {
                 self.dispatch_to_property_key(
                     base,

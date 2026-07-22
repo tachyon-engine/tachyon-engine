@@ -501,6 +501,17 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::PrivateIn { name, object } => {
+                let name = self.load_private_name(name, expression.span)?;
+                let object = self.expression(object)?;
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::HasPrivate,
+                    &[destination.index(), name.index(), object.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::SuperStaticMember(property) => {
                 let destination = self.register()?;
                 let property = self.scope_name(property)?;

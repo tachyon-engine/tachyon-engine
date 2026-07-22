@@ -173,6 +173,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::DefinePrivateField,
                 Opcode::DefinePrivateMethod,
                 Opcode::DefinePrivateAccessor,
+                Opcode::HasPrivate,
             ],
         ),
         (

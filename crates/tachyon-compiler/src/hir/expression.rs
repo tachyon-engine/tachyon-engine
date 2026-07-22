@@ -202,6 +202,10 @@ pub enum HirExpressionKind {
         object: Box<HirExpression>,
         name: HirPrivateName,
     },
+    PrivateIn {
+        name: HirPrivateName,
+        object: Box<HirExpression>,
+    },
     SuperStaticMember(Arc<str>),
     SuperComputedMember(Box<HirExpression>),
     Unary {
@@ -608,6 +612,15 @@ pub(super) fn lower_expression(
                 name: private_name_reference(&expression.field, source, semantic)?,
             }
         }
+        Expression::PrivateInExpression(expression) => HirExpressionKind::PrivateIn {
+            name: private_name_reference(&expression.left, source, semantic)?,
+            object: Box::new(lower_expression(
+                &expression.right,
+                source,
+                semantic,
+                functions,
+            )?),
+        },
         Expression::UnaryExpression(expression) => HirExpressionKind::Unary {
             operator: lower_unary_operator(expression.operator),
             argument: Box::new(lower_expression(
