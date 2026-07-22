@@ -1479,6 +1479,16 @@ impl Isolate {
         let upper_bound = self.for_in_object_key_upper_bound(source)?;
         let mut keys = ForInKeySet::with_upper_bound(upper_bound)
             .map_err(|_: ForInAllocationError| ExecutionError::ForInKeyAllocationFailed)?;
+        if self.is_string_wrapper(source) {
+            let length = self.string_value_length(source)?;
+            for index in 0..length {
+                let atom = self.property_key_atom(Value::from_i32(
+                    i32::try_from(index).map_err(|_| ExecutionError::ForInKeyAllocationFailed)?,
+                ))?;
+                keys.insert(atom);
+                keys.push_enumerable(atom);
+            }
+        }
         let mut current = source;
         loop {
             let (_, snapshot) = self.object_snapshot(current)?;
@@ -1514,6 +1524,11 @@ impl Isolate {
         let mut count = 0_usize;
         let mut current = source;
         loop {
+            if self.is_string_wrapper(current) {
+                count = count
+                    .checked_add(self.string_value_length(current)?)
+                    .ok_or(ExecutionError::ForInKeyAllocationFailed)?;
+            }
             let virtual_count = match self.resolve_function_object(current) {
                 Ok(function) => match function.executable {
                     FunctionExecutable::Native(_) => 3,
