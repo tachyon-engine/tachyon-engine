@@ -967,8 +967,11 @@ impl Isolate {
         Ok(Value::from_heap_ref(object.raw()))
     }
 
-    /// Allocates the ordinary backing of one activation-local unmapped Arguments exotic object.
-    pub(crate) fn allocate_arguments_object(&mut self) -> Result<Value, ExecutionError> {
+    /// Allocates one arguments exotic object and records a lazy simple-parameter alias when valid.
+    pub(crate) fn allocate_arguments_object(
+        &mut self,
+        mapped: Option<(u32, u32, u32, CodeId, FunctionId)>,
+    ) -> Result<Value, ExecutionError> {
         let prototype = self
             .realm
             .object_prototype
@@ -992,6 +995,11 @@ impl Isolate {
                         storage: None,
                         prototype,
                     },
+                    mapped_frame_depth: mapped.map_or(u32::MAX, |mapping| mapping.0),
+                    mapped_base: mapped.map_or(0, |mapping| mapping.1),
+                    mapped_parameter_count: mapped.map_or(0, |mapping| mapping.2),
+                    mapped_code: mapped.map(|mapping| mapping.3),
+                    mapped_function: mapped.map(|mapping| mapping.4),
                 },
                 AllocationSpace::Young,
                 roots,

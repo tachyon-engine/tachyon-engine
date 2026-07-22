@@ -152,6 +152,7 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let key = key.into();
+        self.sync_mapped_argument(receiver, key, value)?;
         if self.is_array_value(receiver)? && key == PropertyKey::Atom(self.length_atom()?) {
             return self.set_array_length_value(receiver, value);
         }

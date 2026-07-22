@@ -268,6 +268,16 @@ fn direct_eval_lexical_record_enforces_tdz_const_and_escaping_closure_capture() 
     assert_direct_eval_batch::<16>(&module, true);
 }
 
+#[test]
+fn sloppy_arguments_indices_alias_simple_parameters() {
+    let module = compile_source(
+        "function foo(a, b, c) { a = 1; b = 'str'; c = 2.1; return arguments[0] === 1 && arguments[1] === 'str' && arguments[2] === 2.1; } function bar(a) { arguments[0] = 7; return a === 7; } foo(10, 'sss', 1) && bar(3);",
+        1_173,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<1>(&module, true);
+}
+
 fn compile_source(source: &str, source_id: u32) -> CompiledModule {
     Compiler
         .compile(

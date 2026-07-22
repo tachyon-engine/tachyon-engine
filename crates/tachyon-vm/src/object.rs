@@ -4,7 +4,8 @@ use core::mem::size_of;
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::{RawHeapRef, Value};
 
-use crate::{AtomId, tuning::objects};
+use crate::{AtomId, CodeId, tuning::objects};
+use tachyon_bytecode::FunctionId;
 
 /// Stable isolate-local identity for one Symbol property key.
 ///
@@ -623,6 +624,12 @@ pub(crate) struct SymbolObject {
 #[repr(C)]
 pub(crate) struct ArgumentsObject {
     pub(crate) ordinary: OrdinaryObject,
+    /// Active sloppy simple-parameter mapping; `u32::MAX` denotes an unmapped object.
+    pub(crate) mapped_frame_depth: u32,
+    pub(crate) mapped_base: u32,
+    pub(crate) mapped_parameter_count: u32,
+    pub(crate) mapped_code: Option<CodeId>,
+    pub(crate) mapped_function: Option<FunctionId>,
 }
 
 /// RegExp state whose observable properties remain in the ordinary-object base.

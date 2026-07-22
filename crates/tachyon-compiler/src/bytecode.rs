@@ -1116,6 +1116,7 @@ fn lower_function(
                 .map_err(|_| CompileError::BindingOverflow)?,
                 self_binding_slot,
                 needs_argument_source: lowerer.needs_argument_source,
+                has_rest_parameter: function.rest_parameter.is_some(),
                 ..FunctionLayout::default()
             },
             source_map,

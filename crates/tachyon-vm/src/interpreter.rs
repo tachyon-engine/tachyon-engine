@@ -6180,7 +6180,39 @@ impl Isolate {
             .frames
             .last()
             .ok_or(ExecutionError::MissingEnvironment)?;
-        let arguments = self.allocate_arguments_object()?;
+        let mapped = if frame.strictness == FunctionStrictness::Sloppy {
+            let function = self
+                .loaded_code(frame.code)?
+                .module
+                .function(frame.function)
+                .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
+            let layout = function.layout();
+            (layout.function_length == layout.argument_count && !layout.has_rest_parameter)
+                .then_some((
+                    u32::try_from(self.fiber.frames.len() - 1)
+                        .map_err(|_| ExecutionError::RegisterAllocationFailed)?,
+                    frame.base,
+                    layout.argument_count,
+                    frame.code,
+                    frame.function,
+                ))
+        } else {
+            None
+        };
+        let mapped_values = if mapped.is_some() {
+            let count = mapped.map_or(0, |mapping| mapping.2);
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(count as usize)
+                .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+            for index in 0..count {
+                values.push(self.read(frame.base, index)?);
+            }
+            Some(values)
+        } else {
+            None
+        };
+        let arguments = self.allocate_arguments_object(mapped)?;
         let site = CallSite {
             caller_base: frame.base,
             destination: 0,
@@ -6199,9 +6231,15 @@ impl Isolate {
             call_site: frame.call_site.unwrap_or(WordOffset::new(0)),
         };
         for index in 0..site.argument_count {
-            let value = self
-                .call_argument(&site, index)?
-                .expect("arguments index stays below the exact argument count");
+            let value = match mapped_values
+                .as_ref()
+                .and_then(|values| values.get(index as usize).copied())
+            {
+                Some(value) => value,
+                None => self
+                    .call_argument(&site, index)?
+                    .expect("arguments index stays below the exact argument count"),
+            };
             let key = self.safe_integer_property_atom(u64::from(index))?;
             self.set_own_data_property(arguments, key, value)?;
         }

@@ -442,6 +442,8 @@ pub struct FunctionLayout {
     pub max_completion_depth: u32,
     /// The function reads the original argument sequence after parameter initialization.
     pub needs_argument_source: bool,
+    /// Whether a rest parameter makes the arguments object unmapped.
+    pub has_rest_parameter: bool,
 }
 
 /// Per-function metadata which the compiler owns until `CompiledModule::new` verifies and freezes it.

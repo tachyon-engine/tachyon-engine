@@ -56,6 +56,76 @@ impl Trace for AccessorAllocationRoots<'_> {
 }
 
 impl Isolate {
+    /// Resolves a live mapped-arguments index to its owning activation without changing Frame size.
+    fn mapped_argument_frame(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<Option<(Frame, u32)>, ExecutionError> {
+        let Some(raw) = target.as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(arguments) = self
+            .heap
+            .checked_reference(raw, self.types.arguments_object)
+        else {
+            return Ok(None);
+        };
+        let (depth, base, count, code, function) = self.heap.with_running_scope(|scope| {
+            let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(arguments, self.types.arguments_object)
+                    .map(|object| {
+                        (
+                            object.mapped_frame_depth,
+                            object.mapped_base,
+                            object.mapped_parameter_count,
+                            object.mapped_code,
+                            object.mapped_function,
+                        )
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if depth == u32::MAX {
+            return Ok(None);
+        }
+        let (Some(code), Some(function)) = (code, function) else {
+            return Ok(None);
+        };
+        let Some(index) = key.atom().and_then(|atom| {
+            self.atoms
+                .get(atom)
+                .and_then(|name| crate::property::keys::array_index(name.as_view()))
+        }) else {
+            return Ok(None);
+        };
+        if index >= count {
+            return Ok(None);
+        }
+        let Some(frame) = self.fiber.frames.get(depth as usize).copied() else {
+            return Ok(None);
+        };
+        if frame.code != code || frame.function != function || frame.base != base {
+            return Ok(None);
+        }
+        Ok(Some((frame, index)))
+    }
+
+    /// Publishes an arguments-index write back to the owning simple parameter register.
+    pub(crate) fn sync_mapped_argument(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if let Some((frame, index)) = self.mapped_argument_frame(target, key)? {
+            self.write(frame.base, index, value)?;
+        }
+        Ok(())
+    }
+
     /// Materializes one String-exotic UTF-16 code-unit value for descriptor consumers.
     pub(crate) fn string_index_value(
         &mut self,
