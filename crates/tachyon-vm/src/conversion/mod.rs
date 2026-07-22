@@ -66,7 +66,11 @@ impl Isolate {
             return Ok(argument);
         }
         let mut units = Vec::new();
-        self.append_primitive_string_units(argument, &mut units)?;
+        if self.is_symbol_value(argument) {
+            self.append_symbol_string_units(argument, &mut units)?;
+        } else {
+            self.append_primitive_string_units(argument, &mut units)?;
+        }
         self.allocate_runtime_string(
             JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
         )
@@ -143,34 +147,74 @@ impl Isolate {
             ConversionConsumer::NativeCall(conversion_native)
         };
         let argument = self.call_argument(site, 0)?;
+        let receiver = match native {
+            NativeFunction::StringConstructor => {
+                if construct {
+                    site.new_target
+                } else {
+                    Value::from_immediate(Immediate::Undefined)
+                }
+            }
+            NativeFunction::NumberToExponential
+            | NativeFunction::NumberToFixed
+            | NativeFunction::NumberToPrecision
+            | NativeFunction::NumberToString => self.this_number_value(site.this_value)?,
+            NativeFunction::NumberConstructor => {
+                if construct {
+                    site.new_target
+                } else {
+                    Value::from_immediate(Immediate::Undefined)
+                }
+            }
+            NativeFunction::GlobalIsFinite
+            | NativeFunction::GlobalIsNaN
+            | NativeFunction::GlobalParseFloat
+            | NativeFunction::GlobalParseInt
+            | NativeFunction::GlobalDecodeUri
+            | NativeFunction::GlobalDecodeUriComponent
+            | NativeFunction::GlobalEncodeUri
+            | NativeFunction::GlobalEncodeUriComponent => {
+                Value::from_immediate(Immediate::Undefined)
+            }
+            _ => unreachable!("only argument conversion consumers enter this dispatch path"),
+        };
+        self.dispatch_native_conversion_operand(consumer, site, receiver, argument)
+    }
+
+    /// Starts ToString over a String prototype method's receiver without recursive interpretation.
+    pub(crate) fn dispatch_string_receiver_conversion(
+        &mut self,
+        native: NativeFunction,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let receiver = site.this_value;
+        if matches!(
+            receiver.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(receiver));
+        }
+        let conversion_native = ConversionNativeFunction::from_native(native)
+            .expect("only receiver conversion natives enter the resumable path");
+        self.dispatch_native_conversion_operand(
+            ConversionConsumer::NativeCall(conversion_native),
+            site,
+            Value::from_immediate(Immediate::Undefined),
+            Some(receiver),
+        )
+    }
+
+    /// Publishes a conversion continuation only when the selected operand is an object.
+    fn dispatch_native_conversion_operand(
+        &mut self,
+        consumer: ConversionConsumer,
+        site: &CallSite,
+        receiver: Value,
+        argument: Option<Value>,
+    ) -> Result<(), ExecutionError> {
         if let Some(object) = argument
             && self.is_object_value(object)
         {
-            let receiver = match native {
-                NativeFunction::StringConstructor => Value::from_immediate(Immediate::Undefined),
-                NativeFunction::NumberToExponential
-                | NativeFunction::NumberToFixed
-                | NativeFunction::NumberToPrecision
-                | NativeFunction::NumberToString => self.this_number_value(site.this_value)?,
-                NativeFunction::NumberConstructor => {
-                    if construct {
-                        site.new_target
-                    } else {
-                        Value::from_immediate(Immediate::Undefined)
-                    }
-                }
-                NativeFunction::GlobalIsFinite
-                | NativeFunction::GlobalIsNaN
-                | NativeFunction::GlobalParseFloat
-                | NativeFunction::GlobalParseInt
-                | NativeFunction::GlobalDecodeUri
-                | NativeFunction::GlobalDecodeUriComponent
-                | NativeFunction::GlobalEncodeUri
-                | NativeFunction::GlobalEncodeUriComponent => {
-                    Value::from_immediate(Immediate::Undefined)
-                }
-                _ => unreachable!("only conversion consumers enter this dispatch path"),
-            };
             let continuation = ConversionContinuation {
                 site: NativeContinuationSite {
                     caller_base: site.caller_base,
@@ -185,11 +229,6 @@ impl Isolate {
             };
             return self.advance_native_conversion(continuation, None);
         }
-        let receiver = if construct {
-            site.new_target
-        } else {
-            site.this_value
-        };
         let value = self.finish_conversion_consumer(consumer, receiver, argument)?;
         self.write(site.caller_base, site.destination, value)
     }
@@ -622,6 +661,11 @@ impl Isolate {
                     .expect("global URI native has metadata"),
                 argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
             ),
+            NativeFunction::StringToLowerCase | NativeFunction::StringToUpperCase => self
+                .string_case_primitive_value(
+                    argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                    native == NativeFunction::StringToUpperCase,
+                ),
             _ => unreachable!("only conversion consumers create this continuation"),
         }
     }
@@ -662,7 +706,7 @@ impl Isolate {
             return Ok(());
         }
         if self.is_symbol_value(value) {
-            return self.append_symbol_string_units(value, output);
+            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
         }
         let raw = value
             .as_heap_ref()

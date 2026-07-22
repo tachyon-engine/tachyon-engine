@@ -86,6 +86,8 @@ pub(crate) enum NativeFunction {
     StringTrim,
     StringTrimStart,
     StringTrimEnd,
+    StringToLowerCase,
+    StringToUpperCase,
     RegExpConstructor,
     RegExpExec,
     RegExpTest,
@@ -749,7 +751,9 @@ impl NativeFunction {
             | Self::BooleanValueOf
             | Self::FunctionPrototype
             | Self::SpeciesGetter
-            | Self::ArrayToString => 0,
+            | Self::ArrayToString
+            | Self::StringToLowerCase
+            | Self::StringToUpperCase => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString | Self::SymbolValueOf | Self::SymbolDescription => 0,
@@ -851,6 +855,8 @@ impl NativeFunction {
             Self::StringTrim => "trim",
             Self::StringTrimStart => "trimStart",
             Self::StringTrimEnd => "trimEnd",
+            Self::StringToLowerCase => "toLowerCase",
+            Self::StringToUpperCase => "toUpperCase",
             Self::SymbolConstructor => "Symbol",
             Self::SymbolFor => "for",
             Self::SymbolKeyFor => "keyFor",

@@ -99,6 +99,20 @@ impl Isolate {
         )
     }
 
+    /// Applies Unicode Default Case Conversion to an already primitive-coerced receiver.
+    pub(crate) fn string_case_primitive_value(
+        &mut self,
+        receiver: Value,
+        uppercase: bool,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.primitive_string_units(receiver)?;
+        let output = case_map_utf16(&units, uppercase)?;
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Implements String.prototype.charAt over the engine's UTF-16 code-unit representation.
     pub(crate) fn string_char_at(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let Some(unit) = self.string_code_unit_at(site)? else {
@@ -701,6 +715,76 @@ impl Isolate {
         }
         Ok(number.trunc() as usize)
     }
+}
+
+/// Converts valid UTF-16 segments and preserves unpaired surrogate code units verbatim.
+fn case_map_utf16(units: &[u16], uppercase: bool) -> Result<Vec<u16>, ExecutionError> {
+    if let Ok(text) = String::from_utf16(units) {
+        let mapped = if uppercase {
+            text.to_uppercase()
+        } else {
+            text.to_lowercase()
+        };
+        return utf8_to_exact_utf16(&mapped);
+    }
+    let utf8_capacity = units
+        .len()
+        .checked_mul(3)
+        .ok_or(ExecutionError::InvalidStringLength)?;
+    let mut segment = String::new();
+    segment
+        .try_reserve_exact(utf8_capacity)
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(units.len())
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    for scalar in char::decode_utf16(units.iter().copied()) {
+        match scalar {
+            Ok(character) => segment.push(character),
+            Err(surrogate) => {
+                append_case_segment(&mut output, &mut segment, uppercase)?;
+                output.push(surrogate.unpaired_surrogate());
+            }
+        }
+    }
+    append_case_segment(&mut output, &mut segment, uppercase)?;
+    Ok(output)
+}
+
+/// Maps one valid UTF-8 segment before appending its exact UTF-16 expansion.
+fn append_case_segment(
+    output: &mut Vec<u16>,
+    segment: &mut String,
+    uppercase: bool,
+) -> Result<(), ExecutionError> {
+    if segment.is_empty() {
+        return Ok(());
+    }
+    let mapped = if uppercase {
+        segment.to_uppercase()
+    } else {
+        segment.to_lowercase()
+    };
+    let mapped_units = mapped.encode_utf16().count();
+    output
+        .try_reserve_exact(mapped_units)
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    output.extend(mapped.encode_utf16());
+    segment.clear();
+    Ok(())
+}
+
+/// Materializes a valid UTF-8 string as one exact-capacity UTF-16 allocation.
+fn utf8_to_exact_utf16(text: &str) -> Result<Vec<u16>, ExecutionError> {
+    let capacity = text.encode_utf16().count();
+    let mut units = Vec::new();
+    units
+        .try_reserve_exact(capacity)
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    units.extend(text.encode_utf16());
+    debug_assert_eq!(units.len(), capacity);
+    Ok(units)
 }
 
 #[inline(always)]

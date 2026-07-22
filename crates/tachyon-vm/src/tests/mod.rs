@@ -30,4 +30,5 @@ mod properties;
 mod property_keys;
 mod proxy;
 mod realm_gc;
+mod string_case;
 mod uri;

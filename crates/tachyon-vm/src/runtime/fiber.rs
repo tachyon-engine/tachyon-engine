@@ -148,6 +148,8 @@ pub(crate) enum ConversionNativeFunction {
     NumberToFixed,
     NumberToPrecision,
     NumberToString,
+    StringToLowerCase,
+    StringToUpperCase,
     GlobalIsFinite,
     GlobalIsNaN,
     GlobalParseFloat,
@@ -167,6 +169,8 @@ impl ConversionNativeFunction {
             NativeFunction::NumberToFixed => Some(Self::NumberToFixed),
             NativeFunction::NumberToPrecision => Some(Self::NumberToPrecision),
             NativeFunction::NumberToString => Some(Self::NumberToString),
+            NativeFunction::StringToLowerCase => Some(Self::StringToLowerCase),
+            NativeFunction::StringToUpperCase => Some(Self::StringToUpperCase),
             NativeFunction::GlobalIsFinite => Some(Self::GlobalIsFinite),
             NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
             NativeFunction::GlobalParseFloat => Some(Self::GlobalParseFloat),
@@ -187,6 +191,8 @@ impl ConversionNativeFunction {
             Self::NumberToFixed => NativeFunction::NumberToFixed,
             Self::NumberToPrecision => NativeFunction::NumberToPrecision,
             Self::NumberToString => NativeFunction::NumberToString,
+            Self::StringToLowerCase => NativeFunction::StringToLowerCase,
+            Self::StringToUpperCase => NativeFunction::StringToUpperCase,
             Self::GlobalIsFinite => NativeFunction::GlobalIsFinite,
             Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
             Self::GlobalParseFloat => NativeFunction::GlobalParseFloat,
@@ -248,6 +254,8 @@ impl ConversionConsumer {
         matches!(
             self,
             Self::NativeCall(ConversionNativeFunction::StringConstructor)
+                | Self::NativeCall(ConversionNativeFunction::StringToLowerCase)
+                | Self::NativeCall(ConversionNativeFunction::StringToUpperCase)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
                 | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUri)

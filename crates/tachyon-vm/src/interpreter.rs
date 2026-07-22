@@ -4458,6 +4458,10 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(
+                    native
+                    @ (NativeFunction::StringToLowerCase | NativeFunction::StringToUpperCase),
+                ) => return self.dispatch_string_receiver_conversion(native, &site),
+                FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
                     | NativeFunction::NumberToExponential
                     | NativeFunction::NumberToFixed

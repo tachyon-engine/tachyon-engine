@@ -664,6 +664,7 @@ impl Trace for Realm {
         self.object_seal.trace(tracer);
         self.object_freeze.trace(tracer);
         self.string_constructor.trace(tracer);
+        self.string_prototype.trace(tracer);
         self.regexp_constructor.trace(tracer);
         self.regexp_prototype.trace(tracer);
         self.symbol_constructor.trace(tracer);
@@ -696,6 +697,7 @@ impl Trace for Realm {
         self.math_pow.trace(tracer);
         self.math_functions.trace(tracer);
         self.global_number_functions.trace(tracer);
+        self.global_uri_functions.trace(tracer);
         self.error_intrinsics.trace(tracer);
         self.well_known_symbols.trace(tracer);
         self.primitive_hint_strings.trace(tracer);

@@ -499,15 +499,16 @@ impl Isolate {
         };
         let string_constructor = allocate(self, NativeFunction::StringConstructor)?;
         self.realm.string_constructor = Some(string_constructor);
-        let string_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
-            shape: ShapeId::EMPTY,
-            extensible: true,
-            storage: None,
-            prototype: self
-                .realm
+        let empty_string = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let string_prototype = self.allocate_string_object(
+            empty_string,
+            self.realm
                 .object_prototype
                 .expect("Object prototype initializes before String prototype"),
-        })?;
+            AllocationSpace::Old,
+        )?;
         self.realm.string_prototype = Some(string_prototype);
         self.set_function_prototype(string_constructor, string_prototype)?;
         let constructor_atom = self.constructor_atom()?;
@@ -543,6 +544,8 @@ impl Isolate {
             (NativeFunction::StringRepeat, b"repeat".as_slice()),
             (NativeFunction::StringPadStart, b"padStart".as_slice()),
             (NativeFunction::StringPadEnd, b"padEnd".as_slice()),
+            (NativeFunction::StringToLowerCase, b"toLowerCase".as_slice()),
+            (NativeFunction::StringToUpperCase, b"toUpperCase".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
