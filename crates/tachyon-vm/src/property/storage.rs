@@ -29,6 +29,9 @@ impl Isolate {
         if snapshot.prototype == prototype {
             return Ok(true);
         }
+        if self.realm.object_prototype == Some(target) {
+            return Ok(false);
+        }
         if !snapshot.extensible {
             return Ok(false);
         }
@@ -36,6 +39,9 @@ impl Isolate {
         while self.is_object_value(candidate) {
             if candidate == target {
                 return Ok(false);
+            }
+            if self.is_proxy_value(candidate) {
+                break;
             }
             candidate = self.object_snapshot(candidate)?.1.prototype;
         }

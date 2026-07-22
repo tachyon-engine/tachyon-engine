@@ -23,6 +23,8 @@ pub(crate) enum NativeFunction {
     ObjectDefineSetter,
     ObjectLookupGetter,
     ObjectLookupSetter,
+    ObjectProtoGetter,
+    ObjectProtoSetter,
     ObjectToLocaleString,
     ObjectToString,
     ObjectValueOf,
@@ -514,6 +516,7 @@ impl NativeFunction {
             | Self::ObjectPropertyIsEnumerable
             | Self::ObjectLookupGetter
             | Self::ObjectLookupSetter
+            | Self::ObjectProtoSetter
             | Self::ObjectKeys
             | Self::ObjectValues
             | Self::ObjectEntries
@@ -660,6 +663,7 @@ impl NativeFunction {
             | Self::GlobalParseFloat
             | Self::GlobalParseInt => unreachable!(),
             Self::ObjectToLocaleString
+            | Self::ObjectProtoGetter
             | Self::ObjectToString
             | Self::ObjectValueOf
             | Self::ErrorToString
@@ -699,6 +703,8 @@ impl NativeFunction {
             Self::ObjectDefineSetter => "__defineSetter__",
             Self::ObjectLookupGetter => "__lookupGetter__",
             Self::ObjectLookupSetter => "__lookupSetter__",
+            Self::ObjectProtoGetter => "get __proto__",
+            Self::ObjectProtoSetter => "set __proto__",
             Self::ObjectToLocaleString => "toLocaleString",
             Self::ObjectToString => "toString",
             Self::ObjectValueOf => "valueOf",

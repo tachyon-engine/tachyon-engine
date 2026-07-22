@@ -298,6 +298,22 @@ impl Isolate {
         Ok(true)
     }
 
+    /// Routes the legacy __proto__ setter through the shared Proxy internal method.
+    pub(crate) fn dispatch_legacy_proxy_set_prototype(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        prototype: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.dispatch_proxy_set_prototype(
+            site,
+            target,
+            prototype,
+            Value::from_immediate(Immediate::Undefined),
+            ProxySetPrototypeMode::LegacyAccessor,
+        )
+    }
+
     /// Walks absent traps iteratively and publishes pending state only at an observable callback.
     fn dispatch_proxy_set_prototype(
         &mut self,
@@ -570,6 +586,12 @@ impl Isolate {
             ProxySetPrototypeMode::Reflect => boolean_value(success),
             ProxySetPrototypeMode::Object if success => result_object,
             ProxySetPrototypeMode::Object => {
+                return Err(ExecutionError::ProxyInvariantViolation);
+            }
+            ProxySetPrototypeMode::LegacyAccessor if success => {
+                Value::from_immediate(Immediate::Undefined)
+            }
+            ProxySetPrototypeMode::LegacyAccessor => {
                 return Err(ExecutionError::ProxyInvariantViolation);
             }
         };

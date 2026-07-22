@@ -394,6 +394,7 @@ pub(crate) enum ProxyContinuationStage {
 pub(crate) enum ProxySetPrototypeMode {
     Reflect,
     Object,
+    LegacyAccessor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

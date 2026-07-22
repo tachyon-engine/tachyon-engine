@@ -178,6 +178,35 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(object_prototype, atom, method, true)?;
         }
+        let proto_getter = self.allocate_native_function(
+            NativeFunction::ObjectProtoGetter,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let proto_setter = self.allocate_native_function(
+            NativeFunction::ObjectProtoSetter,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let proto_atom = self.intern_intrinsic_name(b"__proto__")?;
+        self.define_property(
+            object_prototype,
+            PropertyKey::Atom(proto_atom),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(proto_getter),
+                setter: Some(proto_setter),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )?;
         let to_locale_string = self.allocate_native_function(
             NativeFunction::ObjectToLocaleString,
             OrdinaryObject {

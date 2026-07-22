@@ -588,6 +588,70 @@ impl Isolate {
         )
     }
 
+    /// Implements the legacy __proto__ getter through the shared prototype internal method.
+    pub(crate) fn object_proto_getter(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let receiver = self.object_value_of(site.this_value)?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_proxy_value(receiver) {
+            self.dispatch_proxy_internal_method(
+                native_site,
+                receiver,
+                ProxyInternalMethod::GetPrototypeOf,
+            )?;
+            return Ok(());
+        }
+        let prototype = self.object_snapshot(receiver)?.1.prototype;
+        self.write(site.caller_base, site.destination, prototype)
+    }
+
+    /// Implements the legacy __proto__ setter with RequireObjectCoercible and false-throw rules.
+    pub(crate) fn object_proto_setter(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if matches!(
+            site.this_value.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
+        let prototype = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if prototype.as_immediate() != Some(Immediate::Null) && !self.is_object_value(prototype) {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
+        if !self.is_object_value(site.this_value) {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_proxy_value(site.this_value) {
+            self.dispatch_legacy_proxy_set_prototype(native_site, site.this_value, prototype)?;
+            return Ok(());
+        }
+        if !self.ordinary_set_prototype_of(site.this_value, prototype)? {
+            return Err(ExecutionError::NonExtensibleObject(site.this_value));
+        }
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
     /// Walks ordinary prototypes synchronously and publishes state only at a Proxy boundary.
     pub(crate) fn begin_object_lookup_accessor(
         &mut self,

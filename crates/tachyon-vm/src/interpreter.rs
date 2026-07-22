@@ -4044,6 +4044,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectLookupSetter) => {
                     return self.object_lookup_legacy_accessor(&site, true);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectProtoGetter) => {
+                    return self.object_proto_getter(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectProtoSetter) => {
+                    return self.object_proto_setter(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwn) => {
                     return self.object_has_own(&site);
                 }
