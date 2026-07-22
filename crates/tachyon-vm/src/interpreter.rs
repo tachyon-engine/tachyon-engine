@@ -3741,13 +3741,45 @@ impl Isolate {
         }
         let prototype_atom = self.prototype_atom()?;
         let prototype = self
-            .get_data_property(site.new_target, prototype_atom)?
+            .constructor_prototype_value(site.new_target, prototype_atom)?
             .filter(|value| self.is_object_value(*value))
             .unwrap_or(Value::from_immediate(Immediate::Null));
         let receiver = self.create_ordinary_object_with_prototype(prototype)?;
         site.this_value = receiver;
         site.construct_receiver = Some(receiver);
         self.call(site)
+    }
+
+    /// Resolves `newTarget.prototype` through transparent Proxy layers on the constructor slow path.
+    fn constructor_prototype_value(
+        &mut self,
+        mut new_target: Value,
+        prototype_atom: AtomId,
+    ) -> Result<Option<Value>, ExecutionError> {
+        loop {
+            if !self.is_proxy_value(new_target) {
+                return self.get_data_property(new_target, prototype_atom);
+            }
+            let snapshot = self.proxy_snapshot(new_target)?;
+            if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
+            }
+            let get_atom = self.intern_intrinsic_name(b"get")?;
+            match self.resolve_property_read(snapshot.handler, get_atom.into())? {
+                PropertyRead::Missing => {
+                    new_target = snapshot.target;
+                }
+                PropertyRead::Data(value)
+                    if value.as_immediate() == Some(Immediate::Undefined)
+                        || value.as_immediate() == Some(Immediate::Null) =>
+                {
+                    new_target = snapshot.target;
+                }
+                PropertyRead::Data(_) | PropertyRead::Accessor(_) => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            }
+        }
     }
 
     /// Applies each bound exotic's observable newTarget substitution without merging arguments.
