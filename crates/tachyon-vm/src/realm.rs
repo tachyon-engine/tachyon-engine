@@ -790,6 +790,8 @@ impl Isolate {
             self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
             if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag = Some(symbol);
+            } else if name == b"replace" {
+                self.realm.well_known_symbols.replace = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
             }

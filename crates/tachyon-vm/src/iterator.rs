@@ -278,7 +278,7 @@ impl Isolate {
             )?));
         };
         let length_key = PropertyKey::Atom(self.length_atom()?);
-        match self.resolve_property_read(iterated_object, length_key)? {
+        match self.resolve_array_iterator_read(iterated_object, length_key)? {
             PropertyRead::Accessor(callee)
                 if callee.as_immediate() != Some(Immediate::Undefined) =>
             {
@@ -362,7 +362,7 @@ impl Isolate {
             )?));
         }
         let key = PropertyKey::Atom(self.safe_integer_property_atom(snapshot.next_index)?);
-        match self.resolve_property_read(iterated_object, key)? {
+        match self.resolve_array_iterator_read(iterated_object, key)? {
             PropertyRead::Data(value) => Ok(ArrayIteratorNextAction::Done(
                 self.create_iterator_result(value, false)?,
             )),
@@ -380,6 +380,43 @@ impl Isolate {
                 self.create_iterator_result(Value::from_immediate(Immediate::Undefined), false)?,
             )),
         }
+    }
+
+    /// Reads an Array iterator's live array-like source, forwarding transparent Proxy layers.
+    fn resolve_array_iterator_read(
+        &mut self,
+        mut receiver: Value,
+        key: PropertyKey,
+    ) -> Result<PropertyRead, ExecutionError> {
+        while self.is_proxy_value(receiver) {
+            let snapshot = self.proxy_snapshot(receiver)?;
+            if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
+            }
+            let get_atom = self.intern_intrinsic_name(b"get")?;
+            let transparent = match self.resolve_property_read(snapshot.handler, get_atom.into())? {
+                PropertyRead::Missing => true,
+                PropertyRead::Data(value)
+                    if matches!(
+                        value.as_immediate(),
+                        Some(Immediate::Undefined | Immediate::Null)
+                    ) =>
+                {
+                    true
+                }
+                PropertyRead::Accessor(getter)
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    true
+                }
+                PropertyRead::Data(_) | PropertyRead::Accessor(_) => false,
+            };
+            if !transparent {
+                return Err(ExecutionError::NotObject(receiver));
+            }
+            receiver = snapshot.target;
+        }
+        self.resolve_property_read(receiver, key)
     }
 
     fn array_iterator_reference(

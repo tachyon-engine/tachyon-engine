@@ -693,6 +693,7 @@ impl Trace for Realm {
 pub(crate) struct WellKnownSymbols {
     pub(crate) to_primitive: Option<Value>,
     pub(crate) iterator: Option<Value>,
+    pub(crate) replace: Option<Value>,
     pub(crate) species: Option<Value>,
     pub(crate) to_string_tag: Option<Value>,
 }
@@ -702,6 +703,7 @@ impl Trace for WellKnownSymbols {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.to_primitive.trace(tracer);
         self.iterator.trace(tracer);
+        self.replace.trace(tracer);
         self.species.trace(tracer);
         self.to_string_tag.trace(tracer);
     }

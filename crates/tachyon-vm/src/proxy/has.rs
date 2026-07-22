@@ -20,6 +20,10 @@ impl Isolate {
             if self.is_proxy_value(receiver) {
                 return self.dispatch_proxy_has(site, receiver, trap_key);
             }
+            if self.is_regexp_value(receiver) && self.regexp_virtual_property(key)? {
+                self.write(site.caller_base, site.destination, boolean_value(true))?;
+                return Ok(None);
+            }
             if self
                 .complete_own_property_descriptor(receiver, key)?
                 .is_some()

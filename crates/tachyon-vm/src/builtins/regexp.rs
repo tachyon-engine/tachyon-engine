@@ -4,6 +4,47 @@ use super::super::*;
 use crate::regexp::backend::CompiledRegExp;
 
 impl Isolate {
+    /// Recognizes RegExp's virtual own/prototype accessors for internal `HasProperty`.
+    pub(crate) fn is_regexp_value(&self, value: Value) -> bool {
+        value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+        })
+    }
+
+    /// Checks the standard string-named RegExp accessors without materializing descriptors.
+    pub(crate) fn regexp_virtual_property(
+        &mut self,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        if let PropertyKey::Symbol(symbol) = key
+            && self.realm.well_known_symbols.replace == Some(symbol.value())
+        {
+            return Ok(true);
+        }
+        let Some(atom) = key.atom() else {
+            return Ok(false);
+        };
+        for name in [
+            b"source".as_slice(),
+            b"flags".as_slice(),
+            b"hasIndices".as_slice(),
+            b"global".as_slice(),
+            b"ignoreCase".as_slice(),
+            b"multiline".as_slice(),
+            b"dotAll".as_slice(),
+            b"unicode".as_slice(),
+            b"unicodeSets".as_slice(),
+            b"sticky".as_slice(),
+        ] {
+            if self.intern_intrinsic_name(name)? == atom {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Creates one independent RegExp literal object from verified, module-owned UTF-16 data.
     pub(crate) fn create_regexp_literal(
         &mut self,
