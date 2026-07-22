@@ -69,6 +69,23 @@ impl Isolate {
         self.realm.object_define_property = Some(define_property);
         let define_atom = self.intern_intrinsic_name(b"defineProperty")?;
         self.set_intrinsic_data_property(constructor, define_atom, define_property, true)?;
+        let define_properties = self.allocate_native_function(
+            NativeFunction::ObjectDefineProperties,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_define_properties = Some(define_properties);
+        let define_properties_atom = self.intern_intrinsic_name(b"defineProperties")?;
+        self.set_intrinsic_data_property(
+            constructor,
+            define_properties_atom,
+            define_properties,
+            true,
+        )?;
         let get_own_property_descriptor = self.allocate_native_function(
             NativeFunction::ObjectGetOwnPropertyDescriptor,
             OrdinaryObject {
