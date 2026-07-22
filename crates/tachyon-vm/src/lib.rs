@@ -105,6 +105,7 @@ use property::{
     PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite,
     PropertyWriteResolution,
 };
+use proxy::PendingProxyOwnKeys;
 use proxy::{
     PROXY_ACTIVE_OBJECT, PROXY_DEFINE_HANDLER, PROXY_DELETE_ACTIVE, PROXY_GET_ACTIVE,
     PendingProxyDefine, ProxyObject,
@@ -136,9 +137,9 @@ use runtime::{
         PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots,
         PropertyWriteMode, PrototypeInitializationRoots, ProxyContinuationStage, ProxyDefineMode,
         ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
-        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxySetMode, ProxySetPrototypeMode,
-        ProxySetPrototypeStage, ProxySetStage, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
-        next_to_primitive_stage,
+        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
+        ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

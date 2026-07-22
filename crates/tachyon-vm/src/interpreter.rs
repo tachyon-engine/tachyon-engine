@@ -1786,6 +1786,28 @@ impl Isolate {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             },
+            NativeContinuationKind::ProxyOwnKeys { stage, .. } => match stage {
+                ProxyOwnKeysStage::TrapGetter => (continuation.second(), 0, None, 0),
+                ProxyOwnKeysStage::TrapCall => {
+                    let state = self.pending_proxy_own_keys_reference(continuation.first())?;
+                    let pending = self.proxy_own_keys_snapshot_for_callback(state)?;
+                    let handler = pending.handler;
+                    let argument_base = site
+                        .caller_base
+                        .checked_add(site.destination)
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(1))?;
+                    self.write(site.caller_base, site.destination, pending.target)?;
+                    (handler, argument_base, None, 1)
+                }
+                ProxyOwnKeysStage::LengthGet | ProxyOwnKeysStage::ElementGet => {
+                    let state = self.pending_proxy_own_keys_reference(continuation.first())?;
+                    let pending = self.proxy_own_keys_snapshot_for_callback(state)?;
+                    (pending.trap_result, 0, None, 0)
+                }
+                ProxyOwnKeysStage::TargetOwnKeys => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+            },
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -1914,6 +1936,31 @@ impl Isolate {
             },
             target,
             operation,
+        )?;
+        Ok(true)
+    }
+
+    /// Dispatches Object/Reflect own-key consumers through the resumable Proxy list algorithm.
+    #[cold]
+    fn try_dispatch_proxy_own_keys(
+        &mut self,
+        site: &CallSite,
+        mode: ProxyOwnKeysMode,
+    ) -> Result<bool, ExecutionError> {
+        let Some(target) = self.call_argument(site, 0)? else {
+            return Ok(false);
+        };
+        if !self.is_proxy_value(target) {
+            return Ok(false);
+        }
+        self.dispatch_proxy_own_keys(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            target,
+            mode,
         )?;
         Ok(true)
     }
@@ -4060,10 +4107,16 @@ impl Isolate {
                     return self.object_get_own_property_descriptor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyNames) => {
+                    if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Names)? {
+                        return Ok(());
+                    }
                     let result = self.object_get_own_property_names(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertySymbols) => {
+                    if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Symbols)? {
+                        return Ok(());
+                    }
                     let result = self.object_get_own_property_symbols(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
@@ -4172,6 +4225,9 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ReflectOwnKeys) => {
+                    if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Reflect)? {
+                        return Ok(());
+                    }
                     let keys = self.reflect_own_keys(&site)?;
                     return self.write(site.caller_base, site.destination, keys);
                 }
@@ -4248,6 +4304,12 @@ impl Isolate {
                     | NativeFunction::ObjectValues
                     | NativeFunction::ObjectEntries),
                 ) => {
+                    if native == NativeFunction::ObjectKeys
+                        && self
+                            .try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::EnumerableNames)?
+                    {
+                        return Ok(());
+                    }
                     let result = self.object_enumeration(&site, native)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
@@ -5409,6 +5471,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxyDefine { mode, stage } => self
                     .resume_proxy_define(continuation, mode, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxyOwnKeys { mode, stage } => self
+                    .resume_proxy_own_keys(continuation, mode, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionInitializer(stage) => {
                     let state =

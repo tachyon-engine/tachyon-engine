@@ -197,6 +197,10 @@ var functionTarget = function() {};
 var functionInnerProxy = new Proxy(functionTarget, {});
 var functionProxy = new Proxy(functionInnerProxy, { set: undefined });
 var functionSet = Reflect.set(functionProxy, "prototype", null);
+var ownKeysProxy = new Proxy({ a: 1 }, {
+  ownKeys(target) { return ["a"]; }
+});
+var ownKeysResult = Reflect.ownKeys(ownKeysProxy);
 var indexedReceiver;
 var indexedProxy = new Proxy({}, {
   set(target, key, value, receiver) {
@@ -219,6 +223,7 @@ receiverTrace === "gd" && receiverTarget.value === 2 &&
 array.length === 0 && arrayRejectsIndex &&
 string[4] === 9 && functionSet && functionTarget.prototype === null &&
 indexedReceiver === indexedArray && !Object.hasOwn(indexedArray, "0") &&
+ownKeysResult.length === 1 && ownKeysResult[0] === "a" &&
 cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
 descriptor.get.name === "get __proto__" && descriptor.set.name === "set __proto__";
 "#;

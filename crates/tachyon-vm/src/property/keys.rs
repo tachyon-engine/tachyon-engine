@@ -59,6 +59,10 @@ impl Isolate {
         snapshot: OrdinaryObject,
     ) -> Result<OrdinaryOwnPropertyKeys, ExecutionError> {
         let virtual_keys = self.function_virtual_property_keys(receiver)?;
+        let string_length = self
+            .is_string_wrapper(receiver)
+            .then(|| self.string_value_length(receiver))
+            .transpose()?;
         let structural = self
             .shapes
             .own_keys(snapshot.shape)
@@ -68,9 +72,13 @@ impl Isolate {
             .flatten()
             .filter(|(_, key)| self.shapes.lookup(snapshot.shape, *key).is_none())
             .count();
+        let string_virtual_count = string_length
+            .map(|length| length.saturating_add(1))
+            .unwrap_or(0);
         let capacity = structural
             .len()
             .checked_add(missing_virtuals)
+            .and_then(|capacity| capacity.checked_add(string_virtual_count))
             .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
         let mut keys = Vec::new();
         keys.try_reserve_exact(capacity)
@@ -83,6 +91,21 @@ impl Isolate {
                     rank: STRING_KEY_RANK | u64::from(ordinal),
                 });
             }
+        }
+        if let Some(length) = string_length {
+            for index in 0..length {
+                let atom = self.safe_integer_property_atom(index as u64)?;
+                keys.push(RankedPropertyKey {
+                    key: PropertyKey::Atom(atom),
+                    property: None,
+                    rank: index as u64,
+                });
+            }
+            keys.push(RankedPropertyKey {
+                key: PropertyKey::Atom(self.length_atom()?),
+                property: None,
+                rank: STRING_KEY_RANK | (1_u64 << 32),
+            });
         }
         let mut structural = structural;
         let mut order = 0_usize;

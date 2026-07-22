@@ -328,6 +328,26 @@ pub(crate) enum PropertyCallbackMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyOwnKeysMode {
+    Internal,
+    Reflect,
+    Names,
+    Symbols,
+    EnumerableNames,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxyOwnKeysStage {
+    TrapGetter,
+    TrapCall,
+    LengthGet,
+    ElementGet,
+    TargetOwnKeys,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PropertyWriteMode {
     Assignment,
     Reflect,
@@ -579,6 +599,10 @@ pub(crate) enum NativeContinuationKind {
     ProxyDefine {
         mode: ProxyDefineMode,
         stage: ProxyDefineStage,
+    },
+    ProxyOwnKeys {
+        mode: ProxyOwnKeysMode,
+        stage: ProxyOwnKeysStage,
     },
     CollectionInitializer(CollectionInitializerStage),
     CollectionForEach,
@@ -927,6 +951,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ProxyDefine { mode, stage },
+            first: state,
+            second: retained,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn proxy_own_keys(
+        site: NativeContinuationSite,
+        mode: ProxyOwnKeysMode,
+        stage: ProxyOwnKeysStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxyOwnKeys { mode, stage },
             first: state,
             second: retained,
         }

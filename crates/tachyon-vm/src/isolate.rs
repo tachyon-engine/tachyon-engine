@@ -170,6 +170,9 @@ impl Isolate {
             pending_proxy_define: registry
                 .try_register("PendingProxyDefine")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_proxy_own_keys: registry
+                .try_register("PendingProxyOwnKeys")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             promise_object: registry
                 .try_register("PromiseObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

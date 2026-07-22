@@ -1300,6 +1300,7 @@ pub(crate) struct VmTypes {
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_proxy_define: GcType<PendingProxyDefine>,
+    pub(crate) pending_proxy_own_keys: GcType<PendingProxyOwnKeys>,
     pub(crate) promise_object: GcType<PromiseObject>,
     pub(crate) promise_capability: GcType<PromiseCapability>,
     pub(crate) promise_resolution_cell: GcType<PromiseResolutionCell>,
@@ -1392,6 +1393,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ProxyConstructorRequiresNew
         | ExecutionError::ProxyRevoked
         | ExecutionError::ProxyInvariantViolation
+        | ExecutionError::UnsupportedPropertyKey(_)
         | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
