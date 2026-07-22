@@ -3624,16 +3624,42 @@ impl Isolate {
                 .map_err(|_| ExecutionError::NonConstructor(site.callee))?;
             match callable.executable {
                 FunctionExecutable::Bound(data) => {
-                    if site.argument_prefix.is_some() {
-                        return Err(ExecutionError::BoundArgumentCountOverflow);
-                    }
                     let bound = self.bound_function_snapshot(data)?;
-                    site.argument_count = site
-                        .argument_count
-                        .checked_add(bound.argument_count)
-                        .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
-                    site.argument_prefix = Some(data);
-                    site.argument_prefix_count = bound.argument_count;
+                    if site.argument_prefix.is_some() || site.argument_source.is_some() {
+                        let argument_count = site
+                            .argument_count
+                            .checked_add(bound.argument_count)
+                            .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                        let mut arguments = Vec::new();
+                        arguments
+                            .try_reserve_exact(argument_count as usize)
+                            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+                        self.append_bound_arguments(data, &mut arguments)?;
+                        for index in 0..site.argument_count {
+                            arguments.push(
+                                self.call_argument(&site, index)?
+                                    .expect("forwarded construct argument remains in range"),
+                            );
+                        }
+                        let prefix = self.create_apply_argument_prefix(
+                            bound.call_target,
+                            bound.bound_this,
+                            arguments,
+                        )?;
+                        site.argument_count = argument_count;
+                        site.argument_prefix = Some(prefix);
+                        site.argument_prefix_offset = 0;
+                        site.argument_prefix_count = argument_count;
+                        site.argument_source = None;
+                        site.argument_base = 0;
+                    } else {
+                        site.argument_count = site
+                            .argument_count
+                            .checked_add(bound.argument_count)
+                            .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                        site.argument_prefix = Some(data);
+                        site.argument_prefix_count = bound.argument_count;
+                    }
                     let (target, new_target) =
                         self.resolve_bound_construct_target(site.callee, site.new_target)?;
                     debug_assert_eq!(target, bound.call_target);
