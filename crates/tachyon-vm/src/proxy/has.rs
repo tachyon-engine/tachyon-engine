@@ -11,9 +11,14 @@ impl Isolate {
         key_value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let key = self.property_key(key_value)?;
+        let trap_key = match key {
+            PropertyKey::Atom(atom) => self.atom_string_value(atom)?,
+            PropertyKey::Symbol(symbol) => symbol.value(),
+            PropertyKey::Private(_) => return Err(ExecutionError::PrivatePropertyKeyEscaped),
+        };
         loop {
             if self.is_proxy_value(receiver) {
-                return self.dispatch_proxy_has(site, receiver, key_value);
+                return self.dispatch_proxy_has(site, receiver, trap_key);
             }
             if self
                 .complete_own_property_descriptor(receiver, key)?
