@@ -1417,6 +1417,10 @@ impl Isolate {
                     } else {
                         self.read(base, operands[1] + 1)?
                     };
+                    if !self.is_string_value(source) {
+                        self.write(base, operands[0], source)?;
+                        return Ok(None);
+                    }
                     let callback = self
                         .eval_script_callback
                         .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
@@ -4523,6 +4527,9 @@ impl Isolate {
                     let source = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    if !self.is_string_value(source) {
+                        return self.write(site.caller_base, site.destination, source);
+                    }
                     let callback = self
                         .eval_script_callback
                         .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;

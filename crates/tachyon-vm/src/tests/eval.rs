@@ -146,6 +146,19 @@ fn eval_alias_remains_indirect_and_cannot_observe_caller_lexicals() {
     assert_direct_eval_batch::<8>(&module, false);
 }
 
+#[test]
+fn direct_and_indirect_eval_return_non_string_inputs_without_coercion() {
+    let module = compile_source(
+        "var object = {}; eval(7) === 7 && eval(object) === object && (0, eval)(null) === null;",
+        1_164,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
 fn compile_source(source: &str, source_id: u32) -> CompiledModule {
     Compiler
         .compile(
