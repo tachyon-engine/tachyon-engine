@@ -4029,6 +4029,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectPropertyIsEnumerable) => {
                     return self.object_property_is_enumerable(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectDefineGetter) => {
+                    return self.object_define_legacy_accessor(&site, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectDefineSetter) => {
+                    return self.object_define_legacy_accessor(&site, true);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectHasOwn) => {
                     return self.object_has_own(&site);
                 }

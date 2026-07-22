@@ -123,6 +123,8 @@ pub(crate) enum BuiltinPropertyKeyConsumer {
     ReflectGetOwnPropertyDescriptor,
     HasOwnProperty,
     PropertyIsEnumerable,
+    DefineGetter,
+    DefineSetter,
     HasOwn,
     ReflectDeleteProperty,
     ReflectHas,
@@ -457,6 +459,7 @@ pub(crate) enum ProxyDeleteStage {
 pub(crate) enum ProxyDefineMode {
     Object,
     Reflect,
+    LegacyAccessor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

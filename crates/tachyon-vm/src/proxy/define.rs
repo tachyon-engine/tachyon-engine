@@ -581,11 +581,18 @@ impl Isolate {
         result_object: Value,
         success: bool,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        if !success && mode == ProxyDefineMode::Object {
+        if !success
+            && matches!(
+                mode,
+                ProxyDefineMode::Object | ProxyDefineMode::LegacyAccessor
+            )
+        {
             return Err(ExecutionError::ProxyInvariantViolation);
         }
         let result = if mode == ProxyDefineMode::Reflect {
             boolean_value(success)
+        } else if mode == ProxyDefineMode::LegacyAccessor {
+            Value::from_immediate(Immediate::Undefined)
         } else {
             result_object
         };

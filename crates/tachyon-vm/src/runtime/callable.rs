@@ -19,6 +19,8 @@ pub(crate) enum NativeFunction {
     ObjectGetOwnPropertySymbols,
     ObjectHasOwnProperty,
     ObjectPropertyIsEnumerable,
+    ObjectDefineGetter,
+    ObjectDefineSetter,
     ObjectToLocaleString,
     ObjectToString,
     ObjectValueOf,
@@ -481,6 +483,7 @@ impl NativeFunction {
         }
         match self {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
+            Self::ObjectDefineGetter | Self::ObjectDefineSetter => 2,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
             Self::ProxyConstructor | Self::ProxyRevocable => 2,
@@ -688,6 +691,8 @@ impl NativeFunction {
             Self::ObjectGetOwnPropertySymbols => "getOwnPropertySymbols",
             Self::ObjectHasOwnProperty => "hasOwnProperty",
             Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
+            Self::ObjectDefineGetter => "__defineGetter__",
+            Self::ObjectDefineSetter => "__defineSetter__",
             Self::ObjectToLocaleString => "toLocaleString",
             Self::ObjectToString => "toString",
             Self::ObjectValueOf => "valueOf",

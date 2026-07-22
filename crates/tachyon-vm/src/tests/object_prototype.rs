@@ -86,6 +86,34 @@ proto.isPrototypeOf(value) && A.prototype.isPrototypeOf(value) &&
 trapGets === 2 && trapCalls === 2 && nullishThrows && primitiveArgumentSkipsReceiver;
 "#;
 
+const OBJECT_DEFINE_LEGACY_ACCESSOR_SOURCE: &str = r#"
+var trace = "";
+var object = {};
+var key = {
+  [Symbol.toPrimitive]() { trace += "k"; return "value"; }
+};
+function getter() { return this === object ? 41 : -1; }
+function setter(value) { this.seen = value; }
+var first = object.__defineGetter__(key, getter);
+var second = object.__defineSetter__("value", setter);
+var descriptor = Object.getOwnPropertyDescriptor(object, "value");
+var read = object.value;
+object.value = 9;
+var proxy;
+var target = {};
+proxy = new Proxy(target, {
+  defineProperty(target, key, descriptor) {
+    trace += "p";
+    return Reflect.defineProperty(target, key, descriptor);
+  }
+});
+function proxyGetter() { return this === proxy ? 7 : -1; }
+proxy.__defineGetter__("answer", proxyGetter);
+first === undefined && second === undefined && read === 41 && object.seen === 9 &&
+descriptor.get === getter && descriptor.set === setter && descriptor.enumerable &&
+descriptor.configurable && proxy.answer === 7 && trace === "kp";
+"#;
+
 #[test]
 fn object_value_of_executes_for_every_dispatch_batch() {
     assert_object_value_of_batch::<1>();
@@ -182,6 +210,38 @@ fn object_is_prototype_of_survives_forced_major_collections() {
     ));
 }
 
+#[test]
+fn object_define_legacy_accessor_resumes_for_every_dispatch_batch() {
+    assert_define_legacy_accessor_batch::<1>();
+    assert_define_legacy_accessor_batch::<2>();
+    assert_define_legacy_accessor_batch::<4>();
+    assert_define_legacy_accessor_batch::<8>();
+    assert_define_legacy_accessor_batch::<16>();
+}
+
+#[test]
+/// Forces collection during key conversion, Proxy trap invocation, and accessor publication.
+fn object_define_legacy_accessor_survives_forced_major_collections() {
+    let module = compile_object_source(OBJECT_DEFINE_LEGACY_ACCESSOR_SOURCE, 142);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("forced-major legacy accessor fixture executes");
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
 /// Executes the Object.prototype.valueOf contract with one selected dispatch monomorphization.
 fn assert_object_value_of_batch<const N: usize>() {
     let module = compile_object_value_of_source(100 + N as u32);
@@ -237,6 +297,25 @@ fn assert_is_prototype_of_batch<const N: usize>() {
             },
         )
         .expect("Object.prototype.isPrototypeOf fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes both legacy accessor definitions with one dispatch monomorphization.
+fn assert_define_legacy_accessor_batch<const N: usize>() {
+    let module = compile_object_source(OBJECT_DEFINE_LEGACY_ACCESSOR_SOURCE, 140 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("legacy accessor fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

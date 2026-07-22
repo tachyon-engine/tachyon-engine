@@ -86,11 +86,50 @@ impl Isolate {
         pending: PendingNativePropertyKey,
         primitive: Value,
     ) -> Result<(), ExecutionError> {
-        self.write(site.caller_base, site.destination, primitive)?;
+        let legacy_accessor = matches!(
+            consumer,
+            BuiltinPropertyKeyConsumer::DefineGetter | BuiltinPropertyKeyConsumer::DefineSetter
+        );
+        self.write(
+            site.caller_base,
+            site.destination,
+            if legacy_accessor {
+                pending.first
+            } else {
+                primitive
+            },
+        )?;
         let key = self.property_key(primitive)?;
         match consumer {
             BuiltinPropertyKeyConsumer::DefineProperty => {
                 self.begin_property_descriptor(site, pending.first, key, pending.second, false)
+            }
+            BuiltinPropertyKeyConsumer::DefineGetter | BuiltinPropertyKeyConsumer::DefineSetter => {
+                let setter = consumer == BuiltinPropertyKeyConsumer::DefineSetter;
+                let descriptor = PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                    getter: (!setter).then_some(pending.second),
+                    setter: setter.then_some(pending.second),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                });
+                debug_assert!(self.is_object_value(pending.first));
+                if self.is_proxy_value(pending.first) {
+                    return self
+                        .dispatch_proxy_define(
+                            site,
+                            pending.first,
+                            key,
+                            descriptor,
+                            ProxyDefineMode::LegacyAccessor,
+                        )
+                        .map(|_| ());
+                }
+                self.define_property(pending.first, key, descriptor)?;
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )
             }
             BuiltinPropertyKeyConsumer::ReflectDefineProperty => {
                 self.begin_property_descriptor(site, pending.first, key, pending.second, true)

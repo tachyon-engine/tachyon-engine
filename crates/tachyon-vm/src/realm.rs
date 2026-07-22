@@ -148,6 +148,28 @@ impl Isolate {
             property_is_enumerable,
             true,
         )?;
+        for (name, native) in [
+            (
+                b"__defineGetter__".as_slice(),
+                NativeFunction::ObjectDefineGetter,
+            ),
+            (
+                b"__defineSetter__".as_slice(),
+                NativeFunction::ObjectDefineSetter,
+            ),
+        ] {
+            let method = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(object_prototype, atom, method, true)?;
+        }
         let to_locale_string = self.allocate_native_function(
             NativeFunction::ObjectToLocaleString,
             OrdinaryObject {

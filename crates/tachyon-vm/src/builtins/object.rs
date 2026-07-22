@@ -534,6 +534,35 @@ impl Isolate {
         )
     }
 
+    /// Starts the legacy accessor helper after validating its receiver and callable argument.
+    pub(crate) fn object_define_legacy_accessor(
+        &mut self,
+        site: &CallSite,
+        setter: bool,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.object_value_of(site.this_value)?;
+        self.write(site.caller_base, site.destination, receiver)?;
+        let key = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let callback = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.resolve_function_object(callback)?;
+        self.dispatch_builtin_property_key(
+            if setter {
+                BuiltinPropertyKeyConsumer::DefineSetter
+            } else {
+                BuiltinPropertyKeyConsumer::DefineGetter
+            },
+            site,
+            receiver,
+            key,
+            callback,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
     /// Implements the static Object.hasOwn nullish boundary and ordinary own-property query.
     pub(crate) fn object_has_own(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let object = self
