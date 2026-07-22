@@ -64,6 +64,22 @@ impl Isolate {
             ObjectReceiver::Function(_) => {
                 self.set_function_internal_prototype(target, prototype)?;
             }
+            ObjectReceiver::Array(array) => {
+                self.heap.with_running_scope(|scope| {
+                    let array = scope.root(array).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(array, self.types.array)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .prototype = prototype;
+                        Ok::<(), ExecutionError>(())
+                    })?;
+                    scope
+                        .write_value_barrier(array, prototype)
+                        .map_err(ExecutionError::HeapReference)
+                })?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)

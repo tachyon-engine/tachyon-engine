@@ -197,6 +197,16 @@ var functionTarget = function() {};
 var functionInnerProxy = new Proxy(functionTarget, {});
 var functionProxy = new Proxy(functionInnerProxy, { set: undefined });
 var functionSet = Reflect.set(functionProxy, "prototype", null);
+var indexedReceiver;
+var indexedProxy = new Proxy({}, {
+  set(target, key, value, receiver) {
+    indexedReceiver = receiver;
+    return key === "0" && value === 1;
+  }
+});
+var indexedArray = new Array(1);
+Object.setPrototypeOf(indexedArray, indexedProxy);
+indexedArray[0] = 1;
 var root = {};
 var intermediary = Object.create(root);
 var leaf = Object.create(intermediary);
@@ -208,6 +218,7 @@ abrupt && invariantThrows && observedReceiver === inheritedReceiver &&
 receiverTrace === "gd" && receiverTarget.value === 2 &&
 array.length === 0 && arrayRejectsIndex &&
 string[4] === 9 && functionSet && functionTarget.prototype === null &&
+indexedReceiver === indexedArray && !Object.hasOwn(indexedArray, "0") &&
 cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
 descriptor.get.name === "get __proto__" && descriptor.set.name === "set __proto__";
 "#;
