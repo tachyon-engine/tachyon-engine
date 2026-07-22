@@ -45,6 +45,8 @@ pub struct Isolate {
     pub(crate) inactive_realms: Vec<(RealmId, Realm)>,
     pub(crate) active_realm: RealmId,
     pub(crate) next_realm_serial: NonZeroU32,
+    pub(crate) eval_script_callback: Option<EvalScriptCallback>,
+    pub(crate) suspended_fibers: Vec<Fiber>,
     pub(crate) loaded_code: Vec<LoadedCode>,
     pub(crate) heap: Heap,
     pub(crate) types: VmTypes,
@@ -88,6 +90,9 @@ impl Isolate {
             self.active_realm = current_id;
             return Err(error);
         }
+        if self.eval_script_callback.is_some() {
+            self.install_realm_hooks_current()?;
+        }
         let child = mem::replace(
             &mut self.realm,
             self.inactive_realms
@@ -103,6 +108,56 @@ impl Isolate {
         Ok((id, global))
     }
 
+    /// Installs the host-only `$262` realm hooks on the currently active global object.
+    pub fn install_realm_hooks(
+        &mut self,
+        eval_script: EvalScriptCallback,
+    ) -> Result<(), ExecutionError> {
+        self.eval_script_callback = Some(eval_script);
+        self.install_realm_hooks_current()
+    }
+
+    /// Installs host hooks without changing the callback already owned by this isolate.
+    fn install_realm_hooks_current(&mut self) -> Result<(), ExecutionError> {
+        let global = self
+            .realm
+            .global_object
+            .expect("initialized realm publishes a global object");
+        let hooks = self.create_ordinary_object()?;
+        let harness_atom = self.intern_intrinsic_name(b"$262")?;
+        self.set_own_data_property(global, harness_atom, hooks)?;
+        self.realm.set(harness_atom, hooks)?;
+        let prototype = self
+            .realm
+            .function_prototype
+            .expect("initialized realm publishes a function prototype");
+        let create = self.allocate_native_function(
+            NativeFunction::HostCreateRealm,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype,
+            },
+        )?;
+        let eval = self.allocate_native_function(
+            NativeFunction::HostEvalScript,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype,
+            },
+        )?;
+        let create_atom = self.intern_intrinsic_name(b"createRealm")?;
+        let eval_atom = self.intern_intrinsic_name(b"evalScript")?;
+        self.set_own_data_property(hooks, create_atom, create)?;
+        self.set_own_data_property(hooks, eval_atom, eval)?;
+        let eval_global_atom = self.intern_intrinsic_name(b"eval")?;
+        self.set_own_data_property(global, eval_global_atom, eval)?;
+        self.realm.set(eval_global_atom, eval)
+    }
+
     /// Executes one compiled module with a selected Realm as the active execution context.
     pub fn execute_in_realm(
         &mut self,
@@ -110,8 +165,20 @@ impl Isolate {
         module: &CompiledModule,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        if realm == RealmId::MAIN {
+        if realm == self.active_realm && self.fiber.frames.is_empty() {
             return self.execute(module, budget);
+        }
+        if realm == self.active_realm {
+            let suspended_fiber = mem::take(&mut self.fiber);
+            self.suspended_fibers.push(suspended_fiber);
+            let outcome = self.execute(module, budget);
+            let suspended_fiber = self
+                .suspended_fibers
+                .pop()
+                .expect("nested same-realm execution retains its suspended fiber");
+            let child_fiber = mem::replace(&mut self.fiber, suspended_fiber);
+            debug_assert!(child_fiber.frames.is_empty());
+            return outcome;
         }
         let position = self
             .inactive_realms
@@ -123,7 +190,15 @@ impl Isolate {
         let current = mem::replace(&mut self.realm, selected);
         self.inactive_realms.push((current_id, current));
         self.active_realm = realm;
+        let suspended_fiber = mem::take(&mut self.fiber);
+        self.suspended_fibers.push(suspended_fiber);
         let outcome = self.execute(module, budget);
+        let suspended_fiber = self
+            .suspended_fibers
+            .pop()
+            .expect("nested realm execution retains its suspended fiber");
+        let child_fiber = mem::replace(&mut self.fiber, suspended_fiber);
+        debug_assert!(child_fiber.frames.is_empty());
         let position = self
             .inactive_realms
             .iter()
@@ -320,6 +395,8 @@ impl Isolate {
             inactive_realms: Vec::new(),
             active_realm: RealmId::MAIN,
             next_realm_serial: NonZeroU32::new(2).expect("two is non-zero"),
+            eval_script_callback: None,
+            suspended_fibers: Vec::new(),
             loaded_code: Vec::new(),
             heap,
             types,
@@ -679,6 +756,46 @@ impl Isolate {
                     .borrow(string, self.types.string)
                     .map(JsString::len)
                     .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Copies a primitive or boxed ECMAScript string for an embedding callback boundary.
+    pub fn string_value_to_utf16(&mut self, value: Value) -> Result<Vec<u16>, ExecutionError> {
+        let string_data = if let Some(raw) = value.as_heap_ref()
+            && let Ok(wrapper) = self.heap.checked_reference(raw, self.types.string_object)
+        {
+            self.heap.with_running_scope(|scope| {
+                let wrapper = scope.root(wrapper).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(wrapper, self.types.string_object)
+                        .map(|wrapper| wrapper.string_data)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else {
+            value
+        };
+        let raw = string_data
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(value))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedStringValue(value))?;
+        self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let string = no_gc
+                    .borrow(string, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok(match string.as_view() {
+                    JsStringView::Latin1(bytes) => {
+                        bytes.iter().map(|byte| u16::from(*byte)).collect()
+                    }
+                    JsStringView::Utf16(units) => units.to_vec(),
+                })
             })
         })
     }

@@ -219,6 +219,8 @@ pub(crate) enum NativeFunction {
     GlobalIsNaN,
     GlobalParseFloat,
     GlobalParseInt,
+    HostCreateRealm,
+    HostEvalScript,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -680,6 +682,8 @@ impl NativeFunction {
             Self::SymbolToPrimitive => 1,
             Self::JsonParse => 1,
             Self::JsonStringify => 3,
+            Self::HostCreateRealm => 0,
+            Self::HostEvalScript => 1,
         }
     }
 
@@ -865,6 +869,8 @@ impl NativeFunction {
             Self::WeakSetDelete => "delete",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
+            Self::HostCreateRealm => "createRealm",
+            Self::HostEvalScript => "evalScript",
             Self::MathAbs
             | Self::MathAcos
             | Self::MathAcosh

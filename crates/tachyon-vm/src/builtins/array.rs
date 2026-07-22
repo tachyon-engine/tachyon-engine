@@ -3,6 +3,16 @@
 use super::super::*;
 
 impl Isolate {
+    /// Creates the current Realm's Array argument list for a Proxy apply/construct trap.
+    pub(crate) fn create_array_argument_list_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let mut site = *site;
+        site.new_target = Value::from_immediate(Immediate::Undefined);
+        self.create_array_from_site(&site)
+    }
+
     /// Creates an Array-shaped ordinary object from one native call/construct argument window.
     pub(crate) fn create_array_from_site(
         &mut self,

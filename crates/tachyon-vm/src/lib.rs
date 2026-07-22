@@ -67,7 +67,8 @@ use tachyon_gc::{
     HeapReferenceError, ManagedAllocationError, NoGcBorrowError, RootError, Trace, Tracer,
     TypeRegistrationError, TypeRegistry,
 };
-use tachyon_value::{Immediate, Value};
+use tachyon_value::Immediate;
+pub use tachyon_value::Value;
 
 /// Isolate-local identity for one independent ECMAScript Realm.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -82,6 +83,9 @@ impl RealmId {
         Self(value)
     }
 }
+
+/// Host callback used by embedding harnesses to compile and execute `evalScript` in one Realm.
+pub type EvalScriptCallback = fn(&mut Isolate, RealmId, Value) -> Result<Value, ExecutionError>;
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};

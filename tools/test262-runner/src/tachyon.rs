@@ -5,8 +5,8 @@ use tachyon_compiler::{
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, Isolate, IsolateConfig, RealmLimits,
-    RunOutcome, StackLimits,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, Isolate, IsolateConfig,
+    RealmId, RealmLimits, RunOutcome, StackLimits, Value,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -34,6 +34,39 @@ function $DONE(error) {
 }
 "#;
 const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
+
+/// Compiles and executes `$262.evalScript` in the realm selected by the host hook.
+fn eval_script_callback(
+    isolate: &mut Isolate,
+    realm: RealmId,
+    source: Value,
+) -> Result<Value, ExecutionError> {
+    let units = isolate.string_value_to_utf16(source)?;
+    let source = String::from_utf16_lossy(&units);
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(u32::MAX - 1),
+                SourceName::new("$262.evalScript"),
+                MediaType::JavaScript,
+                Arc::<str>::from(source),
+            ),
+            options(SourceMode::Script),
+        )
+        .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+    match isolate.execute_in_realm(
+        realm,
+        &module,
+        ExecutionBudget {
+            fuel: EXECUTION_FUEL_LIMIT,
+            quantum: u32::MAX,
+        },
+    )? {
+        RunOutcome::Completed(value) => Ok(value),
+        RunOutcome::Thrown(value) => Ok(value),
+        RunOutcome::BudgetExhausted => Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
+    }
+}
 
 /// Stateless in-process Test262 adapter; each request owns an independent Tachyon isolate.
 #[derive(Clone, Copy, Debug, Default)]
@@ -82,6 +115,9 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),
     };
+    if let Err(error) = isolate.install_realm_hooks(eval_script_callback) {
+        return unsupported(format!("Tachyon realm hook installation failed: {error:?}"));
+    }
     for (index, prelude) in request.test.preludes.iter().enumerate() {
         let module = match Compiler.compile(
             prelude_source_text(source_id(index, 1), prelude, request.is_async),

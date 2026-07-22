@@ -922,7 +922,7 @@ impl Isolate {
     }
 
     #[inline(always)]
-    pub(crate) fn typeof_value(&self, value: Value) -> Result<Value, ExecutionError> {
+    pub(crate) fn typeof_value(&mut self, value: Value) -> Result<Value, ExecutionError> {
         let strings = self.realm.typeof_strings;
         if value.as_i32().is_some() || value.as_f64().is_some() {
             return Ok(strings.number);
@@ -937,6 +937,7 @@ impl Isolate {
                 }
             };
         }
+        let mut value = value;
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::UnsupportedTypeof(value))?;
@@ -946,10 +947,21 @@ impl Isolate {
         if self.heap.checked_reference(raw, self.types.symbol).is_ok() {
             return Ok(strings.symbol);
         }
-        if self
-            .heap
-            .checked_reference(raw, self.types.function)
-            .is_ok()
+        while let Some(raw) = value.as_heap_ref()
+            && let Ok(proxy) = self.heap.checked_reference(raw, self.types.proxy_object)
+        {
+            value = self.heap.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(proxy, self.types.proxy_object)
+                    .map(|proxy| proxy.target)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+        }
+        if let Some(raw) = value.as_heap_ref()
+            && self
+                .heap
+                .checked_reference(raw, self.types.function)
+                .is_ok()
         {
             return Ok(strings.function);
         }

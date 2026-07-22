@@ -37,6 +37,9 @@ impl Isolate {
         for (_, realm) in &mut self.inactive_realms {
             realm.trace(tracer);
         }
+        for fiber in &mut self.suspended_fibers {
+            fiber.trace_roots(tracer);
+        }
         for code in &mut self.loaded_code {
             code.trace(tracer);
         }
@@ -1984,7 +1987,7 @@ impl Isolate {
         construct: bool,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         self.resolve_function_object(trap)?;
-        let arguments = self.create_array_from_site(&original)?;
+        let arguments = self.create_array_argument_list_from_site(&original)?;
         let state = self.allocate_proxy_call_state(
             proxy,
             arguments,
@@ -3598,7 +3601,7 @@ impl Isolate {
                             .map(|_| ());
                     }
                     PropertyRead::Accessor(getter) => {
-                        let arguments = self.create_array_from_site(&site)?;
+                        let arguments = self.create_array_argument_list_from_site(&site)?;
                         let state = self.allocate_proxy_call_state(
                             proxy,
                             arguments,
@@ -4110,7 +4113,7 @@ impl Isolate {
                             .map(|_| ());
                     }
                     PropertyRead::Accessor(getter) => {
-                        let arguments = self.create_array_from_site(&site)?;
+                        let arguments = self.create_array_argument_list_from_site(&site)?;
                         let state = self.allocate_proxy_call_state(
                             proxy,
                             arguments,
@@ -4242,6 +4245,23 @@ impl Isolate {
                         site.destination,
                         Value::from_immediate(Immediate::Undefined),
                     );
+                }
+                FunctionExecutable::Native(NativeFunction::HostCreateRealm) => {
+                    let (_, global) = self.create_realm()?;
+                    let result = self.create_ordinary_object()?;
+                    let global_atom = self.intern_intrinsic_name(b"global")?;
+                    self.set_own_data_property(result, global_atom, global)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::HostEvalScript) => {
+                    let source = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let callback = self
+                        .eval_script_callback
+                        .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+                    let result = callback(self, self.active_realm, source)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::NumberIsNaN
