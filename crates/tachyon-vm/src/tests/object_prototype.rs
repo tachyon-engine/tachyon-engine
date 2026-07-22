@@ -152,14 +152,21 @@ var proxy = new Proxy(target, {
 var before = descriptor.get.call(proxy);
 var setResult = descriptor.set.call(proxy, second);
 var after = descriptor.get.call(proxy);
+proxy.__proto__ = first;
+var afterAssignment = descriptor.get.call(proxy);
 var ignored = descriptor.set.call(proxy, 1);
+var marker = {};
+var abruptProxy = new Proxy({}, { get set() { throw marker; } });
+var abrupt = false;
+try { abruptProxy.__proto__ = second; } catch (error) { abrupt = error === marker; }
 var root = {};
 var intermediary = Object.create(root);
 var leaf = Object.create(intermediary);
 var cycleThrows = false;
 try { descriptor.set.call(root, leaf); } catch (error) { cycleThrows = error instanceof TypeError; }
-before === first && after === second && setResult === undefined && ignored === undefined &&
-trace === "gsg" && cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
+before === first && after === second && afterAssignment === first &&
+setResult === undefined && ignored === undefined && trace === "gsgsg" &&
+abrupt && cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
 descriptor.get.name === "get __proto__" && descriptor.set.name === "set __proto__";
 "#;
 

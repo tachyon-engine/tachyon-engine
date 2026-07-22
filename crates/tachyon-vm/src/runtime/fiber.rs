@@ -333,6 +333,20 @@ pub(crate) enum PropertyWriteMode {
     Reflect,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxySetMode {
+    Assignment,
+    Reflect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ProxySetStage {
+    TrapGetter,
+    TrapCall,
+}
+
 /// Identifies the observable caller that must resume after `Get(resolution, "then")`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -537,6 +551,10 @@ pub(crate) enum NativeContinuationKind {
     },
     PropertyGet(PropertyCallbackMode),
     PropertySet(PropertyWriteMode),
+    ProxySet {
+        mode: ProxySetMode,
+        stage: ProxySetStage,
+    },
     Proxy {
         operation: ProxyInternalMethod,
         stage: ProxyContinuationStage,
@@ -746,6 +764,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect),
             first: receiver,
             second: value,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn proxy_set(
+        site: NativeContinuationSite,
+        mode: ProxySetMode,
+        stage: ProxySetStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ProxySet { mode, stage },
+            first: state,
+            second: retained,
         }
     }
 

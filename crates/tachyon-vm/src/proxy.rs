@@ -7,10 +7,12 @@ mod delete;
 mod get;
 mod get_own;
 mod has;
+mod set;
 
 pub(crate) use define::{PROXY_DEFINE_HANDLER, PendingProxyDefine};
 pub(crate) use delete::PROXY_DELETE_ACTIVE;
 pub(crate) use get::PROXY_GET_ACTIVE;
+pub(crate) use set::SET_PROXY;
 
 /// A Proxy has no ordinary-property base; every object internal method must use exotic dispatch.
 #[derive(Clone, Copy, Debug)]

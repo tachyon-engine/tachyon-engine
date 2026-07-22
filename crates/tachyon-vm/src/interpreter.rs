@@ -1560,6 +1560,20 @@ impl Isolate {
         value: Value,
         call_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.is_proxy_value(receiver) {
+            return self.dispatch_proxy_aware_property_write(
+                NativeContinuationSite {
+                    caller_base,
+                    destination: value_register,
+                    call_site,
+                },
+                receiver,
+                receiver,
+                key,
+                value,
+                ProxySetMode::Assignment,
+            );
+        }
         match self.resolve_property_write(receiver, key, value)? {
             PropertyWrite::Complete(success) => {
                 self.finish_property_write(receiver, success)?;
@@ -1589,6 +1603,16 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.is_proxy_value(target) {
+            return self.dispatch_proxy_aware_property_write(
+                site,
+                target,
+                receiver,
+                key,
+                value,
+                ProxySetMode::Reflect,
+            );
+        }
         match self.resolve_reflect_property_write(target, receiver, key, value)? {
             PropertyWrite::Complete(success) => self
                 .write(site.caller_base, site.destination, boolean_value(success))
@@ -1673,6 +1697,17 @@ impl Isolate {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             },
+            NativeContinuationKind::ProxySet { stage, .. } => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let handler = self
+                    .proxy_snapshot(pending.values[crate::proxy::SET_PROXY])?
+                    .handler;
+                match stage {
+                    ProxySetStage::TrapGetter => (handler, 0, None, 0),
+                    ProxySetStage::TrapCall => (handler, 0, Some(state), 4),
+                }
+            }
             NativeContinuationKind::ProxyHas(stage) => {
                 let state = self.native_call_state_reference(continuation.first())?;
                 let pending = self.native_call_state_snapshot(state)?;
@@ -1954,7 +1989,11 @@ impl Isolate {
 
     /// Converts one ordinary [[Set]] false result into strict-mode TypeError semantics.
     #[inline]
-    fn finish_property_write(&self, receiver: Value, success: bool) -> Result<(), ExecutionError> {
+    pub(crate) fn finish_property_write(
+        &self,
+        receiver: Value,
+        success: bool,
+    ) -> Result<(), ExecutionError> {
         let strictness = self
             .fiber
             .frames
@@ -5350,6 +5389,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ProxySetPrototype { mode, stage } => self
                     .resume_proxy_set_prototype(continuation, mode, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::ProxySet { mode, stage } => self
+                    .resume_proxy_set(continuation, mode, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::ProxyHas(stage) => self
                     .resume_proxy_has(continuation, stage, value)

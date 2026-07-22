@@ -133,8 +133,8 @@ use runtime::{
         PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots,
         PropertyWriteMode, PrototypeInitializationRoots, ProxyContinuationStage, ProxyDefineMode,
         ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
-        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxySetPrototypeMode,
-        ProxySetPrototypeStage, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
+        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxySetMode, ProxySetPrototypeMode,
+        ProxySetPrototypeStage, ProxySetStage, SymbolAllocationRoots, ToPrimitiveStage, VmRoots,
         next_to_primitive_stage,
     },
     realm::{
