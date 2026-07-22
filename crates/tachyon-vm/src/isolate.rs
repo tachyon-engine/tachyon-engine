@@ -1426,7 +1426,10 @@ impl Isolate {
     }
 
     /// Applies ordinary `for-in` shadowing: every present own key suppresses prototypes.
-    pub(crate) fn for_in_keys(&mut self, source: Value) -> Result<Box<[AtomId]>, ExecutionError> {
+    pub(crate) fn for_in_keys(
+        &mut self,
+        mut source: Value,
+    ) -> Result<Box<[AtomId]>, ExecutionError> {
         if matches!(
             source.as_immediate(),
             Some(Immediate::Undefined | Immediate::Null)
@@ -1440,6 +1443,38 @@ impl Isolate {
         }
         if !self.is_object_value(source) {
             return Ok(Box::default());
+        }
+        // `for-in` observes Proxy `[[OwnPropertyKeys]]`; when the handler does not
+        // provide that trap the operation forwards through every Proxy layer.
+        // Keep this fast path synchronous so the common transparent-Proxy case
+        // remains compatible with the existing iterator snapshot API.
+        while self.is_proxy_value(source) {
+            let snapshot = self.proxy_snapshot(source)?;
+            if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
+            }
+            let trap_name = self.intern_intrinsic_name(b"ownKeys")?;
+            let has_trap = match self.resolve_property_read(snapshot.handler, trap_name.into())? {
+                PropertyRead::Missing => false,
+                PropertyRead::Data(value)
+                    if matches!(
+                        value.as_immediate(),
+                        Some(Immediate::Undefined | Immediate::Null)
+                    ) =>
+                {
+                    false
+                }
+                PropertyRead::Accessor(getter)
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    false
+                }
+                PropertyRead::Data(_) | PropertyRead::Accessor(_) => true,
+            };
+            if has_trap {
+                return Err(ExecutionError::NotObject(source));
+            }
+            source = snapshot.target;
         }
         let upper_bound = self.for_in_object_key_upper_bound(source)?;
         let mut keys = ForInKeySet::with_upper_bound(upper_bound)
