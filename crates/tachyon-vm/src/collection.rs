@@ -5,7 +5,10 @@ use core::mem::size_of;
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::Value;
 
-use crate::{object::OrdinaryObject, runtime::fiber::VmRoots};
+use crate::{
+    object::OrdinaryObject,
+    runtime::fiber::{CollectionInitializerStage, VmRoots},
+};
 
 /// Map exotic private slots plus its ordinary named-property base.
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +56,7 @@ pub(crate) struct PendingCollectionInitializer {
     pub(crate) key: Value,
     pub(crate) adder: Value,
     pub(crate) kind: CollectionInitializerKind,
+    pub(crate) stage: CollectionInitializerStage,
 }
 
 /// GC-owned callback state for live `Map.prototype.forEach` and `Set.prototype.forEach` scans.
@@ -119,6 +123,7 @@ pub(crate) struct PendingCollectionInitializerSnapshot {
     pub(crate) key: Value,
     pub(crate) adder: Value,
     pub(crate) kind: CollectionInitializerKind,
+    pub(crate) stage: CollectionInitializerStage,
 }
 
 pub(crate) struct PendingCollectionInitializerRoots<'a> {

@@ -545,6 +545,14 @@ pub(crate) enum CollectionInitializerStage {
     AdderCall,
 }
 
+/// Observable stages of IteratorClose for a native iterable consumer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum CollectionIteratorCloseStage {
+    ReturnGetter,
+    ReturnCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum InstanceElementStage {
@@ -618,6 +626,7 @@ pub(crate) enum NativeContinuationKind {
         stage: ProxyOwnKeysStage,
     },
     CollectionInitializer(CollectionInitializerStage),
+    CollectionIteratorClose(CollectionIteratorCloseStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
@@ -1147,6 +1156,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::CollectionInitializer(stage),
             first: state,
             second: callee,
+        }
+    }
+
+    /// Roots an iterator state and its original throw while `return` executes.
+    #[inline]
+    pub(crate) const fn collection_iterator_close(
+        site: NativeContinuationSite,
+        stage: CollectionIteratorCloseStage,
+        state: Value,
+        original_throw: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::CollectionIteratorClose(stage),
+            first: state,
+            second: original_throw,
         }
     }
 

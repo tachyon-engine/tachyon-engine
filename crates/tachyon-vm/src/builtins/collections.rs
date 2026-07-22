@@ -126,6 +126,7 @@ impl Isolate {
             key: Value::from_immediate(Immediate::Undefined),
             adder: Value::from_immediate(Immediate::Undefined),
             kind,
+            stage: CollectionInitializerStage::Adder,
         })?;
         self.write(
             site.caller_base,
@@ -171,6 +172,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         // The parent completion has been popped before this resume. Re-publish the state before
         // any allocation so local GcRef/Value temporaries never become the only owner.
+        self.update_pending_collection_initializer(state, |pending| pending.stage = stage)?;
         self.write(
             site.caller_base,
             site.destination,
@@ -324,6 +326,9 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<PendingCollectionInitializer>,
     ) -> Result<(), ExecutionError> {
+        self.update_pending_collection_initializer(state, |pending| {
+            pending.stage = CollectionInitializerStage::NextCall
+        })?;
         let pending = self.pending_collection_initializer(state)?;
         self.call_collection_initializer(
             site,
@@ -521,6 +526,159 @@ impl Isolate {
         self.call_collection_next(site, state)
     }
 
+    /// Reports whether an abrupt collection stage requires Object.fromEntries IteratorClose.
+    pub(crate) fn should_close_object_from_entries(
+        &mut self,
+        state: Value,
+        _continuation_stage: CollectionInitializerStage,
+    ) -> Result<bool, ExecutionError> {
+        let state = self.pending_collection_initializer_reference(state)?;
+        let pending = self.pending_collection_initializer(state)?;
+        let stage = pending.stage;
+        if !matches!(
+            stage,
+            CollectionInitializerStage::ResultValue
+                | CollectionInitializerStage::EntryKey
+                | CollectionInitializerStage::EntryValue
+        ) {
+            return Ok(false);
+        }
+        Ok(pending.kind == CollectionInitializerKind::ObjectFromEntries)
+    }
+
+    /// Starts IteratorClose while retaining the original abrupt completion outside Rust's stack.
+    pub(crate) fn begin_object_from_entries_iterator_close(
+        &mut self,
+        site: NativeContinuationSite,
+        state: Value,
+        original_throw: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let reference = self.pending_collection_initializer_reference(state)?;
+        let iterator = self.pending_collection_initializer(reference)?.iterator;
+        let return_key = PropertyKey::Atom(self.intern_intrinsic_name(b"return")?);
+        match self.resolve_property_read(iterator, return_key)? {
+            PropertyRead::Missing => self.throw_value(original_throw, site.call_site),
+            PropertyRead::Data(callee)
+                if matches!(
+                    callee.as_immediate(),
+                    Some(Immediate::Undefined | Immediate::Null)
+                ) =>
+            {
+                self.throw_value(original_throw, site.call_site)
+            }
+            PropertyRead::Accessor(getter)
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.throw_value(original_throw, site.call_site)
+            }
+            PropertyRead::Accessor(getter) => self.call_collection_iterator_close(
+                site,
+                CollectionIteratorCloseStage::ReturnGetter,
+                state,
+                original_throw,
+                getter,
+                iterator,
+            ),
+            PropertyRead::Data(callee) => self.call_collection_iterator_close(
+                site,
+                CollectionIteratorCloseStage::ReturnCall,
+                state,
+                original_throw,
+                callee,
+                iterator,
+            ),
+        }
+    }
+
+    /// Resumes either the `return` getter or call, restoring the original throw after the call.
+    pub(crate) fn resume_collection_iterator_close(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: CollectionIteratorCloseStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let original_throw = continuation.second();
+        match stage {
+            CollectionIteratorCloseStage::ReturnGetter => {
+                if matches!(
+                    value.as_immediate(),
+                    Some(Immediate::Undefined | Immediate::Null)
+                ) {
+                    return self.throw_value(original_throw, site.call_site);
+                }
+                let state = continuation.first();
+                let reference = self.pending_collection_initializer_reference(state)?;
+                let iterator = self.pending_collection_initializer(reference)?.iterator;
+                self.call_collection_iterator_close(
+                    site,
+                    CollectionIteratorCloseStage::ReturnCall,
+                    state,
+                    original_throw,
+                    value,
+                    iterator,
+                )
+            }
+            CollectionIteratorCloseStage::ReturnCall => {
+                self.throw_value(original_throw, site.call_site)
+            }
+        }
+    }
+
+    /// Calls one IteratorClose callback and marks JavaScript frames for continuation return.
+    fn call_collection_iterator_close(
+        &mut self,
+        site: NativeContinuationSite,
+        stage: CollectionIteratorCloseStage,
+        state: Value,
+        original_throw: Value,
+        callee: Value,
+        receiver: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.resolve_function_object(callee)?;
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::collection_iterator_close(
+                site,
+                stage,
+                state,
+                original_throw,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: receiver,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("IteratorClose callback publishes its callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(None);
+        }
+        let returned = self.read(site.caller_base, site.destination)?;
+        let continuation = self.pop_native_continuation()?;
+        self.resume_collection_iterator_close(continuation, stage, returned)
+    }
+
     fn pending_collection_initializer(
         &mut self,
         state: GcRef<PendingCollectionInitializer>,
@@ -539,6 +697,7 @@ impl Isolate {
                         key: pending.key,
                         adder: pending.adder,
                         kind: pending.kind,
+                        stage: pending.stage,
                     })
                     .map_err(ExecutionError::NoGcBorrow)
             })

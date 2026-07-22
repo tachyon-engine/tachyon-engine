@@ -1827,6 +1827,9 @@ impl Isolate {
             NativeContinuationKind::CollectionInitializer(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::CollectionIteratorClose(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5840,6 +5843,9 @@ impl Isolate {
                 }
                 continue;
             }
+            if let NativeContinuationKind::CollectionIteratorClose(stage) = continuation.kind() {
+                return self.resume_collection_iterator_close(continuation, stage, value);
+            }
             let site = continuation.site();
             let frame_depth = self.fiber.frames.len();
             let result = match continuation.kind() {
@@ -5942,6 +5948,9 @@ impl Isolate {
                         self.pending_collection_initializer_reference(continuation.first())?;
                     self.resume_collection_initializer(site, state, stage, value)
                 }
+                NativeContinuationKind::CollectionIteratorClose(_) => {
+                    unreachable!("iterator close resumes before native dispatch")
+                }
                 NativeContinuationKind::CollectionForEach => {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;
                     self.resume_collection_for_each(site, state)
@@ -6002,6 +6011,16 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if let Some(state) = self.object_from_entries_close_state(continuation)?
+                    && let Some(kind) = execution_error_kind(&error)
+                {
+                    let original_throw = self.create_native_error(kind, None)?;
+                    return self.begin_object_from_entries_iterator_close(
+                        site,
+                        state,
+                        original_throw,
+                    );
+                }
                 let Some(kind) = execution_error_kind(&error) else {
                     return Err(error);
                 };
@@ -6031,7 +6050,7 @@ impl Isolate {
     /// Propagates a thrown value through explicit frames until an immutable handler range matches.
     #[cold]
     #[inline(never)]
-    fn throw_value(
+    pub(crate) fn throw_value(
         &mut self,
         value: Value,
         instruction_offset: WordOffset,
@@ -6151,6 +6170,22 @@ impl Isolate {
                 .truncate(frame.completion_base as usize);
             if frame.return_continuation {
                 let continuation = self.pop_native_continuation()?;
+                if continuation.kind()
+                    == NativeContinuationKind::CollectionIteratorClose(
+                        CollectionIteratorCloseStage::ReturnCall,
+                    )
+                {
+                    completion = CompletionRecord::throw(continuation.second());
+                    instruction_offset = continuation.site().call_site;
+                    continue;
+                }
+                if let Some(state) = self.object_from_entries_close_state(continuation)? {
+                    return self.begin_object_from_entries_iterator_close(
+                        continuation.site(),
+                        state,
+                        value,
+                    );
+                }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
                     let site = continuation.site();
@@ -6185,6 +6220,28 @@ impl Isolate {
                 .call_site
                 .expect("every non-entry frame records its caller call-site");
         }
+    }
+
+    /// Recovers Object.fromEntries iterator state from direct or ToPropertyKey continuations.
+    fn object_from_entries_close_state(
+        &mut self,
+        continuation: NativeContinuation,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if let NativeContinuationKind::CollectionInitializer(stage) = continuation.kind() {
+            return self
+                .should_close_object_from_entries(continuation.first(), stage)
+                .map(|close| close.then_some(continuation.first()));
+        }
+        let NativeContinuationKind::Conversion {
+            consumer:
+                ConversionConsumer::BuiltinPropertyKey(BuiltinPropertyKeyConsumer::ObjectFromEntries),
+            ..
+        } = continuation.kind()
+        else {
+            return Ok(None);
+        };
+        self.pending_native_property_key(continuation.first())
+            .map(|pending| Some(pending.third()))
     }
 
     /// Selects the innermost handler eligible for one completion kind and target.

@@ -19,6 +19,11 @@ impl PendingNativePropertyKey {
             third,
         }
     }
+
+    #[inline(always)]
+    pub(crate) const fn third(self) -> Value {
+        self.third
+    }
 }
 
 impl Trace for PendingNativePropertyKey {
