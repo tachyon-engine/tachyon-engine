@@ -136,6 +136,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let key = key.into();
+        if self.is_array_value(receiver)? && key == PropertyKey::Atom(self.length_atom()?) {
+            return self.set_array_length_value(receiver, value);
+        }
         if self.is_function_prototype_property(receiver, key) {
             if self.has_read_only_prototype(receiver)? {
                 return Err(ExecutionError::ReadOnlyProperty(receiver));
@@ -183,6 +186,60 @@ impl Isolate {
             value,
             PropertyAttributes::DEFAULT_DATA,
         )
+    }
+
+    /// Applies the shrinking portion of ArraySetLength before publishing the new length slot.
+    pub(crate) fn set_array_length_value(
+        &mut self,
+        receiver: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let old_length = self
+            .complete_own_property_descriptor(receiver, length_key)?
+            .and_then(|descriptor| match descriptor {
+                PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
+                _ => None,
+            })
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        let new_length = numeric_value(value).ok_or(ExecutionError::ArrayLengthOverflow)?;
+        if !new_length.is_finite()
+            || new_length < 0.0
+            || new_length.fract() != 0.0
+            || new_length > f64::from(u32::MAX - 1)
+        {
+            return Err(ExecutionError::ArrayLengthOverflow);
+        }
+        if new_length < old_length {
+            let (_, snapshot) = self.object_snapshot(receiver)?;
+            let entries = self.ordinary_own_property_keys(receiver, snapshot)?;
+            let mut indices = Vec::with_capacity(entries.len());
+            for key in entries {
+                let Some(atom) = key.atom() else {
+                    continue;
+                };
+                let Some(name) = self.atoms.get(atom) else {
+                    continue;
+                };
+                let Some(index) = crate::property::keys::array_index(name.as_view()) else {
+                    continue;
+                };
+                if f64::from(index) >= new_length {
+                    indices.push(key);
+                }
+            }
+            for index in indices {
+                if !self.delete_own_data_property(receiver, index)? {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
+            }
+        }
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let property = self
+            .shapes
+            .lookup(snapshot.shape, length_key)
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        self.update_property_slot(snapshot, length_key, property.slot, value)
     }
 
     /// Defines a fresh ordinary data slot with the intrinsic attributes required by an exotic.

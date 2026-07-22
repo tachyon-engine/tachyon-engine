@@ -56,6 +56,38 @@ impl Trace for AccessorAllocationRoots<'_> {
 }
 
 impl Isolate {
+    /// Materializes one String-exotic UTF-16 code-unit value for descriptor consumers.
+    pub(crate) fn string_index_value(
+        &mut self,
+        receiver: Value,
+        index: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if index >= self.string_value_length(receiver)? {
+            return Ok(None);
+        }
+        let string_receiver = self.string_primitive_value(receiver)?;
+        let raw = string_receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(string_receiver))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(ExecutionError::HeapReference)?;
+        let unit = self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(string, self.types.string)
+                    .map(|string| string.code_unit_at(index).expect("checked index"))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let value = self.allocate_runtime_string(
+            JsString::try_from_utf16(&[unit]).map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        Ok(Some(value))
+    }
+
     /// Resolves an ordinary read while retaining the original receiver for accessor `this`.
     pub(crate) fn resolve_property_read(
         &mut self,
@@ -167,9 +199,13 @@ impl Isolate {
                 )?;
                 return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
             }
-            self.realm
-                .string_prototype
-                .expect("String prototype initializes before primitive String access")
+            if self.is_string_wrapper(target) {
+                target
+            } else {
+                self.realm
+                    .string_prototype
+                    .expect("String prototype initializes before primitive String access")
+            }
         } else if numeric_value(target).is_some() {
             self.realm
                 .number_prototype
@@ -252,12 +288,24 @@ impl Isolate {
                 .checked_reference(raw, self.types.regexp_object)
                 .is_ok()
         {
-            let source = self.intern_intrinsic_name(b"source")?;
-            let flags = self.intern_intrinsic_name(b"flags")?;
-            if key == PropertyKey::Atom(source) || key == PropertyKey::Atom(flags) {
-                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
-                    false,
-                )));
+            for name in [
+                b"source".as_slice(),
+                b"flags".as_slice(),
+                b"hasIndices".as_slice(),
+                b"global".as_slice(),
+                b"ignoreCase".as_slice(),
+                b"multiline".as_slice(),
+                b"dotAll".as_slice(),
+                b"unicode".as_slice(),
+                b"unicodeSets".as_slice(),
+                b"sticky".as_slice(),
+            ] {
+                let atom = self.intern_intrinsic_name(name)?;
+                if key == PropertyKey::Atom(atom) {
+                    return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                        false,
+                    )));
+                }
             }
         }
         let mut current = if self.is_string_value(receiver) {
@@ -366,6 +414,32 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
+        if let Some(raw) = target.as_heap_ref()
+            && self
+                .heap
+                .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+        {
+            for name in [
+                b"source".as_slice(),
+                b"flags".as_slice(),
+                b"hasIndices".as_slice(),
+                b"global".as_slice(),
+                b"ignoreCase".as_slice(),
+                b"multiline".as_slice(),
+                b"dotAll".as_slice(),
+                b"unicode".as_slice(),
+                b"unicodeSets".as_slice(),
+                b"sticky".as_slice(),
+            ] {
+                let atom = self.intern_intrinsic_name(name)?;
+                if key == PropertyKey::Atom(atom) {
+                    return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                        false,
+                    )));
+                }
+            }
+        }
         let mut current = target;
         loop {
             let descriptor = match self.complete_own_property_descriptor(current, key) {

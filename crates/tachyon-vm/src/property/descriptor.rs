@@ -188,7 +188,26 @@ impl Isolate {
                 self.validate_accessor_callable(setter)?;
             }
         }
+        if self.is_array_value(receiver)?
+            && key == PropertyKey::Atom(self.length_atom()?)
+            && let PropertyDescriptor::Data(data) = descriptor
+            && let Some(value) = data.value
+            && data.writable.is_none()
+            && data.enumerable.is_none()
+            && data.configurable.is_none()
+        {
+            return self.set_array_length_value(receiver, value);
+        }
         if self.is_function_prototype_property(receiver, key) {
+            if let PropertyDescriptor::Data(data) = descriptor
+                && data.writable.is_none()
+                && data.enumerable.is_none()
+                && data.configurable.is_none()
+                && let Some(value) = data.value
+            {
+                self.intrinsic_property_atoms.prototype = key.atom();
+                return self.set_function_prototype(receiver, value);
+            }
             return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
@@ -645,6 +664,33 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<PropertyDescriptor>, ExecutionError> {
         let key = key.into();
+        if self.is_string_wrapper(receiver) {
+            let length = self.length_atom()?;
+            if key == PropertyKey::Atom(length) {
+                return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(safe_integer_value(
+                        self.string_value_length(receiver)? as u64
+                    )),
+                    writable: Some(false),
+                    enumerable: Some(false),
+                    configurable: Some(false),
+                })));
+            }
+            if let Some(atom) = key.atom()
+                && let Some(index) = self
+                    .atoms
+                    .get(atom)
+                    .and_then(|name| crate::property::keys::array_index(name.as_view()))
+                && let Some(value) = self.string_index_value(receiver, index as usize)?
+            {
+                return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(false),
+                    enumerable: Some(true),
+                    configurable: Some(false),
+                })));
+            }
+        }
         let (_, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             if let Some(value) = self.function_metadata_property(receiver, key)? {

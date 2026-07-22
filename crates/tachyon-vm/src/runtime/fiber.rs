@@ -345,6 +345,8 @@ pub(crate) enum ProxySetMode {
 pub(crate) enum ProxySetStage {
     TrapGetter,
     TrapCall,
+    ReceiverGetOwn,
+    ReceiverDefine,
 }
 
 /// Identifies the observable caller that must resume after `Get(resolution, "then")`.
@@ -442,6 +444,7 @@ pub(crate) enum ProxyGetOwnStage {
 #[repr(u8)]
 pub(crate) enum ProxyGetOwnMode {
     Descriptor,
+    SetReceiver,
     HasOwn,
     Enumerable,
     LookupGetter,

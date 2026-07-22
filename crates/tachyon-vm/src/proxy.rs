@@ -116,7 +116,8 @@ impl Isolate {
             target,
             handler,
         };
-        self.heap
+        let proxy = self
+            .heap
             .try_allocate_with_gc(
                 self.types.proxy_object,
                 0,
@@ -129,8 +130,8 @@ impl Isolate {
                 AllocationSpace::Young,
                 &mut roots,
             )
-            .map(|proxy| Value::from_heap_ref(proxy.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok(Value::from_heap_ref(proxy.raw()))
     }
 
     /// Creates the Proxy, stateful revoker, and exact two-property result for Proxy.revocable.

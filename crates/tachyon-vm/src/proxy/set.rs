@@ -49,8 +49,13 @@ impl Isolate {
         if snapshot.handler.as_immediate() == Some(Immediate::Null) {
             return Err(ExecutionError::ProxyRevoked);
         }
-        let trap_name = self.intern_intrinsic_name(b"set")?;
         let state = self.allocate_proxy_set_state(snapshot.target, key, value, receiver, proxy)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let trap_name = self.intern_intrinsic_name(b"set")?;
         match self.resolve_property_read(snapshot.handler, trap_name.into())? {
             PropertyRead::Missing => self.forward_proxy_set(site, state, mode),
             PropertyRead::Data(trap) => self.continue_proxy_set_lookup(site, mode, state, trap),
@@ -117,22 +122,9 @@ impl Isolate {
         let resolution = match resolution {
             Ok(resolution) => resolution,
             Err(ExecutionError::NotObject(receiver))
-                if receiver == pending.values[SET_RECEIVER]
-                    && self.proxy_receiver_has_no_descriptor_write_traps(receiver)? =>
+                if receiver == pending.values[SET_RECEIVER] && self.is_proxy_value(receiver) =>
             {
-                let success = match self.set_own_data_property(
-                    pending.values[SET_TARGET],
-                    key,
-                    pending.values[SET_VALUE],
-                ) {
-                    Ok(()) => true,
-                    Err(
-                        ExecutionError::NonExtensibleObject(_)
-                        | ExecutionError::ReadOnlyProperty(_),
-                    ) => false,
-                    Err(error) => return Err(error),
-                };
-                PropertyWriteResolution::Write(PropertyWrite::Complete(success))
+                return self.dispatch_proxy_receiver_write(site, mode, state);
             }
             Err(error) => return Err(error),
         };
@@ -155,28 +147,168 @@ impl Isolate {
         }
     }
 
-    /// Detects the side-effect-free receiver case where Proxy descriptor operations forward.
-    fn proxy_receiver_has_no_descriptor_write_traps(
+    /// Starts receiver `[[GetOwnProperty]]` before OrdinarySet chooses a define operation.
+    fn dispatch_proxy_receiver_write(
         &mut self,
-        receiver: Value,
-    ) -> Result<bool, ExecutionError> {
-        let handler = self.proxy_snapshot(receiver)?.handler;
-        for name in [
-            b"getOwnPropertyDescriptor".as_slice(),
-            b"defineProperty".as_slice(),
-        ] {
-            let atom = self.intern_intrinsic_name(name)?;
-            match self.resolve_property_read(handler, atom.into())? {
-                PropertyRead::Missing => {}
-                PropertyRead::Data(value)
-                    if matches!(
-                        value.as_immediate(),
-                        Some(Immediate::Undefined | Immediate::Null)
-                    ) => {}
-                PropertyRead::Data(_) | PropertyRead::Accessor(_) => return Ok(false),
+        site: NativeContinuationSite,
+        mode: ProxySetMode,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let receiver = pending.values[SET_RECEIVER];
+        let key = pending.values[SET_KEY];
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_proxy_set_parent(site, mode, state, ProxySetStage::ReceiverGetOwn, receiver)?;
+        let outcome =
+            match self.dispatch_proxy_get_own(site, receiver, key, ProxyGetOwnMode::SetReceiver) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    if self.fiber.completions.len() > completion_depth {
+                        self.pop_native_continuation()?;
+                    }
+                    return Err(error);
+                }
+            };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let descriptor = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_set(
+            continuation,
+            mode,
+            ProxySetStage::ReceiverGetOwn,
+            descriptor,
+        )
+    }
+
+    /// Converts receiver descriptor state into either a failed write or a Proxy define call.
+    fn continue_proxy_receiver_write(
+        &mut self,
+        continuation: NativeContinuation,
+        mode: ProxySetMode,
+        state: GcRef<NativeCallState>,
+        descriptor_value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.update_proxy_state_value(state, SET_PROXY, descriptor_value)?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let descriptor_value = pending.values[SET_PROXY];
+        let descriptor_absent = descriptor_value.as_immediate() == Some(Immediate::Undefined);
+        if descriptor_value.as_immediate() == Some(Immediate::False) {
+            return self.finish_proxy_set_result(
+                continuation.site(),
+                mode,
+                pending.values[SET_RECEIVER],
+                pending.values[SET_VALUE],
+                PropertyWrite::Complete(false),
+            );
+        }
+        if descriptor_value.as_immediate() != Some(Immediate::True) && !descriptor_absent {
+            let descriptor = self.parse_property_descriptor(descriptor_value)?;
+            match descriptor {
+                PropertyDescriptor::Accessor(_) => {
+                    return self.finish_proxy_set_result(
+                        continuation.site(),
+                        mode,
+                        pending.values[SET_RECEIVER],
+                        pending.values[SET_VALUE],
+                        PropertyWrite::Complete(false),
+                    );
+                }
+                PropertyDescriptor::Data(data) if data.writable == Some(false) => {
+                    return self.finish_proxy_set_result(
+                        continuation.site(),
+                        mode,
+                        pending.values[SET_RECEIVER],
+                        pending.values[SET_VALUE],
+                        PropertyWrite::Complete(false),
+                    );
+                }
+                PropertyDescriptor::Data(_) | PropertyDescriptor::Generic(_) => {}
             }
         }
-        Ok(true)
+        let descriptor = PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(pending.values[SET_VALUE]),
+            writable: descriptor_absent.then_some(true),
+            enumerable: descriptor_absent.then_some(true),
+            configurable: descriptor_absent.then_some(true),
+        });
+        self.dispatch_proxy_receiver_define(continuation.site(), mode, state, descriptor)
+    }
+
+    /// Defines the value on a Proxy receiver through the existing descriptor/invariant dispatcher.
+    fn dispatch_proxy_receiver_define(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetMode,
+        state: GcRef<NativeCallState>,
+        descriptor: PropertyDescriptor,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let receiver = pending.values[SET_RECEIVER];
+        let key = self.property_key(pending.values[SET_KEY])?;
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_proxy_set_parent(site, mode, state, ProxySetStage::ReceiverDefine, receiver)?;
+        let outcome = match self.dispatch_proxy_define(
+            site,
+            receiver,
+            key,
+            descriptor,
+            ProxyDefineMode::Reflect,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let result = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_set(continuation, mode, ProxySetStage::ReceiverDefine, result)
+    }
+
+    /// Pushes one traced ProxySet parent around nested receiver operations.
+    fn push_proxy_set_parent(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetMode,
+        state: GcRef<NativeCallState>,
+        stage: ProxySetStage,
+        retained: Value,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_set(
+                site,
+                mode,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                retained,
+            ))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })
     }
 
     /// Resumes a trap getter/call and maps the result to assignment or Reflect semantics.
@@ -205,6 +337,20 @@ impl Isolate {
                     pending.values[SET_RECEIVER],
                     pending.values[SET_VALUE],
                     result,
+                )
+            }
+            ProxySetStage::ReceiverGetOwn => {
+                self.continue_proxy_receiver_write(continuation, mode, state, value)
+            }
+            ProxySetStage::ReceiverDefine => {
+                let pending = self.native_call_state_snapshot(state)?;
+                let success = self.is_truthy_value(value)?;
+                self.finish_proxy_set_result(
+                    continuation.site(),
+                    mode,
+                    pending.values[SET_RECEIVER],
+                    pending.values[SET_VALUE],
+                    PropertyWrite::Complete(success),
                 )
             }
         }
@@ -255,14 +401,17 @@ impl Isolate {
         result: PropertyWrite,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         match result {
-            PropertyWrite::Setter(callee) => self.dispatch_property_callback(
-                if mode == ProxySetMode::Assignment {
-                    NativeContinuation::property_set(site, receiver, value)
-                } else {
-                    NativeContinuation::reflect_property_set(site, receiver, value)
-                },
-                callee,
-            ),
+            PropertyWrite::Setter(callee) => {
+                self.write(site.caller_base, site.destination, value)?;
+                self.dispatch_property_callback(
+                    if mode == ProxySetMode::Assignment {
+                        NativeContinuation::property_set(site, receiver, value)
+                    } else {
+                        NativeContinuation::reflect_property_set(site, receiver, value)
+                    },
+                    callee,
+                )
+            }
             PropertyWrite::Complete(success) => {
                 if mode == ProxySetMode::Reflect {
                     self.write(site.caller_base, site.destination, boolean_value(success))?;

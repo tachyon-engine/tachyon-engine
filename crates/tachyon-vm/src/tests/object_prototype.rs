@@ -172,6 +172,31 @@ var prototypeProxy = new Proxy({}, {
 });
 var inheritedReceiver = Object.create(prototypeProxy);
 inheritedReceiver.value = 3;
+var receiverTrace = "";
+var receiverTarget = { value: 1 };
+var receiverProxy = new Proxy(receiverTarget, {
+  getOwnPropertyDescriptor(target, key) {
+    receiverTrace += "g";
+    return Reflect.getOwnPropertyDescriptor(target, key);
+  },
+  defineProperty(target, key, descriptor) {
+    receiverTrace += "d";
+    return Reflect.defineProperty(target, key, descriptor);
+  }
+});
+receiverProxy.value = 2;
+var array = [1, 2];
+var arrayProxy = new Proxy(new Proxy(array, {}), { set: null });
+arrayProxy.length = 0;
+Object.preventExtensions(array);
+var arrayRejectsIndex = !Reflect.set(arrayProxy, "0", 3);
+var string = new String("abc");
+var stringProxy = new Proxy(new Proxy(string, {}), { set: null });
+stringProxy[4] = 9;
+var functionTarget = function() {};
+var functionInnerProxy = new Proxy(functionTarget, {});
+var functionProxy = new Proxy(functionInnerProxy, { set: undefined });
+var functionSet = Reflect.set(functionProxy, "prototype", null);
 var root = {};
 var intermediary = Object.create(root);
 var leaf = Object.create(intermediary);
@@ -180,6 +205,9 @@ try { descriptor.set.call(root, leaf); } catch (error) { cycleThrows = error ins
 before === first && after === second && afterAssignment === first &&
 setResult === undefined && ignored === undefined && trace === "gsgsg" &&
 abrupt && invariantThrows && observedReceiver === inheritedReceiver &&
+receiverTrace === "gd" && receiverTarget.value === 2 &&
+array.length === 0 && arrayRejectsIndex &&
+string[4] === 9 && functionSet && functionTarget.prototype === null &&
 cycleThrows && Object.getPrototypeOf(root) === Object.prototype &&
 descriptor.get.name === "get __proto__" && descriptor.set.name === "set __proto__";
 "#;

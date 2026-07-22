@@ -1603,24 +1603,23 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        if self.is_proxy_value(target) {
-            return self.dispatch_proxy_aware_property_write(
+        match self.resolve_reflect_property_write_until_proxy(target, receiver, key, value)? {
+            PropertyWriteResolution::Proxy(proxy) => self.dispatch_proxy_aware_property_write(
                 site,
-                target,
+                proxy,
                 receiver,
                 key,
                 value,
                 ProxySetMode::Reflect,
-            );
-        }
-        match self.resolve_reflect_property_write(target, receiver, key, value)? {
-            PropertyWrite::Complete(success) => self
+            ),
+            PropertyWriteResolution::Write(PropertyWrite::Complete(success)) => self
                 .write(site.caller_base, site.destination, boolean_value(success))
                 .map(|()| None),
-            PropertyWrite::Setter(callee) => self.dispatch_property_callback(
-                NativeContinuation::reflect_property_set(site, receiver, value),
-                callee,
-            ),
+            PropertyWriteResolution::Write(PropertyWrite::Setter(callee)) => self
+                .dispatch_property_callback(
+                    NativeContinuation::reflect_property_set(site, receiver, value),
+                    callee,
+                ),
         }
     }
 
@@ -1706,6 +1705,9 @@ impl Isolate {
                 match stage {
                     ProxySetStage::TrapGetter => (handler, 0, None, 0),
                     ProxySetStage::TrapCall => (handler, 0, Some(state), 4),
+                    ProxySetStage::ReceiverGetOwn | ProxySetStage::ReceiverDefine => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
                 }
             }
             NativeContinuationKind::ProxyHas(stage) => {

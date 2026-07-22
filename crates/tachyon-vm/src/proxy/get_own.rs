@@ -143,6 +143,11 @@ impl Isolate {
             return Err(ExecutionError::ProxyInvariantViolation);
         }
         self.update_proxy_state_value(state, PROXY_GET_OWN_DESCRIPTOR, trap_result)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
         let pending = self.native_call_state_snapshot(state)?;
         let target = pending.values[PROXY_TARGET_ARGUMENT];
         if self.is_proxy_value(target) {
@@ -183,8 +188,73 @@ impl Isolate {
             return self.finish_proxy_get_own_mode(site, mode, None);
         }
         let target_descriptor_object = if let Some(descriptor) = target_descriptor {
-            let object = self.create_ordinary_object()?;
-            self.materialize_property_descriptor(object, descriptor)?;
+            let (retained, descriptor_setter) = match descriptor {
+                PropertyDescriptor::Data(data) => (
+                    data.value
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                    Value::from_immediate(Immediate::Undefined),
+                ),
+                PropertyDescriptor::Accessor(data) => (
+                    data.getter
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                    data.setter
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                ),
+                PropertyDescriptor::Generic(_) => (
+                    Value::from_immediate(Immediate::Undefined),
+                    Value::from_immediate(Immediate::Undefined),
+                ),
+            };
+            self.update_proxy_state_value(state, PROXY_GET_OWN_TARGET_DESCRIPTOR, retained)?;
+            self.push_proxy_get_own_parent(
+                site,
+                mode,
+                state,
+                ProxyGetOwnStage::TargetGetOwn,
+                descriptor_setter,
+            )?;
+            let object = match self.create_ordinary_object() {
+                Ok(object) => object,
+                Err(error) => {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = self.write(site.caller_base, site.destination, object) {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+            let rooted = self.native_call_state_snapshot(state)?;
+            let rooted_descriptor = match descriptor {
+                PropertyDescriptor::Data(data) => {
+                    PropertyDescriptor::Data(DataPropertyDescriptor {
+                        value: Some(rooted.values[PROXY_GET_OWN_TARGET_DESCRIPTOR]),
+                        writable: data.writable,
+                        enumerable: data.enumerable,
+                        configurable: data.configurable,
+                    })
+                }
+                PropertyDescriptor::Accessor(data) => {
+                    PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                        getter: Some(rooted.values[PROXY_GET_OWN_TARGET_DESCRIPTOR]),
+                        setter: Some(descriptor_setter),
+                        enumerable: data.enumerable,
+                        configurable: data.configurable,
+                    })
+                }
+                PropertyDescriptor::Generic(data) => PropertyDescriptor::Generic(data),
+            };
+            if let Err(error) = self.materialize_property_descriptor(object, rooted_descriptor) {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+            self.pop_native_continuation()?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            self.update_proxy_state_value(state, PROXY_GET_OWN_TARGET_DESCRIPTOR, object)?;
             object
         } else {
             Value::from_immediate(Immediate::Undefined)
@@ -369,10 +439,17 @@ impl Isolate {
                     )?;
                     return Ok(None);
                 };
-                let object = self.create_ordinary_object()?;
-                self.materialize_property_descriptor(object, descriptor)?;
-                object
+                self.materialize_proxy_get_own_descriptor(site, mode, descriptor)?
             }
+            ProxyGetOwnMode::SetReceiver => match descriptor {
+                None => Value::from_immediate(Immediate::Undefined),
+                Some(PropertyDescriptor::Data(data)) if data.writable == Some(true) => {
+                    Value::from_immediate(Immediate::True)
+                }
+                Some(PropertyDescriptor::Data(_))
+                | Some(PropertyDescriptor::Accessor(_))
+                | Some(PropertyDescriptor::Generic(_)) => Value::from_immediate(Immediate::False),
+            },
             ProxyGetOwnMode::HasOwn => boolean_value(descriptor.is_some()),
             ProxyGetOwnMode::Enumerable => boolean_value(
                 descriptor
@@ -408,6 +485,58 @@ impl Isolate {
         };
         self.write(site.caller_base, site.destination, result)?;
         Ok(None)
+    }
+
+    /// Roots descriptor callable/value edges while allocating its public result object.
+    fn materialize_proxy_get_own_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxyGetOwnMode,
+        descriptor: PropertyDescriptor,
+    ) -> Result<Value, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let (first, second) = match descriptor {
+            PropertyDescriptor::Data(data) => (data.value.unwrap_or(undefined), undefined),
+            PropertyDescriptor::Accessor(data) => (
+                data.getter.unwrap_or(undefined),
+                data.setter.unwrap_or(undefined),
+            ),
+            PropertyDescriptor::Generic(_) => (undefined, undefined),
+        };
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_get_own(
+                site,
+                mode,
+                ProxyGetOwnStage::TargetGetOwn,
+                first,
+                second,
+            ))
+            .map_err(|error| match error {
+                CompletionStackError::Limit { limit, requested } => {
+                    ExecutionError::CompletionStackLimit { limit, requested }
+                }
+                CompletionStackError::AllocationFailed => {
+                    ExecutionError::CompletionAllocationFailed
+                }
+            })?;
+        let object = match self.create_ordinary_object() {
+            Ok(object) => object,
+            Err(error) => {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.write(site.caller_base, site.destination, object) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if let Err(error) = self.materialize_property_descriptor(object, descriptor) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        self.pop_native_continuation()?;
+        Ok(object)
     }
 
     fn allocate_proxy_get_own_state(
