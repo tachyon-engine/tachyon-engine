@@ -3795,6 +3795,48 @@ impl Isolate {
     #[inline(never)]
     pub(crate) fn call(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         loop {
+            if self.is_proxy_value(site.callee) {
+                let proxy = site.callee;
+                let snapshot = self.proxy_snapshot(proxy)?;
+                if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                    return Err(ExecutionError::ProxyRevoked);
+                }
+                let apply_atom = self.intern_intrinsic_name(b"apply")?;
+                match self.resolve_property_read(snapshot.handler, apply_atom.into())? {
+                    PropertyRead::Missing => {
+                        site.callee = snapshot.target;
+                        continue;
+                    }
+                    PropertyRead::Data(value)
+                        if value.as_immediate() == Some(Immediate::Undefined)
+                            || value.as_immediate() == Some(Immediate::Null) =>
+                    {
+                        site.callee = snapshot.target;
+                        continue;
+                    }
+                    PropertyRead::Data(trap) => {
+                        self.resolve_function_object(trap)?;
+                        let arguments = self.create_array_from_site(&site)?;
+                        let prefix = self.create_apply_argument_prefix(
+                            snapshot.target,
+                            site.this_value,
+                            vec![snapshot.target, site.this_value, arguments],
+                        )?;
+                        site.callee = trap;
+                        site.argument_base = 0;
+                        site.argument_source = None;
+                        site.argument_prefix = Some(prefix);
+                        site.argument_prefix_offset = 0;
+                        site.argument_prefix_count = 3;
+                        site.argument_count = 3;
+                        site.this_value = Value::from_immediate(Immediate::Undefined);
+                        continue;
+                    }
+                    PropertyRead::Accessor(_) => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
+                }
+            }
             match self.resolve_function_executable(site.callee)? {
                 FunctionExecutable::Bound(data) => {
                     if site.argument_prefix.is_some() {
