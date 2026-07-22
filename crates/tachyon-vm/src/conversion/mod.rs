@@ -661,11 +661,16 @@ impl Isolate {
                     .expect("global URI native has metadata"),
                 argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
             ),
-            NativeFunction::StringToLowerCase | NativeFunction::StringToUpperCase => self
-                .string_case_primitive_value(
-                    argument.ok_or(ExecutionError::MissingNativeContinuation)?,
-                    native == NativeFunction::StringToUpperCase,
+            NativeFunction::StringToLowerCase
+            | NativeFunction::StringToUpperCase
+            | NativeFunction::StringToLocaleLowerCase
+            | NativeFunction::StringToLocaleUpperCase => self.string_case_primitive_value(
+                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                matches!(
+                    native,
+                    NativeFunction::StringToUpperCase | NativeFunction::StringToLocaleUpperCase
                 ),
+            ),
             _ => unreachable!("only conversion consumers create this continuation"),
         }
     }

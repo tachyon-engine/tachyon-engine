@@ -19,6 +19,8 @@ try {
 String.prototype.toUpperCase.call(receiver) === "STRASSE" &&
 trace === "s" &&
 "ΟΣ".toLowerCase() === "ος" &&
+"Straße".toLocaleUpperCase() === "STRASSE" &&
+"MIXED".toLocaleLowerCase() === "mixed" &&
 "\u0130".toLowerCase() === "i\u0307" &&
 String.fromCharCode(0xD800).toUpperCase() === String.fromCharCode(0xD800) &&
 new String("Mixed").toLowerCase() === "mixed" &&

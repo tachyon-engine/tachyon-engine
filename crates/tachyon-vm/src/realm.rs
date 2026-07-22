@@ -546,6 +546,14 @@ impl Isolate {
             (NativeFunction::StringPadEnd, b"padEnd".as_slice()),
             (NativeFunction::StringToLowerCase, b"toLowerCase".as_slice()),
             (NativeFunction::StringToUpperCase, b"toUpperCase".as_slice()),
+            (
+                NativeFunction::StringToLocaleLowerCase,
+                b"toLocaleLowerCase".as_slice(),
+            ),
+            (
+                NativeFunction::StringToLocaleUpperCase,
+                b"toLocaleUpperCase".as_slice(),
+            ),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;

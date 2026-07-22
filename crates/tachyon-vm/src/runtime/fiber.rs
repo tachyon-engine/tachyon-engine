@@ -150,6 +150,8 @@ pub(crate) enum ConversionNativeFunction {
     NumberToString,
     StringToLowerCase,
     StringToUpperCase,
+    StringToLocaleLowerCase,
+    StringToLocaleUpperCase,
     GlobalIsFinite,
     GlobalIsNaN,
     GlobalParseFloat,
@@ -171,6 +173,8 @@ impl ConversionNativeFunction {
             NativeFunction::NumberToString => Some(Self::NumberToString),
             NativeFunction::StringToLowerCase => Some(Self::StringToLowerCase),
             NativeFunction::StringToUpperCase => Some(Self::StringToUpperCase),
+            NativeFunction::StringToLocaleLowerCase => Some(Self::StringToLocaleLowerCase),
+            NativeFunction::StringToLocaleUpperCase => Some(Self::StringToLocaleUpperCase),
             NativeFunction::GlobalIsFinite => Some(Self::GlobalIsFinite),
             NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
             NativeFunction::GlobalParseFloat => Some(Self::GlobalParseFloat),
@@ -193,6 +197,8 @@ impl ConversionNativeFunction {
             Self::NumberToString => NativeFunction::NumberToString,
             Self::StringToLowerCase => NativeFunction::StringToLowerCase,
             Self::StringToUpperCase => NativeFunction::StringToUpperCase,
+            Self::StringToLocaleLowerCase => NativeFunction::StringToLocaleLowerCase,
+            Self::StringToLocaleUpperCase => NativeFunction::StringToLocaleUpperCase,
             Self::GlobalIsFinite => NativeFunction::GlobalIsFinite,
             Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
             Self::GlobalParseFloat => NativeFunction::GlobalParseFloat,
@@ -256,6 +262,8 @@ impl ConversionConsumer {
             Self::NativeCall(ConversionNativeFunction::StringConstructor)
                 | Self::NativeCall(ConversionNativeFunction::StringToLowerCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToUpperCase)
+                | Self::NativeCall(ConversionNativeFunction::StringToLocaleLowerCase)
+                | Self::NativeCall(ConversionNativeFunction::StringToLocaleUpperCase)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
                 | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUri)
