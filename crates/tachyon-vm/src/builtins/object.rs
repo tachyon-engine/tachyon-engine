@@ -517,6 +517,7 @@ impl Isolate {
         ) {
             return Err(ExecutionError::NotObject(object));
         }
+        let object = self.object_value_of(object)?;
         let key = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));

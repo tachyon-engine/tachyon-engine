@@ -2331,9 +2331,13 @@ impl Isolate {
             .try_reserve_exact(self.realm.intrinsic_bindings.len())
             .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
         for binding in &self.realm.intrinsic_bindings {
-            globals.push((binding.name, binding.value, binding.writable));
+            let configurable = !matches!(
+                binding.name,
+                name if name == atoms.undefined || name == atoms.nan || name == atoms.infinity
+            );
+            globals.push((binding.name, binding.value, binding.writable, configurable));
         }
-        for (name, value, writable) in globals {
+        for (name, value, writable, configurable) in globals {
             self.define_data_property(
                 global_object,
                 name,
@@ -2341,7 +2345,7 @@ impl Isolate {
                     value: Some(value),
                     writable: Some(writable),
                     enumerable: Some(false),
-                    configurable: Some(true),
+                    configurable: Some(configurable),
                 },
             )?;
         }

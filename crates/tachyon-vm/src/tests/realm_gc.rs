@@ -73,7 +73,29 @@ fn global_intrinsic_overrides_work_for_every_dispatch_batch() {
 
 /// Proves identifier reads observe the global object's current intrinsic-valued property.
 fn assert_global_intrinsic_override_batch<const N: usize>() {
-    let source = "function fakeObject() {}\nfunction secondObject() {}\nvar global = this;\nglobal.Object = fakeObject;\nvar memberWrite = Object === fakeObject;\nObject = secondObject;\nmemberWrite && Object === secondObject && global.Object === secondObject;";
+    let source = r#"
+function fakeObject() {}
+function secondObject() {}
+var global = this;
+var undefinedDesc = Object.getOwnPropertyDescriptor(global, "undefined");
+var nanDesc = Object.getOwnPropertyDescriptor(global, "NaN");
+var infinityDesc = Object.getOwnPropertyDescriptor(global, "Infinity");
+var stringIndexDesc = Object.getOwnPropertyDescriptor("foo", "0");
+var stringLengthDesc = Object.getOwnPropertyDescriptor("foo", "length");
+var constantDescriptors = undefinedDesc.writable === false && undefinedDesc.enumerable === false &&
+    undefinedDesc.configurable === false && nanDesc.writable === false &&
+    nanDesc.enumerable === false && nanDesc.configurable === false &&
+    infinityDesc.writable === false && infinityDesc.enumerable === false &&
+    infinityDesc.configurable === false && stringIndexDesc.value === "f" &&
+    stringIndexDesc.writable === false && stringIndexDesc.enumerable === true &&
+    stringIndexDesc.configurable === false && stringLengthDesc.value === 3 &&
+    stringLengthDesc.writable === false && stringLengthDesc.enumerable === false &&
+    stringLengthDesc.configurable === false;
+global.Object = fakeObject;
+var memberWrite = Object === fakeObject;
+Object = secondObject;
+constantDescriptors && memberWrite && Object === secondObject && global.Object === secondObject;
+"#;
     let module = Compiler
         .compile(
             SourceText::new(

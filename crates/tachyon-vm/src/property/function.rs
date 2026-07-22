@@ -345,8 +345,10 @@ impl Isolate {
                 let data = self.class_constructor_snapshot(data)?;
                 (data.code, data.function)
             }
-            FunctionExecutable::Native(NativeFunction::ErrorConstructor(_)) => return Ok(true),
-            FunctionExecutable::Native(NativeFunction::BooleanConstructor) => return Ok(true),
+            FunctionExecutable::Native(native) if native.has_default_prototype() => {
+                return Ok(true);
+            }
+            FunctionExecutable::Native(_) => return Ok(false),
             _ => return Ok(false),
         };
         let kind = self
