@@ -20,10 +20,18 @@ impl Isolate {
                     .unwrap_or(Value::from_immediate(Immediate::Undefined)),
             );
         }
-        let prototype = self
+        let default_prototype = self
             .realm
             .array_prototype
             .expect("Array prototype initializes before Array construction");
+        let prototype = if self.is_object_value(site.new_target) {
+            let prototype_atom = self.prototype_atom()?;
+            self.constructor_prototype_value(site.new_target, prototype_atom)?
+                .filter(|value| self.is_object_value(*value))
+                .unwrap_or(default_prototype)
+        } else {
+            default_prototype
+        };
         let array = self.create_array_object_with_prototype(prototype)?;
         self.write(site.caller_base, site.destination, array)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;

@@ -3751,7 +3751,7 @@ impl Isolate {
     }
 
     /// Resolves `newTarget.prototype` through transparent Proxy layers on the constructor slow path.
-    fn constructor_prototype_value(
+    pub(crate) fn constructor_prototype_value(
         &mut self,
         mut new_target: Value,
         prototype_atom: AtomId,
