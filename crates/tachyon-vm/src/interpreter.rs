@@ -4521,6 +4521,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
                     return self.object_get_own_property_descriptor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptors) => {
+                    let value = self.object_get_own_property_descriptors(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyNames) => {
                     if self.try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::Names)? {
                         return Ok(());

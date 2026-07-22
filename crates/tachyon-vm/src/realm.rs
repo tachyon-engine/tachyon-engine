@@ -127,6 +127,23 @@ impl Isolate {
             get_own_property_descriptor,
             true,
         )?;
+        let get_own_property_descriptors = self.allocate_native_function(
+            NativeFunction::ObjectGetOwnPropertyDescriptors,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_get_own_property_descriptors = Some(get_own_property_descriptors);
+        let get_own_descriptors_atom = self.intern_intrinsic_name(b"getOwnPropertyDescriptors")?;
+        self.set_intrinsic_data_property(
+            constructor,
+            get_own_descriptors_atom,
+            get_own_property_descriptors,
+            true,
+        )?;
         let get_own_property_names = self.allocate_native_function(
             NativeFunction::ObjectGetOwnPropertyNames,
             OrdinaryObject {

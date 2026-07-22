@@ -498,6 +498,32 @@ impl Isolate {
         )
     }
 
+    /// Materializes every ordinary own descriptor under its original String or Symbol key.
+    pub(crate) fn object_get_own_property_descriptors(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if is_nullish(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let source = self.object_value_of(source)?;
+        let result = self.create_ordinary_object()?;
+        let (_, snapshot) = self.object_snapshot(source)?;
+        let keys = self.ordinary_own_property_keys(source, snapshot)?;
+        for key in keys {
+            let Some(descriptor) = self.complete_own_property_descriptor(source, key)? else {
+                continue;
+            };
+            let descriptor_object = self.create_ordinary_object()?;
+            self.materialize_property_descriptor(descriptor_object, descriptor)?;
+            self.set_own_data_property(result, key, descriptor_object)?;
+        }
+        Ok(result)
+    }
+
     /// Implements Object.prototype.hasOwnProperty for the currently supported ordinary properties.
     pub(crate) fn object_has_own_property(
         &mut self,
