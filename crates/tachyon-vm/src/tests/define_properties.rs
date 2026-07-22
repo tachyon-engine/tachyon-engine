@@ -41,6 +41,33 @@ result === target && effects === "mv" && target.answer === 42 &&
     !Object.hasOwn(atomic, "first") && proxyEffects === "odg" && proxyTarget.item === 7;
 "#;
 
+const OBJECT_CREATE_PROPERTIES_SOURCE: &str = r#"
+var effects = "";
+var created = Object.create(null, {
+    get answer() {
+        effects = effects + "m";
+        return {
+            get value() { effects = effects + "v"; return 42; },
+            enumerable: true,
+            configurable: true,
+            writable: true
+        };
+    }
+});
+var proxyEffects = "";
+var descriptors = new Proxy({ item: { value: 7, enumerable: true } }, {
+    ownKeys: function(target) { proxyEffects = proxyEffects + "o"; return ["item"]; },
+    getOwnPropertyDescriptor: function(target, key) {
+        proxyEffects = proxyEffects + "d";
+        return Object.getOwnPropertyDescriptor(target, key);
+    },
+    get: function(target, key) { proxyEffects = proxyEffects + "g"; return target[key]; }
+});
+var proxied = Object.create({}, descriptors);
+Object.getPrototypeOf(created) === null && effects === "mv" && created.answer === 42 &&
+    proxyEffects === "odg" && proxied.item === 7;
+"#;
+
 #[test]
 fn object_define_properties_getters_are_stable_across_dispatch_batches() {
     assert_define_properties_batch::<1>(280);
@@ -48,6 +75,15 @@ fn object_define_properties_getters_are_stable_across_dispatch_batches() {
     assert_define_properties_batch::<4>(282);
     assert_define_properties_batch::<8>(283);
     assert_define_properties_batch::<16>(284);
+}
+
+#[test]
+fn object_create_properties_reuse_resumable_descriptor_scanning() {
+    assert_object_create_properties_batch::<1>(300);
+    assert_object_create_properties_batch::<2>(301);
+    assert_object_create_properties_batch::<4>(302);
+    assert_object_create_properties_batch::<8>(303);
+    assert_object_create_properties_batch::<16>(304);
 }
 
 /// Compiles and executes the nested descriptor-getter fixture for one dispatch batch.
@@ -73,6 +109,34 @@ fn assert_define_properties_batch<const N: usize>(source_id: u32) {
             },
         )
         .expect("Object.defineProperties fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes Object.create descriptor getters and Proxy map traps for one dispatch batch.
+fn assert_object_create_properties_batch<const N: usize>(source_id: u32) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id),
+                SourceName::new("object-create-properties"),
+                MediaType::JavaScript,
+                Arc::from(OBJECT_CREATE_PROPERTIES_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("Object.create descriptor fixture compiles");
+    let outcome = define_properties_test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("Object.create descriptor fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"

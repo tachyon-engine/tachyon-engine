@@ -1393,8 +1393,8 @@ impl Isolate {
             .expect("Object prototype initializes before primitive boxing"))
     }
 
-    /// Implements Object.create and publishes the new object before processing descriptors.
-    pub(crate) fn object_create(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    /// Creates the object, then delegates its optional descriptor map to the shared state machine.
+    pub(crate) fn begin_object_create(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let prototype = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -1406,31 +1406,15 @@ impl Isolate {
         if let Some(descriptors) = self.call_argument(site, 1)?
             && descriptors.as_immediate() != Some(Immediate::Undefined)
         {
-            self.define_ordinary_properties(object, descriptors)?;
-        }
-        Ok(object)
-    }
-
-    /// Applies ordinary data descriptors from an Object.create descriptor map.
-    fn define_ordinary_properties(
-        &mut self,
-        target: Value,
-        descriptors: Value,
-    ) -> Result<(), ExecutionError> {
-        if !self.is_object_value(descriptors) {
-            return Err(ExecutionError::NotObject(descriptors));
-        }
-        let (_, snapshot) = self.object_snapshot(descriptors)?;
-        let keys = self.ordinary_own_property_keys(descriptors, snapshot)?;
-        for key in keys {
-            let Some(descriptor) = self.data_property_from_snapshot(snapshot, key)? else {
-                continue;
-            };
-            if !self.is_object_value(descriptor) {
-                return Err(ExecutionError::NotObject(descriptor));
-            }
-            let descriptor = self.parse_data_property_descriptor(descriptor)?;
-            self.define_data_property(target, key, descriptor)?;
+            return self.begin_define_properties_for_target(
+                NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                object,
+                descriptors,
+            );
         }
         Ok(())
     }

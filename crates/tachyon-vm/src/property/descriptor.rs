@@ -116,14 +116,6 @@ impl Isolate {
         }))
     }
 
-    /// Compatibility entry for existing Object builtin code while the storage model is unified.
-    pub(crate) fn parse_data_property_descriptor(
-        &mut self,
-        descriptor: Value,
-    ) -> Result<PropertyDescriptor, ExecutionError> {
-        self.parse_property_descriptor(descriptor)
-    }
-
     /// Defines one spec-facing intrinsic field with non-enumerable builtin attributes.
     pub(crate) fn set_intrinsic_data_property(
         &mut self,

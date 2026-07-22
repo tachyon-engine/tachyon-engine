@@ -4602,8 +4602,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, prototype);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectCreate) => {
-                    let object = self.object_create(&site)?;
-                    return self.write(site.caller_base, site.destination, object);
+                    return self.begin_object_create(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectIsPrototypeOf) => {
                     return self.begin_object_is_prototype_of(&site);

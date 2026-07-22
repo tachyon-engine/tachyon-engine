@@ -235,14 +235,28 @@ impl Isolate {
         if !self.is_object_value(target) {
             return Err(ExecutionError::NotObject(target));
         }
+        self.begin_define_properties_for_target(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            target,
+            source,
+        )
+    }
+
+    /// Starts the shared descriptor-map scan for an already validated object target.
+    pub(crate) fn begin_define_properties_for_target(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(self.is_object_value(target));
         if !self.is_object_value(source) {
             return Err(ExecutionError::NotObject(source));
         }
-        let native_site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site.destination,
-            call_site: site.call_site,
-        };
         if self.is_proxy_value(source) {
             let state = self.allocate_define_properties_state(target, source, Vec::new())?;
             self.write(
@@ -251,7 +265,7 @@ impl Isolate {
                 Value::from_heap_ref(state.raw()),
             )?;
             return self
-                .dispatch_define_properties_own_keys(native_site, state, source)
+                .dispatch_define_properties_own_keys(site, state, source)
                 .map(|_| ());
         }
         let (_, snapshot) = self.object_snapshot(source)?;
@@ -273,7 +287,7 @@ impl Isolate {
             site.destination,
             Value::from_heap_ref(state.raw()),
         )?;
-        self.advance_define_properties(native_site, state)
+        self.advance_define_properties(site, state)
     }
 
     #[inline]
