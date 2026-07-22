@@ -412,11 +412,29 @@ impl Isolate {
             .try_reserve_exact(declared.len())
             .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         for atom in declared {
+            let lexical_binding = if !strict_eval {
+                self.named_environment_binding(lexical, atom)?
+            } else {
+                None
+            };
+            if let Some((environment, slot)) = lexical_binding {
+                let immutable = self.heap.with_running_scope(|scope| {
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_reference(environment, self.types.environment)
+                            .map_err(ExecutionError::NoGcBorrow)
+                            .map(|record| record.slot_is_immutable(slot))
+                    })
+                })?;
+                if immutable {
+                    return Err(ExecutionError::GlobalLexicalRedeclaration(atom));
+                }
+            }
             let already_declared = !strict_eval
-                && (self
+                && self
                     .eval_var_binding_until(current, atom, ancestor)?
                     .is_some()
-                    || self.named_environment_binding(lexical, atom)?.is_some());
+                || lexical_binding.is_some();
             if !already_declared {
                 names.push(atom);
             }

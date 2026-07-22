@@ -194,6 +194,17 @@ impl Environment {
             .and_then(|slot| u32::try_from(slot).ok())
     }
 
+    /// Reports whether a named slot can participate in sloppy eval var declarations.
+    #[inline(always)]
+    pub(crate) fn slot_is_immutable(&self, slot: u32) -> bool {
+        match &self.storage {
+            EnvironmentStorage::Bindings { states, .. } => states
+                .get(slot as usize)
+                .is_some_and(|state| !state.is_mutable()),
+            EnvironmentStorage::Captured(_) | EnvironmentStorage::Dynamic { .. } => false,
+        }
+    }
+
     #[inline(always)]
     /// Reads a direct slot while enforcing TDZ for state-bearing records.
     pub(crate) fn load(&self, slot: u32) -> Result<Value, EnvironmentAccessError> {
