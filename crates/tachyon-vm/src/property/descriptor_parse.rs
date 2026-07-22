@@ -238,6 +238,22 @@ impl Isolate {
         if !self.is_object_value(source) {
             return Err(ExecutionError::NotObject(source));
         }
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if self.is_proxy_value(source) {
+            let state = self.allocate_define_properties_state(target, source, Vec::new())?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            return self
+                .dispatch_define_properties_own_keys(native_site, state, source)
+                .map(|_| ());
+        }
         let (_, snapshot) = self.object_snapshot(source)?;
         let mut own_keys = self.ordinary_own_property_keys(source, snapshot)?;
         let mut keys = Vec::new();
@@ -251,31 +267,13 @@ impl Isolate {
                 keys.push(entry.key);
             }
         }
-        let descriptor_capacity = keys.len();
-        let mut descriptors = Vec::new();
-        descriptors
-            .try_reserve_exact(descriptor_capacity)
-            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
-        let state = self.allocate_pending_define_properties(PendingDefineProperties {
-            target,
-            source,
-            keys: keys.into_boxed_slice(),
-            index: 0,
-            descriptors,
-        })?;
+        let state = self.allocate_define_properties_state(target, source, keys)?;
         self.write(
             site.caller_base,
             site.destination,
             Value::from_heap_ref(state.raw()),
         )?;
-        self.advance_define_properties(
-            NativeContinuationSite {
-                caller_base: site.caller_base,
-                destination: site.destination,
-                call_site: site.call_site,
-            },
-            state,
-        )
+        self.advance_define_properties(native_site, state)
     }
 
     #[inline]
@@ -335,6 +333,69 @@ impl Isolate {
         self.begin_define_properties_descriptor(site, state, key, descriptor)
     }
 
+    /// Resumes Proxy ownKeys, descriptor-enumerability, or Get for the descriptor map.
+    pub(crate) fn resume_define_properties_stage(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: DefinePropertiesStage,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let state = self.pending_define_properties_reference(continuation.first())?;
+        match stage {
+            DefinePropertiesStage::OwnKeys => {
+                self.resume_define_properties_own_keys(site, state, value)
+            }
+            DefinePropertiesStage::Enumerable => {
+                if !self.is_truthy_value(value)? {
+                    self.advance_pending_define_properties(state)?;
+                    return self.advance_define_properties(site, state).map(|_| None);
+                }
+                let key_value = continuation.second();
+                let key = self.property_key(key_value)?;
+                let source = self.pending_define_properties(state)?.source;
+                self.dispatch_define_properties_get(site, state, source, key, key_value)
+            }
+            DefinePropertiesStage::Get => {
+                let key = self.property_key(continuation.second())?;
+                self.begin_define_properties_descriptor(site, state, key, value)
+                    .map(|_| None)
+            }
+        }
+    }
+
+    /// Converts a materialized Proxy ownKeys array into an exact descriptor-map key list.
+    fn resume_define_properties_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        old_state: GcRef<PendingDefineProperties>,
+        result: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let length = self
+            .get_data_property(result, length_key)?
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::ArrayLengthOverflow)? as usize;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(length)
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        for index in 0..length {
+            let index_key = PropertyKey::Atom(self.safe_integer_property_atom(index as u64)?);
+            let key = self
+                .get_data_property(result, index_key)?
+                .ok_or(ExecutionError::ProxyInvariantViolation)?;
+            keys.push(self.property_key(key)?);
+        }
+        let pending = self.pending_define_properties(old_state)?;
+        let state = self.allocate_define_properties_state(pending.target, pending.source, keys)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_define_properties(site, state).map(|_| None)
+    }
+
     /// Applies one parsed descriptor and continues the descriptor-map scan.
     fn finish_define_properties_descriptor(
         &mut self,
@@ -359,6 +420,12 @@ impl Isolate {
             let Some(key) = pending.key else {
                 return self.apply_pending_define_properties(site, state);
             };
+            if self.is_proxy_value(pending.source) {
+                let key_value = self.define_properties_key_value(key)?;
+                return self
+                    .dispatch_define_properties_enumerable(site, state, pending.source, key_value)
+                    .map(|_| ());
+            }
             match self.resolve_property_read(pending.source, key)? {
                 PropertyRead::Missing => self.advance_pending_define_properties(state)?,
                 PropertyRead::Data(descriptor) => {
@@ -384,6 +451,101 @@ impl Isolate {
                 }
             }
         }
+    }
+
+    fn define_properties_key_value(&mut self, key: PropertyKey) -> Result<Value, ExecutionError> {
+        match key {
+            PropertyKey::Atom(atom) => self.atom_string_value(atom),
+            PropertyKey::Symbol(symbol) => Ok(symbol.value()),
+            PropertyKey::Private(_) => Err(ExecutionError::PrivatePropertyKeyEscaped),
+        }
+    }
+
+    fn dispatch_define_properties_own_keys(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        source: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::define_properties_stage(
+            site,
+            DefinePropertiesStage::OwnKeys,
+            Value::from_heap_ref(state.raw()),
+            Value::from_immediate(Immediate::Undefined),
+        );
+        self.dispatch_define_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_own_keys(site, source, ProxyOwnKeysMode::Internal)
+        })
+    }
+
+    fn dispatch_define_properties_enumerable(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        source: Value,
+        key: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::define_properties_stage(
+            site,
+            DefinePropertiesStage::Enumerable,
+            Value::from_heap_ref(state.raw()),
+            key,
+        );
+        self.dispatch_define_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_get_own(site, source, key, ProxyGetOwnMode::Enumerable)
+        })
+    }
+
+    fn dispatch_define_properties_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingDefineProperties>,
+        source: Value,
+        key: PropertyKey,
+        key_value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let continuation = NativeContinuation::define_properties_stage(
+            site,
+            DefinePropertiesStage::Get,
+            Value::from_heap_ref(state.raw()),
+            key_value,
+        );
+        self.dispatch_define_properties_proxy_operation(continuation, |isolate| {
+            isolate.dispatch_proxy_aware_property_read(site, source, source, key)
+        })
+    }
+
+    /// Runs one Proxy descriptor-map operation and drains a synchronous parent continuation.
+    fn dispatch_define_properties_proxy_operation(
+        &mut self,
+        continuation: NativeContinuation,
+        operation: impl FnOnce(&mut Self) -> Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let outcome = operation(self);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let site = continuation.site();
+        let value = self.read(site.caller_base, site.destination)?;
+        let NativeContinuationKind::DefineProperties(stage) = continuation.kind() else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        self.resume_define_properties_stage(continuation, stage, value)
     }
 
     fn begin_define_properties_descriptor(
@@ -567,6 +729,25 @@ impl Isolate {
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)
+    }
+
+    fn allocate_define_properties_state(
+        &mut self,
+        target: Value,
+        source: Value,
+        keys: Vec<PropertyKey>,
+    ) -> Result<GcRef<PendingDefineProperties>, ExecutionError> {
+        let mut descriptors = Vec::new();
+        descriptors
+            .try_reserve_exact(keys.len())
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        self.allocate_pending_define_properties(PendingDefineProperties {
+            target,
+            source,
+            keys: keys.into_boxed_slice(),
+            index: 0,
+            descriptors,
+        })
     }
 
     pub(crate) fn pending_define_properties_reference(

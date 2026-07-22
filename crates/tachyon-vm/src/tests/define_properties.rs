@@ -26,8 +26,19 @@ try {
         get second() { throw 1; }
     });
 } catch (error) {}
+var proxyEffects = "";
+var proxyMap = new Proxy({ item: { value: 7, enumerable: true } }, {
+    ownKeys: function(target) { proxyEffects = proxyEffects + "o"; return ["item"]; },
+    getOwnPropertyDescriptor: function(target, key) {
+        proxyEffects = proxyEffects + "d";
+        return Object.getOwnPropertyDescriptor(target, key);
+    },
+    get: function(target, key) { proxyEffects = proxyEffects + "g"; return target[key]; }
+});
+var proxyTarget = {};
+Object.defineProperties(proxyTarget, proxyMap);
 result === target && effects === "mv" && target.answer === 42 &&
-    !Object.hasOwn(atomic, "first");
+    !Object.hasOwn(atomic, "first") && proxyEffects === "odg" && proxyTarget.item === 7;
 "#;
 
 #[test]

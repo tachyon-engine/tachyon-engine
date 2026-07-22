@@ -1843,6 +1843,9 @@ impl Isolate {
             NativeContinuationKind::CopyDataProperties(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::DefineProperties(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::CollectionForEach => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5976,6 +5979,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::CopyDataProperties(stage) => self
                     .resume_copy_data_properties_stage(continuation, stage, value)
+                    .map(|_| ()),
+                NativeContinuationKind::DefineProperties(stage) => self
+                    .resume_define_properties_stage(continuation, stage, value)
                     .map(|_| ()),
                 NativeContinuationKind::CollectionForEach => {
                     let state = self.pending_collection_for_each_reference(continuation.first())?;
