@@ -334,7 +334,10 @@ impl Isolate {
     }
 
     /// Classifies the immutable public prototype slot without adding flags to every function.
-    pub(crate) fn is_class_constructor(&mut self, receiver: Value) -> Result<bool, ExecutionError> {
+    pub(crate) fn has_read_only_prototype(
+        &mut self,
+        receiver: Value,
+    ) -> Result<bool, ExecutionError> {
         let function = self.resolve_function_object(receiver)?;
         let (code, function) = match function.executable {
             FunctionExecutable::Bytecode { code, function, .. } => (code, function),
@@ -342,6 +345,7 @@ impl Isolate {
                 let data = self.class_constructor_snapshot(data)?;
                 (data.code, data.function)
             }
+            FunctionExecutable::Native(NativeFunction::ErrorConstructor(_)) => return Ok(true),
             _ => return Ok(false),
         };
         let kind = self

@@ -478,6 +478,8 @@ impl Isolate {
             "[object Function]"
         } else if self.is_array_value(value)? {
             "[object Array]"
+        } else if self.native_error_kind(value)?.is_some() {
+            "[object Error]"
         } else {
             "[object Object]"
         };

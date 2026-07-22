@@ -18,6 +18,7 @@ mod control;
 mod conversion;
 mod dispatch;
 mod environments;
+mod errors;
 mod finally;
 mod fixtures;
 mod promise;

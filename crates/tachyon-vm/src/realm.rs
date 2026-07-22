@@ -848,22 +848,27 @@ impl Isolate {
             .expect("function intrinsics initialize before Error intrinsics");
         let constructor_atom = self.constructor_atom()?;
         for kind in NativeErrorKind::ALL {
-            let parent = if kind == NativeErrorKind::Error {
+            let (prototype_parent, constructor_parent) = if kind == NativeErrorKind::Error {
                 self.realm
                     .object_prototype
+                    .map(|prototype| (prototype, function_prototype))
                     .expect("Object prototype initializes before Error prototypes")
             } else {
-                self.realm
-                    .error_intrinsics
-                    .get(NativeErrorKind::Error)
-                    .prototype
-                    .expect("Error.prototype initializes before subclasses")
+                let error = self.realm.error_intrinsics.get(NativeErrorKind::Error);
+                (
+                    error
+                        .prototype
+                        .expect("Error.prototype initializes before subclasses"),
+                    error
+                        .constructor
+                        .expect("Error constructor initializes before subclasses"),
+                )
             };
             let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,
                 storage: None,
-                prototype: parent,
+                prototype: prototype_parent,
             })?;
             self.realm.error_intrinsics.get_mut(kind).prototype = Some(prototype);
             let constructor = self.allocate_native_function(
@@ -872,7 +877,7 @@ impl Isolate {
                     shape: ShapeId::EMPTY,
                     extensible: true,
                     storage: None,
-                    prototype: function_prototype,
+                    prototype: constructor_parent,
                 },
             )?;
             self.realm.error_intrinsics.get_mut(kind).constructor = Some(constructor);

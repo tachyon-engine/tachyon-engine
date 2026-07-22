@@ -1361,6 +1361,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ProxyRevoked
         | ExecutionError::ProxyInvariantViolation
         | ExecutionError::IncompatibleCollectionReceiver(_)
+        | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)

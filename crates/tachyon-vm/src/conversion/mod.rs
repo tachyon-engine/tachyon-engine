@@ -320,6 +320,29 @@ impl Isolate {
                             result,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ErrorConstructorMessage
+                            | ConversionConsumer::ErrorToStringName
+                            | ConversionConsumer::ErrorToStringMessage
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        let string = self.with_error_state_root(
+                            NativeContinuation::conversion(continuation),
+                            |isolate| isolate.error_message_string(value),
+                        )?;
+                        return match continuation.consumer {
+                            ConversionConsumer::ErrorConstructorMessage => {
+                                self.finish_error_message(continuation.site, state, string)
+                            }
+                            ConversionConsumer::ErrorToStringName => {
+                                self.finish_error_to_string_name(continuation.site, state, string)
+                            }
+                            ConversionConsumer::ErrorToStringMessage => self
+                                .finish_error_to_string_message(continuation.site, state, string),
+                            _ => unreachable!("matched Error string conversion consumer"),
+                        };
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -543,6 +566,11 @@ impl Isolate {
                 ConversionConsumer::ToPropertyKey => argument,
                 ConversionConsumer::BuiltinPropertyKey(_) => {
                     unreachable!("builtin property-key consumers finish inside the state machine")
+                }
+                ConversionConsumer::ErrorConstructorMessage
+                | ConversionConsumer::ErrorToStringName
+                | ConversionConsumer::ErrorToStringMessage => {
+                    unreachable!("Error messages finish inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

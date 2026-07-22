@@ -195,6 +195,9 @@ pub(crate) enum ConversionConsumer {
     Equality(Opcode),
     ToPropertyKey,
     BuiltinPropertyKey(BuiltinPropertyKeyConsumer),
+    ErrorConstructorMessage,
+    ErrorToStringName,
+    ErrorToStringMessage,
 }
 
 impl ConversionConsumer {
@@ -213,7 +216,10 @@ impl ConversionConsumer {
             | Self::RelationalRight(_)
             | Self::Equality(_)
             | Self::ToPropertyKey
-            | Self::BuiltinPropertyKey(_) => None,
+            | Self::BuiltinPropertyKey(_)
+            | Self::ErrorConstructorMessage
+            | Self::ErrorToStringName
+            | Self::ErrorToStringMessage => None,
         }
     }
 
@@ -226,6 +232,9 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
+                | Self::ErrorConstructorMessage
+                | Self::ErrorToStringName
+                | Self::ErrorToStringMessage
         )
     }
 
@@ -256,6 +265,9 @@ impl ConversionConsumer {
                 | Self::Equality(_)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
+                | Self::ErrorConstructorMessage
+                | Self::ErrorToStringName
+                | Self::ErrorToStringMessage
         )
     }
 }
@@ -477,6 +489,21 @@ pub(crate) enum InstanceElementStage {
     Define,
 }
 
+/// Observable stages after an Error message has been converted with string hint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ErrorConstructorStage {
+    HasCause,
+    CauseValue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ErrorToStringStage {
+    NameValue,
+    MessageValue,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -513,6 +540,8 @@ pub(crate) enum NativeContinuationKind {
     ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
+    ErrorConstructor(ErrorConstructorStage),
+    ErrorToString(ErrorToStringStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -533,6 +562,34 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn error_constructor(
+        site: NativeContinuationSite,
+        stage: ErrorConstructorStage,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ErrorConstructor(stage),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn error_to_string(
+        site: NativeContinuationSite,
+        stage: ErrorToStringStage,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ErrorToString(stage),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     #[inline]
     pub(crate) const fn instance_elements(
         site: NativeContinuationSite,

@@ -131,7 +131,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let key = key.into();
         if self.is_function_prototype_property(receiver, key) {
-            if self.is_class_constructor(receiver)? {
+            if self.has_read_only_prototype(receiver)? {
                 return Err(ExecutionError::ReadOnlyProperty(receiver));
             }
             self.intrinsic_property_atoms.prototype = key.atom();

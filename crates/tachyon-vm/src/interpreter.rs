@@ -1764,6 +1764,12 @@ impl Isolate {
             NativeContinuationKind::InstanceElements(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ErrorConstructor(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::ErrorToString(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -3334,9 +3340,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
-                    let message = self.call_argument(&site, 0)?;
-                    let error = self.create_native_error(kind, message)?;
-                    return self.write(site.caller_base, site.destination, error);
+                    return self.begin_error_constructor(&site, kind);
                 }
                 FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
                     let proxy = self.create_proxy_from_site(&site)?;
@@ -4274,9 +4278,7 @@ impl Isolate {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
-                    let message = self.call_argument(&site, 0)?;
-                    let error = self.create_native_error(kind, message)?;
-                    return self.write(site.caller_base, site.destination, error);
+                    return self.begin_error_constructor(&site, kind);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorIsError) => {
                     let value = self
@@ -4286,11 +4288,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorToString) => {
-                    if !self.is_object_value(site.this_value) {
-                        return Err(ExecutionError::NotObject(site.this_value));
-                    }
-                    let result = self.error_to_string(site.this_value)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_error_to_string(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
                     return Err(ExecutionError::ProxyConstructorRequiresNew);
@@ -5350,6 +5348,12 @@ impl Isolate {
                 }
                 NativeContinuationKind::InstanceElements(stage) => {
                     self.resume_instance_elements(continuation, stage, value)
+                }
+                NativeContinuationKind::ErrorConstructor(stage) => {
+                    self.resume_error_constructor(continuation, stage, value)
+                }
+                NativeContinuationKind::ErrorToString(stage) => {
+                    self.resume_error_to_string(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
