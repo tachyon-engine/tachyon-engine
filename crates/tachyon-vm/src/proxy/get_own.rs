@@ -17,6 +17,16 @@ impl Isolate {
                 return Err(ExecutionError::ProxyRevoked);
             }
             let trap_name = self.intern_intrinsic_name(b"getOwnPropertyDescriptor")?;
+            if self.is_proxy_value(snapshot.handler) {
+                let state = self.allocate_proxy_get_own_state(snapshot.target, key, proxy)?;
+                return self.dispatch_proxy_get_own_handler_get(
+                    site,
+                    mode,
+                    state,
+                    snapshot.handler,
+                    trap_name.into(),
+                );
+            }
             match self.resolve_property_read(snapshot.handler, trap_name.into())? {
                 PropertyRead::Missing => {
                     if self.is_proxy_value(snapshot.target) {
@@ -59,6 +69,44 @@ impl Isolate {
                 }
             }
         }
+    }
+
+    /// Reads `handler.getOwnPropertyDescriptor` through nested Proxy layers.
+    fn dispatch_proxy_get_own_handler_get(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxyGetOwnMode,
+        state: GcRef<NativeCallState>,
+        handler: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_get_own(
+                site,
+                mode,
+                ProxyGetOwnStage::TrapGetter,
+                Value::from_heap_ref(state.raw()),
+                handler,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, handler, handler, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let trap = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_get_own(continuation, mode, ProxyGetOwnStage::TrapGetter, trap)
     }
 
     pub(crate) fn resume_proxy_get_own(

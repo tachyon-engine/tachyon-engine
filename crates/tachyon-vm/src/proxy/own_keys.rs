@@ -76,6 +76,21 @@ impl Isolate {
                 return Err(ExecutionError::ProxyRevoked);
             }
             let trap_name = self.intern_intrinsic_name(b"ownKeys")?;
+            if self.is_proxy_value(snapshot.handler) {
+                let state = self.allocate_proxy_own_keys_state(
+                    proxy,
+                    snapshot.target,
+                    snapshot.handler,
+                    Value::from_immediate(Immediate::Undefined),
+                    mode,
+                )?;
+                return self.dispatch_proxy_own_keys_handler_get(
+                    site,
+                    state,
+                    snapshot.handler,
+                    trap_name.into(),
+                );
+            }
             match self.resolve_property_read(snapshot.handler, trap_name.into())? {
                 PropertyRead::Missing => {
                     if self.is_proxy_value(snapshot.target) {
@@ -260,6 +275,14 @@ impl Isolate {
                     }
                     let trap_name = self.intern_intrinsic_name(b"ownKeys")?;
                     self.update_proxy_own_keys_value(state, OWN_KEYS_HANDLER, snapshot.handler)?;
+                    if self.is_proxy_value(snapshot.handler) {
+                        return self.dispatch_proxy_own_keys_handler_get(
+                            site,
+                            state,
+                            snapshot.handler,
+                            trap_name.into(),
+                        );
+                    }
                     trap = match self.resolve_property_read(snapshot.handler, trap_name.into())? {
                         PropertyRead::Missing => Value::from_immediate(Immediate::Undefined),
                         PropertyRead::Data(value) => value,
@@ -302,6 +325,48 @@ impl Isolate {
                 trap,
             );
         }
+    }
+
+    /// Reads `handler.ownKeys` through nested Proxy layers while retaining operation state.
+    fn dispatch_proxy_own_keys_handler_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingProxyOwnKeys>,
+        handler: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_own_keys(
+                site,
+                ProxyOwnKeysMode::Internal,
+                ProxyOwnKeysStage::TrapGetter,
+                Value::from_heap_ref(state.raw()),
+                handler,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, handler, handler, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let trap = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_own_keys(
+            continuation,
+            ProxyOwnKeysMode::Internal,
+            ProxyOwnKeysStage::TrapGetter,
+            trap,
+        )
     }
 
     fn finish_proxy_own_keys_trap(
