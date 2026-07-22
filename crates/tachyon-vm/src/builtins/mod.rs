@@ -1,6 +1,7 @@
 //! ECMAScript builtin slow-path implementations.
 
 mod array;
+mod boolean;
 mod collections;
 mod global;
 mod json;

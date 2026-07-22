@@ -160,6 +160,18 @@ impl Isolate {
         self.realm.object_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
         self.set_intrinsic_data_property(object_prototype, to_string_atom, to_string, true)?;
+        let value_of = self.allocate_native_function(
+            NativeFunction::ObjectValueOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_value_of = Some(value_of);
+        let value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
+        self.set_intrinsic_data_property(object_prototype, value_of_atom, value_of, true)?;
         let assign = self.allocate_native_function(
             NativeFunction::ObjectAssign,
             OrdinaryObject {
@@ -549,7 +561,34 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_constant_property(number, atom, value)?;
         }
-        self.realm.boolean_constructor = Some(allocate(self, NativeFunction::BooleanConstructor)?);
+        let boolean = allocate(self, NativeFunction::BooleanConstructor)?;
+        self.realm.boolean_constructor = Some(boolean);
+        let boolean_prototype = self.allocate_boolean_object(
+            Value::from_immediate(Immediate::False),
+            object_prototype,
+            AllocationSpace::Old,
+        )?;
+        self.realm.boolean_prototype = Some(boolean_prototype);
+        self.set_function_prototype(boolean, boolean_prototype)?;
+        self.set_intrinsic_data_property(boolean_prototype, constructor_atom, boolean, true)?;
+        let boolean_to_string = allocate(self, NativeFunction::BooleanToString)?;
+        self.realm.boolean_to_string = Some(boolean_to_string);
+        let boolean_to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_intrinsic_data_property(
+            boolean_prototype,
+            boolean_to_string_atom,
+            boolean_to_string,
+            true,
+        )?;
+        let boolean_value_of = allocate(self, NativeFunction::BooleanValueOf)?;
+        self.realm.boolean_value_of = Some(boolean_value_of);
+        let boolean_value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
+        self.set_intrinsic_data_property(
+            boolean_prototype,
+            boolean_value_of_atom,
+            boolean_value_of,
+            true,
+        )?;
         Ok(())
     }
 

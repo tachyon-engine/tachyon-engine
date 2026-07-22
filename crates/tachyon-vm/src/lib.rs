@@ -91,9 +91,9 @@ use iterator::{
     CollectionIteratorObject,
 };
 use object::{
-    ArgumentsObject, NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind,
-    PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject, SymbolId,
-    SymbolObject, SymbolPropertyKey,
+    ArgumentsObject, BooleanObject, NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey,
+    PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject,
+    SymbolId, SymbolObject, SymbolPropertyKey,
 };
 use promise_state::{
     GenericPromiseCapabilityRoots, PromiseCapability, PromiseCapabilityRoots, PromiseJob,

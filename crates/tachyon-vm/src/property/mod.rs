@@ -48,6 +48,13 @@ impl Isolate {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
+        } else if matches!(
+            receiver.as_immediate(),
+            Some(Immediate::True | Immediate::False)
+        ) {
+            self.realm
+                .boolean_prototype
+                .expect("Boolean prototype initializes before property access")
         } else if self.is_symbol_value(receiver) {
             self.realm
                 .symbol_prototype

@@ -152,6 +152,9 @@ impl Isolate {
             number_object: registry
                 .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            boolean_object: registry
+                .try_register("BooleanObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             string_object: registry
                 .try_register("StringObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -746,6 +749,45 @@ impl Isolate {
                 0,
                 NumberObject {
                     number_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one boxed Boolean while keeping its ordinary prototype rooted.
+    pub(crate) fn allocate_boolean_object(
+        &mut self,
+        boolean_data: Value,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(matches!(
+            boolean_data.as_immediate(),
+            Some(Immediate::True | Immediate::False)
+        ));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.boolean_object,
+                0,
+                0,
+                BooleanObject {
+                    boolean_data,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

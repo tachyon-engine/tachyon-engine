@@ -569,6 +569,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Number(number), ordinary));
         }
+        if let Ok(boolean) = self.heap.checked_reference(raw, self.types.boolean_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(boolean).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.boolean_object)
+                        .map(|boolean| boolean.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Boolean(boolean), ordinary));
+        }
         if let Ok(string) = self.heap.checked_reference(raw, self.types.string_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(string).map_err(ExecutionError::Root)?;
@@ -792,6 +804,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Boolean(boolean) => self.heap.with_running_scope(|scope| {
+                let boolean = scope.root(boolean).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(boolean, self.types.boolean_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::String(string) => self.heap.with_running_scope(|scope| {
                 let string = scope.root(string).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -971,6 +994,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(number, self.types.number_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Boolean(boolean) => self.heap.with_running_scope(|scope| {
+                let boolean = scope.root(boolean).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(boolean, self.types.boolean_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1224,6 +1258,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::Boolean(boolean) => self.heap.with_running_scope(|scope| {
+                let boolean = scope.root(boolean).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let boolean = no_gc
+                        .borrow_mut(boolean, self.types.boolean_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    boolean.ordinary.shape = shape;
+                    boolean.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(boolean, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::String(string) => self.heap.with_running_scope(|scope| {
                 let string = scope.root(string).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1453,6 +1508,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.number_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.boolean_object)
                 .is_ok()
             || self
                 .heap

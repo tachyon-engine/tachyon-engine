@@ -316,13 +316,62 @@ impl Isolate {
             if self.is_object_value(value) {
                 return Ok(value);
             }
-            if self.is_symbol_value(value) {
-                return self.box_symbol(value);
+            if !matches!(
+                value.as_immediate(),
+                Some(Immediate::Undefined | Immediate::Null)
+            ) {
+                return self.box_object_primitive(value);
             }
         }
         let object = self.create_ordinary_object()?;
         self.write(site.caller_base, site.destination, object)?;
         Ok(object)
+    }
+
+    /// Implements Object.prototype.valueOf by applying the specification's ToObject operation.
+    pub(crate) fn object_value_of(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if self.is_object_value(value) {
+            return Ok(value);
+        }
+        if matches!(
+            value.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Err(ExecutionError::NotObject(value));
+        }
+        self.box_object_primitive(value)
+    }
+
+    /// Boxes one non-nullish primitive using an existing truthful wrapper representation.
+    fn box_object_primitive(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if self.is_string_value(value) {
+            let prototype = self
+                .realm
+                .string_prototype
+                .expect("String prototype initializes before primitive boxing");
+            return self.allocate_string_object(value, prototype, AllocationSpace::Young);
+        }
+        if numeric_value(value).is_some() {
+            let prototype = self
+                .realm
+                .number_prototype
+                .expect("Number prototype initializes before primitive boxing");
+            return self.allocate_number_object(value, prototype, AllocationSpace::Young);
+        }
+        if self.is_symbol_value(value) {
+            return self.box_symbol(value);
+        }
+        if matches!(
+            value.as_immediate(),
+            Some(Immediate::True | Immediate::False)
+        ) {
+            let prototype = self
+                .realm
+                .boolean_prototype
+                .expect("Boolean prototype initializes before primitive boxing");
+            return self.allocate_boolean_object(value, prototype, AllocationSpace::Young);
+        }
+        self.create_ordinary_object()
     }
 
     /// Starts Object.defineProperty and leaves any observable descriptor getters in the VM loop.
@@ -465,6 +514,12 @@ impl Isolate {
             })
         {
             "[object Number]"
+        } else if value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.boolean_object)
+                .is_ok()
+        }) {
+            "[object Boolean]"
         } else if let Some(raw) = value.as_heap_ref()
             && self.heap.checked_reference(raw, self.types.string).is_ok()
         {

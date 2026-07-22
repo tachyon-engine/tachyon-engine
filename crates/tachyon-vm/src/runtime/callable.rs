@@ -20,6 +20,7 @@ pub(crate) enum NativeFunction {
     ObjectHasOwnProperty,
     ObjectPropertyIsEnumerable,
     ObjectToString,
+    ObjectValueOf,
     ObjectAssign,
     ObjectKeys,
     ObjectValues,
@@ -94,6 +95,8 @@ pub(crate) enum NativeFunction {
     NumberToString,
     NumberValueOf,
     BooleanConstructor,
+    BooleanToString,
+    BooleanValueOf,
     FunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
@@ -649,9 +652,12 @@ impl NativeFunction {
             | Self::GlobalParseFloat
             | Self::GlobalParseInt => unreachable!(),
             Self::ObjectToString
+            | Self::ObjectValueOf
             | Self::ErrorToString
             | Self::SymbolConstructor
             | Self::NumberValueOf
+            | Self::BooleanToString
+            | Self::BooleanValueOf
             | Self::FunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString => 0,
@@ -681,6 +687,7 @@ impl NativeFunction {
             Self::ObjectHasOwnProperty => "hasOwnProperty",
             Self::ObjectPropertyIsEnumerable => "propertyIsEnumerable",
             Self::ObjectToString => "toString",
+            Self::ObjectValueOf => "valueOf",
             Self::ObjectAssign => "assign",
             Self::ObjectKeys => "keys",
             Self::ObjectValues => "values",
@@ -755,6 +762,8 @@ impl NativeFunction {
             Self::NumberToString => "toString",
             Self::NumberValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
+            Self::BooleanToString => "toString",
+            Self::BooleanValueOf => "valueOf",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
@@ -1071,6 +1080,7 @@ pub(crate) enum ObjectReceiver {
     Function(GcRef<FunctionObject>),
     Error(GcRef<ErrorObject>),
     Number(GcRef<NumberObject>),
+    Boolean(GcRef<BooleanObject>),
     String(GcRef<StringObject>),
     Symbol(GcRef<SymbolObject>),
     RegExp(GcRef<RegExpObject>),
@@ -1093,6 +1103,7 @@ impl ObjectReceiver {
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
+            Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::Symbol(symbol) => Value::from_heap_ref(symbol.raw()),
             Self::RegExp(regexp) => Value::from_heap_ref(regexp.raw()),
@@ -1263,6 +1274,7 @@ pub(crate) struct VmTypes {
     pub(crate) error_object: GcType<ErrorObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
+    pub(crate) boolean_object: GcType<BooleanObject>,
     pub(crate) string_object: GcType<StringObject>,
     pub(crate) symbol_object: GcType<SymbolObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,

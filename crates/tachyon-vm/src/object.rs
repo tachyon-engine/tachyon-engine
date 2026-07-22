@@ -591,6 +591,14 @@ pub(crate) struct NumberObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Ordinary wrapper carrying the specification's private `[[BooleanData]]` slot.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct BooleanObject {
+    pub(crate) boolean_data: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// Ordinary wrapper carrying the specification's private `[[StringData]]` slot.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -647,6 +655,14 @@ impl Trace for NumberObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.number_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for BooleanObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.boolean_data.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

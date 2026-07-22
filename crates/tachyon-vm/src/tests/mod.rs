@@ -21,6 +21,7 @@ mod environments;
 mod errors;
 mod finally;
 mod fixtures;
+mod object_prototype;
 mod promise;
 mod properties;
 mod property_keys;

@@ -3333,7 +3333,8 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::BooleanConstructor) => {
                     let native = NativeFunction::BooleanConstructor;
                     let value = self.primitive_constructor_value(native, &site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    let object = self.box_boolean_from_constructor(value, site.new_target)?;
+                    return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
@@ -3983,6 +3984,14 @@ impl Isolate {
                     let value = self.symbol_value_of(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::BooleanToString) => {
+                    let value = self.boolean_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::BooleanValueOf) => {
+                    let value = self.this_boolean_value(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::SymbolDescription) => {
                     let value = self.symbol_description_get(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -4160,6 +4169,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
                     let string = self.object_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, string);
+                }
+                FunctionExecutable::Native(NativeFunction::ObjectValueOf) => {
+                    let value = self.object_value_of(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectAssign) => {
                     let target = self.object_assign(&site)?;

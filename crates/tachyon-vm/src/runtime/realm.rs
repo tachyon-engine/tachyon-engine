@@ -159,6 +159,7 @@ pub(crate) struct Realm {
     pub(crate) object_has_own_property: Option<Value>,
     pub(crate) object_property_is_enumerable: Option<Value>,
     pub(crate) object_to_string: Option<Value>,
+    pub(crate) object_value_of: Option<Value>,
     pub(crate) object_assign: Option<Value>,
     pub(crate) object_keys: Option<Value>,
     pub(crate) object_values: Option<Value>,
@@ -190,6 +191,9 @@ pub(crate) struct Realm {
     pub(crate) number_to_string: Option<Value>,
     pub(crate) number_value_of: Option<Value>,
     pub(crate) boolean_constructor: Option<Value>,
+    pub(crate) boolean_prototype: Option<Value>,
+    pub(crate) boolean_to_string: Option<Value>,
+    pub(crate) boolean_value_of: Option<Value>,
     pub(crate) function_constructor: Option<Value>,
     pub(crate) math_object: Option<Value>,
     pub(crate) json_object: Option<Value>,
@@ -274,6 +278,7 @@ impl Realm {
             object_has_own_property: None,
             object_property_is_enumerable: None,
             object_to_string: None,
+            object_value_of: None,
             object_assign: None,
             object_keys: None,
             object_values: None,
@@ -305,6 +310,9 @@ impl Realm {
             number_to_string: None,
             number_value_of: None,
             boolean_constructor: None,
+            boolean_prototype: None,
+            boolean_to_string: None,
+            boolean_value_of: None,
             function_constructor: None,
             math_object: None,
             json_object: None,
@@ -624,6 +632,7 @@ impl Trace for Realm {
         self.object_has_own_property.trace(tracer);
         self.object_property_is_enumerable.trace(tracer);
         self.object_to_string.trace(tracer);
+        self.object_value_of.trace(tracer);
         self.object_assign.trace(tracer);
         self.object_keys.trace(tracer);
         self.object_values.trace(tracer);
@@ -654,6 +663,9 @@ impl Trace for Realm {
         self.number_to_string.trace(tracer);
         self.number_value_of.trace(tracer);
         self.boolean_constructor.trace(tracer);
+        self.boolean_prototype.trace(tracer);
+        self.boolean_to_string.trace(tracer);
+        self.boolean_value_of.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
         self.reflect_object.trace(tracer);
