@@ -468,7 +468,6 @@ impl Isolate {
         this_value: Value,
         arguments: Vec<Value>,
     ) -> Result<GcRef<BoundFunctionData>, ExecutionError> {
-        self.resolve_function_object(target)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,

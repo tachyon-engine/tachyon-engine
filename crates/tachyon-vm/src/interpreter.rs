@@ -3391,6 +3391,51 @@ impl Isolate {
     /// Drives a pre-built construct call site through bound forwarding and receiver allocation.
     pub(crate) fn construct_site(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         let derived = loop {
+            if self.is_proxy_value(site.callee) {
+                let proxy = site.callee;
+                let snapshot = self.proxy_snapshot(proxy)?;
+                if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                    return Err(ExecutionError::ProxyRevoked);
+                }
+                if !self.is_constructor_value(snapshot.target)? {
+                    return Err(ExecutionError::NonConstructor(snapshot.target));
+                }
+                let construct_atom = self.intern_intrinsic_name(b"construct")?;
+                match self.resolve_property_read(snapshot.handler, construct_atom.into())? {
+                    PropertyRead::Missing => {
+                        site.callee = snapshot.target;
+                        continue;
+                    }
+                    PropertyRead::Data(value)
+                        if value.as_immediate() == Some(Immediate::Undefined)
+                            || value.as_immediate() == Some(Immediate::Null) =>
+                    {
+                        site.callee = snapshot.target;
+                        continue;
+                    }
+                    PropertyRead::Data(trap) => {
+                        self.resolve_function_object(trap)?;
+                        let arguments = self.create_array_from_site(&site)?;
+                        let prefix = self.create_apply_argument_prefix(
+                            snapshot.target,
+                            Value::from_immediate(Immediate::Undefined),
+                            vec![snapshot.target, arguments, site.new_target],
+                        )?;
+                        site.callee = trap;
+                        site.argument_base = 0;
+                        site.argument_source = None;
+                        site.argument_prefix = Some(prefix);
+                        site.argument_prefix_offset = 0;
+                        site.argument_prefix_count = 3;
+                        site.argument_count = 3;
+                        site.this_value = Value::from_immediate(Immediate::Undefined);
+                        return self.call(site);
+                    }
+                    PropertyRead::Accessor(_) => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
+                }
+            }
             let callable = self
                 .resolve_function_object(site.callee)
                 .map_err(|_| ExecutionError::NonConstructor(site.callee))?;
@@ -4930,6 +4975,10 @@ impl Isolate {
 
     /// Reports whether the current staged callable set may be used as a construct newTarget.
     pub(crate) fn is_constructor_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
+        if self.is_proxy_value(value) {
+            let target = self.proxy_snapshot(value)?.target;
+            return self.is_constructor_value(target);
+        }
         let function = match self.resolve_function_object(value) {
             Ok(function) => function,
             Err(_) => return Ok(false),
