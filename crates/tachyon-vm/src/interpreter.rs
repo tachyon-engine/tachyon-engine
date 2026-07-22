@@ -2061,7 +2061,13 @@ impl Isolate {
         }
         let continuation = self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_proxy_call(continuation, ProxyCallStage::TrapCall, value)
+        match self.resume_proxy_call(continuation, ProxyCallStage::TrapCall, value) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => match execution_error_kind(&error) {
+                Some(kind) => self.throw_native_error(kind, site.call_site),
+                None => Err(error),
+            },
+        }
     }
 
     /// Resumes a Proxy trap getter or validates the completed construct trap result.
@@ -2119,7 +2125,7 @@ impl Isolate {
             }
             ProxyCallStage::TrapCall => {
                 if construct && !self.is_object_value(value) {
-                    return Err(ExecutionError::NotObject(value));
+                    return self.throw_native_error(NativeErrorKind::Type, site.call_site);
                 }
                 self.write(site.caller_base, site.destination, value)?;
                 Ok(None)
