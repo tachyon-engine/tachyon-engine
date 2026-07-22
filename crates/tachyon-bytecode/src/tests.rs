@@ -170,6 +170,9 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::GetPrivate,
                 Opcode::SetPrivate,
                 Opcode::CreateAccessorPair,
+                Opcode::DefinePrivateField,
+                Opcode::DefinePrivateMethod,
+                Opcode::DefinePrivateAccessor,
             ],
         ),
         (

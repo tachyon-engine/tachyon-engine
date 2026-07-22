@@ -326,7 +326,10 @@ impl BytecodeBuilder {
             | Opcode::CopyDataProperties
             | Opcode::GetPrivate
             | Opcode::SetPrivate
-            | Opcode::CreateAccessorPair => &[0, 1, 2],
+            | Opcode::CreateAccessorPair
+            | Opcode::DefinePrivateField
+            | Opcode::DefinePrivateMethod
+            | Opcode::DefinePrivateAccessor => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment => &[0],

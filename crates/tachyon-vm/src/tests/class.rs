@@ -168,6 +168,13 @@ class Base {
   }
 }
 class Derived extends Base {
+  static #staticValue = 3;
+  static #staticMethod() { return this.#staticValue; }
+  static get #staticDouble() { return this.#staticMethod() * 2; }
+  static set #staticDouble(next) { this.#staticValue = next / 2; }
+  static readStatic() { return this.#staticDouble; }
+  static writeStatic(next) { this.#staticDouble = next; return this.#staticValue; }
+  static readStaticMethod() { return this.#staticMethod; }
   #value = 2;
   #first = this.#method();
   #method() { return this.#value; }
@@ -183,13 +190,16 @@ class Derived extends Base {
 }
 var value = new Derived();
 var other = new Derived();
+var staticMethod = Derived.readStaticMethod();
 var read = Derived.prototype.read;
 var readFirst = Derived.prototype.readFirst;
 var readDouble = Derived.prototype.readDouble;
 var writeDouble = Derived.prototype.writeDouble;
 var update = Derived.prototype.update;
 var readMethod = Derived.prototype.readMethod;
-readFirst.call(value) === 2 && readDouble.call(value) === 4 && update.call(value) === 3 && writeDouble.call(value, 10) === 5 && read.call(value) === 5 && readMethod.call(value) === readMethod.call(other) && traps === 0;
+var wrongStaticReceiver = false;
+try { Derived.readStatic.call(class extends Derived {}); } catch (error) { wrongStaticReceiver = error instanceof TypeError; }
+Derived.readStatic() === 6 && Derived.writeStatic(10) === 5 && staticMethod.call(Derived) === 5 && wrongStaticReceiver && readFirst.call(value) === 2 && readDouble.call(value) === 4 && update.call(value) === 3 && writeDouble.call(value, 10) === 5 && read.call(value) === 5 && readMethod.call(value) === readMethod.call(other) && traps === 0;
 "#;
 
 const STATIC_BLOCK_SOURCE: &str = r#"

@@ -273,9 +273,15 @@ pub enum Opcode {
     SetPrivate = 113,
     /// Allocates one normalized getter/setter pair during class evaluation.
     CreateAccessorPair = 114,
+    /// Defines one writable private data slot during static class initialization.
+    DefinePrivateField = 115,
+    /// Defines one immutable private method slot during class evaluation.
+    DefinePrivateMethod = 116,
+    /// Defines one private accessor pair during class evaluation.
+    DefinePrivateAccessor = 117,
 }
 
-pub(super) const OPCODE_COUNT: usize = 115;
+pub(super) const OPCODE_COUNT: usize = 118;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -392,10 +398,13 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // GetPrivate
     3, // SetPrivate
     3, // CreateAccessorPair
+    3, // DefinePrivateField
+    3, // DefinePrivateMethod
+    3, // DefinePrivateAccessor
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CreateAccessorPair as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DefinePrivateAccessor as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -556,6 +565,9 @@ impl Opcode {
             48 => Some(Self::GetPrivate),
             49 => Some(Self::SetPrivate),
             50 => Some(Self::CreateAccessorPair),
+            51 => Some(Self::DefinePrivateField),
+            52 => Some(Self::DefinePrivateMethod),
+            53 => Some(Self::DefinePrivateAccessor),
             _ => None,
         }
     }

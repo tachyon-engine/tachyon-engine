@@ -265,6 +265,47 @@ fn class_static_block_semantics() {
 }
 
 #[test]
+/// Initializes static private elements on the defining constructor in specification order.
+fn static_private_element_semantics() {
+    for (source_id, source) in [
+        (
+            1_137,
+            "var order = ''; class C { static #first = (order += 'a', 1); static { order += 'b'; this.middle = this.#first; } static #second = (order += 'c', 2); static read() { return this.#first + this.#second; } } order === 'abc' && C.middle === 1 && C.read() === 3 && !Object.hasOwn(C, '#first');",
+        ),
+        (
+            1_138,
+            "class C { static #value = this.#method(); static #method() { return 4; } static read() { return this.#value; } static method() { return this.#method; } } C.read() === 4 && C.method() === C.method() && C.method().name === '#method';",
+        ),
+        (
+            1_139,
+            "class Base { static value(input) { return input + 1; } } class C extends Base { static #stored = 1; static get #value() { return super.value(this.#stored); } static set #value(next) { this.#stored = super.value(next); } static read() { return this.#value; } static write(next) { return this.#value = next; } static stored() { return this.#stored; } } C.read() === 2 && C.write(6) === 6 && C.stored() === 7;",
+        ),
+        (
+            1_140,
+            "class C { static #value = 1; static #method() { return 2; } static get #accessor() { return 3; } static readValue() { return this.#value; } static readMethod() { return this.#method(); } static readAccessor() { return this.#accessor; } } class D extends C {} var proxy = new Proxy(C, {}); var instance = new C(); function rejects(receiver, method) { try { method.call(receiver); } catch (error) { return error instanceof TypeError; } return false; } rejects(D, C.readValue) && rejects(proxy, C.readMethod) && rejects(instance, C.readAccessor);",
+        ),
+        (
+            1_141,
+            "class C { static #method() { return 1; } static overwrite() { this.#method = 2; } static update() { this.#method++; } } var assignment = false; var update = false; try { C.overwrite(); } catch (error) { assignment = error instanceof TypeError; } try { C.update(); } catch (error) { update = error instanceof TypeError; } assignment && update;",
+        ),
+        (
+            1_142,
+            "class Outer { static #value = 1; static make() { return class Inner { static #value = 2; static read(receiver) { return receiver.#value; } }; } static read() { return this.#value; } } var Inner = Outer.make(); var wrong = false; try { Inner.read(Outer); } catch (error) { wrong = error instanceof TypeError; } Outer.read() === 1 && Inner.read(Inner) === 2 && wrong;",
+        ),
+        (
+            1_143,
+            "class C { static before() { return 1; } static #value; static write(next) { this.#value = next; return this.#value; } } C.before() === 1 && C.write(4) === 4;",
+        ),
+    ] {
+        assert_eq!(
+            execute_source(source_id, source).as_immediate(),
+            Some(Immediate::True),
+            "failed source: {source}",
+        );
+    }
+}
+
+#[test]
 /// Keeps instance private data unforgeable while preserving field evaluation and update semantics.
 fn private_instance_field_semantics() {
     for (source_id, source) in [

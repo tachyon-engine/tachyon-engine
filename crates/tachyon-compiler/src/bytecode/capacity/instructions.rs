@@ -271,8 +271,12 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                     crate::HirClassElement::Method(method) => (Some(&method.key), 2),
                     crate::HirClassElement::PublicField(field) => (Some(&field.key), 7),
                     crate::HirClassElement::PrivateField(_) => (None, 7),
-                    crate::HirClassElement::PrivateMethod(_) => (None, 7),
-                    crate::HirClassElement::PrivateAccessor(_) => (None, 10),
+                    crate::HirClassElement::PrivateMethod(method) => {
+                        (None, if method.is_static { 4 } else { 7 })
+                    }
+                    crate::HirClassElement::PrivateAccessor(accessor) => {
+                        (None, if accessor.is_static { 7 } else { 10 })
+                    }
                     crate::HirClassElement::StaticBlock(_) => (None, 5),
                 };
                 element_instructions =
@@ -300,9 +304,9 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 usize::from(class.elements.iter().any(|element| match element {
                     crate::HirClassElement::Method(method) => !method.is_static,
                     crate::HirClassElement::PublicField(field) => !field.is_static,
-                    crate::HirClassElement::PrivateField(_) => true,
-                    crate::HirClassElement::PrivateMethod(_) => true,
-                    crate::HirClassElement::PrivateAccessor(_) => true,
+                    crate::HirClassElement::PrivateField(field) => !field.is_static,
+                    crate::HirClassElement::PrivateMethod(method) => !method.is_static,
+                    crate::HirClassElement::PrivateAccessor(accessor) => !accessor.is_static,
                     crate::HirClassElement::StaticBlock(_) => false,
                 })),
                 "bytecode instructions",

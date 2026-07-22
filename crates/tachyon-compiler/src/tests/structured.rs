@@ -921,6 +921,53 @@ fn compiler_freezes_private_accessor_pair() {
     assert_eq!(entry.matches("AttachInstanceFields").count(), 1);
 }
 
+#[test]
+/// Keeps static private elements on the constructor without allocating an instance plan.
+fn compiler_freezes_static_private_elements() {
+    let source = source(
+        MediaType::JavaScript,
+        "class C { static #field = 1; static #method() { return this.#field; } static get #value() { return this.#method(); } static set #value(next) { this.#field = next; } static read() { return this.#value; } } C.read();",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let class = hir
+        .statements()
+        .iter()
+        .find_map(|statement| match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => declaration
+                .declarators
+                .iter()
+                .find_map(|declarator| match declarator.initializer.as_ref() {
+                    Some(HirExpression {
+                        kind: HirExpressionKind::Class(class),
+                        ..
+                    }) => Some(class),
+                    _ => None,
+                }),
+            _ => None,
+        })
+        .expect("class declaration retains one HIR class expression");
+    assert!(
+        class.elements.iter().any(
+            |element| matches!(element, HirClassElement::PrivateField(field) if field.is_static)
+        )
+    );
+    assert!(class.elements.iter().any(
+        |element| matches!(element, HirClassElement::PrivateMethod(method) if method.is_static)
+    ));
+    assert!(class.elements.iter().any(
+        |element| matches!(element, HirClassElement::PrivateAccessor(accessor) if accessor.is_static)
+    ));
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("DefinePrivateField").count(), 1);
+    assert_eq!(entry.matches("DefinePrivateMethod").count(), 1);
+    assert_eq!(entry.matches("DefinePrivateAccessor").count(), 1);
+    assert!(!entry.contains("AttachInstanceFields"));
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

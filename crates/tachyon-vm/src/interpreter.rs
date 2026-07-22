@@ -1014,6 +1014,25 @@ impl Isolate {
                 let pair = self.allocate_private_accessor_pair(getter, setter)?;
                 self.write(base, operands[0], pair)?;
             }
+            Opcode::DefinePrivateField
+            | Opcode::DefinePrivateMethod
+            | Opcode::DefinePrivateAccessor => {
+                let object = self.read(base, operands[0])?;
+                let value = self.read(base, operands[1])?;
+                let name = self.read(base, operands[2])?;
+                match opcode {
+                    Opcode::DefinePrivateField => {
+                        self.define_private_field(object, name, value)?;
+                    }
+                    Opcode::DefinePrivateMethod => {
+                        self.define_private_method(object, name, value)?;
+                    }
+                    Opcode::DefinePrivateAccessor => {
+                        self.define_private_accessor(object, name, value)?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
             Opcode::InitializeInstanceElements => {
                 return self.initialize_instance_elements(NativeContinuationSite {
                     caller_base: base,

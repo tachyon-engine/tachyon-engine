@@ -13,7 +13,14 @@ struct PendingStaticField {
     key: LoweredClassKey,
     initializer: Option<RegisterId>,
     infer_name: bool,
+    kind: PendingStaticFieldKind,
     span: SourceSpan,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PendingStaticFieldKind {
+    Public,
+    Private,
 }
 
 #[derive(Clone, Copy)]
@@ -648,9 +655,9 @@ impl Lowerer<'_> {
         let instance_target = if class.elements.iter().any(|element| match element {
             crate::HirClassElement::Method(method) => !method.is_static,
             crate::HirClassElement::PublicField(field) => !field.is_static,
-            crate::HirClassElement::PrivateField(_) => true,
-            crate::HirClassElement::PrivateMethod(_) => true,
-            crate::HirClassElement::PrivateAccessor(_) => true,
+            crate::HirClassElement::PrivateField(field) => !field.is_static,
+            crate::HirClassElement::PrivateMethod(method) => !method.is_static,
+            crate::HirClassElement::PrivateAccessor(accessor) => !accessor.is_static,
             crate::HirClassElement::StaticBlock(_) => false,
         }) {
             let target = self.register()?;
@@ -668,6 +675,7 @@ impl Lowerer<'_> {
             .iter()
             .filter(|element| {
                 matches!(element, crate::HirClassElement::PublicField(field) if field.is_static)
+                    || matches!(element, crate::HirClassElement::PrivateField(field) if field.is_static)
                     || matches!(element, crate::HirClassElement::StaticBlock(_))
             })
             .count();
@@ -677,7 +685,7 @@ impl Lowerer<'_> {
             .iter()
             .filter(|element| {
                 matches!(element, crate::HirClassElement::PublicField(field) if !field.is_static)
-                    || matches!(element, crate::HirClassElement::PrivateField(_))
+                    || matches!(element, crate::HirClassElement::PrivateField(field) if !field.is_static)
             })
             .count();
         let mut instance_fields = Vec::with_capacity(instance_field_count);
@@ -687,8 +695,10 @@ impl Lowerer<'_> {
             .filter(|element| {
                 matches!(
                     element,
-                    crate::HirClassElement::PrivateMethod(_)
-                        | crate::HirClassElement::PrivateAccessor(_)
+                    crate::HirClassElement::PrivateMethod(method) if !method.is_static
+                ) || matches!(
+                    element,
+                    crate::HirClassElement::PrivateAccessor(accessor) if !accessor.is_static
                 )
             })
             .count();
@@ -726,6 +736,7 @@ impl Lowerer<'_> {
                             key,
                             initializer,
                             infer_name: field.infer_name,
+                            kind: PendingStaticFieldKind::Public,
                             span: field.span,
                         }));
                     } else {
@@ -745,50 +756,77 @@ impl Lowerer<'_> {
                         .map(|initializer| {
                             self.create_class_initializer(
                                 initializer,
-                                instance_target.expect("private field requires class prototype"),
+                                if field.is_static {
+                                    destination
+                                } else {
+                                    instance_target.expect("private field requires class prototype")
+                                },
                                 field.span,
                             )
                         })
                         .transpose()?;
-                    instance_fields.push(PendingInstanceElement {
-                        key: LoweredClassKey::Computed(key),
-                        payload: initializer,
-                        infer_name: false,
-                        kind: ClassInstanceElementKind::PrivateField,
-                        span: field.span,
-                    });
+                    if field.is_static {
+                        static_elements.push(PendingStaticElement::Field(PendingStaticField {
+                            key: LoweredClassKey::Computed(key),
+                            initializer,
+                            infer_name: false,
+                            kind: PendingStaticFieldKind::Private,
+                            span: field.span,
+                        }));
+                    } else {
+                        instance_fields.push(PendingInstanceElement {
+                            key: LoweredClassKey::Computed(key),
+                            payload: initializer,
+                            infer_name: false,
+                            kind: ClassInstanceElementKind::PrivateField,
+                            span: field.span,
+                        });
+                    }
                 }
                 crate::HirClassElement::PrivateMethod(method) => {
                     let key = self.load_private_name(&method.name, method.span)?;
                     let closure = self.create_private_method(
                         method.function,
-                        instance_target.expect("private method requires class prototype"),
+                        if method.is_static {
+                            destination
+                        } else {
+                            instance_target.expect("private method requires class prototype")
+                        },
                         method.span,
                     )?;
-                    private_elements.push(PendingInstanceElement {
-                        key: LoweredClassKey::Computed(key),
-                        payload: Some(closure),
-                        infer_name: false,
-                        kind: ClassInstanceElementKind::PrivateMethod,
-                        span: method.span,
-                    });
+                    if method.is_static {
+                        self.emit(
+                            Opcode::DefinePrivateMethod,
+                            &[destination.index(), closure.index(), key.index()],
+                            method.span,
+                        )?;
+                    } else {
+                        private_elements.push(PendingInstanceElement {
+                            key: LoweredClassKey::Computed(key),
+                            payload: Some(closure),
+                            infer_name: false,
+                            kind: ClassInstanceElementKind::PrivateMethod,
+                            span: method.span,
+                        });
+                    }
                 }
                 crate::HirClassElement::PrivateAccessor(accessor) => {
                     let key = self.load_private_name(&accessor.name, accessor.span)?;
+                    let home_object = if accessor.is_static {
+                        destination
+                    } else {
+                        instance_target.expect("private accessor requires class prototype")
+                    };
                     let getter = match accessor.getter {
-                        Some(getter) => self.create_private_method(
-                            getter,
-                            instance_target.expect("private accessor requires class prototype"),
-                            accessor.span,
-                        )?,
+                        Some(getter) => {
+                            self.create_private_method(getter, home_object, accessor.span)?
+                        }
                         None => self.load_undefined(accessor.span)?,
                     };
                     let setter = match accessor.setter {
-                        Some(setter) => self.create_private_method(
-                            setter,
-                            instance_target.expect("private accessor requires class prototype"),
-                            accessor.span,
-                        )?,
+                        Some(setter) => {
+                            self.create_private_method(setter, home_object, accessor.span)?
+                        }
                         None => self.load_undefined(accessor.span)?,
                     };
                     let pair = self.register()?;
@@ -797,13 +835,21 @@ impl Lowerer<'_> {
                         &[pair.index(), getter.index(), setter.index()],
                         accessor.span,
                     )?;
-                    private_elements.push(PendingInstanceElement {
-                        key: LoweredClassKey::Computed(key),
-                        payload: Some(pair),
-                        infer_name: false,
-                        kind: ClassInstanceElementKind::PrivateAccessor,
-                        span: accessor.span,
-                    });
+                    if accessor.is_static {
+                        self.emit(
+                            Opcode::DefinePrivateAccessor,
+                            &[destination.index(), pair.index(), key.index()],
+                            accessor.span,
+                        )?;
+                    } else {
+                        private_elements.push(PendingInstanceElement {
+                            key: LoweredClassKey::Computed(key),
+                            payload: Some(pair),
+                            infer_name: false,
+                            kind: ClassInstanceElementKind::PrivateAccessor,
+                            span: accessor.span,
+                        });
+                    }
                 }
                 crate::HirClassElement::StaticBlock(block) => {
                     let initializer =
@@ -1006,6 +1052,16 @@ impl Lowerer<'_> {
                     )?;
                 }
             }
+        }
+        if field.kind == PendingStaticFieldKind::Private {
+            let LoweredClassKey::Computed(key) = field.key else {
+                unreachable!("private static fields always use private-name registers")
+            };
+            return self.emit(
+                Opcode::DefinePrivateField,
+                &[target.index(), value.index(), key.index()],
+                field.span,
+            );
         }
         match field.key {
             LoweredClassKey::Static(name) => self.emit(

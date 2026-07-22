@@ -939,6 +939,9 @@ fn verify_instruction(
         | Opcode::GetPrivate
         | Opcode::SetPrivate
         | Opcode::CreateAccessorPair
+        | Opcode::DefinePrivateField
+        | Opcode::DefinePrivateMethod
+        | Opcode::DefinePrivateAccessor
         | Opcode::CopyDataProperties => {
             check_register(operands[0])?;
             check_register(operands[1])?;

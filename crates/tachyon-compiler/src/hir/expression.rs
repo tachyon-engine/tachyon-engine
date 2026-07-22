@@ -96,6 +96,7 @@ pub struct HirPrivateField {
     pub span: SourceSpan,
     pub name: HirPrivateName,
     pub initializer: Option<FunctionStencilId>,
+    pub is_static: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -103,6 +104,7 @@ pub struct HirPrivateMethod {
     pub span: SourceSpan,
     pub name: HirPrivateName,
     pub function: FunctionStencilId,
+    pub is_static: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,6 +113,7 @@ pub struct HirPrivateAccessor {
     pub name: HirPrivateName,
     pub getter: Option<FunctionStencilId>,
     pub setter: Option<FunctionStencilId>,
+    pub is_static: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -862,28 +865,21 @@ pub(super) fn lower_class(
     stencil.strict = true;
     let mut private_names = Vec::with_capacity(class.body.body.len());
     for element in &class.body.body {
-        let (identifier, is_static, span) = match element {
+        let identifier = match element {
             oxc::ast::ast::ClassElement::MethodDefinition(method) => {
                 let PropertyKey::PrivateIdentifier(identifier) = &method.key else {
                     continue;
                 };
-                (identifier, method.r#static, method.span)
+                identifier
             }
             oxc::ast::ast::ClassElement::PropertyDefinition(field) => {
                 let PropertyKey::PrivateIdentifier(identifier) = &field.key else {
                     continue;
                 };
-                (identifier, field.r#static, field.span)
+                identifier
             }
             _ => continue,
         };
-        if is_static {
-            return Err(unsupported(
-                source.name(),
-                source_span(span),
-                "static private class element",
-            ));
-        }
         let private_name = private_name_definition(class, identifier, source, semantic)?;
         if private_names
             .iter()
@@ -928,11 +924,13 @@ pub(super) fn lower_class(
                             span: source_span(method.span),
                             name,
                             function,
+                            is_static: method.r#static,
                         }));
                     } else if let Some(accessor) =
                         elements.iter_mut().find_map(|element| match element {
                             HirClassElement::PrivateAccessor(accessor)
-                                if accessor.name.id == name.id =>
+                                if accessor.name.id == name.id
+                                    && accessor.is_static == method.r#static =>
                             {
                                 Some(accessor)
                             }
@@ -952,6 +950,7 @@ pub(super) fn lower_class(
                                 .then_some(function),
                             setter: (method.kind == oxc::ast::ast::MethodDefinitionKind::Set)
                                 .then_some(function),
+                            is_static: method.r#static,
                         }));
                     }
                     continue;
@@ -1049,6 +1048,7 @@ pub(super) fn lower_class(
                         span: source_span(field.span),
                         name,
                         initializer,
+                        is_static: field.r#static,
                     }));
                     continue;
                 }
@@ -1115,9 +1115,9 @@ pub(super) fn lower_class(
     }
     if elements.iter().any(|element| {
         matches!(element, HirClassElement::PublicField(field) if !field.is_static)
-            || matches!(element, HirClassElement::PrivateField(_))
-            || matches!(element, HirClassElement::PrivateMethod(_))
-            || matches!(element, HirClassElement::PrivateAccessor(_))
+            || matches!(element, HirClassElement::PrivateField(field) if !field.is_static)
+            || matches!(element, HirClassElement::PrivateMethod(method) if !method.is_static)
+            || matches!(element, HirClassElement::PrivateAccessor(accessor) if !accessor.is_static)
     }) {
         functions
             .get_mut(constructor.index() as usize)
