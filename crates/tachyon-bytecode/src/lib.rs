@@ -440,6 +440,8 @@ pub struct FunctionLayout {
     pub self_binding_slot: Option<u32>,
     pub max_handler_depth: u32,
     pub max_completion_depth: u32,
+    /// The function reads the original argument sequence after parameter initialization.
+    pub needs_argument_source: bool,
 }
 
 /// Per-function metadata which the compiler owns until `CompiledModule::new` verifies and freezes it.

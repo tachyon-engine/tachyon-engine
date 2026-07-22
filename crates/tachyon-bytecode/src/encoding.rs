@@ -281,9 +281,13 @@ pub enum Opcode {
     DefinePrivateAccessor = 117,
     /// Checks one own private brand slot without invoking public object semantics.
     HasPrivate = 118,
+    /// Calls without a receiver and permits the VM to replace an eligible strict caller frame.
+    TailCall = 119,
+    /// Calls with a receiver and permits the VM to replace an eligible strict caller frame.
+    TailCallWithReceiver = 120,
 }
 
-pub(super) const OPCODE_COUNT: usize = 119;
+pub(super) const OPCODE_COUNT: usize = 121;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -404,10 +408,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DefinePrivateMethod
     3, // DefinePrivateAccessor
     3, // HasPrivate
+    3, // TailCall
+    3, // TailCallWithReceiver
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::HasPrivate as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::TailCallWithReceiver as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -572,6 +578,8 @@ impl Opcode {
             52 => Some(Self::DefinePrivateMethod),
             53 => Some(Self::DefinePrivateAccessor),
             54 => Some(Self::HasPrivate),
+            55 => Some(Self::TailCall),
+            56 => Some(Self::TailCallWithReceiver),
             _ => None,
         }
     }

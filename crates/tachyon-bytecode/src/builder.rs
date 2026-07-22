@@ -347,7 +347,7 @@ impl BytecodeBuilder {
             Opcode::DefineFieldById => &[0, 1],
             Opcode::GetSuperById => &[0],
             Opcode::GetSuperByValue => &[0, 1, 2],
-            Opcode::Call | Opcode::Construct | Opcode::SuperConstruct => {
+            Opcode::Call | Opcode::TailCall | Opcode::Construct | Opcode::SuperConstruct => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {
                         self.note_register(register)?;
@@ -382,7 +382,7 @@ impl BytecodeBuilder {
                 }
                 return Ok(());
             }
-            Opcode::CallWithReceiver => {
+            Opcode::CallWithReceiver | Opcode::TailCallWithReceiver => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {
                         self.note_register(register)?;

@@ -1355,10 +1355,52 @@ impl Isolate {
                     call_site: instruction_offset,
                 })?;
             }
+            Opcode::TailCall => {
+                self.tail_call(CallSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    callee: self.read(base, operands[1])?,
+                    argument_base: base
+                        .checked_add(operands[1])
+                        .and_then(|base| base.checked_add(1))
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_source: None,
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
+                    argument_count: operands[2],
+                    this_value: Value::from_immediate(Immediate::Undefined),
+                    new_target: Value::from_immediate(Immediate::Undefined),
+                    construct_receiver: None,
+                    call_site: instruction_offset,
+                })?;
+            }
             Opcode::CallWithReceiver => {
                 let receiver = self.read(base, operands[1])?;
                 let callee = self.read(base, operands[1] + 1)?;
                 self.call(CallSite {
+                    caller_base: base,
+                    destination: operands[0],
+                    callee,
+                    argument_base: base
+                        .checked_add(operands[1])
+                        .and_then(|base| base.checked_add(2))
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(operands[2]))?,
+                    argument_source: None,
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
+                    argument_count: operands[2],
+                    this_value: receiver,
+                    new_target: Value::from_immediate(Immediate::Undefined),
+                    construct_receiver: None,
+                    call_site: instruction_offset,
+                })?;
+            }
+            Opcode::TailCallWithReceiver => {
+                let receiver = self.read(base, operands[1])?;
+                let callee = self.read(base, operands[1] + 1)?;
+                self.tail_call(CallSite {
                     caller_base: base,
                     destination: operands[0],
                     callee,
@@ -2256,6 +2298,24 @@ impl Isolate {
         self_binding: Option<(u32, Value)>,
     ) -> Result<(), ExecutionError> {
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let environment =
+            self.allocate_activation_environment(kind, parent, slot_count, self_binding)?;
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("environment allocation retains its frame")
+            .environment = Some(environment);
+        Ok(())
+    }
+
+    /// Builds and allocates one activation environment before its owning frame publishes it.
+    fn allocate_activation_environment(
+        &mut self,
+        kind: FunctionKind,
+        parent: Option<GcRef<Environment>>,
+        slot_count: NonZeroU32,
+        self_binding: Option<(u32, Value)>,
+    ) -> Result<GcRef<Environment>, ExecutionError> {
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
         let mut environment = if kind == FunctionKind::Module {
             Environment::try_bindings(environment_kind, parent, slot_count, |_| {
@@ -2288,8 +2348,7 @@ impl Isolate {
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
         };
-        let environment = self
-            .heap
+        self.heap
             .try_allocate_external_with_gc(
                 self.types.environment,
                 0,
@@ -2297,13 +2356,7 @@ impl Isolate {
                 AllocationSpace::Young,
                 roots,
             )
-            .map_err(ExecutionError::HeapAllocation)?;
-        self.fiber
-            .frames
-            .last_mut()
-            .expect("environment allocation retains its frame")
-            .environment = Some(environment);
-        Ok(())
+            .map_err(ExecutionError::HeapAllocation)
     }
 
     pub(crate) fn enter(
@@ -3381,6 +3434,256 @@ impl Isolate {
             }
             target = bound.bound_target;
         }
+    }
+
+    /// Replaces an eligible strict frame after resolving bound forwarding, otherwise calls normally.
+    #[inline(never)]
+    fn tail_call(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .expect("tail call retains its caller frame");
+        if frame.strictness != FunctionStrictness::Strict
+            || self.call_site_is_handler_protected(frame, site.call_site)?
+        {
+            return self.call(site);
+        }
+        loop {
+            match self.resolve_function_executable(site.callee)? {
+                FunctionExecutable::Bound(data) => {
+                    if site.argument_prefix.is_some() {
+                        return self.call(site);
+                    }
+                    let bound = self.bound_function_snapshot(data)?;
+                    site.argument_count = site
+                        .argument_count
+                        .checked_add(bound.argument_count)
+                        .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                    site.argument_prefix = Some(data);
+                    site.argument_prefix_count = bound.argument_count;
+                    site.callee = bound.call_target;
+                    site.this_value = bound.bound_this;
+                }
+                FunctionExecutable::Bytecode {
+                    code,
+                    function,
+                    environment,
+                } => {
+                    let target = {
+                        let template = self
+                            .loaded_code(code)?
+                            .module
+                            .function(function)
+                            .ok_or(ExecutionError::MissingEntryFunction(function))?;
+                        ResolvedCallTarget {
+                            code,
+                            function,
+                            environment,
+                            kind: template.kind(),
+                            layout: template.layout(),
+                            strictness: template.strictness(),
+                        }
+                    };
+                    if matches!(
+                        target.kind,
+                        FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+                    ) || target.layout.needs_argument_source
+                    {
+                        return self.call(site);
+                    }
+                    return self.replace_tail_call_frame(target, site);
+                }
+                _ => return self.call(site),
+            }
+        }
+    }
+
+    /// Reports whether a throw or return from this call must still visit a protected region.
+    #[inline]
+    fn call_site_is_handler_protected(
+        &self,
+        frame: Frame,
+        call_site: WordOffset,
+    ) -> Result<bool, ExecutionError> {
+        let function = self
+            .loaded_code(frame.code)?
+            .module
+            .function(frame.function)
+            .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
+        Ok(function.handlers().iter().any(|handler| {
+            handler.protected_start.index() <= call_site.index()
+                && call_site.index() < handler.protected_end.index()
+        }))
+    }
+
+    /// Reserves the target windows, copies overlapping parameters, then publishes one replacement.
+    fn replace_tail_call_frame(
+        &mut self,
+        target: ResolvedCallTarget,
+        site: CallSite,
+    ) -> Result<(), ExecutionError> {
+        let old = *self
+            .fiber
+            .frames
+            .last()
+            .expect("tail replacement retains one frame");
+        let requested = old.base.checked_add(target.layout.register_count).ok_or(
+            ExecutionError::RegisterWindowTooLarge(target.layout.register_count),
+        )?;
+        if requested > self.stack_limits.max_registers {
+            return Err(ExecutionError::RegisterStackLimit {
+                limit: self.stack_limits.max_registers,
+                requested,
+            });
+        }
+        self.reserve_tail_call_windows(target.layout, requested)?;
+        let environment =
+            if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count) {
+                Some(
+                    self.allocate_activation_environment(
+                        target.kind,
+                        target.environment,
+                        slot_count,
+                        target
+                            .layout
+                            .self_binding_slot
+                            .map(|slot| (slot, site.callee)),
+                    )?,
+                )
+            } else {
+                target.environment
+            };
+        let copied = site.argument_count.min(target.layout.argument_count);
+        self.copy_tail_call_parameters(&site, old.base, copied)?;
+        self.fiber.registers[(old.base + copied) as usize..requested as usize]
+            .fill(Value::from_immediate(Immediate::Undefined));
+        let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
+        let receiver_or_home_object = if matches!(
+            target.kind,
+            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+        ) {
+            Some(self.function_home_object(site.callee)?)
+        } else {
+            None
+        };
+        let frame_depth = self.fiber.frames.len() as u32;
+        while self
+            .fiber
+            .class_environments
+            .last()
+            .is_some_and(|depth| *depth >= frame_depth)
+        {
+            self.fiber.class_environments.pop();
+        }
+        self.fiber.handlers.truncate(old.handler_base as usize);
+        self.fiber
+            .completions
+            .truncate(old.completion_base as usize);
+        self.fiber.registers.truncate(requested as usize);
+        *self
+            .fiber
+            .argument_objects
+            .last_mut()
+            .expect("tail replacement retains its arguments cache") = None;
+        *self
+            .fiber
+            .argument_sources
+            .last_mut()
+            .expect("tail replacement retains its argument source") = None;
+        *self
+            .fiber
+            .frames
+            .last_mut()
+            .expect("tail replacement retains one frame") = Frame {
+            code: target.code,
+            function: target.function,
+            pc: WordOffset::new(0),
+            base: old.base,
+            environment,
+            return_register: old.return_register,
+            return_continuation: old.return_continuation,
+            this_value,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            receiver_or_home_object,
+            strictness: target.strictness,
+            has_finally: target.layout.max_completion_depth != 0,
+            argument_base: old.base,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: site.argument_count,
+            handler_base: old.handler_base,
+            completion_base: old.completion_base,
+            call_site: old.call_site,
+        };
+        Ok(())
+    }
+
+    /// Grows only the reusable register/handler/completion windows before frame mutation.
+    fn reserve_tail_call_windows(
+        &mut self,
+        layout: tachyon_bytecode::FunctionLayout,
+        requested: u32,
+    ) -> Result<(), ExecutionError> {
+        let additional = requested as usize - self.fiber.registers.len().min(requested as usize);
+        if additional > self.fiber.registers.capacity() - self.fiber.registers.len() {
+            self.fiber
+                .registers
+                .try_reserve_exact(additional)
+                .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        }
+        let handlers = usize::try_from(layout.max_handler_depth)
+            .map_err(|_| ExecutionError::HandlerStackTooLarge(layout.max_handler_depth))?;
+        if handlers > self.fiber.handlers.capacity() - self.fiber.handlers.len() {
+            self.fiber
+                .handlers
+                .try_reserve_exact(handlers)
+                .map_err(|_| ExecutionError::HandlerAllocationFailed)?;
+        }
+        self.fiber
+            .completions
+            .reserve(layout.max_completion_depth as usize)
+            .map_err(Self::completion_stack_error)?;
+        self.fiber.registers.resize(
+            self.fiber.registers.len().max(requested as usize),
+            Value::from_immediate(Immediate::Undefined),
+        );
+        Ok(())
+    }
+
+    /// Copies formal parameters without allocating, choosing a direction safe for overlap.
+    fn copy_tail_call_parameters(
+        &mut self,
+        site: &CallSite,
+        destination: u32,
+        copied: u32,
+    ) -> Result<(), ExecutionError> {
+        let prefix = site.argument_prefix_count.min(copied);
+        let suffix_start = prefix;
+        let destination_suffix = destination.saturating_add(suffix_start);
+        if destination_suffix <= site.argument_base || site.argument_source.is_some() {
+            for index in suffix_start..copied {
+                let value = self
+                    .call_argument(site, index)?
+                    .expect("copied tail argument remains in range");
+                self.fiber.registers[(destination + index) as usize] = value;
+            }
+        } else {
+            for index in (suffix_start..copied).rev() {
+                let value = self
+                    .call_argument(site, index)?
+                    .expect("copied tail argument remains in range");
+                self.fiber.registers[(destination + index) as usize] = value;
+            }
+        }
+        for index in 0..prefix {
+            let value = self
+                .call_argument(site, index)?
+                .expect("bound tail prefix remains in range");
+            self.fiber.registers[(destination + index) as usize] = value;
+        }
+        Ok(())
     }
 
     /// Resolves native forwarding iteratively, then pushes one exact bytecode frame when required.

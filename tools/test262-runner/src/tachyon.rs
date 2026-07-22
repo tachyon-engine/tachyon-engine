@@ -14,8 +14,9 @@ use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phas
 const ATOM_MAX_ENTRIES: u32 = 1 << 18;
 const ATOM_MAX_BYTES: usize = 32 * 1024 * 1024;
 // Test262 variants execute in-process, so a bounded per-variant budget keeps one unsupported
-// infinite loop from suppressing a complete report. Passing conformance tests stay well below it.
-const EXECUTION_FUEL_LIMIT: u64 = 100_000;
+// infinite loop from suppressing a complete report. The normative TCO helper performs 100,000
+// recursive calls, so the limit must cover several bytecodes per iteration without becoming open.
+const EXECUTION_FUEL_LIMIT: u64 = 20_000_000;
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;

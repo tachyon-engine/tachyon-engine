@@ -1,4 +1,7 @@
-use super::fixtures::*;
+use super::{fixtures::*, *};
+use std::sync::Arc;
+
+use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
 #[test]
 fn function_prototype_call_forwards_arguments_for_every_dispatch_batch() {
@@ -210,4 +213,131 @@ fn instanceof_walks_prototypes_for_every_dispatch_batch() {
     assert_instanceof_batch::<4>();
     assert_instanceof_batch::<8>();
     assert_instanceof_batch::<16>();
+}
+
+#[test]
+fn strict_tail_calls_reuse_frames_for_every_dispatch_batch() {
+    assert_tail_call_batch::<1>();
+    assert_tail_call_batch::<2>();
+    assert_tail_call_batch::<4>();
+    assert_tail_call_batch::<8>();
+    assert_tail_call_batch::<16>();
+}
+
+#[test]
+fn strict_tail_calls_from_finally_discard_saved_completions() {
+    let source = r#"
+        function loop(n) {
+            "use strict";
+            if (n === 0) return true;
+            try {} finally { return loop(n - 1); }
+        }
+        loop(100000);
+    "#;
+    assert_tail_source::<8>(source, 2);
+}
+
+#[test]
+fn tail_call_fallbacks_preserve_handlers_native_calls_and_arguments() {
+    let source = r#"
+        function fail() { throw 7; }
+        function guarded() {
+            "use strict";
+            try { return fail(); } catch (error) { return error === 7; }
+        }
+        function read(value) {
+            "use strict";
+            value = 9;
+            return arguments[0] === 1;
+        }
+        function nativeTail() { "use strict"; return Number("3"); }
+        guarded() && read(1) && nativeTail() === 3;
+    "#;
+    assert_tail_source::<8>(source, 3);
+}
+
+#[test]
+fn named_tail_target_survives_forced_major_environment_replacement() {
+    let source = r#"
+        (function loop(n) {
+            "use strict";
+            if (n === 0) return true;
+            return loop(n - 1);
+        }(4));
+    "#;
+    let module = compile_tail_source(source, 4);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("forced-major tail-call fixture executes");
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
+/// Exercises direct, conditional, logical, comma, and receiver tail forms past frame limits.
+fn assert_tail_call_batch<const N: usize>() {
+    let source = r#"
+        function direct(n, acc) {
+            "use strict";
+            if (n === 0) return acc;
+            return direct(n - 1, acc + 1);
+        }
+        function forms(n) {
+            "use strict";
+            if (n === 0) return true;
+            return n === 1 ? forms(0) : (0, n && forms(n - 1));
+        }
+        class Counter {
+            run(n) {
+                if (n === 0) return true;
+                return this.run(n - 1);
+            }
+        }
+        direct(100000, 0) === 100000 && forms(100000) && new Counter().run(100000);
+    "#;
+    assert_tail_source::<N>(source, 10 + N as u32);
+}
+
+/// Compiles and executes one tail-call source with enough fuel but the default shallow frame cap.
+fn assert_tail_source<const N: usize>(source: &str, source_id: u32) {
+    let module = compile_tail_source(source, source_id);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 10_000_000,
+                quantum: 10_000_000,
+            },
+        )
+        .expect("tail-call fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+fn compile_tail_source(source: &str, source_id: u32) -> CompiledModule {
+    Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id),
+                SourceName::new("tail-call"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("tail-call fixture compiles")
 }

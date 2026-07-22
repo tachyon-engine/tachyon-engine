@@ -42,6 +42,93 @@ struct PendingInstanceElement {
 }
 
 impl Lowerer<'_> {
+    /// Emits a strict return expression while propagating tail position through spec forms.
+    pub(in crate::bytecode) fn tail_expression(
+        &mut self,
+        expression: &HirExpression,
+    ) -> Result<(), CompileError> {
+        match &expression.kind {
+            HirExpressionKind::Call { callee, arguments } => {
+                let result = self.call_expression(callee, arguments, expression.span, true)?;
+                self.emit(Opcode::Return, &[result.index()], expression.span)
+            }
+            HirExpressionKind::Sequence(expressions) if !expressions.is_empty() => {
+                for expression in &expressions[..expressions.len() - 1] {
+                    self.expression(expression)?;
+                }
+                self.tail_expression(&expressions[expressions.len() - 1])
+            }
+            HirExpressionKind::Conditional {
+                test,
+                consequent,
+                alternate,
+            } => {
+                let test = self.expression(test)?;
+                let alternate_label = self.builder.new_label().map_err(CompileError::Builder)?;
+                self.builder
+                    .emit_jump_if_false(
+                        test,
+                        alternate_label,
+                        BytecodeSourceSpan {
+                            start: expression.span.start,
+                            end: expression.span.end,
+                        },
+                    )
+                    .map_err(CompileError::Builder)?;
+                self.tail_expression(consequent)?;
+                self.builder
+                    .bind_label(alternate_label)
+                    .map_err(CompileError::Builder)?;
+                self.tail_expression(alternate)
+            }
+            HirExpressionKind::Logical {
+                operator,
+                left,
+                right,
+            } => self.tail_logical(*operator, left, right, expression.span),
+            _ => {
+                let result = self.expression(expression)?;
+                self.emit(Opcode::Return, &[result.index()], expression.span)
+            }
+        }
+    }
+
+    /// Returns a short-circuit value directly or evaluates the right operand in tail position.
+    fn tail_logical(
+        &mut self,
+        operator: HirLogicalOperator,
+        left: &HirExpression,
+        right: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let left = self.expression(left)?;
+        let return_left = self.builder.new_label().map_err(CompileError::Builder)?;
+        let bytecode_span = BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        };
+        match operator {
+            HirLogicalOperator::And => {
+                self.builder
+                    .emit_jump_if_false(left, return_left, bytecode_span)
+            }
+            HirLogicalOperator::Or => {
+                self.builder
+                    .emit_jump_if_true(left, return_left, bytecode_span)
+            }
+            HirLogicalOperator::Coalesce => {
+                self.builder
+                    .emit_jump_if_not_nullish(left, return_left, bytecode_span)
+            }
+        }
+        .map_err(CompileError::Builder)?;
+        self.tail_expression(right)?;
+        self.builder
+            .bind_label(return_left)
+            .map_err(CompileError::Builder)?;
+        self.emit(Opcode::Return, &[left.index()], span)
+    }
+
     /// Lowers expressions into registers while leaving unsupported reference semantics as explicit errors.
     pub(in crate::bytecode) fn expression(
         &mut self,
@@ -246,6 +333,7 @@ impl Lowerer<'_> {
                     && reference.name.as_ref() == "arguments"
                     && self.function_scope.is_some()
                 {
+                    self.needs_argument_source = true;
                     let destination = self.register()?;
                     self.emit(
                         Opcode::LoadArgumentsObject,
@@ -460,6 +548,7 @@ impl Lowerer<'_> {
                             if reference.binding.is_none() && reference.name.as_ref() == "arguments"
                     )
                 {
+                    self.needs_argument_source = true;
                     let destination = self.register()?;
                     self.emit(
                         Opcode::LoadArgumentsLength,
@@ -570,7 +659,7 @@ impl Lowerer<'_> {
                 alternate,
             } => self.conditional(test, consequent, alternate, expression.span),
             HirExpressionKind::Call { callee, arguments } => {
-                self.call_expression(callee, arguments, expression.span)
+                self.call_expression(callee, arguments, expression.span, false)
             }
             HirExpressionKind::SuperCall(arguments) => {
                 self.super_call_expression(arguments, expression.span)
@@ -1745,27 +1834,29 @@ impl Lowerer<'_> {
         callee: &HirExpression,
         arguments: &[HirExpression],
         span: SourceSpan,
+        tail: bool,
     ) -> Result<RegisterId, CompileError> {
         if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
-            return self.method_call_expression(object, property, arguments, span);
+            return self.method_call_expression(object, property, arguments, span, tail);
         }
         if let HirExpressionKind::ComputedMember { object, property } = &callee.kind {
-            return self.computed_method_call_expression(object, property, arguments, span);
+            return self.computed_method_call_expression(object, property, arguments, span, tail);
         }
         if let HirExpressionKind::PrivateMember { object, name } = &callee.kind {
-            return self.private_method_call_expression(object, name, arguments, span);
+            return self.private_method_call_expression(object, name, arguments, span, tail);
         }
         if let HirExpressionKind::SuperStaticMember(property) = &callee.kind {
-            return self.super_method_call_expression(Some(property), None, arguments, span);
+            return self.super_method_call_expression(Some(property), None, arguments, span, tail);
         }
         if let HirExpressionKind::SuperComputedMember(property) = &callee.kind {
-            return self.super_method_call_expression(None, Some(property), arguments, span);
+            return self.super_method_call_expression(None, Some(property), arguments, span, tail);
         }
+        let opcode = if tail { Opcode::TailCall } else { Opcode::Call };
         let callee_value = self.expression(callee)?;
         if arguments.is_empty() {
             let destination = self.register()?;
             self.emit(
-                Opcode::Call,
+                opcode,
                 &[destination.index(), callee_value.index(), 0],
                 span,
             )?;
@@ -1789,7 +1880,7 @@ impl Lowerer<'_> {
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
-            Opcode::Call,
+            opcode,
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
@@ -1803,6 +1894,7 @@ impl Lowerer<'_> {
         computed_property: Option<&HirExpression>,
         arguments: &[HirExpression],
         span: SourceSpan,
+        tail: bool,
     ) -> Result<RegisterId, CompileError> {
         let receiver_value = self.register()?;
         self.emit(Opcode::LoadThis, &[receiver_value.index()], span)?;
@@ -1845,7 +1937,11 @@ impl Lowerer<'_> {
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
-            Opcode::CallWithReceiver,
+            if tail {
+                Opcode::TailCallWithReceiver
+            } else {
+                Opcode::CallWithReceiver
+            },
             &[destination.index(), receiver.index(), argument_count],
             span,
         )?;
@@ -1923,6 +2019,7 @@ impl Lowerer<'_> {
         property: &std::sync::Arc<str>,
         arguments: &[HirExpression],
         span: SourceSpan,
+        tail: bool,
     ) -> Result<RegisterId, CompileError> {
         let receiver_value = self.expression(object)?;
         let call_base = self.register()?;
@@ -1950,7 +2047,11 @@ impl Lowerer<'_> {
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
-            Opcode::CallWithReceiver,
+            if tail {
+                Opcode::TailCallWithReceiver
+            } else {
+                Opcode::CallWithReceiver
+            },
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
@@ -1964,6 +2065,7 @@ impl Lowerer<'_> {
         property: &HirExpression,
         arguments: &[HirExpression],
         span: SourceSpan,
+        tail: bool,
     ) -> Result<RegisterId, CompileError> {
         let receiver = self.expression(object)?;
         let property = self.expression(property)?;
@@ -1988,7 +2090,11 @@ impl Lowerer<'_> {
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
-            Opcode::CallWithReceiver,
+            if tail {
+                Opcode::TailCallWithReceiver
+            } else {
+                Opcode::CallWithReceiver
+            },
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
@@ -2002,6 +2108,7 @@ impl Lowerer<'_> {
         name: &crate::hir::HirPrivateName,
         arguments: &[HirExpression],
         span: SourceSpan,
+        tail: bool,
     ) -> Result<RegisterId, CompileError> {
         let receiver = self.expression(object)?;
         let key = self.load_private_name(name, span)?;
@@ -2025,7 +2132,11 @@ impl Lowerer<'_> {
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
         self.emit(
-            Opcode::CallWithReceiver,
+            if tail {
+                Opcode::TailCallWithReceiver
+            } else {
+                Opcode::CallWithReceiver
+            },
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;

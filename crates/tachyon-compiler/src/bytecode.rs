@@ -118,6 +118,8 @@ fn lower_entry(
         root_scope: hir.root_scope(),
         function_scope: None,
         initialize_instance_elements: false,
+        proper_tail_calls: false,
+        needs_argument_source: false,
         active_scope: hir.root_scope(),
         environments,
     };
@@ -801,6 +803,12 @@ fn lower_function(
         root_scope,
         function_scope: Some(function.scope),
         initialize_instance_elements: function.initialize_instance_elements,
+        proper_tail_calls: function.strict
+            && matches!(
+                function.kind,
+                HirFunctionKind::Ordinary | HirFunctionKind::ClassMethod
+            ),
+        needs_argument_source: function.rest_parameter.is_some(),
         active_scope: function.scope,
         environments,
     };
@@ -978,6 +986,7 @@ fn lower_function(
                 )
                 .map_err(|_| CompileError::BindingOverflow)?,
                 self_binding_slot,
+                needs_argument_source: lowerer.needs_argument_source,
                 ..FunctionLayout::default()
             },
             source_map,

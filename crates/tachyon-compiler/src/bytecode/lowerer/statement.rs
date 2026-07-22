@@ -293,8 +293,12 @@ impl Lowerer<'_> {
             }
             HirStatementKind::Return(argument) => {
                 if let Some(argument) = argument {
-                    let value = self.expression(argument)?;
-                    self.emit(Opcode::Return, &[value.index()], statement.span)?;
+                    if self.proper_tail_calls {
+                        self.tail_expression(argument)?;
+                    } else {
+                        let value = self.expression(argument)?;
+                        self.emit(Opcode::Return, &[value.index()], statement.span)?;
+                    }
                 } else {
                     self.emit(Opcode::ReturnUndefined, &[], statement.span)?;
                 }

@@ -38,6 +38,10 @@ pub(super) struct Lowerer<'a> {
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
     pub(super) initialize_instance_elements: bool,
+    /// Whether this function may replace its frame at strict tail-call sites.
+    pub(super) proper_tail_calls: bool,
+    /// Whether the activation must preserve the original argument sequence after entry.
+    pub(super) needs_argument_source: bool,
     /// Semantic scope matching the environment currently exposed to emitted loads.
     pub(super) active_scope: ScopeId,
     pub(super) environments: &'a EnvironmentPlans,
