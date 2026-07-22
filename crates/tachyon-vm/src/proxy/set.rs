@@ -27,7 +27,7 @@ impl Isolate {
             };
             return self.dispatch_proxy_set(site, target, key_value, value, receiver, mode);
         }
-        let result = if mode == ProxySetMode::Assignment {
+        let result = if matches!(mode, ProxySetMode::Assignment | ProxySetMode::ObjectAssign) {
             self.resolve_property_write(receiver, key, value)?
         } else {
             self.resolve_reflect_property_write(target, receiver, key, value)?
@@ -404,7 +404,7 @@ impl Isolate {
             PropertyWrite::Setter(callee) => {
                 self.write(site.caller_base, site.destination, value)?;
                 self.dispatch_property_callback(
-                    if mode == ProxySetMode::Assignment {
+                    if matches!(mode, ProxySetMode::Assignment | ProxySetMode::ObjectAssign) {
                         NativeContinuation::property_set(site, receiver, value)
                     } else {
                         NativeContinuation::reflect_property_set(site, receiver, value)
@@ -418,6 +418,9 @@ impl Isolate {
                     return Ok(None);
                 }
                 self.write(site.caller_base, site.destination, value)?;
+                if mode == ProxySetMode::ObjectAssign && !success {
+                    return Err(ExecutionError::ReadOnlyProperty(receiver));
+                }
                 self.finish_property_write(receiver, success)?;
                 Ok(None)
             }

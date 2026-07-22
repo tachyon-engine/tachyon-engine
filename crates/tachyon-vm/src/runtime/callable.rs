@@ -1325,6 +1325,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
+    pub(crate) pending_object_assign: GcType<PendingObjectAssign>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
     pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,
     pub(crate) pending_map_get_or_insert_computed: GcType<PendingMapGetOrInsertComputed>,

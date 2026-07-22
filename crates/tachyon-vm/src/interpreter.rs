@@ -1664,14 +1664,23 @@ impl Isolate {
                 };
                 (receiver, 0, None, 0)
             }
-            NativeContinuationKind::PropertySet(_) => (
-                continuation.first(),
-                site.caller_base
-                    .checked_add(site.destination)
-                    .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
-                None,
-                1,
-            ),
+            NativeContinuationKind::PropertySet(mode) => {
+                let receiver = if mode == PropertyWriteMode::ObjectAssign {
+                    let state =
+                        self.pending_copy_data_properties_reference(continuation.first())?;
+                    self.pending_copy_data_properties_target(state)?
+                } else {
+                    continuation.first()
+                };
+                (
+                    receiver,
+                    site.caller_base
+                        .checked_add(site.destination)
+                        .ok_or(ExecutionError::RegisterWindowTooLarge(1))?,
+                    None,
+                    1,
+                )
+            }
             NativeContinuationKind::Proxy { stage, .. } => match stage {
                 ProxyContinuationStage::TrapGetter => (continuation.second(), 0, None, 0),
                 ProxyContinuationStage::TrapCall => {
@@ -4696,8 +4705,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectAssign) => {
-                    let target = self.object_assign(&site)?;
-                    return self.write(site.caller_base, site.destination, target);
+                    return self.begin_object_assign(&site);
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::ObjectKeys
@@ -5915,6 +5923,11 @@ impl Isolate {
                 }
                 NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect) => {
                     self.write(site.caller_base, site.destination, boolean_value(true))
+                }
+                NativeContinuationKind::PropertySet(PropertyWriteMode::ObjectAssign) => {
+                    let state =
+                        self.pending_copy_data_properties_reference(continuation.first())?;
+                    self.resume_object_assign_set(site, state).map(|_| ())
                 }
                 NativeContinuationKind::Proxy { operation, stage } => self
                     .resume_proxy_internal_method(continuation, operation, stage, value)

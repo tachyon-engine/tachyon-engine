@@ -353,6 +353,7 @@ pub(crate) enum ProxyOwnKeysStage {
 pub(crate) enum PropertyWriteMode {
     Assignment,
     Reflect,
+    ObjectAssign,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,6 +361,7 @@ pub(crate) enum PropertyWriteMode {
 pub(crate) enum ProxySetMode {
     Assignment,
     Reflect,
+    ObjectAssign,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -825,6 +827,20 @@ impl NativeContinuation {
             site,
             kind: NativeContinuationKind::PropertySet(PropertyWriteMode::Reflect),
             first: receiver,
+            second: value,
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn object_assign_set(
+        site: NativeContinuationSite,
+        state: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PropertySet(PropertyWriteMode::ObjectAssign),
+            first: state,
             second: value,
         }
     }

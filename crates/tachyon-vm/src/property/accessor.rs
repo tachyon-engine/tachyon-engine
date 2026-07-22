@@ -327,6 +327,23 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
+        if self.is_string_wrapper(receiver) {
+            let length = self.length_atom()?;
+            let virtual_index = key.atom().is_some_and(|atom| {
+                self.atoms
+                    .get(atom)
+                    .and_then(|name| crate::property::keys::array_index(name.as_view()))
+                    .is_some_and(|index| {
+                        self.string_value_length(receiver)
+                            .is_ok_and(|length| (index as usize) < length)
+                    })
+            });
+            if key == PropertyKey::Atom(length) || virtual_index {
+                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                    false,
+                )));
+            }
+        }
         if let Some(raw) = receiver.as_heap_ref()
             && self
                 .heap

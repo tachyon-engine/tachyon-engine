@@ -12,6 +12,7 @@ use tachyon_value::RawHeapRef;
 use super::*;
 
 mod accessors;
+mod assign;
 mod calls;
 mod class;
 mod control;

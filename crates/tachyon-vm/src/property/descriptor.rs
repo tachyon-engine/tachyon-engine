@@ -262,29 +262,7 @@ impl Isolate {
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
         self.define_missing_property_raw(receiver, key, descriptor)?;
-        if self.is_array_value(receiver)?
-            && let Some(atom) = key.atom()
-            && let Some(name) = self.atoms.get(atom)
-            && let Some(index) = crate::property::keys::array_index(name.as_view())
-        {
-            let length_key = PropertyKey::Atom(self.length_atom()?);
-            let current_length = self
-                .complete_own_property_descriptor(receiver, length_key)?
-                .and_then(|descriptor| match descriptor {
-                    PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
-                    _ => None,
-                })
-                .unwrap_or(0.0);
-            let next_length = f64::from(index) + 1.0;
-            if next_length > current_length {
-                self.set_own_data_property(
-                    receiver,
-                    length_key,
-                    safe_integer_value(next_length as u64),
-                )?;
-            }
-        }
-        Ok(())
+        self.grow_array_length_for_index_property(receiver, key)
     }
 
     /// Publishes a missing ordinary slot before applying Array index length growth.

@@ -928,51 +928,6 @@ impl Isolate {
         )
     }
 
-    /// Copies enumerable ordinary data slots in stable shape insertion order.
-    fn copy_own_data_properties(
-        &mut self,
-        target: Value,
-        source: Value,
-    ) -> Result<(), ExecutionError> {
-        if !self.is_object_value(source) {
-            return Ok(());
-        }
-        let (_, snapshot) = self.object_snapshot(source)?;
-        let mut keys = self.ordinary_own_property_keys(source, snapshot)?;
-        while let Some(entry) = keys.next_entry() {
-            let key = entry.key;
-            let Some(property) = entry.property else {
-                continue;
-            };
-            if !property.attributes.enumerable() {
-                continue;
-            }
-            if let Some(value) = self.data_property_from_snapshot(snapshot, key)? {
-                self.set_own_data_property(target, key, value)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Implements Object.assign for ordinary data-property sources and one target object.
-    pub(crate) fn object_assign(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let target = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let target = if self.is_object_value(target) {
-            target
-        } else {
-            self.create_ordinary_object()?
-        };
-        for index in 1..site.argument_count {
-            let source = self
-                .call_argument(site, index)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            self.copy_own_data_properties(target, source)?;
-        }
-        Ok(target)
-    }
-
     /// Materializes Object.keys/values/entries from ordinary enumerable data slots.
     pub(crate) fn object_enumeration(
         &mut self,

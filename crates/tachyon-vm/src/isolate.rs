@@ -379,6 +379,9 @@ impl Isolate {
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_object_assign: registry
+                .try_register("PendingObjectAssign")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_collection_initializer: registry
                 .try_register("PendingCollectionInitializer")
                 .map_err(IsolateCreationError::TypeRegistration)?,

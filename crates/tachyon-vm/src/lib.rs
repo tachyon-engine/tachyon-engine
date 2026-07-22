@@ -129,7 +129,7 @@ use promise_state::{
     PromiseJobQueue, PromiseObject, PromiseReaction, PromiseReactionRoots, PromiseResolutionCell,
     PromiseState,
 };
-use property::copy::{ExclusionList, PendingCopyDataProperties};
+use property::copy::{ExclusionList, PendingCopyDataProperties, PendingObjectAssign};
 use property::{
     PendingPropertyDescriptor, PropertyRead, PropertyReadResolution, PropertyWrite,
     PropertyWriteResolution,

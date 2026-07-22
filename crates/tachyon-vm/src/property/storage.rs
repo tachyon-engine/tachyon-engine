@@ -181,13 +181,15 @@ impl Isolate {
             }
             self.remove_property_slot(object, snapshot, key)?;
             let (object, snapshot) = self.object_snapshot(receiver)?;
-            return self.add_property_slot(
+            self.add_property_slot(
                 object,
                 snapshot,
                 key,
                 value,
                 PropertyAttributes::DEFAULT_DATA,
-            );
+            )?;
+            self.grow_array_length_for_index_property(receiver, key)?;
+            return Ok(());
         }
         if self.is_function_metadata_property(receiver, key)? {
             return Err(ExecutionError::ReadOnlyProperty(receiver));
@@ -201,7 +203,46 @@ impl Isolate {
             key,
             value,
             PropertyAttributes::DEFAULT_DATA,
-        )
+        )?;
+        self.grow_array_length_for_index_property(receiver, key)
+    }
+
+    /// Grows an Array length after publishing a new canonical array-index property.
+    pub(crate) fn grow_array_length_for_index_property(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_array_value(receiver)? {
+            return Ok(());
+        }
+        let Some(atom) = key.atom() else {
+            return Ok(());
+        };
+        let Some(index) = self
+            .atoms
+            .get(atom)
+            .and_then(|name| crate::property::keys::array_index(name.as_view()))
+        else {
+            return Ok(());
+        };
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let current_length = self
+            .complete_own_property_descriptor(receiver, length_key)?
+            .and_then(|descriptor| match descriptor {
+                PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let next_length = f64::from(index) + 1.0;
+        if next_length > current_length {
+            self.set_own_data_property(
+                receiver,
+                length_key,
+                safe_integer_value(next_length as u64),
+            )?;
+        }
+        Ok(())
     }
 
     /// Applies the shrinking portion of ArraySetLength before publishing the new length slot.

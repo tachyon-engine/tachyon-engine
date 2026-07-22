@@ -50,6 +50,27 @@ pub(crate) struct PendingCopyDataProperties {
     exclusions: Value,
     keys: Box<[PropertyKey]>,
     index: usize,
+    consumer: CopyDataPropertiesConsumer,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CopyDataPropertiesConsumer {
+    Bytecode,
+    ObjectAssign(Value),
+}
+
+enum CopyDataPropertyAction {
+    Continue,
+    Dispatched(Option<RunOutcome>),
+}
+
+/// GC-managed Object.assign source list retained across observable getters.
+#[derive(Debug)]
+pub(crate) struct PendingObjectAssign {
+    target: Value,
+    exclusions: Value,
+    sources: Box<[Value]>,
+    index: usize,
 }
 
 impl Trace for PendingCopyDataProperties {
@@ -59,6 +80,18 @@ impl Trace for PendingCopyDataProperties {
         self.source.trace(tracer);
         self.exclusions.trace(tracer);
         self.keys.trace(tracer);
+        if let CopyDataPropertiesConsumer::ObjectAssign(state) = &mut self.consumer {
+            state.trace(tracer);
+        }
+    }
+}
+
+impl Trace for PendingObjectAssign {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.target.trace(tracer);
+        self.exclusions.trace(tracer);
+        self.sources.trace(tracer);
     }
 }
 
@@ -69,7 +102,54 @@ impl GcExternalMemory for PendingCopyDataProperties {
     }
 }
 
+impl GcExternalMemory for PendingObjectAssign {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.sources.len() * size_of::<Value>()
+    }
+}
+
 impl Isolate {
+    /// Starts Object.assign with an exactly-sized rooted source list.
+    pub(crate) fn begin_object_assign(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let target = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let target = self.object_value_of(target)?;
+        let source_count = site.argument_count.saturating_sub(1) as usize;
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(source_count)
+            .map_err(|_| ExecutionError::CopyDataPropertiesAllocationFailed)?;
+        for index in 1..site.argument_count {
+            sources.push(
+                self.call_argument(site, index)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            );
+        }
+        let exclusions = self.create_exclusion_list(0)?;
+        let state = self.allocate_pending_object_assign(PendingObjectAssign {
+            target,
+            exclusions,
+            sources: sources.into_boxed_slice(),
+            index: 0,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.advance_object_assign(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            state,
+        )
+        .map(|_| ())
+    }
+
     /// Allocates a VM-private list that cannot invoke user code or inherit user-visible properties.
     pub(crate) fn create_exclusion_list(&mut self, capacity: u32) -> Result<Value, ExecutionError> {
         let capacity =
@@ -134,6 +214,24 @@ impl Isolate {
         source: Value,
         exclusions: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.begin_copy_data_properties_for_consumer(
+            site,
+            target,
+            source,
+            exclusions,
+            CopyDataPropertiesConsumer::Bytecode,
+        )
+    }
+
+    /// Starts one copy pass and records which native operation consumes its completion.
+    fn begin_copy_data_properties_for_consumer(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        source: Value,
+        exclusions: Value,
+        consumer: CopyDataPropertiesConsumer,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         if matches!(
             source.as_immediate(),
             Some(Immediate::Undefined | Immediate::Null)
@@ -141,9 +239,7 @@ impl Isolate {
             return Err(ExecutionError::NotObject(source));
         }
         if !self.is_object_value(source) {
-            return self
-                .write(site.caller_base, site.destination, target)
-                .map(|_| None);
+            return self.finish_copy_data_properties(site, target, consumer);
         }
         let raw = exclusions
             .as_heap_ref()
@@ -154,10 +250,20 @@ impl Isolate {
             .map_err(|_| ExecutionError::InvalidExclusionList(exclusions))?;
         let (_, snapshot) = self.object_snapshot(source)?;
         let keys = self.ordinary_own_property_keys(source, snapshot)?;
+        let string_length = if self.is_string_wrapper(source) {
+            self.string_value_length(source)?
+        } else {
+            0
+        };
         let mut copied_keys = Vec::new();
         copied_keys
-            .try_reserve_exact(keys.len())
+            .try_reserve_exact(keys.len().saturating_add(string_length))
             .map_err(|_| ExecutionError::CopyDataPropertiesAllocationFailed)?;
+        for index in 0..string_length {
+            copied_keys.push(PropertyKey::Atom(
+                self.safe_integer_property_atom(index as u64)?,
+            ));
+        }
         copied_keys.extend(keys);
         let state = self.allocate_pending_copy_data_properties(PendingCopyDataProperties {
             target,
@@ -165,6 +271,7 @@ impl Isolate {
             exclusions,
             keys: copied_keys.into_boxed_slice(),
             index: 0,
+            consumer,
         })?;
         self.write(
             site.caller_base,
@@ -172,6 +279,52 @@ impl Isolate {
             Value::from_heap_ref(state.raw()),
         )?;
         self.advance_copy_data_properties(site, state)
+    }
+
+    /// Continues with the next non-nullish source after one copy pass completes.
+    fn advance_object_assign(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingObjectAssign>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        loop {
+            let pending = self.pending_object_assign(state)?;
+            let Some(source) = pending.source else {
+                self.write(site.caller_base, site.destination, pending.target)?;
+                return Ok(None);
+            };
+            self.advance_pending_object_assign(state)?;
+            if is_nullish(source) {
+                continue;
+            }
+            let source = self.object_value_of(source)?;
+            return self.begin_copy_data_properties_for_consumer(
+                site,
+                pending.target,
+                source,
+                pending.exclusions,
+                CopyDataPropertiesConsumer::ObjectAssign(Value::from_heap_ref(state.raw())),
+            );
+        }
+    }
+
+    /// Routes a completed copy pass back to bytecode or the Object.assign source loop.
+    fn finish_copy_data_properties(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        consumer: CopyDataPropertiesConsumer,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        match consumer {
+            CopyDataPropertiesConsumer::Bytecode => {
+                self.write(site.caller_base, site.destination, target)?;
+                Ok(None)
+            }
+            CopyDataPropertiesConsumer::ObjectAssign(state) => {
+                let state = self.pending_object_assign_reference(state)?;
+                self.advance_object_assign(site, state)
+            }
+        }
     }
 
     /// Records an accessor result, then resumes ordered CopyDataProperties scanning from GC state.
@@ -185,9 +338,11 @@ impl Isolate {
         let key = pending
             .key
             .ok_or(ExecutionError::MissingNativeContinuation)?;
-        self.copy_data_property(pending.target, key, value)?;
         self.advance_pending_copy_data_properties(state)?;
-        self.advance_copy_data_properties(site, state)
+        match self.write_copy_data_property(site, state, pending, key, value)? {
+            CopyDataPropertyAction::Continue => self.advance_copy_data_properties(site, state),
+            CopyDataPropertyAction::Dispatched(outcome) => Ok(outcome),
+        }
     }
 
     /// Processes non-accessor keys synchronously and suspends only at the next observable getter.
@@ -199,33 +354,40 @@ impl Isolate {
         loop {
             let pending = self.pending_copy_data_properties(state)?;
             let Some(key) = pending.key else {
-                self.write(site.caller_base, site.destination, pending.target)?;
-                return Ok(None);
+                return self.finish_copy_data_properties(site, pending.target, pending.consumer);
             };
             self.advance_pending_copy_data_properties(state)?;
             if self.exclusion_list_contains_value(pending.exclusions, key)? {
                 continue;
             }
-            let (_, snapshot) = self.object_snapshot(pending.source)?;
-            let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            let Some(descriptor) = self.complete_own_property_descriptor(pending.source, key)?
+            else {
                 continue;
             };
-            if !property.attributes.enumerable()
-                || !self.property_is_present_from_snapshot(snapshot, property)?
-            {
+            if !descriptor.enumerable().unwrap_or(false) {
                 continue;
             }
             match self.resolve_property_read(pending.source, key)? {
                 PropertyRead::Missing => continue,
-                PropertyRead::Data(value) => self.copy_data_property(pending.target, key, value)?,
+                PropertyRead::Data(value) => {
+                    match self.write_copy_data_property(site, state, pending, key, value)? {
+                        CopyDataPropertyAction::Continue => {}
+                        CopyDataPropertyAction::Dispatched(outcome) => return Ok(outcome),
+                    }
+                }
                 PropertyRead::Accessor(getter)
                     if getter.as_immediate() == Some(Immediate::Undefined) =>
                 {
-                    self.copy_data_property(
-                        pending.target,
+                    match self.write_copy_data_property(
+                        site,
+                        state,
+                        pending,
                         key,
                         Value::from_immediate(Immediate::Undefined),
-                    )?;
+                    )? {
+                        CopyDataPropertyAction::Continue => {}
+                        CopyDataPropertyAction::Dispatched(outcome) => return Ok(outcome),
+                    }
                 }
                 PropertyRead::Accessor(callee) => {
                     self.rewind_pending_copy_data_properties(state)?;
@@ -258,6 +420,103 @@ impl Isolate {
                 configurable: Some(true),
             },
         )
+    }
+
+    /// Applies CreateDataProperty or Set according to the active copy consumer.
+    fn write_copy_data_property(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        pending: PendingCopyDataPropertiesSnapshot,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<CopyDataPropertyAction, ExecutionError> {
+        if matches!(pending.consumer, CopyDataPropertiesConsumer::Bytecode) {
+            self.copy_data_property(pending.target, key, value)?;
+            return Ok(CopyDataPropertyAction::Continue);
+        }
+        match self.resolve_property_write_until_proxy(pending.target, key, value)? {
+            PropertyWriteResolution::Write(PropertyWrite::Complete(true)) => {
+                Ok(CopyDataPropertyAction::Continue)
+            }
+            PropertyWriteResolution::Write(PropertyWrite::Complete(false)) => {
+                Err(ExecutionError::ReadOnlyProperty(pending.target))
+            }
+            PropertyWriteResolution::Write(PropertyWrite::Setter(callee)) => self
+                .write(site.caller_base, site.destination, value)
+                .and_then(|()| {
+                    self.dispatch_property_callback(
+                        NativeContinuation::object_assign_set(
+                            site,
+                            Value::from_heap_ref(state.raw()),
+                            value,
+                        ),
+                        callee,
+                    )
+                })
+                .map(CopyDataPropertyAction::Dispatched),
+            PropertyWriteResolution::Proxy(proxy) => self.dispatch_object_assign_proxy_write(
+                site,
+                state,
+                proxy,
+                pending.target,
+                key,
+                value,
+            ),
+        }
+    }
+
+    /// Resumes the copy scan after one Object.assign target setter completes.
+    pub(crate) fn resume_object_assign_set(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.advance_copy_data_properties(site, state)
+    }
+
+    /// Publishes a parent continuation while Proxy [[Set]] runs for Object.assign.
+    fn dispatch_object_assign_proxy_write(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        proxy: Value,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<CopyDataPropertyAction, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::object_assign_set(
+                site,
+                Value::from_heap_ref(state.raw()),
+                value,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_write(
+            site,
+            proxy,
+            receiver,
+            key,
+            value,
+            ProxySetMode::ObjectAssign,
+        );
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() == completion_depth
+        {
+            return outcome.map(CopyDataPropertyAction::Dispatched);
+        }
+        self.pop_native_continuation()?;
+        self.resume_object_assign_set(site, state)
+            .map(CopyDataPropertyAction::Dispatched)
     }
 
     fn exclusion_list_contains(
@@ -313,6 +572,76 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
+    /// Allocates the external source slice retained by Object.assign.
+    fn allocate_pending_object_assign(
+        &mut self,
+        pending: PendingObjectAssign,
+    ) -> Result<GcRef<PendingObjectAssign>, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.pending_object_assign,
+                0,
+                pending,
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    fn pending_object_assign_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<PendingObjectAssign>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_object_assign)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    fn pending_object_assign(
+        &mut self,
+        state: GcRef<PendingObjectAssign>,
+    ) -> Result<PendingObjectAssignSnapshot, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_object_assign)
+                    .map(|pending| PendingObjectAssignSnapshot {
+                        target: pending.target,
+                        exclusions: pending.exclusions,
+                        source: pending.sources.get(pending.index).copied(),
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    fn advance_pending_object_assign(
+        &mut self,
+        state: GcRef<PendingObjectAssign>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_object_assign)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                pending.index = pending.index.saturating_add(1);
+                Ok(())
+            })
+        })
+    }
+
     pub(crate) fn pending_copy_data_properties_reference(
         &mut self,
         value: Value,
@@ -334,6 +663,14 @@ impl Isolate {
             .map(|pending| pending.source)
     }
 
+    pub(crate) fn pending_copy_data_properties_target(
+        &mut self,
+        state: GcRef<PendingCopyDataProperties>,
+    ) -> Result<Value, ExecutionError> {
+        self.pending_copy_data_properties(state)
+            .map(|pending| pending.target)
+    }
+
     fn pending_copy_data_properties(
         &mut self,
         state: GcRef<PendingCopyDataProperties>,
@@ -348,6 +685,7 @@ impl Isolate {
                         source: pending.source,
                         exclusions: pending.exclusions,
                         key: pending.keys.get(pending.index).copied(),
+                        consumer: pending.consumer,
                     })
                     .map_err(ExecutionError::NoGcBorrow)
             })
@@ -395,4 +733,12 @@ struct PendingCopyDataPropertiesSnapshot {
     source: Value,
     exclusions: Value,
     key: Option<PropertyKey>,
+    consumer: CopyDataPropertiesConsumer,
+}
+
+#[derive(Clone, Copy)]
+struct PendingObjectAssignSnapshot {
+    target: Value,
+    exclusions: Value,
+    source: Option<Value>,
 }
