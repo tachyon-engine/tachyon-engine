@@ -46,6 +46,16 @@ pub(super) fn estimate_entry(
     has_control_flow: bool,
     has_expression: bool,
 ) -> Result<LoweringCapacity, CompileError> {
+    let function_declaration_count = hir
+        .statements()
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement.kind,
+                crate::HirStatementKind::FunctionDeclaration(_)
+            )
+        })
+        .count();
     let result_instruction_count = if has_control_flow {
         control::statements_expression_count(hir.statements())?
             .checked_add(2)
@@ -60,6 +70,7 @@ pub(super) fn estimate_entry(
     let instruction_upper_bound = instructions::hir_instruction_count(hir)?
         .checked_add(var_binding_count)
         .and_then(|count| count.checked_add(global_lexical_count))
+        .and_then(|count| count.checked_add(function_declaration_count))
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "global var instantiation instructions",
         })?

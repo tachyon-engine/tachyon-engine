@@ -138,6 +138,24 @@ fn environment_access_errors_preserve_the_direct_slot_address() {
 }
 
 #[test]
+fn eval_var_environment_owns_exact_named_slots_without_affecting_direct_layouts() {
+    let first = AtomId::from_test_index(3);
+    let second = AtomId::from_test_index(7);
+    let mut environment = Environment::try_dynamic(None, vec![first, second].into_boxed_slice())
+        .expect("two exact eval names allocate");
+    assert_eq!(environment.kind(), EnvironmentKind::EvalVar);
+    assert_eq!(environment.dynamic_slot(first), Some(0));
+    assert_eq!(environment.dynamic_slot(second), Some(1));
+    assert_eq!(environment.dynamic_slot(AtomId::from_test_index(9)), None);
+    environment.store(1, Value::from_i32(42)).unwrap();
+    assert_eq!(environment.load(1).unwrap().as_i32(), Some(42));
+    assert_eq!(
+        environment.external_memory_bytes(),
+        2 * (size_of::<Value>() + size_of::<AtomId>())
+    );
+}
+
+#[test]
 /// Exercises initialization separately from assignment so TDZ and const cannot collapse together.
 fn binding_storage_enforces_tdz_mutability_and_single_initialization() {
     let states = [

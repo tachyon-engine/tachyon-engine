@@ -241,15 +241,25 @@ impl Isolate {
         realm: RealmId,
         module: &CompiledModule,
         budget: ExecutionBudget,
+        strict_eval: bool,
     ) -> Result<RunOutcome, ExecutionError> {
         if realm != self.active_realm || self.fiber.frames.is_empty() {
             return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
         }
         let parent = self.fiber.frames.last().and_then(|frame| frame.environment);
         let code = self.load_module(module)?;
+        let entry = self
+            .loaded_code(code)?
+            .module
+            .function(module.entry_function())
+            .ok_or(ExecutionError::MissingEntryFunction(
+                module.entry_function(),
+            ))?;
+        let strict_eval = strict_eval || entry.strictness() == FunctionStrictness::Strict;
+        let eval_var_environment = self.prepare_direct_eval_var_environment(code, strict_eval)?;
         let suspended_fiber = mem::take(&mut self.fiber);
         self.suspended_fibers.push(suspended_fiber);
-        let outcome = self.execute_loaded_with_parent(code, budget, parent);
+        let outcome = self.execute_loaded_with_parent(code, budget, parent, eval_var_environment);
         let suspended_fiber = self
             .suspended_fibers
             .pop()

@@ -24,6 +24,18 @@ pub(crate) fn environment_access_error(
     }
 }
 
+fn count_opcode(words: &[u32], target: Opcode) -> Result<usize, ExecutionError> {
+    let mut count = 0_usize;
+    let mut offset = WordOffset::new(0);
+    while offset.index() < words.len() as u32 {
+        let instruction = tachyon_bytecode::decode_instruction(words, offset)
+            .map_err(|_| ExecutionError::DecodeInvariant(offset))?;
+        count += usize::from(instruction.opcode == target);
+        offset = WordOffset::new(offset.index() + u32::from(instruction.word_len));
+    }
+    Ok(count)
+}
+
 impl Isolate {
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
@@ -332,7 +344,7 @@ impl Isolate {
         code: CodeId,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None)
+        self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None, None)
     }
 
     /// Runs eval code with an explicitly retained caller lexical environment.
@@ -341,11 +353,118 @@ impl Isolate {
         code: CodeId,
         budget: ExecutionBudget,
         parent: Option<GcRef<Environment>>,
+        eval_var_environment: Option<GcRef<Environment>>,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.fiber.dynamic_scope = true;
         self.execute_loaded_loop_with_parent::<{ tuning::dispatch::DEFAULT_DISPATCH_BATCH }, false>(
-            code, budget, parent,
+            code,
+            budget,
+            parent,
+            eval_var_environment,
         )
+    }
+
+    /// Builds an exact direct-eval var overlay from verified declaration bytecode.
+    pub(crate) fn prepare_direct_eval_var_environment(
+        &mut self,
+        code: CodeId,
+        strict_eval: bool,
+    ) -> Result<Option<GcRef<Environment>>, ExecutionError> {
+        let caller = self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let caller_kind = self
+            .loaded_code(caller.code)?
+            .module
+            .function(caller.function)
+            .ok_or(ExecutionError::MissingEntryFunction(caller.function))?
+            .kind();
+        if !strict_eval && matches!(caller_kind, FunctionKind::Script | FunctionKind::Module) {
+            return Ok(None);
+        }
+        let declared = self.eval_declared_var_atoms(code)?;
+        let frame_depth = self.fiber.frames.len() as u32;
+        let previous = self
+            .fiber
+            .eval_var_environments
+            .iter()
+            .rev()
+            .find(|environment| environment.frame_depth <= frame_depth)
+            .map(|environment| environment.environment);
+        let current = self
+            .fiber
+            .eval_var_environments
+            .iter()
+            .rev()
+            .find(|environment| environment.frame_depth == frame_depth)
+            .map(|environment| environment.environment);
+        let ancestor = self
+            .fiber
+            .eval_var_environments
+            .iter()
+            .rev()
+            .find(|environment| environment.frame_depth < frame_depth)
+            .map(|environment| environment.environment);
+        let lexical = self.fiber.frames.last().and_then(|frame| frame.environment);
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(declared.len())
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        for atom in declared {
+            let already_declared = !strict_eval
+                && (self
+                    .eval_var_binding_until(current, atom, ancestor)?
+                    .is_some()
+                    || self.named_environment_binding(lexical, atom)?.is_some());
+            if !already_declared {
+                names.push(atom);
+            }
+        }
+        if names.is_empty() {
+            return Ok(previous);
+        }
+        let environment = self.allocate_eval_var_environment(previous, names.into_boxed_slice())?;
+        if !strict_eval {
+            self.attach_eval_var_environment(frame_depth, environment)?;
+        }
+        Ok(Some(environment))
+    }
+
+    /// Scans verified entry bytecode twice so the declaration atom buffer has exact capacity.
+    fn eval_declared_var_atoms(&self, code: CodeId) -> Result<Box<[AtomId]>, ExecutionError> {
+        let loaded = self.loaded_code(code)?;
+        let function_id = loaded.module.entry_function();
+        let function = loaded
+            .module
+            .function(function_id)
+            .ok_or(ExecutionError::MissingEntryFunction(function_id))?;
+        let words = function.bytecode().bytecode().words();
+        let count = count_opcode(words, Opcode::DeclareScope)?;
+        let mut atoms = Vec::new();
+        atoms
+            .try_reserve_exact(count)
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        let mut offset = WordOffset::new(0);
+        while offset.index() < words.len() as u32 {
+            let instruction = tachyon_bytecode::decode_instruction(words, offset)
+                .map_err(|_| ExecutionError::DecodeInvariant(offset))?;
+            if instruction.opcode == Opcode::DeclareScope {
+                let scope_name = instruction.operands[0] as usize;
+                let atom = loaded
+                    .scope_resolutions
+                    .get(scope_name)
+                    .ok_or(ExecutionError::InvalidScopeName {
+                        code,
+                        scope_name: instruction.operands[0],
+                    })?
+                    .atom;
+                atoms.push(atom);
+            }
+            offset = WordOffset::new(offset.index() + u32::from(instruction.word_len));
+        }
+        debug_assert_eq!(atoms.len(), count);
+        Ok(atoms.into_boxed_slice())
     }
 
     /// Shares the dispatch loop while allowing only direct eval to seed an entry parent.
@@ -354,9 +473,16 @@ impl Isolate {
         code: CodeId,
         mut budget: ExecutionBudget,
         parent: Option<GcRef<Environment>>,
+        eval_var_environment: Option<GcRef<Environment>>,
     ) -> Result<RunOutcome, ExecutionError> {
         let entry_function = self.loaded_code(code)?.module.entry_function();
+        let dynamic_scope = parent.is_some() || eval_var_environment.is_some();
         self.enter_with_parent(code, entry_function, parent)?;
+        self.fiber.dynamic_scope = dynamic_scope;
+        self.fiber.direct_eval = dynamic_scope;
+        if let Some(environment) = eval_var_environment {
+            self.attach_eval_var_environment(1, environment)?;
+        }
         loop {
             if !UNBOUNDED && (budget.fuel == 0 || budget.quantum == 0) {
                 return Ok(RunOutcome::BudgetExhausted);
@@ -2405,7 +2531,19 @@ impl Isolate {
         if !self.fiber.dynamic_scope {
             return Ok(None);
         }
-        let mut cursor = self.fiber.frames.last().and_then(|frame| frame.environment);
+        if let Some(binding) = self.dynamic_eval_var_binding(atom)? {
+            return Ok(Some(binding));
+        }
+        let cursor = self.fiber.frames.last().and_then(|frame| frame.environment);
+        self.named_environment_binding(cursor, atom)
+    }
+
+    /// Resolves immutable owner metadata without consulting the Fiber dynamic-scope gate.
+    fn named_environment_binding(
+        &mut self,
+        mut cursor: Option<GcRef<Environment>>,
+        atom: AtomId,
+    ) -> Result<Option<(GcRef<Environment>, u32)>, ExecutionError> {
         while let Some(environment) = cursor {
             let (owner, parent) = self.heap.with_running_scope(|scope| {
                 scope.with_no_gc_scope(|no_gc| {
@@ -2440,6 +2578,78 @@ impl Isolate {
                         })?,
                     )));
                 }
+            }
+            cursor = parent;
+        }
+        Ok(None)
+    }
+
+    /// Walks only the sparse eval-var overlay chain owned by the active activation.
+    fn dynamic_eval_var_binding(
+        &mut self,
+        atom: AtomId,
+    ) -> Result<Option<(GcRef<Environment>, u32)>, ExecutionError> {
+        let frame_depth = self.fiber.frames.len() as u32;
+        let cursor = self
+            .fiber
+            .eval_var_environments
+            .iter()
+            .rev()
+            .find(|environment| environment.frame_depth <= frame_depth)
+            .map(|environment| environment.environment);
+        self.eval_var_binding_from(cursor, atom)
+    }
+
+    fn eval_var_binding_from(
+        &mut self,
+        mut cursor: Option<GcRef<Environment>>,
+        atom: AtomId,
+    ) -> Result<Option<(GcRef<Environment>, u32)>, ExecutionError> {
+        while let Some(environment) = cursor {
+            let (slot, parent, kind) = self.heap.with_running_scope(|scope| {
+                scope.with_no_gc_scope(|no_gc| {
+                    let environment = no_gc
+                        .borrow_reference(environment, self.types.environment)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    Ok::<_, ExecutionError>((
+                        environment.dynamic_slot(atom),
+                        environment.parent(),
+                        environment.kind(),
+                    ))
+                })
+            })?;
+            if kind != EnvironmentKind::EvalVar {
+                break;
+            }
+            if let Some(slot) = slot {
+                return Ok(Some((environment, slot)));
+            }
+            cursor = parent;
+        }
+        Ok(None)
+    }
+
+    /// Checks declarations only within one variable environment, excluding ancestor overlays.
+    fn eval_var_binding_until(
+        &mut self,
+        mut cursor: Option<GcRef<Environment>>,
+        atom: AtomId,
+        stop_before: Option<GcRef<Environment>>,
+    ) -> Result<Option<(GcRef<Environment>, u32)>, ExecutionError> {
+        while let Some(environment) = cursor {
+            if Some(environment) == stop_before {
+                break;
+            }
+            let (slot, parent) = self.heap.with_running_scope(|scope| {
+                scope.with_no_gc_scope(|no_gc| {
+                    let environment = no_gc
+                        .borrow_reference(environment, self.types.environment)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    Ok::<_, ExecutionError>((environment.dynamic_slot(atom), environment.parent()))
+                })
+            })?;
+            if let Some(slot) = slot {
+                return Ok(Some((environment, slot)));
             }
             cursor = parent;
         }
@@ -2517,6 +2727,9 @@ impl Isolate {
     #[inline(always)]
     fn declare_scope(&mut self, code: CodeId, scope_name: u32) -> Result<(), ExecutionError> {
         let resolution = self.scope_resolution(code, scope_name)?;
+        if self.dynamic_environment_binding(resolution.atom)?.is_some() {
+            return Ok(());
+        }
         self.declare_scope_resolution(resolution)
     }
 
@@ -2805,7 +3018,7 @@ impl Isolate {
         Ok(())
     }
 
-    /// Drops stale class environments after a JavaScript frame leaves the explicit fiber.
+    /// Drops sparse environment roots after their owning JavaScript frame leaves the fiber.
     #[inline(always)]
     fn discard_exited_class_environments(&mut self) {
         let frame_depth = self.fiber.frames.len() as u32;
@@ -2817,6 +3030,16 @@ impl Isolate {
         {
             self.fiber.class_environments.pop();
         }
+        while self
+            .fiber
+            .eval_var_environments
+            .last()
+            .is_some_and(|environment| environment.frame_depth > frame_depth)
+        {
+            self.fiber.eval_var_environments.pop();
+        }
+        self.fiber.dynamic_scope =
+            self.fiber.direct_eval || !self.fiber.eval_var_environments.is_empty();
     }
 
     /// Allocates non-empty captured-slot backing after the current activation frame is rooted.
@@ -2898,6 +3121,60 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
+    /// Allocates one exact eval-var record while every parent and atom remains isolate-rooted.
+    fn allocate_eval_var_environment(
+        &mut self,
+        parent: Option<GcRef<Environment>>,
+        names: Box<[AtomId]>,
+    ) -> Result<GcRef<Environment>, ExecutionError> {
+        let environment = Environment::try_dynamic(parent, names)
+            .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_external_with_gc(
+                self.types.environment,
+                0,
+                environment,
+                AllocationSpace::Young,
+                roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Replaces one activation's overlay head or reserves exactly one sparse root entry.
+    fn attach_eval_var_environment(
+        &mut self,
+        frame_depth: u32,
+        environment: GcRef<Environment>,
+    ) -> Result<(), ExecutionError> {
+        if let Some(active) = self
+            .fiber
+            .eval_var_environments
+            .iter_mut()
+            .rev()
+            .find(|active| active.frame_depth == frame_depth)
+        {
+            active.environment = environment;
+        } else {
+            self.fiber
+                .eval_var_environments
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
+            self.fiber.eval_var_environments.push(EvalVarEnvironment {
+                frame_depth,
+                environment,
+            });
+        }
+        self.fiber.dynamic_scope = true;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn enter(
         &mut self,
@@ -2939,6 +3216,7 @@ impl Isolate {
         self.fiber.derived_activations.clear();
         self.fiber.base_class_activations.clear();
         self.fiber.class_environments.clear();
+        self.fiber.eval_var_environments.clear();
         self.fiber.registers.clear();
         self.fiber.handlers.clear();
         self.fiber.completions.clear();
@@ -4248,6 +4526,16 @@ impl Isolate {
         {
             self.fiber.class_environments.pop();
         }
+        while self
+            .fiber
+            .eval_var_environments
+            .last()
+            .is_some_and(|environment| environment.frame_depth >= frame_depth)
+        {
+            self.fiber.eval_var_environments.pop();
+        }
+        self.fiber.dynamic_scope =
+            self.fiber.direct_eval || !self.fiber.eval_var_environments.is_empty();
         self.fiber.handlers.truncate(old.handler_base as usize);
         self.fiber
             .completions

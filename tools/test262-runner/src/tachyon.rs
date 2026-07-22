@@ -71,7 +71,7 @@ fn eval_script_callback(
     };
     let outcome = match kind {
         tachyon_vm::EvalKind::Direct { .. } => {
-            isolate.execute_direct_eval_in_realm(realm, &module, budget)
+            isolate.execute_direct_eval_in_realm(realm, &module, budget, kind.inherits_strict())
         }
         tachyon_vm::EvalKind::Indirect => isolate.execute_in_realm(realm, &module, budget),
     }?;

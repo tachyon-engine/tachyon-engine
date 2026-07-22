@@ -41,7 +41,9 @@ fn eval_script_callback(
         quantum: 8_192,
     };
     let outcome = match kind {
-        EvalKind::Direct { .. } => isolate.execute_direct_eval_in_realm(realm, &module, budget),
+        EvalKind::Direct { .. } => {
+            isolate.execute_direct_eval_in_realm(realm, &module, budget, kind.inherits_strict())
+        }
         EvalKind::Indirect => isolate.execute_in_realm(realm, &module, budget),
     }?;
     match outcome {
@@ -186,6 +188,62 @@ fn direct_eval_inherits_caller_strictness_for_parse_and_assignment_rules() {
     let module = compile_source(
         "function run() { 'use strict'; var syntax = false; var reference = false; try { eval('var public = 1;'); } catch (error) { syntax = error instanceof SyntaxError; } try { eval('missing = 1;'); } catch (error) { reference = error instanceof ReferenceError; } return syntax && reference; } run();",
         1_165,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+fn sloppy_eval_persists_new_var_and_function_bindings_on_the_caller_activation() {
+    let module = compile_source(
+        "function run() { var existing = 1; eval('var existing = 2; var added = 3; function created() { return added; }'); var first = existing === 2 && added === 3 && created() === 3; eval('added = 5;'); return first && added === 5 && created() === 5; } run();",
+        1_166,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+fn strict_eval_var_and_function_bindings_do_not_escape_the_eval_fiber() {
+    let module = compile_source(
+        "function run() { 'use strict'; eval('var hidden = 1; function created() {}'); return typeof hidden === 'undefined' && typeof created === 'undefined'; } run();",
+        1_167,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+fn global_direct_eval_uses_global_var_environment_only_when_sloppy() {
+    let sloppy = compile_source(
+        "eval('var globalEval = 3; function globalCreated() { return 4; }'); globalEval === 3 && globalCreated() === 4;",
+        1_168,
+    );
+    assert_direct_eval_batch::<1>(&sloppy, false);
+    assert_direct_eval_batch::<8>(&sloppy, true);
+    let strict = compile_source(
+        "'use strict'; eval('var isolated = 1; function hidden() {}'); typeof isolated === 'undefined' && typeof hidden === 'undefined';",
+        1_169,
+    );
+    assert_direct_eval_batch::<2>(&strict, false);
+    assert_direct_eval_batch::<4>(&strict, false);
+    assert_direct_eval_batch::<16>(&strict, true);
+}
+
+#[test]
+fn nested_sloppy_eval_var_shadows_an_ancestor_eval_overlay() {
+    let module = compile_source(
+        "function outer() { eval('var value = 1;'); function inner() { eval('var value = 2;'); return value; } return inner() === 2 && value === 1; } outer();",
+        1_170,
     );
     assert_direct_eval_batch::<1>(&module, false);
     assert_direct_eval_batch::<2>(&module, false);

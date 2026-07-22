@@ -563,8 +563,9 @@ impl Lowerer<'_> {
             .index()
             .checked_add(1)
             .ok_or(CompileError::RegisterOverflow)?;
-        self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
         let scope_name = self.global_binding(&declaration.binding.name, true)?;
+        self.emit(Opcode::DeclareScope, &[scope_name], span)?;
+        self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
         self.emit(Opcode::StoreScope, &[register.index(), scope_name], span)?;
         Ok(())
     }

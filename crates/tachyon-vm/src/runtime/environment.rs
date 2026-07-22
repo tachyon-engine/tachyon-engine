@@ -7,6 +7,7 @@ use super::super::*;
 #[repr(u8)]
 pub(crate) enum EnvironmentKind {
     Declarative,
+    EvalVar,
     Function,
     Global,
     Module,
@@ -66,6 +67,10 @@ const _: [(); 1] = [(); core::mem::size_of::<BindingState>()];
 #[derive(Debug)]
 enum EnvironmentStorage {
     Captured(Box<[Value]>),
+    Dynamic {
+        names: Box<[AtomId]>,
+        values: Box<[Value]>,
+    },
     Bindings {
         values: Box<[Value]>,
         states: Box<[BindingState]>,
@@ -144,6 +149,25 @@ impl Environment {
         })
     }
 
+    /// Allocates one exact named var record for a direct-eval declaration set.
+    pub(crate) fn try_dynamic(
+        parent: Option<GcRef<Self>>,
+        names: Box<[AtomId]>,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut values = Vec::new();
+        values.try_reserve_exact(names.len())?;
+        values.resize(names.len(), Value::from_immediate(Immediate::Undefined));
+        Ok(Self {
+            parent,
+            owner: None,
+            kind: EnvironmentKind::EvalVar,
+            storage: EnvironmentStorage::Dynamic {
+                names,
+                values: values.into_boxed_slice(),
+            },
+        })
+    }
+
     #[inline(always)]
     pub(crate) const fn kind(&self) -> EnvironmentKind {
         self.kind
@@ -160,11 +184,26 @@ impl Environment {
     }
 
     #[inline(always)]
+    pub(crate) fn dynamic_slot(&self, name: AtomId) -> Option<u32> {
+        let EnvironmentStorage::Dynamic { names, .. } = &self.storage else {
+            return None;
+        };
+        names
+            .iter()
+            .position(|candidate| *candidate == name)
+            .and_then(|slot| u32::try_from(slot).ok())
+    }
+
+    #[inline(always)]
     /// Reads a direct slot while enforcing TDZ for state-bearing records.
     pub(crate) fn load(&self, slot: u32) -> Result<Value, EnvironmentAccessError> {
         let index = slot as usize;
         match &self.storage {
             EnvironmentStorage::Captured(values) => values
+                .get(index)
+                .copied()
+                .ok_or(EnvironmentAccessError::InvalidSlot),
+            EnvironmentStorage::Dynamic { values, .. } => values
                 .get(index)
                 .copied()
                 .ok_or(EnvironmentAccessError::InvalidSlot),
@@ -187,6 +226,12 @@ impl Environment {
         let index = slot as usize;
         match &mut self.storage {
             EnvironmentStorage::Captured(values) => {
+                let target = values
+                    .get_mut(index)
+                    .ok_or(EnvironmentAccessError::InvalidSlot)?;
+                *target = value;
+            }
+            EnvironmentStorage::Dynamic { values, .. } => {
                 let target = values
                     .get_mut(index)
                     .ok_or(EnvironmentAccessError::InvalidSlot)?;
@@ -237,9 +282,9 @@ impl Environment {
     #[inline(always)]
     fn slot_count(&self) -> usize {
         match &self.storage {
-            EnvironmentStorage::Captured(values) | EnvironmentStorage::Bindings { values, .. } => {
-                values.len()
-            }
+            EnvironmentStorage::Captured(values)
+            | EnvironmentStorage::Dynamic { values, .. }
+            | EnvironmentStorage::Bindings { values, .. } => values.len(),
         }
     }
 }
@@ -248,9 +293,9 @@ impl Trace for Environment {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.parent.trace(tracer);
         match &mut self.storage {
-            EnvironmentStorage::Captured(values) | EnvironmentStorage::Bindings { values, .. } => {
-                values.trace(tracer)
-            }
+            EnvironmentStorage::Captured(values)
+            | EnvironmentStorage::Dynamic { values, .. }
+            | EnvironmentStorage::Bindings { values, .. } => values.trace(tracer),
         }
     }
 }
@@ -262,6 +307,9 @@ impl GcExternalMemory for Environment {
             .saturating_mul(core::mem::size_of::<Value>());
         let state_bytes = match &self.storage {
             EnvironmentStorage::Captured(_) => 0,
+            EnvironmentStorage::Dynamic { names, .. } => {
+                names.len().saturating_mul(core::mem::size_of::<AtomId>())
+            }
             EnvironmentStorage::Bindings { states, .. } => states
                 .len()
                 .saturating_mul(core::mem::size_of::<BindingState>()),

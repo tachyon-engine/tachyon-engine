@@ -1495,11 +1495,27 @@ pub(crate) struct ActiveHandler {
     pub(crate) environment_depth: u32,
 }
 
+/// Sparse direct-eval var record owned by exactly one JavaScript activation depth.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EvalVarEnvironment {
+    pub(crate) frame_depth: u32,
+    pub(crate) environment: GcRef<Environment>,
+}
+
+impl Trace for EvalVarEnvironment {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.environment.trace(tracer);
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
     /// Only direct-eval/debugger fibers enable runtime name lookup before global resolution.
     pub(crate) dynamic_scope: bool,
+    /// Distinguishes an eval child from an ordinary fiber that only retains var overlays.
+    pub(crate) direct_eval: bool,
     /// Activation-aligned lazy Arguments object roots; avoids growing the hot Frame layout.
     pub(crate) argument_objects: Vec<Option<Value>>,
     /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.
@@ -1510,6 +1526,8 @@ pub(crate) struct Fiber {
     pub(crate) base_class_activations: Vec<ClassActivation>,
     /// Frame depths for active class-name lexical environments, sparse across ordinary execution.
     pub(crate) class_environments: Vec<u32>,
+    /// Persistent sloppy-eval var records, sparse across direct-eval-capable activations.
+    pub(crate) eval_var_environments: Vec<EvalVarEnvironment>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -1527,6 +1545,7 @@ impl Fiber {
         self.argument_sources.trace(tracer);
         self.derived_activations.trace(tracer);
         self.base_class_activations.trace(tracer);
+        self.eval_var_environments.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         debug_assert_eq!(self.argument_sources.len(), self.frames.len());
         debug_assert!(self.derived_activations.iter().all(|activation| {
@@ -1537,6 +1556,9 @@ impl Fiber {
         }));
         debug_assert!(self.class_environments.iter().all(|depth| {
             *depth != 0 && usize::try_from(*depth).is_ok_and(|depth| depth <= self.frames.len())
+        }));
+        debug_assert!(self.eval_var_environments.iter().all(|environment| {
+            environment.frame_depth != 0 && environment.frame_depth as usize <= self.frames.len()
         }));
         for frame in &mut self.frames {
             frame.environment.trace(tracer);

@@ -221,7 +221,7 @@ fn compiler_compacts_zero_argument_call_loop_hot_path() {
 }
 
 #[test]
-/// Confirms script vars become deduplicated global declarations while function vars use frames.
+/// Confirms script vars/functions declare globals while function-local vars use frames.
 fn compiler_instantiates_var_bindings_at_their_scope_entry() {
     let module = Compiler
         .compile(
@@ -244,7 +244,7 @@ fn compiler_instantiates_var_bindings_at_their_scope_entry() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(entry.matches("DeclareScope").count(), 2);
+    assert_eq!(entry.matches("DeclareScope").count(), 3);
     assert!(entry.contains("StoreScope"));
     assert!(function.contains("LoadUndefined"));
     assert!(function.contains("Typeof"));
