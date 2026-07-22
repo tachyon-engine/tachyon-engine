@@ -254,6 +254,13 @@ impl Isolate {
                 pending.second,
                 pending.third,
             ),
+            BuiltinPropertyKeyConsumer::ObjectGroupBy => self.finish_object_group_by_key(
+                site,
+                pending.first,
+                key,
+                pending.second,
+                pending.third,
+            ),
         }
     }
 

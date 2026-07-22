@@ -4500,6 +4500,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ObjectFromEntries) => {
                     return self.begin_object_from_entries(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ObjectGroupBy) => {
+                    return self.begin_object_group_by(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectGetOwnPropertyDescriptor) => {
                     return self.object_get_own_property_descriptor(&site);
                 }
@@ -6011,15 +6014,11 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
-                if let Some(state) = self.object_from_entries_close_state(continuation)?
+                if let Some(state) = self.collection_initializer_close_state(continuation)?
                     && let Some(kind) = execution_error_kind(&error)
                 {
                     let original_throw = self.create_native_error(kind, None)?;
-                    return self.begin_object_from_entries_iterator_close(
-                        site,
-                        state,
-                        original_throw,
-                    );
+                    return self.begin_collection_iterator_close(site, state, original_throw);
                 }
                 let Some(kind) = execution_error_kind(&error) else {
                     return Err(error);
@@ -6179,12 +6178,8 @@ impl Isolate {
                     instruction_offset = continuation.site().call_site;
                     continue;
                 }
-                if let Some(state) = self.object_from_entries_close_state(continuation)? {
-                    return self.begin_object_from_entries_iterator_close(
-                        continuation.site(),
-                        state,
-                        value,
-                    );
+                if let Some(state) = self.collection_initializer_close_state(continuation)? {
+                    return self.begin_collection_iterator_close(continuation.site(), state, value);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
@@ -6222,24 +6217,30 @@ impl Isolate {
         }
     }
 
-    /// Recovers Object.fromEntries iterator state from direct or ToPropertyKey continuations.
-    fn object_from_entries_close_state(
+    /// Recovers iterable-consumer state from direct or ToPropertyKey continuations.
+    fn collection_initializer_close_state(
         &mut self,
         continuation: NativeContinuation,
     ) -> Result<Option<Value>, ExecutionError> {
         if let NativeContinuationKind::CollectionInitializer(stage) = continuation.kind() {
             return self
-                .should_close_object_from_entries(continuation.first(), stage)
+                .should_close_collection_initializer(continuation.first(), stage)
                 .map(|close| close.then_some(continuation.first()));
         }
         let NativeContinuationKind::Conversion {
-            consumer:
-                ConversionConsumer::BuiltinPropertyKey(BuiltinPropertyKeyConsumer::ObjectFromEntries),
+            consumer: ConversionConsumer::BuiltinPropertyKey(consumer),
             ..
         } = continuation.kind()
         else {
             return Ok(None);
         };
+        if !matches!(
+            consumer,
+            BuiltinPropertyKeyConsumer::ObjectFromEntries
+                | BuiltinPropertyKeyConsumer::ObjectGroupBy
+        ) {
+            return Ok(None);
+        }
         self.pending_native_property_key(continuation.first())
             .map(|pending| Some(pending.third()))
     }

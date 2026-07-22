@@ -98,6 +98,18 @@ impl Isolate {
         self.realm.object_from_entries = Some(from_entries);
         let from_entries_atom = self.intern_intrinsic_name(b"fromEntries")?;
         self.set_intrinsic_data_property(constructor, from_entries_atom, from_entries, true)?;
+        let group_by = self.allocate_native_function(
+            NativeFunction::ObjectGroupBy,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.object_group_by = Some(group_by);
+        let group_by_atom = self.intern_intrinsic_name(b"groupBy")?;
+        self.set_intrinsic_data_property(constructor, group_by_atom, group_by, true)?;
         let get_own_property_descriptor = self.allocate_native_function(
             NativeFunction::ObjectGetOwnPropertyDescriptor,
             OrdinaryObject {

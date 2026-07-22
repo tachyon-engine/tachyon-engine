@@ -78,6 +78,53 @@ impl Isolate {
         )
     }
 
+    /// Starts Object.groupBy with a null-prototype result and a resumable callback state.
+    pub(crate) fn begin_object_group_by(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let items = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if is_nullish(items) {
+            return Err(ExecutionError::NotObject(items));
+        }
+        let callback = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.resolve_function_object(callback)?;
+        let iterable = if self.is_string_value(items) {
+            let prototype = self
+                .realm
+                .array_prototype
+                .expect("Array prototype initializes before string groupBy");
+            let array = self.create_array_object_with_prototype(prototype)?;
+            let length = self.string_value_length(items)?;
+            let mut source_index = 0_usize;
+            let mut output_index = 0_u64;
+            while source_index < length {
+                let (value, next_index) = self
+                    .string_code_point_value_at(items, source_index)?
+                    .expect("bounded String iterator index");
+                let key = PropertyKey::Atom(self.safe_integer_property_atom(output_index)?);
+                self.set_own_data_property(array, key, value)?;
+                source_index = next_index;
+                output_index = output_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
+            }
+            self.set_array_length_value(array, safe_integer_value(output_index))?;
+            array
+        } else {
+            items
+        };
+        let target =
+            self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
+        self.begin_collection_initializer_with_iterable(
+            site,
+            target,
+            CollectionInitializerKind::ObjectGroupBy,
+            iterable,
+        )
+    }
+
     /// Starts WeakMap construction with the same resumable iterable protocol as Map.
     pub(crate) fn begin_weak_map_from_site(
         &mut self,
@@ -114,9 +161,26 @@ impl Isolate {
         let iterable = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.begin_collection_initializer_with_iterable(site, target, kind, iterable)
+    }
+
+    /// Starts a collection initializer after the host has normalized a primitive iterable.
+    fn begin_collection_initializer_with_iterable(
+        &mut self,
+        site: &CallSite,
+        target: Value,
+        kind: CollectionInitializerKind,
+        iterable: Value,
+    ) -> Result<(), ExecutionError> {
         if is_nullish(iterable) {
             return self.write(site.caller_base, site.destination, target);
         }
+        let group_by_callback = if kind == CollectionInitializerKind::ObjectGroupBy {
+            self.call_argument(site, 1)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+        } else {
+            Value::from_immediate(Immediate::Undefined)
+        };
         let state = self.allocate_pending_collection_initializer(PendingCollectionInitializer {
             target,
             iterable,
@@ -124,9 +188,10 @@ impl Isolate {
             next: Value::from_immediate(Immediate::Undefined),
             result: Value::from_immediate(Immediate::Undefined),
             key: Value::from_immediate(Immediate::Undefined),
-            adder: Value::from_immediate(Immediate::Undefined),
+            adder: group_by_callback,
             kind,
             stage: CollectionInitializerStage::Adder,
+            index: 0,
         })?;
         self.write(
             site.caller_base,
@@ -138,7 +203,10 @@ impl Isolate {
             destination: site.destination,
             call_site: site.call_site,
         };
-        if kind == CollectionInitializerKind::ObjectFromEntries {
+        if matches!(
+            kind,
+            CollectionInitializerKind::ObjectFromEntries | CollectionInitializerKind::ObjectGroupBy
+        ) {
             return self.resume_collection_initializer(
                 native_site,
                 state,
@@ -180,9 +248,17 @@ impl Isolate {
         )?;
         match stage {
             CollectionInitializerStage::Adder => {
-                self.update_pending_collection_initializer(state, |pending| pending.adder = value)?;
                 let kind = self.pending_collection_initializer(state)?.kind;
-                if kind != CollectionInitializerKind::ObjectFromEntries {
+                if kind != CollectionInitializerKind::ObjectGroupBy {
+                    self.update_pending_collection_initializer(state, |pending| {
+                        pending.adder = value
+                    })?;
+                }
+                if !matches!(
+                    kind,
+                    CollectionInitializerKind::ObjectFromEntries
+                        | CollectionInitializerKind::ObjectGroupBy
+                ) {
                     self.resolve_function_object(value)?;
                 }
                 let iterable = self.pending_collection_initializer(state)?.iterable;
@@ -264,6 +340,21 @@ impl Isolate {
             }
             CollectionInitializerStage::ResultValue => {
                 let pending = self.pending_collection_initializer(state)?;
+                if pending.kind == CollectionInitializerKind::ObjectGroupBy {
+                    let index = pending.index;
+                    self.update_pending_collection_initializer(state, |pending| {
+                        pending.result = value;
+                        pending.index = pending.index.saturating_add(1);
+                    })?;
+                    return self.call_collection_initializer(
+                        site,
+                        state,
+                        CollectionInitializerStage::GroupByCallback,
+                        pending.adder,
+                        Value::from_immediate(Immediate::Undefined),
+                        &[value, safe_integer_value(index)],
+                    );
+                }
                 if matches!(
                     pending.kind,
                     CollectionInitializerKind::Set | CollectionInitializerKind::WeakSet
@@ -315,6 +406,17 @@ impl Isolate {
                     );
                 }
                 self.call_collection_adder(site, state, &[pending.key, pending.result])
+            }
+            CollectionInitializerStage::GroupByCallback => {
+                let pending = self.pending_collection_initializer(state)?;
+                self.dispatch_builtin_property_key_native(
+                    site,
+                    BuiltinPropertyKeyConsumer::ObjectGroupBy,
+                    pending.target,
+                    value,
+                    pending.result,
+                    Value::from_heap_ref(state.raw()),
+                )
             }
             CollectionInitializerStage::AdderCall => self.call_collection_next(site, state),
         }
@@ -416,6 +518,7 @@ impl Isolate {
         receiver: Value,
         arguments: &[Value],
     ) -> Result<(), ExecutionError> {
+        self.update_pending_collection_initializer(state, |pending| pending.stage = stage)?;
         let mut copied_arguments = Vec::new();
         copied_arguments
             .try_reserve_exact(arguments.len())
@@ -526,8 +629,45 @@ impl Isolate {
         self.call_collection_next(site, state)
     }
 
-    /// Reports whether an abrupt collection stage requires Object.fromEntries IteratorClose.
-    pub(crate) fn should_close_object_from_entries(
+    /// Appends one value to the null-prototype group's array and advances the iterable.
+    pub(crate) fn finish_object_group_by_key(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        key: PropertyKey,
+        value: Value,
+        state: Value,
+    ) -> Result<(), ExecutionError> {
+        let group = match self.resolve_property_read(target, key)? {
+            PropertyRead::Data(group) => group,
+            PropertyRead::Missing => {
+                let prototype = self
+                    .realm
+                    .array_prototype
+                    .expect("Array prototype initializes before groupBy");
+                let group = self.create_array_object_with_prototype(prototype)?;
+                self.set_own_data_property(target, key, group)?;
+                group
+            }
+            PropertyRead::Accessor(_) => return Err(ExecutionError::UnsupportedAccessorDescriptor),
+        };
+        if !self.is_array_value(group)? {
+            return Err(ExecutionError::InvalidPropertyDescriptor(group));
+        }
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let length = self
+            .get_data_property(group, length_key)?
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        let index_key = PropertyKey::Atom(self.safe_integer_property_atom(length as u64)?);
+        self.set_own_data_property(group, index_key, value)?;
+        self.set_array_length_value(group, Value::from_f64(length + 1.0))?;
+        let state = self.pending_collection_initializer_reference(state)?;
+        self.call_collection_next(site, state)
+    }
+
+    /// Reports whether an abrupt iterable-consumer stage requires IteratorClose.
+    pub(crate) fn should_close_collection_initializer(
         &mut self,
         state: Value,
         _continuation_stage: CollectionInitializerStage,
@@ -535,19 +675,25 @@ impl Isolate {
         let state = self.pending_collection_initializer_reference(state)?;
         let pending = self.pending_collection_initializer(state)?;
         let stage = pending.stage;
-        if !matches!(
-            stage,
-            CollectionInitializerStage::ResultValue
-                | CollectionInitializerStage::EntryKey
-                | CollectionInitializerStage::EntryValue
-        ) {
-            return Ok(false);
-        }
-        Ok(pending.kind == CollectionInitializerKind::ObjectFromEntries)
+        Ok(match pending.kind {
+            CollectionInitializerKind::ObjectFromEntries => matches!(
+                stage,
+                CollectionInitializerStage::ResultValue
+                    | CollectionInitializerStage::EntryKey
+                    | CollectionInitializerStage::EntryValue
+            ),
+            CollectionInitializerKind::ObjectGroupBy => {
+                stage == CollectionInitializerStage::GroupByCallback
+            }
+            CollectionInitializerKind::Map
+            | CollectionInitializerKind::Set
+            | CollectionInitializerKind::WeakMap
+            | CollectionInitializerKind::WeakSet => false,
+        })
     }
 
     /// Starts IteratorClose while retaining the original abrupt completion outside Rust's stack.
-    pub(crate) fn begin_object_from_entries_iterator_close(
+    pub(crate) fn begin_collection_iterator_close(
         &mut self,
         site: NativeContinuationSite,
         state: Value,
@@ -698,6 +844,7 @@ impl Isolate {
                         adder: pending.adder,
                         kind: pending.kind,
                         stage: pending.stage,
+                        index: pending.index,
                     })
                     .map_err(ExecutionError::NoGcBorrow)
             })

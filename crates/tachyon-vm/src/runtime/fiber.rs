@@ -133,6 +133,7 @@ pub(crate) enum BuiltinPropertyKeyConsumer {
     ReflectGet,
     ReflectSet,
     ObjectFromEntries,
+    ObjectGroupBy,
 }
 
 const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
@@ -543,6 +544,7 @@ pub(crate) enum CollectionInitializerStage {
     EntryKey,
     EntryValue,
     AdderCall,
+    GroupByCallback,
 }
 
 /// Observable stages of IteratorClose for a native iterable consumer.

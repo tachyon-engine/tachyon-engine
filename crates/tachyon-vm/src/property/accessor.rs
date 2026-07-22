@@ -88,6 +88,51 @@ impl Isolate {
         Ok(Some(value))
     }
 
+    /// Materializes one String iterator code point and returns its next UTF-16 index.
+    pub(crate) fn string_code_point_value_at(
+        &mut self,
+        receiver: Value,
+        index: usize,
+    ) -> Result<Option<(Value, usize)>, ExecutionError> {
+        let length = self.string_value_length(receiver)?;
+        if index >= length {
+            return Ok(None);
+        }
+        let string_receiver = self.string_primitive_value(receiver)?;
+        let raw = string_receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(string_receiver))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(ExecutionError::HeapReference)?;
+        let units = self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(string, self.types.string)
+                    .map(|string| {
+                        let first = string.code_unit_at(index).expect("checked index");
+                        let second = string.code_unit_at(index + 1);
+                        if (0xd800..=0xdbff).contains(&first)
+                            && second.is_some_and(|unit| (0xdc00..=0xdfff).contains(&unit))
+                        {
+                            vec![first, second.expect("checked surrogate pair")]
+                        } else {
+                            vec![first]
+                        }
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let next = index + units.len();
+        let value = self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        Ok(Some((value, next)))
+    }
+
     /// Resolves an ordinary read while retaining the original receiver for accessor `this`.
     pub(crate) fn resolve_property_read(
         &mut self,

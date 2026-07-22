@@ -43,6 +43,7 @@ pub(crate) enum CollectionInitializerKind {
     WeakMap,
     WeakSet,
     ObjectFromEntries,
+    ObjectGroupBy,
 }
 
 /// GC-owned state that survives every observable step of `new Map(iterable)` and `new Set(iterable)`.
@@ -57,6 +58,7 @@ pub(crate) struct PendingCollectionInitializer {
     pub(crate) adder: Value,
     pub(crate) kind: CollectionInitializerKind,
     pub(crate) stage: CollectionInitializerStage,
+    pub(crate) index: u64,
 }
 
 /// GC-owned callback state for live `Map.prototype.forEach` and `Set.prototype.forEach` scans.
@@ -124,6 +126,7 @@ pub(crate) struct PendingCollectionInitializerSnapshot {
     pub(crate) adder: Value,
     pub(crate) kind: CollectionInitializerKind,
     pub(crate) stage: CollectionInitializerStage,
+    pub(crate) index: u64,
 }
 
 pub(crate) struct PendingCollectionInitializerRoots<'a> {
