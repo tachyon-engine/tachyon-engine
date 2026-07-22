@@ -5356,6 +5356,17 @@ impl Isolate {
                     let value = self.global_number_value(function, &site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(native) if native.global_uri_function().is_some() => {
+                    let argument = self.call_argument(&site, 0)?;
+                    if argument.is_some_and(|value| self.is_object_value(value)) {
+                        return self.dispatch_conversion_native(native, &site, false);
+                    }
+                    let function = native
+                        .global_uri_function()
+                        .expect("global-URI guard establishes the native identity");
+                    let value = self.global_uri_value(function, &site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 _ => return Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
             }
         }

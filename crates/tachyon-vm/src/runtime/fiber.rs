@@ -152,6 +152,10 @@ pub(crate) enum ConversionNativeFunction {
     GlobalIsNaN,
     GlobalParseFloat,
     GlobalParseInt,
+    GlobalDecodeUri,
+    GlobalDecodeUriComponent,
+    GlobalEncodeUri,
+    GlobalEncodeUriComponent,
 }
 
 impl ConversionNativeFunction {
@@ -167,6 +171,10 @@ impl ConversionNativeFunction {
             NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
             NativeFunction::GlobalParseFloat => Some(Self::GlobalParseFloat),
             NativeFunction::GlobalParseInt => Some(Self::GlobalParseInt),
+            NativeFunction::GlobalDecodeUri => Some(Self::GlobalDecodeUri),
+            NativeFunction::GlobalDecodeUriComponent => Some(Self::GlobalDecodeUriComponent),
+            NativeFunction::GlobalEncodeUri => Some(Self::GlobalEncodeUri),
+            NativeFunction::GlobalEncodeUriComponent => Some(Self::GlobalEncodeUriComponent),
             _ => None,
         }
     }
@@ -183,6 +191,10 @@ impl ConversionNativeFunction {
             Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
             Self::GlobalParseFloat => NativeFunction::GlobalParseFloat,
             Self::GlobalParseInt => NativeFunction::GlobalParseInt,
+            Self::GlobalDecodeUri => NativeFunction::GlobalDecodeUri,
+            Self::GlobalDecodeUriComponent => NativeFunction::GlobalDecodeUriComponent,
+            Self::GlobalEncodeUri => NativeFunction::GlobalEncodeUri,
+            Self::GlobalEncodeUriComponent => NativeFunction::GlobalEncodeUriComponent,
         }
     }
 }
@@ -238,6 +250,10 @@ impl ConversionConsumer {
             Self::NativeCall(ConversionNativeFunction::StringConstructor)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
+                | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUri)
+                | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUriComponent)
+                | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUri)
+                | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUriComponent)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
                 | Self::ErrorConstructorMessage

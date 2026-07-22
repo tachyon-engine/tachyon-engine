@@ -11,4 +11,5 @@ pub(crate) mod object;
 mod regexp;
 mod string;
 mod symbol;
+mod uri;
 mod weak_collections;

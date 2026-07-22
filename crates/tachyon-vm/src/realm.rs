@@ -1014,6 +1014,12 @@ impl Isolate {
                 self.intern_intrinsic_name(b"parseFloat")?,
                 self.intern_intrinsic_name(b"parseInt")?,
             ],
+            global_uris: [
+                self.intern_intrinsic_name(b"decodeURI")?,
+                self.intern_intrinsic_name(b"decodeURIComponent")?,
+                self.intern_intrinsic_name(b"encodeURI")?,
+                self.intern_intrinsic_name(b"encodeURIComponent")?,
+            ],
         })
     }
 
@@ -1510,6 +1516,18 @@ impl Isolate {
                 },
             )?;
             self.realm.global_number_functions[function.index()] = Some(method);
+        }
+        for function in GlobalUriFunction::ALL {
+            let method = self.allocate_native_function(
+                function.native(),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            self.realm.global_uri_functions[function.index()] = Some(method);
         }
         Ok(())
     }
@@ -2325,6 +2343,17 @@ impl Isolate {
             self.realm.publish_intrinsic(
                 atom,
                 value.expect("numeric global initializes before publication"),
+                true,
+            )?;
+        }
+        for (atom, value) in atoms
+            .global_uris
+            .into_iter()
+            .zip(self.realm.global_uri_functions)
+        {
+            self.realm.publish_intrinsic(
+                atom,
+                value.expect("URI global initializes before publication"),
                 true,
             )?;
         }

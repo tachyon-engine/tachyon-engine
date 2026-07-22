@@ -146,9 +146,9 @@ use runtime::{
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, ErrorIntrinsics, FlatWork, FunctionExecutable, FunctionObject,
-        GenericPropertyDescriptor, GlobalNumberFunction, IntrinsicPropertyAtoms, MathFunction,
-        NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
-        ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
+        GenericPropertyDescriptor, GlobalNumberFunction, GlobalUriFunction, IntrinsicPropertyAtoms,
+        MathFunction, NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor,
+        RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
     },
     class::{
         ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,
@@ -334,6 +334,7 @@ pub enum ExecutionError {
     StringBufferAllocationFailed,
     InvalidStringLength,
     InvalidStringRepeatCount(Value),
+    InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),
     InvalidScopeName { code: CodeId, scope_name: u32 },

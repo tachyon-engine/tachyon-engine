@@ -225,6 +225,10 @@ pub(crate) enum NativeFunction {
     GlobalIsNaN,
     GlobalParseFloat,
     GlobalParseInt,
+    GlobalDecodeUri,
+    GlobalDecodeUriComponent,
+    GlobalEncodeUri,
+    GlobalEncodeUriComponent,
     HostCreateRealm,
     HostEvalScript,
 }
@@ -269,6 +273,57 @@ impl GlobalNumberFunction {
     }
 
     #[allow(dead_code, reason = "used when intrinsic installation is table-driven")]
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum GlobalUriFunction {
+    DecodeUri,
+    DecodeUriComponent,
+    EncodeUri,
+    EncodeUriComponent,
+}
+
+impl GlobalUriFunction {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::DecodeUri,
+        Self::DecodeUriComponent,
+        Self::EncodeUri,
+        Self::EncodeUriComponent,
+    ];
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::DecodeUri => "decodeURI",
+            Self::DecodeUriComponent => "decodeURIComponent",
+            Self::EncodeUri => "encodeURI",
+            Self::EncodeUriComponent => "encodeURIComponent",
+        }
+    }
+
+    pub(crate) const fn native(self) -> NativeFunction {
+        match self {
+            Self::DecodeUri => NativeFunction::GlobalDecodeUri,
+            Self::DecodeUriComponent => NativeFunction::GlobalDecodeUriComponent,
+            Self::EncodeUri => NativeFunction::GlobalEncodeUri,
+            Self::EncodeUriComponent => NativeFunction::GlobalEncodeUriComponent,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn is_component(self) -> bool {
+        matches!(self, Self::DecodeUriComponent | Self::EncodeUriComponent)
+    }
+
+    #[inline(always)]
+    pub(crate) const fn is_encode(self) -> bool {
+        matches!(self, Self::EncodeUri | Self::EncodeUriComponent)
+    }
+
+    #[inline(always)]
     pub(crate) const fn index(self) -> usize {
         self as usize
     }
@@ -493,6 +548,9 @@ impl NativeFunction {
         if let Some(function) = self.global_number_function() {
             return function.length();
         }
+        if self.global_uri_function().is_some() {
+            return 1;
+        }
         match self {
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
@@ -675,7 +733,11 @@ impl NativeFunction {
             | Self::GlobalIsFinite
             | Self::GlobalIsNaN
             | Self::GlobalParseFloat
-            | Self::GlobalParseInt => unreachable!(),
+            | Self::GlobalParseInt
+            | Self::GlobalDecodeUri
+            | Self::GlobalDecodeUriComponent
+            | Self::GlobalEncodeUri
+            | Self::GlobalEncodeUriComponent => unreachable!(),
             Self::ObjectToLocaleString
             | Self::ObjectProtoGetter
             | Self::ObjectToString
@@ -705,6 +767,9 @@ impl NativeFunction {
             return function.name();
         }
         if let Some(function) = self.global_number_function() {
+            return function.name();
+        }
+        if let Some(function) = self.global_uri_function() {
             return function.name();
         }
         match self {
@@ -928,7 +993,11 @@ impl NativeFunction {
             | Self::GlobalIsFinite
             | Self::GlobalIsNaN
             | Self::GlobalParseFloat
-            | Self::GlobalParseInt => unreachable!(),
+            | Self::GlobalParseInt
+            | Self::GlobalDecodeUri
+            | Self::GlobalDecodeUriComponent
+            | Self::GlobalEncodeUri
+            | Self::GlobalEncodeUriComponent => unreachable!(),
         }
     }
 
@@ -981,6 +1050,16 @@ impl NativeFunction {
             Self::GlobalIsNaN => GlobalNumberFunction::IsNaN,
             Self::GlobalParseFloat => GlobalNumberFunction::ParseFloat,
             Self::GlobalParseInt => GlobalNumberFunction::ParseInt,
+            _ => return None,
+        })
+    }
+
+    pub(crate) const fn global_uri_function(self) -> Option<GlobalUriFunction> {
+        Some(match self {
+            Self::GlobalDecodeUri => GlobalUriFunction::DecodeUri,
+            Self::GlobalDecodeUriComponent => GlobalUriFunction::DecodeUriComponent,
+            Self::GlobalEncodeUri => GlobalUriFunction::EncodeUri,
+            Self::GlobalEncodeUriComponent => GlobalUriFunction::EncodeUriComponent,
             _ => return None,
         })
     }
@@ -1382,11 +1461,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) promise: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
+    pub(crate) global_uris: [AtomId; GlobalUriFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize =
-        21 + NativeErrorKind::ALL.len() + GlobalNumberFunction::ALL.len();
+    pub(crate) const BINDING_COUNT: usize = 21
+        + NativeErrorKind::ALL.len()
+        + GlobalNumberFunction::ALL.len()
+        + GlobalUriFunction::ALL.len();
 
     #[inline(always)]
     pub(crate) fn error(self, kind: NativeErrorKind) -> AtomId {
@@ -1435,6 +1517,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidNumberPrecision(_)
         | ExecutionError::InvalidStringLength
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),
+        ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,
     }
 }

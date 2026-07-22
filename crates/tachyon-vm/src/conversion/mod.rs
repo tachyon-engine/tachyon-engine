@@ -162,7 +162,13 @@ impl Isolate {
                 NativeFunction::GlobalIsFinite
                 | NativeFunction::GlobalIsNaN
                 | NativeFunction::GlobalParseFloat
-                | NativeFunction::GlobalParseInt => Value::from_immediate(Immediate::Undefined),
+                | NativeFunction::GlobalParseInt
+                | NativeFunction::GlobalDecodeUri
+                | NativeFunction::GlobalDecodeUriComponent
+                | NativeFunction::GlobalEncodeUri
+                | NativeFunction::GlobalEncodeUriComponent => {
+                    Value::from_immediate(Immediate::Undefined)
+                }
                 _ => unreachable!("only conversion consumers enter this dispatch path"),
             };
             let continuation = ConversionContinuation {
@@ -605,6 +611,15 @@ impl Isolate {
                 native
                     .global_number_function()
                     .expect("global numeric native has metadata"),
+                argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            ),
+            NativeFunction::GlobalDecodeUri
+            | NativeFunction::GlobalDecodeUriComponent
+            | NativeFunction::GlobalEncodeUri
+            | NativeFunction::GlobalEncodeUriComponent => self.global_uri_primitive_value(
+                native
+                    .global_uri_function()
+                    .expect("global URI native has metadata"),
                 argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
             ),
             _ => unreachable!("only conversion consumers create this continuation"),
