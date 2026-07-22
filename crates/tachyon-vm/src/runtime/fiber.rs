@@ -621,6 +621,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayForEach(ArrayForEachStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
+    InstanceOf,
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ObjectIsPrototypeOf,
@@ -730,6 +731,16 @@ impl NativeContinuation {
             site,
             kind: NativeContinuationKind::InstanceElements(stage),
             first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn instance_of(site: NativeContinuationSite, prototype: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::InstanceOf,
+            first: prototype,
             second: Value::from_immediate(Immediate::Undefined),
         }
     }

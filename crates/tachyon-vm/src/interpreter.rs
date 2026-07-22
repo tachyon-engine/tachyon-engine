@@ -848,12 +848,15 @@ impl Isolate {
             Opcode::InstanceOf => {
                 let left = self.read(base, operands[1])?;
                 let right = self.read(base, operands[2])?;
-                let value = if self.ordinary_instance_of(left, right)? {
-                    Value::from_immediate(Immediate::True)
-                } else {
-                    Value::from_immediate(Immediate::False)
-                };
-                self.write(base, operands[0], value)?;
+                return self.begin_instance_of(
+                    NativeContinuationSite {
+                        caller_base: base,
+                        destination: operands[0],
+                        call_site: instruction_offset,
+                    },
+                    left,
+                    right,
+                );
             }
             Opcode::Jump => self.set_pc(WordOffset::new(operands[0])),
             Opcode::JumpIfFalse => {
@@ -1836,6 +1839,9 @@ impl Isolate {
             NativeContinuationKind::InstanceElements(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::InstanceOf => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ErrorConstructor(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -2244,7 +2250,13 @@ impl Isolate {
         kind: NativeErrorKind,
         instruction_offset: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let error = self.create_native_error(kind, None)?;
+        let error_realm = self
+            .fiber
+            .frames
+            .last()
+            .and_then(|frame| self.loaded_code(frame.code).ok().map(|code| code.realm))
+            .unwrap_or(self.active_realm);
+        let error = self.create_native_error_in_realm(kind, None, error_realm)?;
         self.throw_value(error, instruction_offset)
     }
 
@@ -5934,6 +5946,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::InstanceElements(stage) => {
                     self.resume_instance_elements(continuation, stage, value)
+                }
+                NativeContinuationKind::InstanceOf => {
+                    self.resume_instance_of(continuation, value).map(|_| ())
                 }
                 NativeContinuationKind::ErrorConstructor(stage) => {
                     self.resume_error_constructor(continuation, stage, value)

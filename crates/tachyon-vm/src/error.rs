@@ -561,6 +561,34 @@ impl Isolate {
             .get(kind)
             .prototype
             .expect("native Error prototypes initialize before execution");
+        self.allocate_native_error_with_prototype(kind, message, prototype)
+    }
+
+    /// Allocates a native Error using the intrinsic prototype belonging to another Realm.
+    pub(crate) fn create_native_error_in_realm(
+        &mut self,
+        kind: NativeErrorKind,
+        message: Option<Value>,
+        realm: RealmId,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = if realm == self.active_realm {
+            self.realm.error_intrinsics.get(kind).prototype
+        } else {
+            self.inactive_realms
+                .iter()
+                .find(|(id, _)| *id == realm)
+                .and_then(|(_, realm)| realm.error_intrinsics.get(kind).prototype)
+        }
+        .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?;
+        self.allocate_native_error_with_prototype(kind, message, prototype)
+    }
+
+    fn allocate_native_error_with_prototype(
+        &mut self,
+        kind: NativeErrorKind,
+        message: Option<Value>,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
         let mut roots = ErrorAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,

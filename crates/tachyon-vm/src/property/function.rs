@@ -557,12 +557,13 @@ impl Isolate {
         })
     }
 
-    /// Implements ordinary HasInstance over the current constructor prototype and object chain.
-    pub(crate) fn ordinary_instance_of(
+    /// Starts ordinary HasInstance and suspends only when the value chain reaches a Proxy.
+    pub(crate) fn begin_instance_of(
         &mut self,
+        site: NativeContinuationSite,
         value: Value,
         mut constructor: Value,
-    ) -> Result<bool, ExecutionError> {
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
             let function = self.resolve_function_object(constructor)?;
             let FunctionExecutable::Bound(data) = function.executable else {
@@ -578,19 +579,84 @@ impl Isolate {
             return Err(ExecutionError::InvalidInstanceofPrototype(prototype));
         }
         if !self.is_object_value(value) {
-            return Ok(false);
+            self.write(site.caller_base, site.destination, boolean_value(false))?;
+            return Ok(None);
         }
-        let (_, mut snapshot) = self.object_snapshot(value)?;
+        self.continue_instance_of(site, prototype, value)
+    }
+
+    /// Walks ordinary prototypes iteratively and delegates exotic steps to Proxy dispatch.
+    fn continue_instance_of(
+        &mut self,
+        site: NativeContinuationSite,
+        prototype: Value,
+        mut current: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         loop {
-            let candidate = snapshot.prototype;
+            let candidate = if self.is_proxy_value(current) {
+                let depth = self.fiber.completions.len();
+                let frames = self.fiber.frames.len();
+                self.fiber
+                    .completions
+                    .push_native(NativeContinuation::instance_of(site, prototype))
+                    .map_err(|error| match error {
+                        CompletionStackError::Limit { limit, requested } => {
+                            ExecutionError::CompletionStackLimit { limit, requested }
+                        }
+                        CompletionStackError::AllocationFailed => {
+                            ExecutionError::CompletionAllocationFailed
+                        }
+                    })?;
+                let outcome = match self.dispatch_proxy_internal_method(
+                    site,
+                    current,
+                    ProxyInternalMethod::GetPrototypeOf,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        if self.fiber.completions.len() > depth {
+                            self.pop_native_continuation()?;
+                        }
+                        return Err(error);
+                    }
+                };
+                if self.fiber.completions.len() == depth || self.fiber.frames.len() != frames {
+                    return Ok(outcome);
+                }
+                let continuation = self.pop_native_continuation()?;
+                let candidate = self.read(site.caller_base, site.destination)?;
+                return self.resume_instance_of(continuation, candidate);
+            } else {
+                self.object_snapshot(current)?.1.prototype
+            };
             if candidate.as_immediate() == Some(Immediate::Null) {
-                return Ok(false);
+                self.write(site.caller_base, site.destination, boolean_value(false))?;
+                return Ok(None);
             }
             if candidate == prototype {
-                return Ok(true);
+                self.write(site.caller_base, site.destination, boolean_value(true))?;
+                return Ok(None);
             }
-            let (_, next) = self.object_snapshot(candidate)?;
-            snapshot = next;
+            current = candidate;
         }
+    }
+
+    /// Resumes HasInstance after one Proxy `[[GetPrototypeOf]]` result.
+    pub(crate) fn resume_instance_of(
+        &mut self,
+        continuation: NativeContinuation,
+        candidate: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let prototype = continuation.first();
+        if candidate.as_immediate() == Some(Immediate::Null) {
+            self.write(site.caller_base, site.destination, boolean_value(false))?;
+            return Ok(None);
+        }
+        if candidate == prototype {
+            self.write(site.caller_base, site.destination, boolean_value(true))?;
+            return Ok(None);
+        }
+        self.continue_instance_of(site, prototype, candidate)
     }
 }
