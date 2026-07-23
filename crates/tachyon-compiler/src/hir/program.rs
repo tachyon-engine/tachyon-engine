@@ -138,6 +138,8 @@ pub struct HirFunction {
     pub body: Arc<[HirStatement]>,
     pub scope: ScopeId,
     pub strict: bool,
+    /// Whether this stencil is an arrow and therefore has no own arguments binding.
+    pub is_arrow: bool,
     pub kind: HirFunctionKind,
     /// Whether this class constructor must run its attached instance-element plan.
     pub initialize_instance_elements: bool,

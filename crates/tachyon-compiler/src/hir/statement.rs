@@ -719,7 +719,13 @@ pub(super) fn lower_function_stencil(
         strict: semantic
             .scoping()
             .scope_flags(oxc_scope)
-            .contains(OxcScopeFlags::StrictMode),
+            .contains(OxcScopeFlags::StrictMode)
+            || function.body.as_ref().is_some_and(|body| {
+                body.directives
+                    .iter()
+                    .any(|directive| directive.expression.value.as_str() == "use strict")
+            }),
+        is_arrow: false,
         kind: super::program::HirFunctionKind::Ordinary,
         initialize_instance_elements: false,
     });
@@ -814,7 +820,13 @@ pub(super) fn lower_arrow_function_stencil(
         strict: semantic
             .scoping()
             .scope_flags(oxc_scope)
-            .contains(OxcScopeFlags::StrictMode),
+            .contains(OxcScopeFlags::StrictMode)
+            || function
+                .body
+                .directives
+                .iter()
+                .any(|directive| directive.expression.value.as_str() == "use strict"),
+        is_arrow: true,
         kind: super::program::HirFunctionKind::Ordinary,
         initialize_instance_elements: false,
     });

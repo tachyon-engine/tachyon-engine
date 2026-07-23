@@ -855,6 +855,7 @@ pub(super) fn lower_class(
                 body: Arc::from([]),
                 scope: to_scope_id(scope),
                 strict: true,
+                is_arrow: false,
                 kind: if class.super_class.is_some() {
                     super::program::HirFunctionKind::DefaultDerivedConstructor
                 } else {
@@ -1049,6 +1050,7 @@ pub(super) fn lower_class(
                             }]),
                             scope: to_scope_id(class_scope),
                             strict: true,
+                            is_arrow: false,
                             kind: super::program::HirFunctionKind::ClassFieldInitializer,
                             initialize_instance_elements: false,
                         });
@@ -1109,6 +1111,7 @@ pub(super) fn lower_class(
                     body: body.into(),
                     scope: to_scope_id(scope),
                     strict: true,
+                    is_arrow: false,
                     kind: super::program::HirFunctionKind::ClassStaticBlock,
                     initialize_instance_elements: false,
                 });

@@ -121,6 +121,7 @@ fn lower_entry(
         script_scope: true,
         root_scope: hir.root_scope(),
         function_scope: Some(hir.root_scope()),
+        is_arrow: false,
         initialize_instance_elements: false,
         proper_tail_calls: false,
         needs_argument_source: false,
@@ -928,6 +929,7 @@ fn lower_function(
         script_scope: false,
         root_scope,
         function_scope: Some(function.scope),
+        is_arrow: function.is_arrow,
         initialize_instance_elements: function.initialize_instance_elements,
         proper_tail_calls: function.strict
             && matches!(

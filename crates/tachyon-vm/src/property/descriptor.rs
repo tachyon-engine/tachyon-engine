@@ -172,6 +172,23 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        let mapped_value_before_freeze = match &descriptor {
+            PropertyDescriptor::Data(data)
+                if data.writable == Some(false) && data.value.is_none() =>
+            {
+                self.mapped_argument_value(receiver, key)?
+            }
+            _ => None,
+        };
+        let descriptor = match descriptor {
+            PropertyDescriptor::Data(mut data) => {
+                if data.value.is_none() {
+                    data.value = mapped_value_before_freeze;
+                }
+                PropertyDescriptor::Data(data)
+            }
+            descriptor => descriptor,
+        };
         if let PropertyDescriptor::Data(data) = &descriptor
             && let Some(value) = data.value
         {
@@ -755,7 +772,7 @@ impl Isolate {
         };
         Ok(Some(match stored {
             StoredProperty::Data(value) => PropertyDescriptor::Data(DataPropertyDescriptor {
-                value: Some(value),
+                value: Some(self.mapped_argument_value(receiver, key)?.unwrap_or(value)),
                 writable: Some(property.attributes.writable()),
                 enumerable: Some(property.attributes.enumerable()),
                 configurable: Some(property.attributes.configurable()),

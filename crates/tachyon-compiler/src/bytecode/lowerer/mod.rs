@@ -37,6 +37,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) script_scope: bool,
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
+    pub(super) is_arrow: bool,
     pub(super) initialize_instance_elements: bool,
     /// Whether this function may replace its frame at strict tail-call sites.
     pub(super) proper_tail_calls: bool,
@@ -82,6 +83,7 @@ impl Lowerer<'_> {
         reference: &HirIdentifierReference,
     ) -> bool {
         reference.name.as_ref() == "arguments"
+            && !self.is_arrow
             && self
                 .function_scope
                 .is_some_and(|scope| reference.binding_scope != Some(scope))

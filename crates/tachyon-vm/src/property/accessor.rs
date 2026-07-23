@@ -150,7 +150,7 @@ impl Isolate {
     }
 
     /// Reads a mapped parameter while its owner activation is still present on the fiber.
-    fn mapped_argument_value(
+    pub(crate) fn mapped_argument_value(
         &mut self,
         target: Value,
         key: PropertyKey,
@@ -180,6 +180,18 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        let (_, snapshot) = self.object_snapshot(target)?;
+        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            return Ok(());
+        };
+        if !property.attributes.writable()
+            || !matches!(
+                self.stored_property_from_snapshot(snapshot, property)?,
+                Some(StoredProperty::Data(_))
+            )
+        {
+            return Ok(());
+        }
         if let Some((frame, index)) = self.mapped_argument_frame(target, key)? {
             self.write(frame.base, index, value)?;
         }
