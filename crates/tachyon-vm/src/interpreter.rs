@@ -6138,9 +6138,18 @@ impl Isolate {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
-                FunctionExecutable::Native(NativeFunction::ArrayValues) => {
-                    let iterator =
-                        self.create_array_iterator(site.this_value, ArrayIterationKind::Value)?;
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::ArrayKeys
+                    | NativeFunction::ArrayValues
+                    | NativeFunction::ArrayEntries),
+                ) => {
+                    let kind = match native {
+                        NativeFunction::ArrayKeys => ArrayIterationKind::Key,
+                        NativeFunction::ArrayValues => ArrayIterationKind::Value,
+                        NativeFunction::ArrayEntries => ArrayIterationKind::KeyAndValue,
+                        _ => unreachable!("array iterator creator match is exhaustive"),
+                    };
+                    let iterator = self.create_array_iterator(site.this_value, kind)?;
                     return self.write(site.caller_base, site.destination, iterator);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIteratorNext) => {

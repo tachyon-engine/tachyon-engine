@@ -143,7 +143,9 @@ pub(crate) struct Realm {
     pub(crate) array_for_each: Option<Value>,
     pub(crate) array_filter: Option<Value>,
     pub(crate) array_to_string: Option<Value>,
+    pub(crate) array_keys: Option<Value>,
     pub(crate) array_values: Option<Value>,
+    pub(crate) array_entries: Option<Value>,
     pub(crate) array_iterator_prototype: Option<Value>,
     pub(crate) array_iterator_next: Option<Value>,
     pub(crate) iterator_identity: Option<Value>,
@@ -281,7 +283,9 @@ impl Realm {
             array_for_each: None,
             array_filter: None,
             array_to_string: None,
+            array_keys: None,
             array_values: None,
+            array_entries: None,
             array_iterator_prototype: None,
             array_iterator_next: None,
             iterator_identity: None,
@@ -654,7 +658,9 @@ impl Trace for Realm {
         self.array_for_each.trace(tracer);
         self.array_filter.trace(tracer);
         self.array_to_string.trace(tracer);
+        self.array_keys.trace(tracer);
         self.array_values.trace(tracer);
+        self.array_entries.trace(tracer);
         self.array_iterator_prototype.trace(tracer);
         self.array_iterator_next.trace(tracer);
         self.iterator_identity.trace(tracer);

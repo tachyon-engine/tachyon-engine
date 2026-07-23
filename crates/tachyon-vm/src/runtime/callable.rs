@@ -274,7 +274,9 @@ pub(crate) enum NativeFunction {
     ArrayReduceRight,
     ArraySplice,
     ArrayToString,
+    ArrayKeys,
     ArrayValues,
+    ArrayEntries,
     ArrayIteratorNext,
     IteratorIdentity,
     MapConstructor,
@@ -909,7 +911,11 @@ impl NativeFunction {
             | Self::StringToLocaleUpperCase
             | Self::StringIterator
             | Self::StringIteratorNext => 0,
-            Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
+            Self::ArrayKeys
+            | Self::ArrayValues
+            | Self::ArrayEntries
+            | Self::ArrayIteratorNext
+            | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString | Self::SymbolValueOf | Self::SymbolDescription => 0,
             Self::SymbolToPrimitive => 1,
@@ -1110,7 +1116,9 @@ impl NativeFunction {
             Self::ArrayReduceRight => "reduceRight",
             Self::ArraySplice => "splice",
             Self::ArrayToString => "toString",
+            Self::ArrayKeys => "keys",
             Self::ArrayValues => "values",
+            Self::ArrayEntries => "entries",
             Self::ArrayIteratorNext => "next",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",

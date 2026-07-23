@@ -13,10 +13,6 @@ use crate::{
 
 /// The result projection selected when an Array iterator is created.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "key and pair modes are reserved for iterator consumers"
-)]
 #[repr(u8)]
 pub(crate) enum ArrayIterationKind {
     Key,
@@ -207,7 +203,7 @@ impl Isolate {
                 CollectionIterationKind::Key => entry.key,
                 CollectionIterationKind::Value => entry.value,
                 CollectionIterationKind::KeyAndValue => {
-                    self.create_collection_entry_array(entry.key, entry.value)?
+                    self.create_iterator_entry_array(entry.key, entry.value)?
                 }
             };
             return self.create_iterator_result(result, false);
@@ -220,9 +216,7 @@ impl Isolate {
         iterated_object: Value,
         kind: ArrayIterationKind,
     ) -> Result<Value, ExecutionError> {
-        if !self.is_object_value(iterated_object) {
-            return Err(ExecutionError::NotObject(iterated_object));
-        }
+        let iterated_object = self.coerce_to_object(iterated_object)?;
         let prototype = self
             .realm
             .array_iterator_prototype
@@ -342,14 +336,16 @@ impl Isolate {
         let reference = self.array_iterator_reference(iterator)?;
         let snapshot = self.array_iterator_snapshot(reference)?;
         debug_assert_ne!(snapshot.kind, ArrayIterationKind::StringValue);
-        self.create_iterator_result(
-            if snapshot.kind == ArrayIterationKind::Key {
-                safe_integer_value(snapshot.next_index.saturating_sub(1))
-            } else {
-                value
-            },
-            false,
-        )
+        let result = match snapshot.kind {
+            ArrayIterationKind::Key => safe_integer_value(snapshot.next_index.saturating_sub(1)),
+            ArrayIterationKind::Value => value,
+            ArrayIterationKind::KeyAndValue => self.create_iterator_entry_array(
+                safe_integer_value(snapshot.next_index.saturating_sub(1)),
+                value,
+            )?,
+            ArrayIterationKind::StringValue => unreachable!("String iterator uses a distinct next"),
+        };
+        self.create_iterator_result(result, false)
     }
 
     /// Advances a branded String iterator by one Unicode code point without allocating a Vec.
@@ -451,9 +447,19 @@ impl Isolate {
         }
         let key = PropertyKey::Atom(self.safe_integer_property_atom(snapshot.next_index)?);
         match self.resolve_array_iterator_read(iterated_object, key)? {
-            PropertyRead::Data(value) => Ok(ArrayIteratorNextAction::Done(
-                self.create_iterator_result(value, false)?,
-            )),
+            PropertyRead::Data(value) => {
+                let result = if snapshot.kind == ArrayIterationKind::KeyAndValue {
+                    self.create_iterator_entry_array(
+                        safe_integer_value(snapshot.next_index),
+                        value,
+                    )?
+                } else {
+                    value
+                };
+                Ok(ArrayIteratorNextAction::Done(
+                    self.create_iterator_result(result, false)?,
+                ))
+            }
             PropertyRead::Accessor(callee)
                 if callee.as_immediate() != Some(Immediate::Undefined) =>
             {
@@ -464,9 +470,20 @@ impl Isolate {
                     mode: crate::PropertyCallbackMode::ArrayIteratorElement,
                 })
             }
-            PropertyRead::Accessor(_) | PropertyRead::Missing => Ok(ArrayIteratorNextAction::Done(
-                self.create_iterator_result(Value::from_immediate(Immediate::Undefined), false)?,
-            )),
+            PropertyRead::Accessor(_) | PropertyRead::Missing => {
+                let undefined = Value::from_immediate(Immediate::Undefined);
+                let result = if snapshot.kind == ArrayIterationKind::KeyAndValue {
+                    self.create_iterator_entry_array(
+                        safe_integer_value(snapshot.next_index),
+                        undefined,
+                    )?
+                } else {
+                    undefined
+                };
+                Ok(ArrayIteratorNextAction::Done(
+                    self.create_iterator_result(result, false)?,
+                ))
+            }
         }
     }
 
@@ -629,8 +646,8 @@ impl Isolate {
         })
     }
 
-    /// Allocates the two-element array required for Map entries and Set key/value pairs.
-    fn create_collection_entry_array(
+    /// Allocates the two-element array required for indexed and collection entry iterators.
+    fn create_iterator_entry_array(
         &mut self,
         key: Value,
         value: Value,

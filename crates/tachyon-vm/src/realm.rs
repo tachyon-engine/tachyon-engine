@@ -1682,6 +1682,18 @@ impl Isolate {
         self.realm.array_iterator_next = Some(next);
         let next_atom = self.intern_intrinsic_name(b"next")?;
         self.set_intrinsic_data_property(array_iterator_prototype, next_atom, next, true)?;
+        let keys = self.allocate_native_function(
+            NativeFunction::ArrayKeys,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_keys = Some(keys);
+        let keys_atom = self.intern_intrinsic_name(b"keys")?;
+        self.set_intrinsic_data_property(array_prototype, keys_atom, keys, true)?;
         let values = self.allocate_native_function(
             NativeFunction::ArrayValues,
             OrdinaryObject {
@@ -1694,6 +1706,18 @@ impl Isolate {
         self.realm.array_values = Some(values);
         let values_atom = self.intern_intrinsic_name(b"values")?;
         self.set_intrinsic_data_property(array_prototype, values_atom, values, true)?;
+        let entries = self.allocate_native_function(
+            NativeFunction::ArrayEntries,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_entries = Some(entries);
+        let entries_atom = self.intern_intrinsic_name(b"entries")?;
+        self.set_intrinsic_data_property(array_prototype, entries_atom, entries, true)?;
         self.define_data_property(
             array_prototype,
             iterator_key,
