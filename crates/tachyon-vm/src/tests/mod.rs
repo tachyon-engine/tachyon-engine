@@ -22,6 +22,7 @@ mod array_reduce;
 mod array_search;
 mod array_splice;
 mod array_static;
+mod array_to_sorted;
 mod assign;
 mod calls;
 mod class;

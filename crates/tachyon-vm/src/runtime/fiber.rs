@@ -247,6 +247,10 @@ pub(crate) enum ConversionConsumer {
     ArrayCopyIndex,
     ArrayCopyStart,
     ArrayCopyDeleteCount,
+    ArrayToSortedLength,
+    ArrayToSortedCompareResult,
+    ArrayToSortedLeftString,
+    ArrayToSortedRightString,
     ArrayStaticLength,
     ArraySpliceLength,
     ArraySpliceStart,
@@ -284,6 +288,10 @@ impl ConversionConsumer {
             | Self::ArrayCopyIndex
             | Self::ArrayCopyStart
             | Self::ArrayCopyDeleteCount
+            | Self::ArrayToSortedLength
+            | Self::ArrayToSortedCompareResult
+            | Self::ArrayToSortedLeftString
+            | Self::ArrayToSortedRightString
             | Self::ArrayStaticLength
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
@@ -314,6 +322,8 @@ impl ConversionConsumer {
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
                 | Self::DateToPrimitiveString
+                | Self::ArrayToSortedLeftString
+                | Self::ArrayToSortedRightString
         )
     }
 
@@ -609,6 +619,15 @@ pub(crate) enum ArrayCopyStage {
     SourceValue,
 }
 
+/// One observable boundary in the resumable `Array.prototype.toSorted` algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayToSortedStage {
+    Length,
+    SourceValue,
+    CompareCall,
+}
+
 /// The first Proxy essential internal methods routed through the exotic slow path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -844,6 +863,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayForEach(ArrayForEachStage),
     ArrayConcat(ArrayConcatStage),
     ArrayCopy(ArrayCopyStage),
+    ArrayToSorted(ArrayToSortedStage),
     ArraySplice(ArraySpliceStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
@@ -1546,6 +1566,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayCopy(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one stable-sort state across a property Get or comparator call.
+    #[inline]
+    pub(crate) const fn array_to_sorted(
+        site: NativeContinuationSite,
+        stage: ArrayToSortedStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayToSorted(stage),
             first: state,
             second: retained,
         }

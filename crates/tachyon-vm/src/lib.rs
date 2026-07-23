@@ -16,6 +16,7 @@ mod array_copy;
 mod array_for_each;
 mod array_splice;
 mod array_static;
+mod array_to_sorted;
 mod atom;
 mod bound_function;
 mod builtins;
@@ -129,6 +130,7 @@ use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
 use array_splice::PendingArraySplice;
 use array_static::PendingArrayStatic;
+use array_to_sorted::PendingArrayToSorted;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
@@ -192,8 +194,8 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayForEachStage,
-        ArraySpliceStage, ArrayStaticStage, BuiltinPropertyKeyConsumer, ClassActivation,
-        CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
+        ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer,
+        ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
         ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
         ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
         ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,

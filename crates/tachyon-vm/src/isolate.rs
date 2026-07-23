@@ -446,6 +446,9 @@ impl Isolate {
             pending_array_static: registry
                 .try_register("PendingArrayStatic")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_array_to_sorted: registry
+                .try_register("PendingArrayToSorted")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,

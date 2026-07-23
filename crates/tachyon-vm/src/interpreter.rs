@@ -2115,6 +2115,9 @@ impl Isolate {
             NativeContinuationKind::ArrayCopy(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayToSorted(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6049,6 +6052,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayToSpliced) => {
                     return self.begin_array_copy(&site, ArrayCopyKind::ToSpliced);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayToSorted) => {
+                    return self.begin_array_to_sorted(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
                     let value = self.array_flat(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -6970,6 +6976,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayCopy(stage) => {
                     let state = self.pending_array_copy_reference(continuation.first())?;
                     self.resume_array_copy(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayToSorted(stage) => {
+                    let state = self.pending_array_to_sorted_reference(continuation.first())?;
+                    self.resume_array_to_sorted(site, state, stage, value)
                 }
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;

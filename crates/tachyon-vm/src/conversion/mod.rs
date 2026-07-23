@@ -395,6 +395,22 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayToSortedLength
+                            | ConversionConsumer::ArrayToSortedCompareResult
+                            | ConversionConsumer::ArrayToSortedLeftString
+                            | ConversionConsumer::ArrayToSortedRightString
+                    ) {
+                        let state =
+                            self.pending_array_to_sorted_reference(continuation.receiver)?;
+                        return self.resume_array_to_sorted_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::DateToJson {
                         return self.resume_date_to_json_after_primitive(
                             continuation.site,
@@ -720,6 +736,12 @@ impl Isolate {
                 | ConversionConsumer::ArrayCopyDeleteCount => {
                     unreachable!("Array copy conversion resumes inside its state machine")
                 }
+                ConversionConsumer::ArrayToSortedLength
+                | ConversionConsumer::ArrayToSortedCompareResult
+                | ConversionConsumer::ArrayToSortedLeftString
+                | ConversionConsumer::ArrayToSortedRightString => {
+                    unreachable!("Array toSorted conversion resumes inside its state machine")
+                }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength
                 | ConversionConsumer::ArraySpliceDeleteCount => {
@@ -958,7 +980,7 @@ impl Isolate {
     }
 
     /// Compares two primitive strings by exact ECMAScript UTF-16 code-unit ordering.
-    fn compare_string_values(
+    pub(crate) fn compare_string_values(
         &mut self,
         left: Value,
         right: Value,

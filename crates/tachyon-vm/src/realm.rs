@@ -1508,6 +1508,18 @@ impl Isolate {
         self.realm.array_to_spliced = Some(to_spliced);
         let to_spliced_atom = self.intern_intrinsic_name(b"toSpliced")?;
         self.set_intrinsic_data_property(prototype, to_spliced_atom, to_spliced, true)?;
+        let to_sorted = self.allocate_native_function(
+            NativeFunction::ArrayToSorted,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_to_sorted = Some(to_sorted);
+        let to_sorted_atom = self.intern_intrinsic_name(b"toSorted")?;
+        self.set_intrinsic_data_property(prototype, to_sorted_atom, to_sorted, true)?;
         let flat = self.allocate_native_function(
             NativeFunction::ArrayFlat,
             OrdinaryObject {

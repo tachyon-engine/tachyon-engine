@@ -256,6 +256,7 @@ pub(crate) enum NativeFunction {
     ArrayToReversed,
     ArrayWith,
     ArrayToSpliced,
+    ArrayToSorted,
     ArrayFlat,
     ArraySort,
     ArrayForEach,
@@ -797,7 +798,8 @@ impl NativeFunction {
             | Self::ArrayLastIndexOf
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
-            | Self::ArraySort => 1,
+            | Self::ArraySort
+            | Self::ArrayToSorted => 1,
             Self::ArrayWith | Self::ArrayToSpliced => 2,
             Self::ArrayOf
             | Self::ArrayToReversed
@@ -1091,6 +1093,7 @@ impl NativeFunction {
             Self::ArrayToReversed => "toReversed",
             Self::ArrayWith => "with",
             Self::ArrayToSpliced => "toSpliced",
+            Self::ArrayToSorted => "toSorted",
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
             Self::ArrayForEach => "forEach",
@@ -1632,6 +1635,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,
+    pub(crate) pending_array_to_sorted: GcType<PendingArrayToSorted>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
