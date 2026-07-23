@@ -4320,6 +4320,10 @@ impl Isolate {
                     let object = self.box_boolean_from_constructor(value, site.new_target)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
+                FunctionExecutable::Native(NativeFunction::DateConstructor) => {
+                    let date = self.create_date_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, date);
+                }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
@@ -5138,6 +5142,15 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, regexp);
+                }
+                FunctionExecutable::Native(NativeFunction::DateConstructor) => {
+                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::DateGetTime | NativeFunction::DateValueOf,
+                ) => {
+                    let value = self.date_prototype_time_value(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpExec) => {
                     let result = self.regexp_exec(&site)?;

@@ -619,6 +619,14 @@ pub(crate) struct SymbolObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Ordinary object carrying the specification's private `[[DateValue]]` slot.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct DateObject {
+    pub(crate) date_value: f64,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// Function activation arguments with an ordinary property base and stable exotic identity.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -683,6 +691,13 @@ impl Trace for SymbolObject {
     }
 }
 
+impl Trace for DateObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+    }
+}
+
 impl Trace for ArgumentsObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -695,8 +710,8 @@ mod tests {
     use core::mem::size_of;
 
     use super::{
-        OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, ShapeId, ShapeTable,
-        SymbolId,
+        DateObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, ShapeId,
+        ShapeTable, SymbolId,
     };
     use crate::AtomId;
 
@@ -807,5 +822,6 @@ mod tests {
     #[test]
     fn extensibility_uses_existing_object_alignment_padding() {
         assert_eq!(size_of::<OrdinaryObject>(), 24);
+        assert_eq!(size_of::<DateObject>(), 32);
     }
 }

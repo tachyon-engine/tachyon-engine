@@ -200,6 +200,10 @@ pub(crate) struct Realm {
     pub(crate) boolean_prototype: Option<Value>,
     pub(crate) boolean_to_string: Option<Value>,
     pub(crate) boolean_value_of: Option<Value>,
+    pub(crate) date_constructor: Option<Value>,
+    pub(crate) date_prototype: Option<Value>,
+    pub(crate) date_get_time: Option<Value>,
+    pub(crate) date_value_of: Option<Value>,
     pub(crate) function_constructor: Option<Value>,
     pub(crate) math_object: Option<Value>,
     pub(crate) json_object: Option<Value>,
@@ -326,6 +330,10 @@ impl Realm {
             boolean_prototype: None,
             boolean_to_string: None,
             boolean_value_of: None,
+            date_constructor: None,
+            date_prototype: None,
+            date_get_time: None,
+            date_value_of: None,
             function_constructor: None,
             math_object: None,
             json_object: None,
@@ -687,6 +695,10 @@ impl Trace for Realm {
         self.boolean_prototype.trace(tracer);
         self.boolean_to_string.trace(tracer);
         self.boolean_value_of.trace(tracer);
+        self.date_constructor.trace(tracer);
+        self.date_prototype.trace(tracer);
+        self.date_get_time.trace(tracer);
+        self.date_value_of.trace(tracer);
         self.function_constructor.trace(tracer);
         self.math_object.trace(tracer);
         self.reflect_object.trace(tracer);

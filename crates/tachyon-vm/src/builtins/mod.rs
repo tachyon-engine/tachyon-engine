@@ -3,6 +3,7 @@
 mod array;
 mod boolean;
 mod collections;
+mod date;
 mod global;
 mod json;
 mod map_upsert;

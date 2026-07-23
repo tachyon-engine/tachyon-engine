@@ -695,6 +695,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Array(array), ordinary));
         }
+        if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(date).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.date_object)
+                        .map(|date| date.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Date(date), ordinary));
+        }
         if let Ok(number) = self.heap.checked_reference(raw, self.types.number_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(number).map_err(ExecutionError::Root)?;
@@ -931,6 +943,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
+                let date = scope.root(date).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(date, self.types.date_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Number(number) => self.heap.with_running_scope(|scope| {
                 let number = scope.root(number).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1121,6 +1144,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(error, self.types.error_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
+                let date = scope.root(date).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(date, self.types.date_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1371,6 +1405,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(error, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
+                let date = scope.root(date).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let date = no_gc
+                        .borrow_mut(date, self.types.date_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    date.ordinary.shape = shape;
+                    date.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(date, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -1643,6 +1698,10 @@ impl Isolate {
                 .checked_reference(raw, self.types.arguments_object)
                 .is_ok()
             || self.heap.checked_reference(raw, self.types.array).is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.date_object)
+                .is_ok()
             || self
                 .heap
                 .checked_reference(raw, self.types.number_object)

@@ -71,6 +71,7 @@ impl Isolate {
             IntrinsicPrototypeKind::Object => realm.object_prototype,
             IntrinsicPrototypeKind::Array => realm.array_prototype,
             IntrinsicPrototypeKind::Boolean => realm.boolean_prototype,
+            IntrinsicPrototypeKind::Date => realm.date_prototype,
             IntrinsicPrototypeKind::String => realm.string_prototype,
         };
         if realm == self.active_realm {
@@ -372,6 +373,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             error_object: registry
                 .try_register("ErrorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            date_object: registry
+                .try_register("DateObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             proxy_object: registry
                 .try_register("ProxyObject")
@@ -1142,6 +1146,41 @@ impl Isolate {
                 0,
                 NumberObject {
                     number_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one branded Date object while retaining its Realm-local prototype.
+    pub(crate) fn allocate_date_object(
+        &mut self,
+        date_value: f64,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.date_object,
+                0,
+                0,
+                DateObject {
+                    date_value,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

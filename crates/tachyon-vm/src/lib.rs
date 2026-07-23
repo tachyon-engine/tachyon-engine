@@ -115,6 +115,7 @@ pub(crate) enum IntrinsicPrototypeKind {
     Object,
     Array,
     Boolean,
+    Date,
     String,
 }
 
@@ -141,9 +142,9 @@ use iterator::{
     CollectionIteratorObject,
 };
 use object::{
-    ArgumentsObject, BooleanObject, NumberObject, OrdinaryObject, PropertyAttributes, PropertyKey,
-    PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable, StringObject,
-    SymbolId, SymbolObject, SymbolPropertyKey,
+    ArgumentsObject, BooleanObject, DateObject, NumberObject, OrdinaryObject, PropertyAttributes,
+    PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable,
+    StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
 };
 use promise_state::{
     GenericPromiseCapabilityRoots, PromiseCapability, PromiseCapabilityRoots, PromiseJob,

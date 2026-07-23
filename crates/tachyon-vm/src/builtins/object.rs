@@ -1244,6 +1244,12 @@ impl Isolate {
                 .is_ok()
         }) {
             "[object Arguments]"
+        } else if value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.date_object)
+                .is_ok()
+        }) {
+            "[object Date]"
         } else if let Some(raw) = value.as_heap_ref()
             && self
                 .heap

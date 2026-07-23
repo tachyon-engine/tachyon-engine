@@ -114,6 +114,9 @@ pub(crate) enum NativeFunction {
     BooleanConstructor,
     BooleanToString,
     BooleanValueOf,
+    DateConstructor,
+    DateGetTime,
+    DateValueOf,
     FunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
@@ -529,6 +532,7 @@ impl NativeFunction {
                 | Self::RegExpConstructor
                 | Self::NumberConstructor
                 | Self::BooleanConstructor
+                | Self::DateConstructor
                 | Self::FunctionConstructor
                 | Self::ErrorConstructor(_)
                 | Self::ProxyConstructor
@@ -559,6 +563,7 @@ impl NativeFunction {
             return 1;
         }
         match self {
+            Self::DateConstructor => 7,
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
             Self::ObjectFromEntries => 1,
@@ -757,6 +762,8 @@ impl NativeFunction {
             | Self::NumberValueOf
             | Self::BooleanToString
             | Self::BooleanValueOf
+            | Self::DateGetTime
+            | Self::DateValueOf
             | Self::FunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
@@ -889,6 +896,9 @@ impl NativeFunction {
             Self::BooleanConstructor => "Boolean",
             Self::BooleanToString => "toString",
             Self::BooleanValueOf => "valueOf",
+            Self::DateConstructor => "Date",
+            Self::DateGetTime => "getTime",
+            Self::DateValueOf => "valueOf",
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
@@ -1233,6 +1243,7 @@ pub(crate) enum ObjectReceiver {
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
     Error(GcRef<ErrorObject>),
+    Date(GcRef<DateObject>),
     Number(GcRef<NumberObject>),
     Boolean(GcRef<BooleanObject>),
     String(GcRef<StringObject>),
@@ -1256,6 +1267,7 @@ impl ObjectReceiver {
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
             Self::Error(error) => Value::from_heap_ref(error.raw()),
+            Self::Date(date) => Value::from_heap_ref(date.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
             Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
@@ -1433,6 +1445,7 @@ pub(crate) struct VmTypes {
     pub(crate) weak_set_object: GcType<WeakSetObject>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) error_object: GcType<ErrorObject>,
+    pub(crate) date_object: GcType<DateObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
     pub(crate) boolean_object: GcType<BooleanObject>,
@@ -1491,6 +1504,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
     pub(crate) boolean: AtomId,
+    pub(crate) date: AtomId,
     pub(crate) function: AtomId,
     pub(crate) math: AtomId,
     pub(crate) json: AtomId,
@@ -1503,7 +1517,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 21
+    pub(crate) const BINDING_COUNT: usize = 22
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
         + GlobalUriFunction::ALL.len();

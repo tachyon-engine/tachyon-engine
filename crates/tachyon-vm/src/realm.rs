@@ -22,6 +22,7 @@ impl Isolate {
         self.initialize_function_intrinsics()?;
         self.initialize_object_intrinsics()?;
         self.initialize_primitive_constructors()?;
+        self.initialize_date_intrinsics()?;
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
@@ -739,6 +740,46 @@ impl Isolate {
         Ok(())
     }
 
+    /// Builds the clock-independent Date constructor/prototype branded-object foundation.
+    fn initialize_date_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before Date");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before Date");
+        let allocate = |this: &mut Self, native: NativeFunction| -> Result<Value, ExecutionError> {
+            this.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )
+        };
+        let constructor = allocate(self, NativeFunction::DateConstructor)?;
+        let prototype =
+            self.allocate_date_object(f64::NAN, object_prototype, AllocationSpace::Old)?;
+        self.realm.date_constructor = Some(constructor);
+        self.realm.date_prototype = Some(prototype);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+
+        let get_time = allocate(self, NativeFunction::DateGetTime)?;
+        self.realm.date_get_time = Some(get_time);
+        let get_time_atom = self.intern_intrinsic_name(b"getTime")?;
+        self.set_intrinsic_data_property(prototype, get_time_atom, get_time, true)?;
+        let value_of = allocate(self, NativeFunction::DateValueOf)?;
+        self.realm.date_value_of = Some(value_of);
+        let value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
+        self.set_intrinsic_data_property(prototype, value_of_atom, value_of, true)
+    }
+
     /// Allocates and publishes the realm-local well-known `Symbol.toPrimitive` identity.
     fn initialize_to_primitive_symbol(
         &mut self,
@@ -1013,6 +1054,7 @@ impl Isolate {
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
+            date: self.intern_intrinsic_name(b"Date")?,
             function: self.intern_intrinsic_name(b"Function")?,
             math: self.intern_intrinsic_name(b"Math")?,
             json: self.intern_intrinsic_name(b"JSON")?,
@@ -2319,6 +2361,13 @@ impl Isolate {
             self.realm
                 .boolean_constructor
                 .expect("Boolean initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.date,
+            self.realm
+                .date_constructor
+                .expect("Date initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(
