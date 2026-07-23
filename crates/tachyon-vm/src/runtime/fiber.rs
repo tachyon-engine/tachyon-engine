@@ -573,6 +573,15 @@ pub(crate) enum ArraySpliceStage {
     FinalLength,
 }
 
+/// One observable boundary in a resumable static Array constructor algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayStaticStage {
+    Construct,
+    Define,
+    FinalLength,
+}
+
 /// The first Proxy essential internal methods routed through the exotic slow path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -808,6 +817,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayForEach(ArrayForEachStage),
     ArrayConcat(ArrayConcatStage),
     ArraySplice(ArraySpliceStage),
+    ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
     InstanceOf,
@@ -1508,6 +1518,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayConcat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one static Array operation across construct and property callbacks.
+    #[inline]
+    pub(crate) const fn array_static(
+        site: NativeContinuationSite,
+        stage: ArrayStaticStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayStatic(stage),
             first: state,
             second: retained,
         }

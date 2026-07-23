@@ -2115,6 +2115,9 @@ impl Isolate {
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayStatic(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::MapGetOrInsertComputed => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5975,6 +5978,9 @@ impl Isolate {
                         }),
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayOf) => {
+                    return self.begin_array_of(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConcat) => {
                     return self.begin_array_concat(&site);
                 }
@@ -6949,6 +6955,10 @@ impl Isolate {
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;
                     self.resume_array_splice(site, state, stage, value, continuation.second())
+                }
+                NativeContinuationKind::ArrayStatic(stage) => {
+                    let state = self.pending_array_static_reference(continuation.first())?;
+                    self.resume_array_static(site, state, stage, value)
                 }
                 NativeContinuationKind::MapGetOrInsertComputed => {
                     let state = self.pending_map_upsert_reference(continuation.first())?;

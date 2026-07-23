@@ -20,6 +20,7 @@ mod array_predicate;
 mod array_reduce;
 mod array_search;
 mod array_splice;
+mod array_static;
 mod assign;
 mod calls;
 mod class;

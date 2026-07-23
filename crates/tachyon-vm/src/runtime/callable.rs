@@ -237,6 +237,7 @@ pub(crate) enum NativeFunction {
     PromiseCatch,
     ArrayConstructor,
     ArrayIsArray,
+    ArrayOf,
     ArrayConcat,
     ArrayPush,
     ArrayJoin,
@@ -792,7 +793,8 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
-            Self::MapConstructor
+            Self::ArrayOf
+            | Self::MapConstructor
             | Self::SetConstructor
             | Self::WeakMapConstructor
             | Self::WeakSetConstructor => 0,
@@ -1063,6 +1065,7 @@ impl NativeFunction {
             Self::PromiseCatch => "catch",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
+            Self::ArrayOf => "of",
             Self::ArrayConcat => "concat",
             Self::ArrayPush => "push",
             Self::ArrayJoin => "join",
@@ -1616,6 +1619,7 @@ pub(crate) struct VmTypes {
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
+    pub(crate) pending_array_static: GcType<PendingArrayStatic>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,

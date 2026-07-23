@@ -14,6 +14,7 @@ mod array;
 mod array_concat;
 mod array_for_each;
 mod array_splice;
+mod array_static;
 mod atom;
 mod bound_function;
 mod builtins;
@@ -125,6 +126,7 @@ use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use array_concat::PendingArrayConcat;
 use array_splice::PendingArraySplice;
+use array_static::PendingArrayStatic;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
@@ -188,20 +190,20 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayForEachStage, ArraySpliceStage,
-        BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
-        CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
-        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
-        DefinePropertiesStage, ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment,
-        Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
-        ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
-        PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,
-        PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots, ProxyCallStage,
-        ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
-        ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
-        ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ArrayStaticStage, BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots,
+        CollectionInitializerStage, CollectionIteratorCloseStage, ConversionCallbackStage,
+        ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
+        CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
+        ErrorToStringStage, EvalVarEnvironment, Fiber, Frame, GetOwnPropertyDescriptorsStage,
+        InstanceElementStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
+        PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
+        PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
+        PrototypeInitializationRoots, ProxyCallStage, ProxyContinuationStage, ProxyDefineMode,
+        ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
+        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
+        ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

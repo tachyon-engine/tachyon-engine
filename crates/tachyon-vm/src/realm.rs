@@ -1279,6 +1279,17 @@ impl Isolate {
         self.realm.array_is_array = Some(is_array);
         let is_array_atom = self.intern_intrinsic_name(b"isArray")?;
         self.set_intrinsic_data_property(constructor, is_array_atom, is_array, true)?;
+        let of = self.allocate_native_function(
+            NativeFunction::ArrayOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let of_atom = self.intern_intrinsic_name(b"of")?;
+        self.set_intrinsic_data_property(constructor, of_atom, of, true)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_intrinsic_data_property(prototype, length_atom, Value::from_i32(0), false)?;
         self.initialize_array_iterator_intrinsics(prototype, function_prototype)?;
