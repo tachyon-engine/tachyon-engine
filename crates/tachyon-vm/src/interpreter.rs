@@ -6012,6 +6012,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayForEach) => {
                     return self.begin_array_for_each(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayEvery) => {
+                    return self.begin_array_predicate(&site, true);
+                }
+                FunctionExecutable::Native(NativeFunction::ArraySome) => {
+                    return self.begin_array_predicate(&site, false);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayFilter) => {
                     return self.begin_array_filter(&site);
                 }

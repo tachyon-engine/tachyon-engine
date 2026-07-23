@@ -1456,6 +1456,22 @@ impl Isolate {
         self.realm.array_for_each = Some(for_each);
         let for_each_atom = self.intern_intrinsic_name(b"forEach")?;
         self.set_intrinsic_data_property(prototype, for_each_atom, for_each, true)?;
+        for (name, native) in [
+            (b"every".as_slice(), NativeFunction::ArrayEvery),
+            (b"some".as_slice(), NativeFunction::ArraySome),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(prototype, atom, function, true)?;
+        }
         let filter = self.allocate_native_function(
             NativeFunction::ArrayFilter,
             OrdinaryObject {

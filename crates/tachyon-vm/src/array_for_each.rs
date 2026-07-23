@@ -1,4 +1,4 @@
-//! Resumable Array.prototype.forEach property and callback state machine.
+//! Resumable Array iteration property, callback, species, and predicate state machine.
 
 use super::*;
 
@@ -13,6 +13,9 @@ const FILTER_NEXT_INDEX: usize = 2;
 const FILTER_CONSTRUCTOR: usize = 3;
 const FILTER_PENDING_VALUE: usize = 4;
 const FILTER_STATE_COUNT: u8 = 3;
+const PREDICATE_THIS_ARGUMENT: usize = 0;
+const PREDICATE_CONTINUE_TRUTHINESS: usize = 1;
+const PREDICATE_STATE_COUNT: u8 = 2;
 
 struct ArrayForEachRoots<'a> {
     vm: VmRoots<'a>,
@@ -28,6 +31,73 @@ impl Trace for ArrayForEachRoots<'_> {
 }
 
 impl Isolate {
+    /// Starts Array.prototype.every/some with a compact side-state for the short-circuit contract.
+    pub(crate) fn begin_array_predicate(
+        &mut self,
+        site: &CallSite,
+        continue_truthiness: bool,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.coerce_to_object(site.this_value)?;
+        let callback = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let this_argument = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let predicate = self.allocate_array_for_each_state(NativeCallState {
+            values: [
+                this_argument,
+                Value::from_immediate(if continue_truthiness {
+                    Immediate::True
+                } else {
+                    Immediate::False
+                }),
+                Value::from_i32(0),
+                Value::from_i32(0),
+                Value::from_i32(0),
+            ],
+            count: PREDICATE_STATE_COUNT,
+        })?;
+        let state = self.allocate_array_for_each_state(NativeCallState {
+            values: [
+                receiver,
+                callback,
+                Value::from_heap_ref(predicate.raw()),
+                Value::from_i32(0),
+                Value::from_i32(0),
+            ],
+            count: 5,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let length = self.length_atom()?;
+        let value = self.dispatch_array_for_each_get(
+            continuation_site,
+            state,
+            ArrayForEachStage::Length,
+            receiver,
+            length.into(),
+        )?;
+        if let Some(value) = value {
+            self.resume_array_for_each(
+                continuation_site,
+                state,
+                ArrayForEachStage::Length,
+                value,
+                receiver,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Validates the callback, publishes fixed state, and starts observable length lookup.
     pub(crate) fn begin_array_for_each(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = self.coerce_to_object(site.this_value)?;
@@ -244,7 +314,7 @@ impl Isolate {
                     else {
                         return Ok(());
                     };
-                    if self.select_array_filter_value(site, state, returned, element)? {
+                    if self.select_array_iteration_result(site, state, returned, element)? {
                         return Ok(());
                     }
                 }
@@ -254,13 +324,13 @@ impl Isolate {
                 let Some(returned) = self.call_array_for_each_callback(site, state, value)? else {
                     return Ok(());
                 };
-                if self.select_array_filter_value(site, state, returned, value)? {
+                if self.select_array_iteration_result(site, state, returned, value)? {
                     return Ok(());
                 }
                 self.advance_array_for_each(site, state)
             }
             ArrayForEachStage::Callback => {
-                if self.select_array_filter_value(site, state, value, retained)? {
+                if self.select_array_iteration_result(site, state, value, retained)? {
                     return Ok(());
                 }
                 self.advance_array_for_each(site, state)
@@ -438,6 +508,9 @@ impl Isolate {
             if index >= length {
                 let result = if let Some(filter) = self.array_filter_state(state)? {
                     self.native_call_state_snapshot(filter)?.values[FILTER_RESULT]
+                } else if let Some(predicate) = self.array_predicate_state(state)? {
+                    self.native_call_state_snapshot(predicate)?.values
+                        [PREDICATE_CONTINUE_TRUTHINESS]
                 } else {
                     Value::from_immediate(Immediate::Undefined)
                 };
@@ -463,7 +536,7 @@ impl Isolate {
             let Some(returned) = self.call_array_for_each_callback(site, state, element)? else {
                 return Ok(());
             };
-            if self.select_array_filter_value(site, state, returned, element)? {
+            if self.select_array_iteration_result(site, state, returned, element)? {
                 return Ok(());
             }
         }
@@ -499,6 +572,8 @@ impl Isolate {
         let index = Value::from_f64((next - 1) as f64);
         let this_argument = if let Some(filter) = self.array_filter_state(state)? {
             self.native_call_state_snapshot(filter)?.values[FILTER_THIS_ARGUMENT]
+        } else if let Some(predicate) = self.array_predicate_state(state)? {
+            self.native_call_state_snapshot(predicate)?.values[PREDICATE_THIS_ARGUMENT]
         } else {
             pending.values[FOREACH_THIS_ARGUMENT]
         };
@@ -739,6 +814,25 @@ impl Isolate {
         Ok((snapshot.count == FILTER_STATE_COUNT).then_some(filter))
     }
 
+    /// Returns the every/some side-state when the shared iteration carries a predicate contract.
+    fn array_predicate_state(
+        &mut self,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Option<GcRef<NativeCallState>>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let Some(raw) = pending.values[FOREACH_THIS_ARGUMENT].as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(predicate) = self
+            .heap
+            .checked_reference(raw, self.types.native_call_state)
+        else {
+            return Ok(None);
+        };
+        let snapshot = self.native_call_state_snapshot(predicate)?;
+        Ok((snapshot.count == PREDICATE_STATE_COUNT).then_some(predicate))
+    }
+
     /// Appends a selected value, suspending around a Proxy [[DefineOwnProperty]] trap.
     fn append_array_filter_value(
         &mut self,
@@ -822,8 +916,8 @@ impl Isolate {
         self.set_array_for_each_number(filter, FILTER_NEXT_INDEX, index + 1)
     }
 
-    /// Appends the retained element when a filter callback completed truthily.
-    fn select_array_filter_value(
+    /// Applies filter retention or every/some short-circuit semantics to a callback result.
+    fn select_array_iteration_result(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
@@ -834,6 +928,24 @@ impl Isolate {
             && self.is_truthy_value(returned)?
         {
             return self.append_array_filter_value(site, state, filter, element);
+        }
+        if let Some(predicate) = self.array_predicate_state(state)? {
+            let expected = self.native_call_state_snapshot(predicate)?.values
+                [PREDICATE_CONTINUE_TRUTHINESS]
+                .as_immediate()
+                == Some(Immediate::True);
+            if self.is_truthy_value(returned)? != expected {
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_immediate(if expected {
+                        Immediate::False
+                    } else {
+                        Immediate::True
+                    }),
+                )?;
+                return Ok(true);
+            }
         }
         Ok(false)
     }

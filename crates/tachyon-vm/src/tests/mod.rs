@@ -13,6 +13,7 @@ use super::*;
 
 mod accessors;
 mod array_filter;
+mod array_predicate;
 mod assign;
 mod calls;
 mod class;
