@@ -325,46 +325,6 @@ impl Isolate {
         Ok(site.this_value)
     }
 
-    /// Implements `Array.prototype.copyWithin` with overlap-safe direction and hole preservation.
-    pub(crate) fn array_copy_within(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        let target_value = self.call_argument(site, 0)?.unwrap_or(Value::from_i32(0));
-        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
-        let end_value = self
-            .call_argument(site, 2)?
-            .unwrap_or(safe_integer_value(length));
-        let target = self.relative_array_index(target_value, length)?;
-        let start = self.relative_array_index(start_value, length)?;
-        let end = self.relative_array_index(end_value, length)?;
-        let count = end.saturating_sub(start).min(length.saturating_sub(target));
-        if target < start || target >= start.saturating_add(count) {
-            for offset in 0..count {
-                self.copy_within_element(site.this_value, start + offset, target + offset)?;
-            }
-        } else {
-            for offset in (0..count).rev() {
-                self.copy_within_element(site.this_value, start + offset, target + offset)?;
-            }
-        }
-        Ok(site.this_value)
-    }
-
-    fn copy_within_element(
-        &mut self,
-        receiver: Value,
-        source_index: u64,
-        target_index: u64,
-    ) -> Result<(), ExecutionError> {
-        let source_key = self.safe_integer_property_atom(source_index)?;
-        let target_key = self.safe_integer_property_atom(target_index)?;
-        if let Some(value) = self.get_data_property(receiver, source_key)? {
-            self.set_own_data_property(receiver, target_key, value)?;
-        } else if !self.delete_own_data_property(receiver, target_key)? {
-            return Err(ExecutionError::ReadOnlyProperty(receiver));
-        }
-        Ok(())
-    }
-
     fn array_element_or_undefined(
         &mut self,
         receiver: Value,

@@ -795,11 +795,10 @@ impl NativeFunction {
             | Self::ArrayReverse
             | Self::ArrayFill
             | Self::ArrayLastIndexOf
-            | Self::ArrayCopyWithin
             | Self::ArrayFlatMap
             | Self::ArraySort
             | Self::ArrayToSorted => 1,
-            Self::ArrayWith | Self::ArrayToSpliced => 2,
+            Self::ArrayCopyWithin | Self::ArrayWith | Self::ArrayToSpliced => 2,
             Self::ArrayOf
             | Self::ArrayFlat
             | Self::ArrayPop
@@ -1642,6 +1641,7 @@ pub(crate) struct VmTypes {
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
+    pub(crate) pending_array_copy_within: GcType<PendingArrayCopyWithin>,
     pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,

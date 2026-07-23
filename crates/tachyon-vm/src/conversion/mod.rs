@@ -404,6 +404,22 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayCopyWithinLength
+                            | ConversionConsumer::ArrayCopyWithinTarget
+                            | ConversionConsumer::ArrayCopyWithinStart
+                            | ConversionConsumer::ArrayCopyWithinEnd
+                    ) {
+                        let state =
+                            self.pending_array_copy_within_reference(continuation.receiver)?;
+                        return self.resume_array_copy_within_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::DateNumericArgument {
                         return self.resume_date_numeric_arguments(
                             continuation.site,
@@ -502,6 +518,22 @@ impl Isolate {
                     ) {
                         let state = self.pending_array_copy_reference(continuation.receiver)?;
                         return self.resume_array_copy_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayCopyWithinLength
+                            | ConversionConsumer::ArrayCopyWithinTarget
+                            | ConversionConsumer::ArrayCopyWithinStart
+                            | ConversionConsumer::ArrayCopyWithinEnd
+                    ) {
+                        let state =
+                            self.pending_array_copy_within_reference(continuation.receiver)?;
+                        return self.resume_array_copy_within_conversion(
                             continuation.site,
                             state,
                             continuation.consumer,
@@ -817,6 +849,12 @@ impl Isolate {
                 | ConversionConsumer::ArrayCopyStart
                 | ConversionConsumer::ArrayCopyDeleteCount => {
                     unreachable!("Array copy conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayCopyWithinLength
+                | ConversionConsumer::ArrayCopyWithinTarget
+                | ConversionConsumer::ArrayCopyWithinStart
+                | ConversionConsumer::ArrayCopyWithinEnd => {
+                    unreachable!("Array copyWithin conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArrayToSortedLength
                 | ConversionConsumer::ArrayToSortedCompareResult

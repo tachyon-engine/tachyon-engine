@@ -252,6 +252,10 @@ pub(crate) enum ConversionConsumer {
     ArrayCopyIndex,
     ArrayCopyStart,
     ArrayCopyDeleteCount,
+    ArrayCopyWithinLength,
+    ArrayCopyWithinTarget,
+    ArrayCopyWithinStart,
+    ArrayCopyWithinEnd,
     ArrayToSortedLength,
     ArrayToSortedCompareResult,
     ArrayToSortedLeftString,
@@ -303,6 +307,10 @@ impl ConversionConsumer {
             | Self::ArrayCopyIndex
             | Self::ArrayCopyStart
             | Self::ArrayCopyDeleteCount
+            | Self::ArrayCopyWithinLength
+            | Self::ArrayCopyWithinTarget
+            | Self::ArrayCopyWithinStart
+            | Self::ArrayCopyWithinEnd
             | Self::ArrayToSortedLength
             | Self::ArrayToSortedCompareResult
             | Self::ArrayToSortedLeftString
@@ -396,6 +404,10 @@ impl ConversionConsumer {
                 | Self::ArraySpliceDeleteCount
                 | Self::ArrayRemoveLength
                 | Self::ArrayInsertLength
+                | Self::ArrayCopyWithinLength
+                | Self::ArrayCopyWithinTarget
+                | Self::ArrayCopyWithinStart
+                | Self::ArrayCopyWithinEnd
         )
     }
 }
@@ -721,6 +733,17 @@ pub(crate) enum ArrayCopyStage {
     SourceValue,
 }
 
+/// One observable boundary in the resumable Array copyWithin algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayCopyWithinStage {
+    Length,
+    MoveHas,
+    MoveGet,
+    MoveSet,
+    MoveDelete,
+}
+
 /// One observable boundary in the resumable stable Array sort machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -970,6 +993,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayFlat(ArrayFlatStage),
     ArrayFlatMap(ArrayFlatMapStage),
     ArrayCopy(ArrayCopyStage),
+    ArrayCopyWithin(ArrayCopyWithinStage),
     ArrayToSorted(ArrayToSortedStage),
     ArraySlice(ArraySliceStage),
     ArraySplice(ArraySpliceStage),
@@ -1724,6 +1748,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayCopy(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one copyWithin state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_copy_within(
+        site: NativeContinuationSite,
+        stage: ArrayCopyWithinStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayCopyWithin(stage),
             first: state,
             second: retained,
         }
