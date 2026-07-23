@@ -306,34 +306,6 @@ impl Isolate {
         Ok(value)
     }
 
-    /// Implements the ordinary, non-Proxy `Array.prototype.slice` copy semantics.
-    pub(crate) fn array_slice(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        let start_value = self.call_argument(site, 0)?.unwrap_or(Value::from_i32(0));
-        let end_value = self
-            .call_argument(site, 1)?
-            .unwrap_or(safe_integer_value(length));
-        let start = self.relative_array_index(start_value, length)?;
-        let end = self.relative_array_index(end_value, length)?;
-        let count = end.saturating_sub(start);
-        let result = self.create_array_from_site(&CallSite {
-            argument_count: 0,
-            ..*site
-        })?;
-        for offset in 0..count {
-            let source_index = start + offset;
-            let source_key = self.safe_integer_property_atom(source_index)?;
-            let Some(value) = self.get_data_property(site.this_value, source_key)? else {
-                continue;
-            };
-            let target_key = self.safe_integer_property_atom(offset)?;
-            self.set_own_data_property(result, target_key, value)?;
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(result, length_atom, safe_integer_value(count))?;
-        Ok(result)
-    }
-
     fn relative_array_index(&mut self, value: Value, length: u64) -> Result<u64, ExecutionError> {
         let number = numeric_value(self.convert_to_number(value)?).unwrap_or(f64::NAN);
         if number.is_nan() || number == 0.0 {

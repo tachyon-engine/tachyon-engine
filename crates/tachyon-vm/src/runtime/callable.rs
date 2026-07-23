@@ -690,7 +690,10 @@ impl NativeFunction {
             Self::ObjectDefineGetter | Self::ObjectDefineSetter => 2,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
-            Self::ProxyConstructor | Self::ProxyRevocable | Self::ArraySplice => 2,
+            Self::ProxyConstructor
+            | Self::ProxyRevocable
+            | Self::ArraySlice
+            | Self::ArraySplice => 2,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
@@ -790,7 +793,6 @@ impl NativeFunction {
             | Self::ArrayIndexOf
             | Self::ArrayIncludes
             | Self::ArrayPop
-            | Self::ArraySlice
             | Self::ArrayShift
             | Self::ArrayUnshift
             | Self::ArrayReverse
@@ -1633,6 +1635,7 @@ pub(crate) struct VmTypes {
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
+    pub(crate) pending_array_slice: GcType<PendingArraySlice>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,
     pub(crate) pending_array_to_sorted: GcType<PendingArrayToSorted>,

@@ -14,6 +14,7 @@ mod array;
 mod array_concat;
 mod array_copy;
 mod array_for_each;
+mod array_slice;
 mod array_splice;
 mod array_static;
 mod array_to_sorted;
@@ -128,6 +129,7 @@ use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
+use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
 use array_static::PendingArrayStatic;
 use array_to_sorted::PendingArrayToSorted;
@@ -194,12 +196,12 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayForEachStage,
-        ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer,
-        ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
-        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
-        ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
+        ArraySliceStage, ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage,
+        BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
+        CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
+        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
+        DefinePropertiesStage, ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment,
+        Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
         ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
         PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,

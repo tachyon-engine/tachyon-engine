@@ -467,6 +467,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArraySliceLength
+                            | ConversionConsumer::ArraySliceStart
+                            | ConversionConsumer::ArraySliceEnd
+                    ) {
+                        let state = self.pending_array_slice_reference(continuation.receiver)?;
+                        return self.resume_array_slice_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ArraySpliceLength
                             | ConversionConsumer::ArraySpliceStart
                             | ConversionConsumer::ArraySpliceDeleteCount
@@ -741,6 +755,11 @@ impl Isolate {
                 | ConversionConsumer::ArrayToSortedLeftString
                 | ConversionConsumer::ArrayToSortedRightString => {
                     unreachable!("Array toSorted conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArraySliceLength
+                | ConversionConsumer::ArraySliceStart
+                | ConversionConsumer::ArraySliceEnd => {
+                    unreachable!("Array slice conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength

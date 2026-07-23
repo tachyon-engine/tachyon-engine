@@ -20,6 +20,7 @@ mod array_map;
 mod array_predicate;
 mod array_reduce;
 mod array_search;
+mod array_slice;
 mod array_splice;
 mod array_static;
 mod array_to_sorted;

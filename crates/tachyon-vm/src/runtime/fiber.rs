@@ -252,6 +252,9 @@ pub(crate) enum ConversionConsumer {
     ArrayToSortedLeftString,
     ArrayToSortedRightString,
     ArrayStaticLength,
+    ArraySliceLength,
+    ArraySliceStart,
+    ArraySliceEnd,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -293,6 +296,9 @@ impl ConversionConsumer {
             | Self::ArrayToSortedLeftString
             | Self::ArrayToSortedRightString
             | Self::ArrayStaticLength
+            | Self::ArraySliceLength
+            | Self::ArraySliceStart
+            | Self::ArraySliceEnd
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount => None,
@@ -363,6 +369,9 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::ArrayLength
                 | Self::ArrayConcatLength
+                | Self::ArraySliceLength
+                | Self::ArraySliceStart
+                | Self::ArraySliceEnd
                 | Self::ArraySpliceLength
                 | Self::ArraySpliceStart
                 | Self::ArraySpliceDeleteCount
@@ -569,6 +578,20 @@ pub(crate) enum ArrayConcatStage {
     ElementGet,
     ElementDefine,
     ValueDefine,
+    FinalLength,
+}
+
+/// One observable boundary in the resumable Array.prototype.slice algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArraySliceStage {
+    Length,
+    SpeciesConstructor,
+    SpeciesValue,
+    SpeciesConstruct,
+    ElementHas,
+    ElementGet,
+    ElementDefine,
     FinalLength,
 }
 
@@ -867,6 +890,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayConcat(ArrayConcatStage),
     ArrayCopy(ArrayCopyStage),
     ArrayToSorted(ArrayToSortedStage),
+    ArraySlice(ArraySliceStage),
     ArraySplice(ArraySpliceStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
@@ -1553,6 +1577,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArraySplice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one slice state and operation-specific value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_slice(
+        site: NativeContinuationSite,
+        stage: ArraySliceStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArraySlice(stage),
             first: state,
             second: retained,
         }
