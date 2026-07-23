@@ -6060,8 +6060,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArraySort) => {
-                    let value = self.array_sort(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_sort(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayForEach) => {
                     return self.begin_array_for_each(&site);

@@ -6,3 +6,14 @@ pub(crate) const JOIN_INITIAL_UNITS_PER_ELEMENT: usize = 8;
 pub(crate) const JOIN_MAX_INITIAL_UNITS: usize = 4_096;
 /// Starts ordinary prototype-chain candidate scans instead of walking long proven hole runs.
 pub(crate) const ARRAY_ITERATION_SPARSE_SKIP_THRESHOLD: u64 = 256;
+/// Covers the common small sort while avoiding length-sized allocation for sparse array-likes.
+pub(crate) const INITIAL_ARRAY_SORT_ITEM_CAPACITY: usize = 64;
+
+/// Doubles managed sort backing while preserving an explicit overflow boundary.
+#[inline(always)]
+pub(crate) const fn grown_array_sort_capacity(current: usize) -> Option<usize> {
+    match current.checked_mul(2) {
+        Some(capacity) if capacity > current => Some(capacity),
+        _ => None,
+    }
+}

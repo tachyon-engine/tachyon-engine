@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
-use super::{fixtures::test_isolate, *};
+use super::*;
 
 const ARRAY_TO_SORTED_SOURCE: &str = r#"
 var trace = "";
@@ -43,6 +43,47 @@ var stringOrder = objects[0].toString() === "a" && objects[1].toString() === "b"
 collectedFirst && defaultOrder && stableOrder && undefinedOrder && stringOrder;
 "#;
 
+const ARRAY_SORT_SOURCE: &str = r#"
+var stable = [];
+for (var i = 128; i >= 0; i--) {
+  stable.push({ key: i % 5, id: i });
+}
+var compareCalls = 0;
+stable.sort(function(a, b) {
+  compareCalls++;
+  return { valueOf: function() { return a.key - b.key; } };
+});
+var stableOk = compareCalls > 0 && stable.length === 129;
+for (var j = 1; j < stable.length; j++) {
+  if (stable[j - 1].key > stable[j].key ||
+      (stable[j - 1].key === stable[j].key && stable[j - 1].id < stable[j].id)) {
+    stableOk = false;
+  }
+}
+
+var sparse = { length: 1000 };
+sparse[0] = 3;
+sparse[500] = undefined;
+sparse[999] = 1;
+var sawUndefined = false;
+Array.prototype.sort.call(sparse, function(a, b) {
+  if (a === undefined || b === undefined) sawUndefined = true;
+  return a - b;
+});
+var sparseOk = sparse[0] === 1 && sparse[1] === 3 && sparse[2] === undefined &&
+  !("3" in sparse) && !("999" in sparse) && !sawUndefined;
+
+stableOk && sparseOk;
+"#;
+
+const ARRAY_SORT_LONG_SYNC_SOURCE: &str = r#"
+var values = [];
+for (var i = 2047; i >= 0; i--) values.push(i);
+values.sort();
+values.length === 2048 && values[0] === 0 && values[1] === 1 &&
+  values[values.length - 1] === 999;
+"#;
+
 #[test]
 fn array_to_sorted_is_stable_for_every_dispatch_batch() {
     assert_array_to_sorted_source::<1>(ARRAY_TO_SORTED_SOURCE, 1_951, false);
@@ -57,20 +98,45 @@ fn array_to_sorted_state_survives_forced_major_collections() {
     assert_array_to_sorted_source::<8>(ARRAY_TO_SORTED_SOURCE, 1_968, true);
 }
 
+#[test]
+fn array_sort_is_stable_for_every_dispatch_batch() {
+    assert_array_to_sorted_source::<1>(ARRAY_SORT_SOURCE, 1_971, false);
+    assert_array_to_sorted_source::<2>(ARRAY_SORT_SOURCE, 1_972, false);
+    assert_array_to_sorted_source::<4>(ARRAY_SORT_SOURCE, 1_974, false);
+    assert_array_to_sorted_source::<8>(ARRAY_SORT_SOURCE, 1_978, false);
+    assert_array_to_sorted_source::<16>(ARRAY_SORT_SOURCE, 1_986, false);
+}
+
+#[test]
+fn array_sort_state_survives_forced_major_collections() {
+    assert_array_to_sorted_source::<8>(ARRAY_SORT_SOURCE, 1_988, true);
+}
+
+#[test]
+fn array_sort_long_synchronous_path_does_not_grow_the_rust_stack() {
+    assert_array_to_sorted_source::<8>(ARRAY_SORT_LONG_SYNC_SOURCE, 1_989, false);
+}
+
 /// Compiles and executes one stable-sort fixture under a selected dispatch and GC policy.
 fn assert_array_to_sorted_source<const N: usize>(source: &str, source_id: u32, forced_major: bool) {
     let module = Compiler
         .compile(
             SourceText::new(
                 SourceId::new(source_id),
-                SourceName::new("array-to-sorted-fixture"),
+                SourceName::new("stable-array-sort-fixture"),
                 MediaType::JavaScript,
                 Arc::from(source),
             ),
             CompileOptions::default(),
         )
-        .expect("Array.toSorted fixture compiles");
-    let mut isolate = test_isolate();
+        .expect("stable Array sort fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(8_192, 8 * 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(64 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 8_192),
+        RealmLimits::new(64, 8_192).with_max_shapes(8_192),
+    ))
+    .expect("stable sort test isolate initializes");
     if forced_major {
         isolate
             .heap
@@ -80,11 +146,11 @@ fn assert_array_to_sorted_source<const N: usize>(source: &str, source_id: u32, f
         .execute_with_batch::<N>(
             &module,
             ExecutionBudget {
-                fuel: 131_072,
-                quantum: 131_072,
+                fuel: 2_097_152,
+                quantum: 2_097_152,
             },
         )
-        .expect("Array.toSorted fixture executes");
+        .expect("stable Array sort fixture executes");
     assert_eq!(
         outcome,
         RunOutcome::Completed(Value::from_immediate(Immediate::True))

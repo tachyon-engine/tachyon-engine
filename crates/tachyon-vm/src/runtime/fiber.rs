@@ -619,13 +619,16 @@ pub(crate) enum ArrayCopyStage {
     SourceValue,
 }
 
-/// One observable boundary in the resumable `Array.prototype.toSorted` algorithm.
+/// One observable boundary in the resumable stable Array sort machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ArrayToSortedStage {
     Length,
+    SourceHas,
     SourceValue,
     CompareCall,
+    WriteSet,
+    WriteDelete,
 }
 
 /// The first Proxy essential internal methods routed through the exotic slow path.
@@ -1571,7 +1574,7 @@ impl NativeContinuation {
         }
     }
 
-    /// Roots one stable-sort state across a property Get or comparator call.
+    /// Roots one stable-sort state across a property operation or comparator call.
     #[inline]
     pub(crate) const fn array_to_sorted(
         site: NativeContinuationSite,

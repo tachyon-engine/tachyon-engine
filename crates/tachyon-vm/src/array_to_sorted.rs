@@ -1,4 +1,6 @@
-//! Resumable stable `Array.prototype.toSorted` collection and merge sort.
+//! Resumable stable `Array.prototype.sort` and `toSorted` merge machine.
+
+mod support;
 
 use core::{cmp::Ordering, mem::size_of};
 
@@ -13,9 +15,11 @@ pub(crate) struct PendingArrayToSorted {
     left_value: Value,
     right_value: Value,
     left_string: Value,
+    retained: Value,
     values: Box<[Value]>,
     scratch: Box<[Value]>,
     length: u64,
+    item_count: u64,
     cursor: u64,
     width: u64,
     merge_start: u64,
@@ -25,6 +29,7 @@ pub(crate) struct PendingArrayToSorted {
     right_end: u64,
     destination: u64,
     active_merge: bool,
+    copy: bool,
 }
 
 impl Trace for PendingArrayToSorted {
@@ -36,6 +41,7 @@ impl Trace for PendingArrayToSorted {
         self.left_value.trace(tracer);
         self.right_value.trace(tracer);
         self.left_string.trace(tracer);
+        self.retained.trace(tracer);
         self.values.trace(tracer);
         self.scratch.trace(tracer);
     }
@@ -59,7 +65,9 @@ struct ArrayToSortedSnapshot {
     left_value: Value,
     right_value: Value,
     left_string: Value,
+    retained: Value,
     length: u64,
+    item_count: u64,
     cursor: u64,
     width: u64,
     merge_start: u64,
@@ -69,11 +77,26 @@ struct ArrayToSortedSnapshot {
     right_end: u64,
     destination: u64,
     active_merge: bool,
+    copy: bool,
 }
 
 impl Isolate {
     /// Validates comparefn before ToObject and starts the observable length Get.
     pub(crate) fn begin_array_to_sorted(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_stable_array_sort(site, true)
+    }
+
+    /// Starts the in-place stable sort path with skip-holes collection.
+    pub(crate) fn begin_array_sort(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_stable_array_sort(site, false)
+    }
+
+    /// Builds the shared state before the first observable length access.
+    fn begin_stable_array_sort(
+        &mut self,
+        site: &CallSite,
+        copy: bool,
+    ) -> Result<(), ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
         let comparator = self.call_argument(site, 0)?.unwrap_or(undefined);
         if comparator.as_immediate() != Some(Immediate::Undefined) {
@@ -87,9 +110,11 @@ impl Isolate {
             left_value: undefined,
             right_value: undefined,
             left_string: undefined,
+            retained: undefined,
             values: Box::new([]),
             scratch: Box::new([]),
             length: 0,
+            item_count: 0,
             cursor: 0,
             width: 1,
             merge_start: 0,
@@ -99,6 +124,7 @@ impl Isolate {
             right_end: 0,
             destination: 0,
             active_merge: false,
+            copy,
         })?;
         let native_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -107,13 +133,16 @@ impl Isolate {
         };
         self.root_array_to_sorted_state(native_site, state)?;
         let length = self.length_atom()?;
-        self.get_array_to_sorted_property(
+        if let Some((state, value)) = self.get_array_to_sorted_property(
             native_site,
             state,
             ArrayToSortedStage::Length,
             receiver,
             length.into(),
-        )
+        )? {
+            self.resume_array_to_sorted_length(native_site, state, value)?;
+        }
+        Ok(())
     }
 
     /// Routes property Gets and comparator calls into the stable-sort machine.
@@ -124,14 +153,19 @@ impl Isolate {
         stage: ArrayToSortedStage,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        self.set_array_to_sorted_value(state, |pending| &mut pending.retained, value)?;
         self.root_array_to_sorted_state(site, state)?;
         match stage {
             ArrayToSortedStage::Length => self.resume_array_to_sorted_length(site, state, value),
+            ArrayToSortedStage::SourceHas => self.finish_array_sort_source_has(site, state, value),
             ArrayToSortedStage::SourceValue => {
                 self.finish_array_to_sorted_source(site, state, value)
             }
             ArrayToSortedStage::CompareCall => {
                 self.finish_array_to_sorted_compare_result(site, state, value)
+            }
+            ArrayToSortedStage::WriteSet | ArrayToSortedStage::WriteDelete => {
+                self.finish_array_sort_write(site, state)
             }
         }
     }
@@ -144,6 +178,7 @@ impl Isolate {
         consumer: ConversionConsumer,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        self.set_array_to_sorted_value(state, |pending| &mut pending.retained, value)?;
         self.root_array_to_sorted_state(site, state)?;
         match consumer {
             ConversionConsumer::ArrayToSortedLength => {
@@ -182,7 +217,7 @@ impl Isolate {
         self.finish_array_to_sorted_length(site, state, value)
     }
 
-    /// Allocates the intrinsic result and exact merge buffers after ToLength.
+    /// Allocates the selected result and exact merge buffers after ToLength.
     fn finish_array_to_sorted_length(
         &mut self,
         site: NativeContinuationSite,
@@ -190,22 +225,33 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let length = array_to_sorted_length(self.convert_to_number(value)?)?;
-        if length > u64::from(u32::MAX) {
+        let old = self.array_to_sorted_snapshot(state)?;
+        if old.copy && length > u64::from(u32::MAX) {
             return Err(ExecutionError::InvalidArrayLength);
         }
-        let old = self.array_to_sorted_snapshot(state)?;
-        let prototype = self
-            .realm
-            .array_prototype
-            .expect("Array prototype initializes before toSorted");
-        let result = self.create_array_object_with_prototype(prototype)?;
-        let state =
-            self.pending_array_to_sorted_reference(self.read(site.caller_base, site.destination)?)?;
-        self.set_array_to_sorted_value(state, |pending| &mut pending.result, result)?;
-        self.set_array_length_value(result, safe_integer_value(length))?;
+        let result = if old.copy {
+            let prototype = self
+                .realm
+                .array_prototype
+                .expect("Array prototype initializes before toSorted");
+            let result = self.create_array_object_with_prototype(prototype)?;
+            let state = self.pending_array_to_sorted_reference(
+                self.read(site.caller_base, site.destination)?,
+            )?;
+            self.set_array_to_sorted_value(state, |pending| &mut pending.result, result)?;
+            self.set_array_length_value(result, safe_integer_value(length))?;
+            result
+        } else {
+            old.receiver
+        };
         let undefined = Value::from_immediate(Immediate::Undefined);
-        let values = exact_value_buffer(length, undefined)?;
-        let scratch = exact_value_buffer(length, undefined)?;
+        let capacity = if old.copy {
+            length
+        } else {
+            length.min(tuning::arrays::INITIAL_ARRAY_SORT_ITEM_CAPACITY as u64)
+        };
+        let values = exact_value_buffer(capacity, undefined)?;
+        let scratch = exact_value_buffer(capacity, undefined)?;
         let state = self.allocate_array_to_sorted_state(PendingArrayToSorted {
             receiver: old.receiver,
             result,
@@ -213,9 +259,11 @@ impl Isolate {
             left_value: undefined,
             right_value: undefined,
             left_string: undefined,
+            retained: undefined,
             values,
             scratch,
             length,
+            item_count: 0,
             cursor: 0,
             width: 1,
             merge_start: 0,
@@ -225,43 +273,119 @@ impl Isolate {
             right_end: 0,
             destination: 0,
             active_merge: false,
+            copy: old.copy,
         })?;
         self.root_array_to_sorted_state(site, state)?;
         self.advance_array_to_sorted_collection(site, state)
     }
 
-    /// Reads every source element in ascending order before any comparison.
+    /// Collects source values in ascending order before any comparison.
     fn advance_array_to_sorted_collection(
         &mut self,
         site: NativeContinuationSite,
-        state: GcRef<PendingArrayToSorted>,
+        mut state: GcRef<PendingArrayToSorted>,
     ) -> Result<(), ExecutionError> {
-        let snapshot = self.array_to_sorted_snapshot(state)?;
-        if snapshot.cursor >= snapshot.length {
-            self.update_array_to_sorted_scalars(state, |pending| pending.cursor = 0)?;
-            return self.advance_array_to_sorted_merge(site, state);
+        loop {
+            let snapshot = self.array_to_sorted_snapshot(state)?;
+            if snapshot.cursor >= snapshot.length {
+                self.update_array_to_sorted_scalars(state, |pending| pending.cursor = 0)?;
+                return self.advance_array_to_sorted_merge(site, state);
+            }
+            if !snapshot.copy {
+                let present = self.has_array_sort_property(
+                    site,
+                    state,
+                    snapshot.receiver,
+                    safe_integer_value(snapshot.cursor),
+                )?;
+                let Some((rooted_state, present)) = present else {
+                    return Ok(());
+                };
+                state = rooted_state;
+                if !self.is_truthy_value(present)? {
+                    self.update_array_to_sorted_scalars(state, |pending| pending.cursor += 1)?;
+                    continue;
+                }
+            }
+            let snapshot = self.array_to_sorted_snapshot(state)?;
+            let key = self.safe_integer_property_atom(snapshot.cursor)?;
+            let value = self.get_array_to_sorted_property(
+                site,
+                state,
+                ArrayToSortedStage::SourceValue,
+                snapshot.receiver,
+                key.into(),
+            )?;
+            let Some((rooted_state, value)) = value else {
+                return Ok(());
+            };
+            state = self.store_array_sort_source(site, rooted_state, value)?;
         }
+    }
+
+    /// Resumes skip-holes collection and reads only a present property.
+    fn finish_array_sort_source_has(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_truthy_value(value)? {
+            self.update_array_to_sorted_scalars(state, |pending| pending.cursor += 1)?;
+            return self.advance_array_to_sorted_collection(site, state);
+        }
+        let snapshot = self.array_to_sorted_snapshot(state)?;
         let key = self.safe_integer_property_atom(snapshot.cursor)?;
-        self.get_array_to_sorted_property(
+        if let Some((state, value)) = self.get_array_to_sorted_property(
             site,
             state,
             ArrayToSortedStage::SourceValue,
             snapshot.receiver,
             key.into(),
-        )
+        )? {
+            self.finish_array_to_sorted_source(site, state, value)?;
+        }
+        Ok(())
     }
 
-    /// Stores one read-through-holes value and advances the collection cursor.
+    /// Stores one collected value and advances the source and item cursors.
     fn finish_array_to_sorted_source(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<PendingArrayToSorted>,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        let cursor = self.array_to_sorted_snapshot(state)?.cursor;
-        self.set_array_to_sorted_buffer_value(state, false, cursor, value)?;
-        self.update_array_to_sorted_scalars(state, |pending| pending.cursor += 1)?;
+        let state = self.store_array_sort_source(site, state, value)?;
         self.advance_array_to_sorted_collection(site, state)
+    }
+
+    /// Appends one collected value, replacing full managed backing when required.
+    fn store_array_sort_source(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+        value: Value,
+    ) -> Result<GcRef<PendingArrayToSorted>, ExecutionError> {
+        let mut state = state;
+        self.set_array_to_sorted_value(state, |pending| &mut pending.left_value, value)?;
+        let mut snapshot = self.array_to_sorted_snapshot(state)?;
+        let capacity = u64::try_from(self.array_to_sorted_buffer_len(state)?)
+            .map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+        if snapshot.item_count >= capacity {
+            state = self.grow_array_sort_buffers(site, state, snapshot)?;
+            snapshot = self.array_to_sorted_snapshot(state)?;
+        }
+        self.set_array_to_sorted_buffer_value(
+            state,
+            false,
+            snapshot.item_count,
+            snapshot.left_value,
+        )?;
+        self.update_array_to_sorted_scalars(state, |pending| {
+            pending.cursor += 1;
+            pending.item_count += 1;
+        })?;
+        Ok(state)
     }
 
     /// Advances bottom-up merge sort until one observable comparison is required.
@@ -272,11 +396,11 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         loop {
             let snapshot = self.array_to_sorted_snapshot(state)?;
-            if snapshot.width >= snapshot.length {
+            if snapshot.width >= snapshot.item_count {
                 return self.publish_array_to_sorted(site, state);
             }
             if !snapshot.active_merge {
-                if snapshot.merge_start >= snapshot.length {
+                if snapshot.merge_start >= snapshot.item_count {
                     self.finish_array_to_sorted_pass(state)?;
                     continue;
                 }
@@ -297,8 +421,43 @@ impl Isolate {
             let right = self.array_to_sorted_buffer_value(state, false, snapshot.right)?;
             self.set_array_to_sorted_value(state, |pending| &mut pending.left_value, left)?;
             self.set_array_to_sorted_value(state, |pending| &mut pending.right_value, right)?;
+            let snapshot = self.array_to_sorted_snapshot(state)?;
+            if let Some(ordering) = self.array_sort_immediate_ordering(state, snapshot)? {
+                self.commit_array_to_sorted_ordering(state, snapshot, ordering)?;
+                continue;
+            }
             return self.begin_array_to_sorted_compare(site, state);
         }
+    }
+
+    /// Handles non-observable undefined and primitive default comparisons in the merge loop.
+    fn array_sort_immediate_ordering(
+        &mut self,
+        state: GcRef<PendingArrayToSorted>,
+        snapshot: ArrayToSortedSnapshot,
+    ) -> Result<Option<Ordering>, ExecutionError> {
+        let undefined = Some(Immediate::Undefined);
+        if snapshot.left_value.as_immediate() == undefined {
+            return Ok(Some(if snapshot.right_value.as_immediate() == undefined {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }));
+        }
+        if snapshot.right_value.as_immediate() == undefined {
+            return Ok(Some(Ordering::Less));
+        }
+        if snapshot.comparator.as_immediate() != undefined
+            || self.is_object_value(snapshot.left_value)
+            || self.is_object_value(snapshot.right_value)
+        {
+            return Ok(None);
+        }
+        let left = self.array_to_sorted_string(snapshot.left_value)?;
+        self.set_array_to_sorted_value(state, |pending| &mut pending.left_string, left)?;
+        let right = self.array_to_sorted_string(snapshot.right_value)?;
+        let left = self.array_to_sorted_snapshot(state)?.left_string;
+        Ok(Some(self.compare_string_values(left, right)?))
     }
 
     /// Initializes one adjacent pair of runs for the current merge width.
@@ -310,11 +469,11 @@ impl Isolate {
         let left_end = snapshot
             .merge_start
             .saturating_add(snapshot.width)
-            .min(snapshot.length);
+            .min(snapshot.item_count);
         let right_end = snapshot
             .merge_start
             .saturating_add(snapshot.width.saturating_mul(2))
-            .min(snapshot.length);
+            .min(snapshot.item_count);
         self.update_array_to_sorted_scalars(state, |pending| {
             pending.left = snapshot.merge_start;
             pending.left_end = left_end;
@@ -459,6 +618,8 @@ impl Isolate {
         }
         self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
+        self.set_array_to_sorted_value(state, |pending| &mut pending.retained, value)?;
+        self.root_array_to_sorted_state(site, state)?;
         self.finish_array_to_sorted_compare_result(site, state, value)
     }
 
@@ -574,6 +735,17 @@ impl Isolate {
         ordering: Ordering,
     ) -> Result<(), ExecutionError> {
         let snapshot = self.array_to_sorted_snapshot(state)?;
+        self.commit_array_to_sorted_ordering(state, snapshot, ordering)?;
+        self.advance_array_to_sorted_merge(site, state)
+    }
+
+    /// Writes one stable merge choice without re-entering the merge driver.
+    fn commit_array_to_sorted_ordering(
+        &mut self,
+        state: GcRef<PendingArrayToSorted>,
+        snapshot: ArrayToSortedSnapshot,
+        ordering: Ordering,
+    ) -> Result<(), ExecutionError> {
         let take_left = ordering != Ordering::Greater;
         let value = if take_left {
             snapshot.left_value
@@ -588,18 +760,41 @@ impl Isolate {
             } else {
                 pending.right += 1;
             }
-        })?;
-        self.advance_array_to_sorted_merge(site, state)
+        })
     }
 
-    /// Defines the sorted dense result after every comparison has completed.
+    /// Publishes either a dense copy or the next observable in-place write.
     fn publish_array_to_sorted(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<PendingArrayToSorted>,
     ) -> Result<(), ExecutionError> {
-        let snapshot = self.array_to_sorted_snapshot(state)?;
-        for index in 0..snapshot.length {
+        let mut snapshot = self.array_to_sorted_snapshot(state)?;
+        if !snapshot.copy {
+            loop {
+                snapshot = self.array_to_sorted_snapshot(state)?;
+                if snapshot.cursor >= snapshot.length {
+                    return self.write(site.caller_base, site.destination, snapshot.receiver);
+                }
+                let completed = if snapshot.cursor < snapshot.item_count {
+                    let value = self.array_to_sorted_buffer_value(state, false, snapshot.cursor)?;
+                    let key = self.safe_integer_property_atom(snapshot.cursor)?;
+                    self.set_array_sort_property(site, state, snapshot.receiver, key.into(), value)?
+                } else {
+                    self.delete_array_sort_property(
+                        site,
+                        state,
+                        snapshot.receiver,
+                        safe_integer_value(snapshot.cursor),
+                    )?
+                };
+                if !completed {
+                    return Ok(());
+                }
+                self.update_array_to_sorted_scalars(state, |pending| pending.cursor += 1)?;
+            }
+        }
+        for index in 0..snapshot.item_count {
             let value = self.array_to_sorted_buffer_value(state, false, index)?;
             let key = self.safe_integer_property_atom(index)?;
             self.define_data_property(
@@ -616,6 +811,112 @@ impl Isolate {
         self.write(site.caller_base, site.destination, snapshot.result)
     }
 
+    /// Advances in-place publication only after Set/DeletePropertyOrThrow succeeds.
+    fn finish_array_sort_write(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+    ) -> Result<(), ExecutionError> {
+        self.update_array_to_sorted_scalars(state, |pending| pending.cursor += 1)?;
+        self.publish_array_to_sorted(site, state)
+    }
+
+    /// Publishes a parent around one skip-holes HasProperty operation.
+    fn has_array_sort_property(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+        receiver: Value,
+        key: Value,
+    ) -> Result<Option<(GcRef<PendingArrayToSorted>, Value)>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_array_to_sorted_parent(site, state, ArrayToSortedStage::SourceHas, key)?;
+        let outcome = self.dispatch_has_property(site, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(None);
+        }
+        let rooted = self.pop_native_continuation()?;
+        let state = self.pending_array_to_sorted_reference(rooted.first())?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.root_array_to_sorted_state(site, state)?;
+        Ok(Some((state, value)))
+    }
+
+    /// Performs one observable Set(O, index, value, true).
+    fn set_array_sort_property(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<bool, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_array_to_sorted_parent(site, state, ArrayToSortedStage::WriteSet, value)?;
+        let outcome = self.dispatch_proxy_aware_property_write(
+            site,
+            receiver,
+            receiver,
+            key,
+            value,
+            ProxySetMode::ObjectAssign,
+        );
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(false);
+        }
+        let rooted = self.pop_native_continuation()?;
+        let state = self.pending_array_to_sorted_reference(rooted.first())?;
+        self.root_array_to_sorted_state(site, state)?;
+        Ok(true)
+    }
+
+    /// Performs one observable DeletePropertyOrThrow on the sorted receiver.
+    fn delete_array_sort_property(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayToSorted>,
+        receiver: Value,
+        key: Value,
+    ) -> Result<bool, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_array_to_sorted_parent(site, state, ArrayToSortedStage::WriteDelete, key)?;
+        let outcome = self.dispatch_delete_property(site, receiver, key, ProxyDeleteMode::Strict);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(false);
+        }
+        let rooted = self.pop_native_continuation()?;
+        let state = self.pending_array_to_sorted_reference(rooted.first())?;
+        self.root_array_to_sorted_state(site, state)?;
+        Ok(true)
+    }
+
     /// Publishes a typed parent around one Proxy/accessor-aware source Get.
     fn get_array_to_sorted_property(
         &mut self,
@@ -624,7 +925,7 @@ impl Isolate {
         stage: ArrayToSortedStage,
         receiver: Value,
         key: PropertyKey,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<(GcRef<PendingArrayToSorted>, Value)>, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
         self.push_array_to_sorted_parent(site, state, stage, receiver)?;
@@ -638,214 +939,14 @@ impl Isolate {
         if self.fiber.frames.len() != frame_depth
             || self.fiber.completions.len() <= completion_depth
         {
-            return Ok(());
+            return Ok(None);
         }
         let rooted = self.pop_native_continuation()?;
         let state = self.pending_array_to_sorted_reference(rooted.first())?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_array_to_sorted(site, state, stage, value)
-    }
-
-    /// Pushes one continuation that roots sort state and operation-local data.
-    fn push_array_to_sorted_parent(
-        &mut self,
-        site: NativeContinuationSite,
-        state: GcRef<PendingArrayToSorted>,
-        stage: ArrayToSortedStage,
-        retained: Value,
-    ) -> Result<(), ExecutionError> {
-        self.fiber
-            .completions
-            .push_native(NativeContinuation::array_to_sorted(
-                site,
-                stage,
-                Value::from_heap_ref(state.raw()),
-                retained,
-            ))
-            .map_err(Isolate::completion_stack_error)
-    }
-
-    /// Roots sort state in the destination register before any safepoint.
-    #[inline]
-    fn root_array_to_sorted_state(
-        &mut self,
-        site: NativeContinuationSite,
-        state: GcRef<PendingArrayToSorted>,
-    ) -> Result<(), ExecutionError> {
-        self.write(
-            site.caller_base,
-            site.destination,
-            Value::from_heap_ref(state.raw()),
-        )
-    }
-
-    /// Allocates exact external sort buffers under the complete VM root set.
-    fn allocate_array_to_sorted_state(
-        &mut self,
-        pending: PendingArrayToSorted,
-    ) -> Result<GcRef<PendingArrayToSorted>, ExecutionError> {
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            promise_jobs: &mut self.promise_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
-        };
-        self.heap
-            .try_allocate_external_with_gc(
-                self.types.pending_array_to_sorted,
-                0,
-                pending,
-                AllocationSpace::Young,
-                roots,
-            )
-            .map_err(ExecutionError::HeapAllocation)
-    }
-
-    /// Validates and recovers one managed stable-sort reference.
-    pub(crate) fn pending_array_to_sorted_reference(
-        &mut self,
-        value: Value,
-    ) -> Result<GcRef<PendingArrayToSorted>, ExecutionError> {
-        let raw = value
-            .as_heap_ref()
-            .ok_or(ExecutionError::MissingNativeContinuation)?;
-        self.heap
-            .checked_reference(raw, self.types.pending_array_to_sorted)
-            .map_err(|_| ExecutionError::MissingNativeContinuation)
-    }
-
-    /// Copies sort fields without retaining a managed borrow across safepoints.
-    fn array_to_sorted_snapshot(
-        &mut self,
-        state: GcRef<PendingArrayToSorted>,
-    ) -> Result<ArrayToSortedSnapshot, ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let pending = no_gc
-                    .borrow(state, self.types.pending_array_to_sorted)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                Ok(ArrayToSortedSnapshot {
-                    receiver: pending.receiver,
-                    result: pending.result,
-                    comparator: pending.comparator,
-                    left_value: pending.left_value,
-                    right_value: pending.right_value,
-                    left_string: pending.left_string,
-                    length: pending.length,
-                    cursor: pending.cursor,
-                    width: pending.width,
-                    merge_start: pending.merge_start,
-                    left: pending.left,
-                    left_end: pending.left_end,
-                    right: pending.right,
-                    right_end: pending.right_end,
-                    destination: pending.destination,
-                    active_merge: pending.active_merge,
-                })
-            })
-        })
-    }
-
-    /// Reads one source or scratch buffer slot under a no-GC borrow.
-    fn array_to_sorted_buffer_value(
-        &mut self,
-        state: GcRef<PendingArrayToSorted>,
-        scratch: bool,
-        index: u64,
-    ) -> Result<Value, ExecutionError> {
-        let index = usize::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let pending = no_gc
-                    .borrow(state, self.types.pending_array_to_sorted)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let buffer = if scratch {
-                    &pending.scratch
-                } else {
-                    &pending.values
-                };
-                buffer
-                    .get(index)
-                    .copied()
-                    .ok_or(ExecutionError::MissingNativeContinuation)
-            })
-        })
-    }
-
-    /// Updates one traced buffer slot and records the owner/value barrier.
-    fn set_array_to_sorted_buffer_value(
-        &mut self,
-        state: GcRef<PendingArrayToSorted>,
-        scratch: bool,
-        index: u64,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        let index = usize::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let pending = no_gc
-                    .borrow_mut(state, self.types.pending_array_to_sorted)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let buffer = if scratch {
-                    &mut pending.scratch
-                } else {
-                    &mut pending.values
-                };
-                *buffer
-                    .get_mut(index)
-                    .ok_or(ExecutionError::MissingNativeContinuation)? = value;
-                Ok::<(), ExecutionError>(())
-            })?;
-            scope
-                .write_value_barrier(state, value)
-                .map_err(ExecutionError::HeapReference)
-                .map(|_| ())
-        })
-    }
-
-    /// Updates one traced scalar edge and records its generational barrier.
-    fn set_array_to_sorted_value(
-        &mut self,
-        state: GcRef<PendingArrayToSorted>,
-        field: impl FnOnce(&mut PendingArrayToSorted) -> &mut Value,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let pending = no_gc
-                    .borrow_mut(state, self.types.pending_array_to_sorted)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                *field(pending) = value;
-                Ok::<(), ExecutionError>(())
-            })?;
-            scope
-                .write_value_barrier(state, value)
-                .map_err(ExecutionError::HeapReference)
-                .map(|_| ())
-        })
-    }
-
-    /// Updates merge cursors without requiring a write barrier.
-    fn update_array_to_sorted_scalars(
-        &mut self,
-        state: GcRef<PendingArrayToSorted>,
-        update: impl FnOnce(&mut PendingArrayToSorted),
-    ) -> Result<(), ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let pending = no_gc
-                    .borrow_mut(state, self.types.pending_array_to_sorted)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                update(pending);
-                Ok(())
-            })
-        })
+        self.set_array_to_sorted_value(state, |pending| &mut pending.retained, value)?;
+        self.root_array_to_sorted_state(site, state)?;
+        Ok(Some((state, value)))
     }
 }
 
