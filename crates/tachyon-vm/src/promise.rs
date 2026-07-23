@@ -808,6 +808,18 @@ impl Isolate {
                 ],
                 count: 3,
             })?;
+            if let Some(promise) =
+                self.promise_resolve_same_constructor(callback_result, constructor)?
+            {
+                return self.finish_promise_finally_resolved(
+                    NativeContinuation::promise_finally_resolve(
+                        site,
+                        Value::from_heap_ref(result_state.raw()),
+                    ),
+                    result_state,
+                    promise,
+                );
+            }
             let parent = NativeContinuation::promise_finally_resolve(
                 site,
                 Value::from_heap_ref(result_state.raw()),
@@ -873,6 +885,22 @@ impl Isolate {
         )?;
         self.begin_promise_finally_mapping(site, callback_promise, original, rejected)?;
         Ok(())
+    }
+
+    /// Implements the PromiseResolve same-constructor identity fast path for native Promises.
+    fn promise_resolve_same_constructor(
+        &mut self,
+        value: Value,
+        constructor: Value,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if !self.is_object_value(value) || self.promise_snapshot(value).is_err() {
+            return Ok(None);
+        }
+        let key = self.constructor_atom()?;
+        let observed = self.get_data_property(value, key)?;
+        Ok(observed
+            .filter(|observed| *observed == constructor)
+            .map(|_| value))
     }
 
     /// Attaches the final value/reason thunk after a custom PromiseResolve has produced its promise.

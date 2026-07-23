@@ -326,6 +326,39 @@ fn default_derived_constructor_forwards_complete_arguments() {
 }
 
 #[test]
+/// Reuses a same-constructor Promise returned by a custom-species finally callback.
+fn promise_finally_custom_same_constructor_chain_completes() {
+    let setup = compile_promise_fixture(
+        1_039,
+        "promise-finally-custom",
+        "class MyPromise extends Promise {} var mp1 = MyPromise.resolve({}); var mp2 = MyPromise.resolve(42); var done = 0; mp1.finally(function() { return mp2; }).then(function() { done = 1; }, function() { done = 2; });",
+    );
+    let probe = compile_promise_fixture(1_040, "promise-finally-custom", "done;");
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate.execute(
+            &setup,
+            ExecutionBudget {
+                fuel: 4096,
+                quantum: 4096
+            }
+        ),
+        Ok(RunOutcome::Completed(_))
+    ));
+    let outcome = isolate.execute(
+        &probe,
+        ExecutionBudget {
+            fuel: 256,
+            quantum: 256,
+        },
+    );
+    assert!(
+        matches!(outcome, Ok(RunOutcome::Completed(value)) if value.as_i32() == Some(1)),
+        "fast path: {outcome:?}"
+    );
+}
+
+#[test]
 /// Keeps sibling Promise chains in FIFO order while each handler appends another reaction.
 fn promise_checkpoint_preserves_sibling_chain_order() {
     let setup = compile_promise_fixture(
