@@ -11,6 +11,7 @@ const FILTER_RESULT: usize = 0;
 const FILTER_THIS_ARGUMENT: usize = 1;
 const FILTER_NEXT_INDEX: usize = 2;
 const FILTER_CONSTRUCTOR: usize = 3;
+const FILTER_PENDING_VALUE: usize = 4;
 const FILTER_STATE_COUNT: u8 = 3;
 
 struct ArrayForEachRoots<'a> {
@@ -208,6 +209,13 @@ impl Isolate {
             ArrayForEachStage::FilterConstruct => {
                 self.finish_array_filter_construct(site, state, value)
             }
+            ArrayForEachStage::FilterDefine => {
+                let filter = self
+                    .array_filter_state(state)?
+                    .ok_or(ExecutionError::MissingNativeContinuation)?;
+                self.finish_array_filter_append(filter)?;
+                self.advance_array_for_each(site, state)
+            }
             ArrayForEachStage::Has => {
                 self.write(
                     site.caller_base,
@@ -223,7 +231,9 @@ impl Isolate {
                     else {
                         return Ok(());
                     };
-                    self.select_array_filter_value(state, returned, element)?;
+                    if self.select_array_filter_value(site, state, returned, element)? {
+                        return Ok(());
+                    }
                 }
                 self.advance_array_for_each(site, state)
             }
@@ -231,11 +241,15 @@ impl Isolate {
                 let Some(returned) = self.call_array_for_each_callback(site, state, value)? else {
                     return Ok(());
                 };
-                self.select_array_filter_value(state, returned, value)?;
+                if self.select_array_filter_value(site, state, returned, value)? {
+                    return Ok(());
+                }
                 self.advance_array_for_each(site, state)
             }
             ArrayForEachStage::Callback => {
-                self.select_array_filter_value(state, value, retained)?;
+                if self.select_array_filter_value(site, state, value, retained)? {
+                    return Ok(());
+                }
                 self.advance_array_for_each(site, state)
             }
         }
@@ -287,11 +301,18 @@ impl Isolate {
         if constructor.as_immediate() == Some(Immediate::Undefined)
             || (from_species && constructor.as_immediate() == Some(Immediate::Null))
         {
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
             let prototype = self
                 .realm
                 .array_prototype
                 .expect("Array prototype initializes before filter");
             let result = self.create_array_object_with_prototype(prototype)?;
+            let rooted_state = self.read(site.caller_base, site.destination)?;
+            let state = self.native_call_state_reference(rooted_state)?;
             let filter = self
                 .array_filter_state(state)?
                 .ok_or(ExecutionError::MissingNativeContinuation)?;
@@ -307,14 +328,34 @@ impl Isolate {
             .ok_or(ExecutionError::MissingNativeContinuation)?;
         self.set_array_for_each_value(filter, FILTER_CONSTRUCTOR, constructor)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
-        let prefix =
-            self.create_apply_argument_prefix(constructor, undefined, vec![Value::from_i32(0)])?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
         self.push_array_for_each_parent(
             site,
             state,
             ArrayForEachStage::FilterConstruct,
             constructor,
         )?;
+        let rooted_state = self.read(site.caller_base, site.destination)?;
+        let state = self.native_call_state_reference(rooted_state)?;
+        let filter = self
+            .array_filter_state(state)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let constructor = self.native_call_state_snapshot(filter)?.values[FILTER_CONSTRUCTOR];
+        let prefix = match self.create_apply_argument_prefix(
+            constructor,
+            undefined,
+            vec![Value::from_i32(0)],
+        ) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+        };
         let frame_depth = self.fiber.frames.len();
         if let Err(error) = self.construct_site(CallSite {
             caller_base: site.caller_base,
@@ -409,7 +450,9 @@ impl Isolate {
             let Some(returned) = self.call_array_for_each_callback(site, state, element)? else {
                 return Ok(());
             };
-            self.select_array_filter_value(state, returned, element)?;
+            if self.select_array_filter_value(site, state, returned, element)? {
+                return Ok(());
+            }
         }
     }
 
@@ -683,47 +726,103 @@ impl Isolate {
         Ok((snapshot.count == FILTER_STATE_COUNT).then_some(filter))
     }
 
-    /// Appends a selected value to the filter result with one indexed write and length update.
+    /// Appends a selected value, suspending around a Proxy [[DefineOwnProperty]] trap.
     fn append_array_filter_value(
         &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
         filter: GcRef<NativeCallState>,
         value: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<bool, ExecutionError> {
+        // Keep the iteration state and selected element in VM-visible roots before atom creation.
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.set_array_for_each_value(filter, FILTER_PENDING_VALUE, value)?;
         let index = exact_nonnegative_integer(
             self.native_call_state_snapshot(filter)?.values[FILTER_NEXT_INDEX],
         )?;
         let key = self.safe_integer_property_atom(index)?;
-        let result = self.native_call_state_snapshot(filter)?.values[FILTER_RESULT];
-        self.define_data_property(
-            result,
-            key,
-            DataPropertyDescriptor {
-                value: Some(value),
-                writable: Some(true),
-                enumerable: Some(true),
-                configurable: Some(true),
-            },
-        )?;
-        if self.is_array_value(result)? {
-            let length = self.length_atom()?;
-            self.set_own_data_property(result, length, safe_integer_value(index + 1))?;
+        let rooted_state = self.read(site.caller_base, site.destination)?;
+        let state = self.native_call_state_reference(rooted_state)?;
+        let filter = self
+            .array_filter_state(state)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let pending = self.native_call_state_snapshot(filter)?;
+        let result = pending.values[FILTER_RESULT];
+        let value = pending.values[FILTER_PENDING_VALUE];
+        let descriptor = DataPropertyDescriptor {
+            value: Some(value),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
+        };
+        if self.is_proxy_value(result) {
+            self.push_array_for_each_parent(site, state, ArrayForEachStage::FilterDefine, result)?;
+            let frame_depth = self.fiber.frames.len();
+            if let Err(error) = self.dispatch_proxy_define(
+                site,
+                result,
+                key.into(),
+                descriptor.into(),
+                ProxyDefineMode::Object,
+            ) {
+                self.pop_native_continuation()?;
+                return Err(error);
+            }
+            if self.fiber.frames.len() != frame_depth {
+                return Ok(true);
+            }
+            let continuation = self.pop_native_continuation()?;
+            if continuation.kind()
+                != NativeContinuationKind::ArrayForEach(ArrayForEachStage::FilterDefine)
+            {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            let state = self.native_call_state_reference(continuation.first())?;
+            let filter = self
+                .array_filter_state(state)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            self.finish_array_filter_append(filter)?;
+            return Ok(false);
         }
+        self.define_data_property(result, key, descriptor)?;
+        let rooted_state = self.read(site.caller_base, site.destination)?;
+        let state = self.native_call_state_reference(rooted_state)?;
+        let filter = self
+            .array_filter_state(state)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.finish_array_filter_append(filter)?;
+        Ok(false)
+    }
+
+    /// Advances the dense filter output cursor only after CreateDataPropertyOrThrow succeeds.
+    fn finish_array_filter_append(
+        &mut self,
+        filter: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let index = exact_nonnegative_integer(
+            self.native_call_state_snapshot(filter)?.values[FILTER_NEXT_INDEX],
+        )?;
         self.set_array_for_each_number(filter, FILTER_NEXT_INDEX, index + 1)
     }
 
     /// Appends the retained element when a filter callback completed truthily.
     fn select_array_filter_value(
         &mut self,
+        site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
         returned: Value,
         element: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<bool, ExecutionError> {
         if let Some(filter) = self.array_filter_state(state)?
             && self.is_truthy_value(returned)?
         {
-            self.append_array_filter_value(filter, element)?;
+            return self.append_array_filter_value(site, state, filter, element);
         }
-        Ok(())
+        Ok(false)
     }
 }
 

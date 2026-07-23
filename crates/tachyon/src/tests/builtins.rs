@@ -804,6 +804,30 @@ fn array_filter_runs_resumable_callback_iteration() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            1_147,
+            "var target = {}; var trace = ''; var resultProxy = new Proxy(target, { defineProperty: function(object, key, descriptor) { trace += key + descriptor.value; if (!descriptor.writable || !descriptor.enumerable || !descriptor.configurable) throw 91; Object.defineProperty(object, key, descriptor); return true; } }); var source = [4, 7]; source.constructor = {}; source.constructor[Symbol.species] = function() { return resultProxy; }; var result = source.filter(function() { return true; }); result === resultProxy && trace === '0417' && result[0] === 4 && result[1] === 7;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            1_148,
+            "var falseProxy = new Proxy({}, { defineProperty: function() { return false; } }); var falseSource = [1]; falseSource.constructor = {}; falseSource.constructor[Symbol.species] = function() { return falseProxy; }; var rejected = false; try { falseSource.filter(function() { return true; }); } catch (error) { rejected = error instanceof TypeError; } var marker = {}; var throwProxy = new Proxy({}, { defineProperty: function() { throw marker; } }); var throwSource = [2]; throwSource.constructor = {}; throwSource.constructor[Symbol.species] = function() { return throwProxy; }; var propagated = false; try { throwSource.filter(function() { return true; }); } catch (error) { propagated = error === marker; } rejected && propagated;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            1_149,
+            "var target = {}; var calls = 0; var inner = new Proxy(target, { defineProperty: function(object, key, descriptor) { calls += 1; Object.defineProperty(object, key, descriptor); return true; } }); var outer = new Proxy(inner, {}); var source = [8]; source.constructor = {}; source.constructor[Symbol.species] = function() { return outer; }; var result = source.filter(function() { return true; }); result === outer && calls === 1 && target[0] === 8;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
 
 #[test]

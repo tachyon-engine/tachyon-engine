@@ -485,6 +485,7 @@ pub(crate) enum ArrayForEachStage {
     FilterConstructor,
     FilterSpecies,
     FilterConstruct,
+    FilterDefine,
     Has,
     Get,
     Callback,
