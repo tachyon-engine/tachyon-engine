@@ -43,6 +43,54 @@ impl DateUtcField {
     }
 }
 
+/// UTC Date setters sharing the same field normalization implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DateUtcSetter {
+    FullYear,
+    Month,
+    Date,
+    Hours,
+    Minutes,
+    Seconds,
+    Milliseconds,
+}
+
+impl DateUtcSetter {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::FullYear,
+        Self::Month,
+        Self::Date,
+        Self::Hours,
+        Self::Minutes,
+        Self::Seconds,
+        Self::Milliseconds,
+    ];
+
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::FullYear => "setUTCFullYear",
+            Self::Month => "setUTCMonth",
+            Self::Date => "setUTCDate",
+            Self::Hours => "setUTCHours",
+            Self::Minutes => "setUTCMinutes",
+            Self::Seconds => "setUTCSeconds",
+            Self::Milliseconds => "setUTCMilliseconds",
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::FullYear | Self::Minutes => 3,
+            Self::Month | Self::Seconds => 2,
+            Self::Date | Self::Milliseconds => 1,
+            Self::Hours => 4,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 #[cfg_attr(
@@ -161,6 +209,7 @@ pub(crate) enum NativeFunction {
     DateSetTime,
     DateValueOf,
     DateUtcGetter(DateUtcField),
+    DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
@@ -608,6 +657,7 @@ impl NativeFunction {
         }
         match self {
             Self::DateConstructor | Self::DateUtc => 7,
+            Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
             Self::ObjectFromEntries => 1,
@@ -948,6 +998,7 @@ impl NativeFunction {
             Self::DateSetTime => "setTime",
             Self::DateValueOf => "valueOf",
             Self::DateUtcGetter(field) => field.name(),
+            Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",

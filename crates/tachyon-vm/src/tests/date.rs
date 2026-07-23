@@ -9,6 +9,7 @@ var positive = new Date(1.9);
 var negative = new Date(-1.9);
 var invalid = new Date(Infinity);
 var utc = new Date(Date.UTC(2000, 1, 29, 23, 58, 57, 456));
+var setters = new Date(0);
 var brandThrows = false;
 try { Date.prototype.getTime.call({}); } catch (error) {
   brandThrows = error instanceof TypeError;
@@ -26,6 +27,14 @@ utc.setTime(-1) === -1 && utc.getUTCFullYear() === 1969 &&
 utc.getUTCMonth() === 11 && utc.getUTCDate() === 31 &&
 utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59 &&
 utc.getUTCSeconds() === 59 && utc.getUTCMilliseconds() === 999 &&
+setters.setUTCFullYear(2000) === Date.UTC(2000, 0, 1) &&
+setters.setUTCMonth(1, 29) === Date.UTC(2000, 1, 29) &&
+setters.setUTCDate(1) === Date.UTC(2000, 1, 1) &&
+setters.setUTCHours(23, 58, 57, 456) === Date.UTC(2000, 1, 1, 23, 58, 57, 456) &&
+setters.setUTCMinutes(0, 1, 2) === Date.UTC(2000, 1, 1, 23, 0, 1, 2) &&
+setters.setUTCSeconds(3, 4) === Date.UTC(2000, 1, 1, 23, 0, 3, 4) &&
+setters.setUTCMilliseconds(5) === Date.UTC(2000, 1, 1, 23, 0, 3, 5) &&
+invalid.setUTCFullYear(2001) === Date.UTC(2001, 0, 1) &&
 Object.prototype.toString.call(positive) === "[object Date]" &&
 Date.name === "Date" && Date.length === 7 &&
 Date.prototype.constructor === Date && brandThrows;

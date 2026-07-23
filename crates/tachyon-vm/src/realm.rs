@@ -791,6 +791,11 @@ impl Isolate {
             let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;
             self.set_intrinsic_data_property(prototype, atom, getter, true)?;
         }
+        for setter in DateUtcSetter::ALL {
+            let atom = self.intern_intrinsic_name(setter.name().as_bytes())?;
+            let function = allocate(self, NativeFunction::DateUtcSetter(setter))?;
+            self.set_intrinsic_data_property(prototype, atom, function, true)?;
+        }
         Ok(())
     }
 

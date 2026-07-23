@@ -125,6 +125,57 @@ impl Isolate {
         Ok(Value::from_f64(clipped))
     }
 
+    /// Applies one UTC setter after preserving its ordered argument conversion contract.
+    pub(crate) fn date_utc_setter_from_site(
+        &mut self,
+        site: &CallSite,
+        setter: DateUtcSetter,
+    ) -> Result<Value, ExecutionError> {
+        let original = self
+            .date_time_value(site.this_value)?
+            .ok_or(ExecutionError::NotObject(site.this_value))?;
+        let arguments = self.date_setter_arguments(site, setter.length() as u32)?;
+        let base_time = if original.is_nan() {
+            if setter == DateUtcSetter::FullYear {
+                0
+            } else {
+                self.set_date_time_value(site.this_value, f64::NAN)?;
+                return Ok(Value::from_f64(f64::NAN));
+            }
+        } else {
+            original as i64
+        };
+        let mut fields = UtcDateParts::from_time(base_time).make_date_fields();
+        apply_utc_setter(&mut fields, setter, arguments);
+        let date_value = make_utc_date(fields);
+        self.set_date_time_value(site.this_value, date_value)?;
+        Ok(Value::from_f64(date_value))
+    }
+
+    /// Converts only supplied setter arguments and leaves optional defaults distinguishable.
+    fn date_setter_arguments(
+        &mut self,
+        site: &CallSite,
+        maximum: u32,
+    ) -> Result<[Option<f64>; 4], ExecutionError> {
+        let mut arguments = [None; 4];
+        for index in 0..site.argument_count.min(maximum) {
+            let argument = self
+                .call_argument(site, index)?
+                .expect("Date setter argument remains inside the call window");
+            let converted = self.convert_to_number(argument)?;
+            arguments[index as usize] = Some(
+                numeric_value(converted)
+                    .ok_or(ExecutionError::UnsupportedNumberConversion(argument))?
+                    .trunc(),
+            );
+        }
+        if arguments[0].is_none() {
+            arguments[0] = Some(f64::NAN);
+        }
+        Ok(arguments)
+    }
+
     /// Reads `[[DateValue]]` only from a genuine Date payload.
     pub(crate) fn date_time_value(&mut self, value: Value) -> Result<Option<f64>, ExecutionError> {
         let Some(raw) = value.as_heap_ref() else {
@@ -198,6 +249,38 @@ impl UtcDateParts {
             seconds: (within_day / MS_PER_SECOND) % 60,
             milliseconds: within_day % MS_PER_SECOND,
         }
+    }
+
+    #[inline(always)]
+    fn make_date_fields(self) -> [f64; 7] {
+        [
+            self.year as f64,
+            self.month as f64,
+            self.date as f64,
+            self.hours as f64,
+            self.minutes as f64,
+            self.seconds as f64,
+            self.milliseconds as f64,
+        ]
+    }
+}
+
+/// Replaces the contiguous MakeDate fields controlled by one UTC setter.
+fn apply_utc_setter(fields: &mut [f64; 7], setter: DateUtcSetter, arguments: [Option<f64>; 4]) {
+    let start = match setter {
+        DateUtcSetter::FullYear => 0,
+        DateUtcSetter::Month => 1,
+        DateUtcSetter::Date => 2,
+        DateUtcSetter::Hours => 3,
+        DateUtcSetter::Minutes => 4,
+        DateUtcSetter::Seconds => 5,
+        DateUtcSetter::Milliseconds => 6,
+    };
+    for (offset, argument) in arguments.into_iter().enumerate() {
+        let Some(argument) = argument else {
+            break;
+        };
+        fields[start + offset] = argument;
     }
 }
 

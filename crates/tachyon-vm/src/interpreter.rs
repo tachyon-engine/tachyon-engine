@@ -5164,6 +5164,10 @@ impl Isolate {
                     let value = self.date_utc_field_value(site.this_value, field)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::DateUtcSetter(setter)) => {
+                    let value = self.date_utc_setter_from_site(&site, setter)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpExec) => {
                     let result = self.regexp_exec(&site)?;
                     return self.write(site.caller_base, site.destination, result);
