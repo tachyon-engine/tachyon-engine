@@ -6213,6 +6213,15 @@ impl Isolate {
             None
         };
         let arguments = self.allocate_arguments_object(mapped)?;
+        if let Some(values) = mapped_values.as_ref() {
+            for (index, value) in values.iter().copied().enumerate() {
+                self.write(
+                    frame.base,
+                    u32::try_from(index).map_err(|_| ExecutionError::RegisterAllocationFailed)?,
+                    value,
+                )?;
+            }
+        }
         let site = CallSite {
             caller_base: frame.base,
             destination: 0,

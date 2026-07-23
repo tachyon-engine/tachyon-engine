@@ -113,6 +113,30 @@ impl Isolate {
         Ok(Some((frame, index)))
     }
 
+    /// Reads a mapped parameter while its owner activation is still present on the fiber.
+    fn mapped_argument_value(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let Some((frame, index)) = self.mapped_argument_frame(target, key)? else {
+            return Ok(None);
+        };
+        let (_, snapshot) = self.object_snapshot(target)?;
+        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
+            return Ok(None);
+        };
+        if !property.attributes.writable()
+            || !matches!(
+                self.stored_property_from_snapshot(snapshot, property)?,
+                Some(StoredProperty::Data(_))
+            )
+        {
+            return Ok(None);
+        }
+        self.read(frame.base, index).map(Some)
+    }
+
     /// Publishes an arguments-index write back to the owning simple parameter register.
     pub(crate) fn sync_mapped_argument(
         &mut self,
@@ -230,6 +254,9 @@ impl Isolate {
         target: Value,
         key: PropertyKey,
     ) -> Result<PropertyReadResolution, ExecutionError> {
+        if let Some(value) = self.mapped_argument_value(target, key)? {
+            return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
+        }
         if let Some(raw) = target.as_heap_ref()
             && self
                 .heap

@@ -172,6 +172,11 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        if let PropertyDescriptor::Data(data) = &descriptor
+            && let Some(value) = data.value
+        {
+            self.sync_mapped_argument(receiver, key, value)?;
+        }
         if let PropertyDescriptor::Accessor(accessor) = descriptor {
             if let Some(getter) = accessor.getter {
                 self.validate_accessor_callable(getter)?;
