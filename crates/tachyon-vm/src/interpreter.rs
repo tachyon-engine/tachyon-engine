@@ -3280,6 +3280,7 @@ impl Isolate {
         self.fiber.frames.clear();
         self.fiber.argument_objects.clear();
         self.fiber.argument_sources.clear();
+        self.fiber.argument_callees.clear();
         self.fiber.derived_activations.clear();
         self.fiber.base_class_activations.clear();
         self.fiber.class_environments.clear();
@@ -3325,6 +3326,7 @@ impl Isolate {
         });
         self.fiber.argument_objects.push(None);
         self.fiber.argument_sources.push(None);
+        self.fiber.argument_callees.push(None);
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
@@ -4618,6 +4620,11 @@ impl Isolate {
             .argument_sources
             .last_mut()
             .expect("tail replacement retains its argument source") = None;
+        *self
+            .fiber
+            .argument_callees
+            .last_mut()
+            .expect("tail replacement retains its callee cache") = Some(site.callee);
         *self
             .fiber
             .frames
@@ -6253,11 +6260,31 @@ impl Isolate {
             self.set_own_data_property(arguments, key, value)?;
         }
         let length = self.length_atom()?;
-        self.set_own_data_property(
+        self.define_data_property(
             arguments,
             length,
-            safe_integer_value(u64::from(site.argument_count)),
+            DataPropertyDescriptor {
+                value: Some(safe_integer_value(u64::from(site.argument_count))),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
         )?;
+        if frame.strictness == FunctionStrictness::Sloppy
+            && let Some(callee) = self.fiber.argument_callees.last().copied().flatten()
+        {
+            let callee_atom = self.intern_intrinsic_name(b"callee")?;
+            self.define_data_property(
+                arguments,
+                callee_atom,
+                DataPropertyDescriptor {
+                    value: Some(callee),
+                    writable: Some(true),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
+            )?;
+        }
         if let (Some(iterator), Some(values)) = (
             self.realm.well_known_symbols.iterator,
             self.realm.array_values,
@@ -6395,6 +6422,7 @@ impl Isolate {
         });
         self.fiber.argument_objects.push(None);
         self.fiber.argument_sources.push(site.argument_source);
+        self.fiber.argument_callees.push(Some(site.callee));
         if target.kind == FunctionKind::DerivedClassConstructor {
             self.fiber.derived_activations.push(ClassActivation {
                 frame_depth: self.fiber.frames.len() as u32,
@@ -6426,6 +6454,7 @@ impl Isolate {
             self.discard_exited_class_environments();
             self.fiber.argument_objects.pop();
             self.fiber.argument_sources.pop();
+            self.fiber.argument_callees.pop();
             if self
                 .fiber
                 .derived_activations
@@ -6515,6 +6544,10 @@ impl Isolate {
             .argument_sources
             .pop()
             .expect("argument sources stay aligned with active frames");
+        self.fiber
+            .argument_callees
+            .pop()
+            .expect("argument callees stay aligned with active frames");
         if derived {
             self.fiber.derived_activations.pop();
         }
@@ -6893,6 +6926,10 @@ impl Isolate {
                 .argument_sources
                 .pop()
                 .expect("argument sources stay aligned with abrupt frame unwinding");
+            self.fiber
+                .argument_callees
+                .pop()
+                .expect("argument callees stay aligned with abrupt frame unwinding");
             if self
                 .fiber
                 .derived_activations

@@ -1520,6 +1520,8 @@ pub(crate) struct Fiber {
     pub(crate) argument_objects: Vec<Option<Value>>,
     /// Activation-aligned roots for native-owned argument suffixes; keeps the hot Frame at 104B.
     pub(crate) argument_sources: Vec<Option<GcRef<NativeCallState>>>,
+    /// Activation-aligned callable roots for lazy sloppy `arguments.callee` publication.
+    pub(crate) argument_callees: Vec<Option<Value>>,
     /// Only derived constructors enter this stack, preserving the ordinary call hot path.
     pub(crate) derived_activations: Vec<ClassActivation>,
     /// Only base class constructors enter this stack; ordinary functions never pay its cost.
@@ -1543,11 +1545,13 @@ impl Fiber {
         self.registers.trace(tracer);
         self.argument_objects.trace(tracer);
         self.argument_sources.trace(tracer);
+        self.argument_callees.trace(tracer);
         self.derived_activations.trace(tracer);
         self.base_class_activations.trace(tracer);
         self.eval_var_environments.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         debug_assert_eq!(self.argument_sources.len(), self.frames.len());
+        debug_assert_eq!(self.argument_callees.len(), self.frames.len());
         debug_assert!(self.derived_activations.iter().all(|activation| {
             activation.frame_depth != 0 && activation.frame_depth as usize <= self.frames.len()
         }));
