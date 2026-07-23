@@ -2131,6 +2131,7 @@ impl Isolate {
             NativeContinuationKind::PromiseFinally => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseFinallyMethod(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4884,8 +4885,8 @@ impl Isolate {
                 FunctionExecutable::PromiseCapabilityExecutor(capability) => {
                     return self.call_promise_capability_executor(&site, capability);
                 }
-                FunctionExecutable::PromiseFinallyHandler { callback, rejected } => {
-                    let _rejected = rejected;
+                FunctionExecutable::PromiseFinallyHandler { state, .. } => {
+                    let callback = self.native_call_state_snapshot(state)?.values[0];
                     let original = self
                         .call_argument(&site, 0)?
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -4899,8 +4900,8 @@ impl Isolate {
                         .completions
                         .push_native(NativeContinuation::promise_finally(
                             continuation_site,
+                            site.callee,
                             original,
-                            rejected,
                         ))
                         .map_err(Isolate::completion_stack_error)?;
                     let frame_depth = self.fiber.frames.len();
@@ -4937,7 +4938,8 @@ impl Isolate {
                     }
                     return self.write(site.caller_base, site.destination, original);
                 }
-                FunctionExecutable::PromiseFinallyResultHandler { value, rejected } => {
+                FunctionExecutable::PromiseFinallyResultHandler { state, rejected } => {
+                    let value = self.native_call_state_snapshot(state)?.values[0];
                     if rejected {
                         return Err(ExecutionError::HostThrown(value));
                     }
@@ -6862,6 +6864,10 @@ impl Isolate {
                 }
                 NativeContinuationKind::PromiseFinally => {
                     self.finish_promise_finally_callback(continuation, value)
+                }
+                NativeContinuationKind::PromiseFinallyMethod(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_promise_finally_method(site, state, stage, value)
                 }
                 NativeContinuationKind::PromiseStaticResolve(stage) => {
                     self.resume_generic_promise_resolve(continuation, stage, value)

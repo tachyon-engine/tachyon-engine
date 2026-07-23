@@ -2,6 +2,12 @@
 
 use super::*;
 
+const FIN_SOURCE: usize = 0;
+const FIN_CALLBACK: usize = 1;
+const FIN_FULFILLED: usize = 2;
+const FIN_REJECTED: usize = 3;
+const FIN_CONSTRUCTOR: usize = 4;
+
 impl Isolate {
     /// Allocates one Promise with its state/result initialized before publication.
     pub(crate) fn create_promise(
@@ -536,17 +542,218 @@ impl Isolate {
     /// The wrapper invokes the user callback and restores the original settlement argument;
     /// callback-returned thenables are handled by the follow-up resolution continuation.
     pub(crate) fn promise_finally(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
-        self.promise_snapshot(site.this_value)?;
+        if !self.is_object_value(site.this_value) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
         let callback = self
             .call_argument(site, 0)?
-            .filter(|value| self.resolve_function_object(*value).is_ok());
-        let Some(callback) = callback else {
-            self.begin_promise_then(site)?;
-            return Ok(());
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_promise_then_state(NativeCallState {
+            values: [site.this_value, callback, undefined, undefined, undefined],
+            count: 2,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
         };
-        let on_fulfilled = self.allocate_promise_finally_handler(callback, false)?;
-        let on_rejected = self.allocate_promise_finally_handler(callback, true)?;
-        self.begin_promise_then_with_callbacks(site, Some(on_fulfilled), Some(on_rejected))?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let constructor = self.constructor_atom()?;
+        self.dispatch_promise_finally_get(
+            continuation_site,
+            state,
+            PromiseFinallyMethodStage::Constructor,
+            site.this_value,
+            constructor.into(),
+        )
+    }
+
+    /// Resumes the observable SpeciesConstructor and `then` lookup for finally.
+    pub(crate) fn resume_promise_finally_method(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: PromiseFinallyMethodStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let pending = self.native_call_state_snapshot(state)?;
+        match stage {
+            PromiseFinallyMethodStage::Constructor => {
+                let constructor = if value.as_immediate() == Some(Immediate::Undefined) {
+                    self.realm
+                        .promise_constructor
+                        .expect("Promise initializes before finally")
+                } else {
+                    if !self.is_object_value(value) {
+                        return Err(ExecutionError::NotObject(value));
+                    }
+                    value
+                };
+                self.set_promise_then_value(state, FIN_CONSTRUCTOR, constructor)?;
+                let species = self
+                    .realm
+                    .well_known_symbols
+                    .species
+                    .expect("Symbol.species initializes before Promise");
+                let species_key = self.property_key(species)?;
+                self.dispatch_promise_finally_get(
+                    site,
+                    state,
+                    PromiseFinallyMethodStage::Species,
+                    constructor,
+                    species_key,
+                )
+            }
+            PromiseFinallyMethodStage::Species => {
+                let intrinsic = self
+                    .realm
+                    .promise_constructor
+                    .expect("Promise initializes before finally");
+                let constructor = if matches!(
+                    value.as_immediate(),
+                    Some(Immediate::Undefined | Immediate::Null)
+                ) {
+                    intrinsic
+                } else {
+                    if self.resolve_function_object(value).is_err() {
+                        return Err(ExecutionError::NonConstructor(value));
+                    }
+                    value
+                };
+                let callback = pending.values[FIN_CALLBACK];
+                let callable = self.resolve_function_object(callback).is_ok();
+                let (on_fulfilled, on_rejected) = if callable {
+                    (
+                        self.allocate_promise_finally_handler(callback, constructor, false)?,
+                        self.allocate_promise_finally_handler(callback, constructor, true)?,
+                    )
+                } else {
+                    (callback, callback)
+                };
+                self.set_promise_then_value(state, FIN_FULFILLED, on_fulfilled)?;
+                self.set_promise_then_value(state, FIN_REJECTED, on_rejected)?;
+                let then_atom = self.intern_intrinsic_name(b"then")?;
+                self.dispatch_promise_finally_get(
+                    site,
+                    state,
+                    PromiseFinallyMethodStage::Then,
+                    pending.values[FIN_SOURCE],
+                    then_atom.into(),
+                )
+            }
+            PromiseFinallyMethodStage::Then => {
+                self.resolve_function_object(value)
+                    .map_err(|_| ExecutionError::NonCallable(value))?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let arguments = self.allocate_promise_then_state(NativeCallState {
+                    values: [
+                        pending.values[FIN_FULFILLED],
+                        pending.values[FIN_REJECTED],
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                    ],
+                    count: 2,
+                })?;
+                let continuation = NativeContinuation::promise_finally_method(
+                    site,
+                    PromiseFinallyMethodStage::ThenCall,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                );
+                let completion_depth = self.fiber.completions.len();
+                self.fiber
+                    .completions
+                    .push_native(continuation)
+                    .map_err(Isolate::completion_stack_error)?;
+                let frame_depth = self.fiber.frames.len();
+                if let Err(error) = self.call(CallSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    callee: value,
+                    argument_base: 0,
+                    argument_source: Some(arguments),
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
+                    argument_count: 2,
+                    this_value: pending.values[FIN_SOURCE],
+                    new_target: Value::from_immediate(Immediate::Undefined),
+                    construct_receiver: None,
+                    call_site: site.call_site,
+                }) {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+                if self.fiber.frames.len() != frame_depth {
+                    let frame = self
+                        .fiber
+                        .frames
+                        .last_mut()
+                        .expect("finally then call publishes one frame");
+                    frame.return_register = None;
+                    frame.return_continuation = true;
+                } else if self.fiber.completions.len() == completion_depth + 1 {
+                    self.pop_native_continuation()?;
+                    let result = self.read(site.caller_base, site.destination)?;
+                    self.write(site.caller_base, site.destination, result)?;
+                } else {
+                    return Ok(());
+                }
+                Ok(())
+            }
+            PromiseFinallyMethodStage::ThenCall => {
+                self.write(site.caller_base, site.destination, value)
+            }
+        }
+    }
+
+    /// Wraps an observable property read with a finally method continuation.
+    fn dispatch_promise_finally_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: PromiseFinallyMethodStage,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::promise_finally_method(
+                site,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                receiver,
+            ))
+            .map_err(Isolate::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, receiver, receiver, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_promise_finally_method(site, state, stage, value)?;
+        let _ = continuation;
         Ok(())
     }
 
@@ -557,8 +764,15 @@ impl Isolate {
         callback_result: Value,
     ) -> Result<(), ExecutionError> {
         let site = continuation.site();
-        let original = continuation.first();
-        let rejected = continuation.second().as_immediate() == Some(Immediate::True);
+        let original = continuation.second();
+        let function = self.resolve_function_object(continuation.first())?;
+        let FunctionExecutable::PromiseFinallyHandler {
+            state, rejected, ..
+        } = function.executable
+        else {
+            return Err(ExecutionError::NonCallable(continuation.first()));
+        };
+        let _constructor = self.native_call_state_snapshot(state)?.values[1];
         let callback_promise = self.create_promise(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),

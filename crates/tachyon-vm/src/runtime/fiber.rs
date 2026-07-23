@@ -451,6 +451,16 @@ pub(crate) enum PromiseThenStage {
     Capability,
 }
 
+/// Observable stages of Promise.prototype.finally before it invokes `then`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PromiseFinallyMethodStage {
+    Constructor,
+    Species,
+    Then,
+    ThenCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum PromiseStaticResolveStage {
@@ -713,6 +723,7 @@ pub(crate) enum NativeContinuationKind {
     PromiseThen(PromiseThenStage),
     /// Resumes a finally reaction after its user callback returns.
     PromiseFinally,
+    PromiseFinallyMethod(PromiseFinallyMethodStage),
     PromiseStaticResolve(PromiseStaticResolveStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
@@ -1184,18 +1195,30 @@ impl NativeContinuation {
     #[inline]
     pub(crate) const fn promise_finally(
         site: NativeContinuationSite,
+        handler: Value,
         original: Value,
-        rejected: bool,
     ) -> Self {
         Self {
             site,
             kind: NativeContinuationKind::PromiseFinally,
-            first: original,
-            second: Value::from_immediate(if rejected {
-                Immediate::True
-            } else {
-                Immediate::False
-            }),
+            first: handler,
+            second: original,
+        }
+    }
+
+    /// Roots finally's source/callback state across constructor, species, and `then` lookups.
+    #[inline]
+    pub(crate) const fn promise_finally_method(
+        site: NativeContinuationSite,
+        stage: PromiseFinallyMethodStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseFinallyMethod(stage),
+            first: state,
+            second: retained,
         }
     }
 

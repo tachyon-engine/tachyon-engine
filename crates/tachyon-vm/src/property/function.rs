@@ -201,7 +201,7 @@ impl Isolate {
             }
             FunctionExecutable::PromiseFinallyHandler { .. } => {
                 if key == self.length_atom()? {
-                    return Ok(Some(Value::from_i32(0)));
+                    return Ok(Some(Value::from_i32(1)));
                 }
                 if key != self.name_atom()? {
                     return Ok(None);

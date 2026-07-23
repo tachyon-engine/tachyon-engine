@@ -1175,12 +1175,12 @@ pub(crate) enum FunctionExecutable {
     PromiseCapabilityExecutor(GcRef<PromiseCapability>),
     /// Reaction wrapper used by Promise.prototype.finally.
     PromiseFinallyHandler {
-        callback: Value,
+        state: GcRef<NativeCallState>,
         rejected: bool,
     },
     /// Continuation callback that restores or rethrows the original finally argument.
     PromiseFinallyResultHandler {
-        value: Value,
+        state: GcRef<NativeCallState>,
         rejected: bool,
     },
 }
@@ -1397,12 +1397,12 @@ impl Trace for FunctionObject {
         if let FunctionExecutable::PromiseCapabilityExecutor(capability) = &mut self.executable {
             capability.trace(tracer);
         }
-        if let FunctionExecutable::PromiseFinallyHandler { callback, .. } = &mut self.executable {
-            callback.trace(tracer);
+        if let FunctionExecutable::PromiseFinallyHandler { state, .. } = &mut self.executable {
+            state.trace(tracer);
         }
-        if let FunctionExecutable::PromiseFinallyResultHandler { value, .. } = &mut self.executable
+        if let FunctionExecutable::PromiseFinallyResultHandler { state, .. } = &mut self.executable
         {
-            value.trace(tracer);
+            state.trace(tracer);
         }
         self.prototype_or_home_object.trace(tracer);
         self.ordinary.trace(tracer);

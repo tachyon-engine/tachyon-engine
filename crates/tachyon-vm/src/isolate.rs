@@ -4,19 +4,6 @@ use core::mem;
 
 use super::*;
 
-struct PromiseFinallyRoots<'a> {
-    vm: VmRoots<'a>,
-    captured: Value,
-}
-
-impl Trace for PromiseFinallyRoots<'_> {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.vm.trace(tracer);
-        self.captured.trace(tracer);
-    }
-}
-
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
     prototype: Value,
@@ -604,21 +591,29 @@ impl Isolate {
     pub(crate) fn allocate_promise_finally_handler(
         &mut self,
         callback: Value,
+        constructor: Value,
         rejected: bool,
     ) -> Result<Value, ExecutionError> {
         let function_prototype = self
             .realm
             .function_prototype
             .expect("Function prototype initializes before Promise.finally");
-        let mut roots = PromiseFinallyRoots {
-            vm: VmRoots {
-                fiber: &mut self.fiber,
-                finalization_jobs: &mut self.finalization_jobs,
-                promise_jobs: &mut self.promise_jobs,
-                realm: &mut self.realm,
-                loaded_code: &mut self.loaded_code,
-            },
-            captured: callback,
+        let state = self.allocate_promise_then_state(NativeCallState {
+            values: [
+                callback,
+                constructor,
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+            ],
+            count: 2,
+        })?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
         };
         self.heap
             .try_allocate_with_gc(
@@ -626,10 +621,7 @@ impl Isolate {
                 0,
                 0,
                 FunctionObject {
-                    executable: FunctionExecutable::PromiseFinallyHandler {
-                        callback: roots.captured,
-                        rejected,
-                    },
+                    executable: FunctionExecutable::PromiseFinallyHandler { state, rejected },
                     prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
@@ -639,7 +631,7 @@ impl Isolate {
                     },
                 },
                 AllocationSpace::Young,
-                &mut roots,
+                roots,
             )
             .map(|function| Value::from_heap_ref(function.raw()))
             .map_err(ExecutionError::HeapAllocation)
@@ -655,15 +647,22 @@ impl Isolate {
             .realm
             .function_prototype
             .expect("Function prototype initializes before Promise.finally");
-        let mut roots = PromiseFinallyRoots {
-            vm: VmRoots {
-                fiber: &mut self.fiber,
-                finalization_jobs: &mut self.finalization_jobs,
-                promise_jobs: &mut self.promise_jobs,
-                realm: &mut self.realm,
-                loaded_code: &mut self.loaded_code,
-            },
-            captured: value,
+        let state = self.allocate_promise_then_state(NativeCallState {
+            values: [
+                value,
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+            ],
+            count: 1,
+        })?;
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
         };
         self.heap
             .try_allocate_with_gc(
@@ -671,10 +670,7 @@ impl Isolate {
                 0,
                 0,
                 FunctionObject {
-                    executable: FunctionExecutable::PromiseFinallyResultHandler {
-                        value: roots.captured,
-                        rejected,
-                    },
+                    executable: FunctionExecutable::PromiseFinallyResultHandler { state, rejected },
                     prototype_or_home_object: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
@@ -684,7 +680,7 @@ impl Isolate {
                     },
                 },
                 AllocationSpace::Young,
-                &mut roots,
+                roots,
             )
             .map(|function| Value::from_heap_ref(function.raw()))
             .map_err(ExecutionError::HeapAllocation)

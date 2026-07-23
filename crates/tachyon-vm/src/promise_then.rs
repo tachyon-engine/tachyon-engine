@@ -276,7 +276,7 @@ impl Isolate {
     }
 
     /// Allocates the fixed source/handlers/constructor state under all isolate roots.
-    fn allocate_promise_then_state(
+    pub(crate) fn allocate_promise_then_state(
         &mut self,
         pending: NativeCallState,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
@@ -312,7 +312,7 @@ impl Isolate {
     }
 
     /// Updates one fixed Promise.then state slot and records its managed edge.
-    fn set_promise_then_value(
+    pub(crate) fn set_promise_then_value(
         &mut self,
         state: GcRef<NativeCallState>,
         index: usize,
