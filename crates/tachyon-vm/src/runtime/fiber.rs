@@ -243,6 +243,8 @@ pub(crate) enum ConversionConsumer {
     ArrayLength,
     ArraySearchIndex,
     ArrayConcatLength,
+    ArrayCopyLength,
+    ArrayCopyIndex,
     ArrayStaticLength,
     ArraySpliceLength,
     ArraySpliceStart,
@@ -276,6 +278,8 @@ impl ConversionConsumer {
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayConcatLength
+            | Self::ArrayCopyLength
+            | Self::ArrayCopyIndex
             | Self::ArrayStaticLength
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
@@ -593,6 +597,14 @@ pub(crate) enum ArrayStaticStage {
     FinalLength,
 }
 
+/// One observable boundary in a change-array-by-copy algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayCopyStage {
+    Length,
+    SourceValue,
+}
+
 /// The first Proxy essential internal methods routed through the exotic slow path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -827,6 +839,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     ArrayConcat(ArrayConcatStage),
+    ArrayCopy(ArrayCopyStage),
     ArraySplice(ArraySpliceStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
@@ -1513,6 +1526,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArraySplice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one change-array-by-copy state across an observable operation.
+    #[inline]
+    pub(crate) const fn array_copy(
+        site: NativeContinuationSite,
+        stage: ArrayCopyStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayCopy(stage),
             first: state,
             second: retained,
         }

@@ -2112,6 +2112,9 @@ impl Isolate {
             NativeContinuationKind::ArrayConcat(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayCopy(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6037,6 +6040,12 @@ impl Isolate {
                     let value = self.array_copy_within(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayToReversed) => {
+                    return self.begin_array_copy(&site, ArrayCopyKind::ToReversed);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayWith) => {
+                    return self.begin_array_copy(&site, ArrayCopyKind::With);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
                     let value = self.array_flat(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -6954,6 +6963,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayConcat(stage) => {
                     let state = self.pending_array_concat_reference(continuation.first())?;
                     self.resume_array_concat(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayCopy(stage) => {
+                    let state = self.pending_array_copy_reference(continuation.first())?;
+                    self.resume_array_copy(site, state, stage, value)
                 }
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;

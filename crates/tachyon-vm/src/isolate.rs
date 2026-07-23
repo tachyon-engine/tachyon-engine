@@ -437,6 +437,9 @@ impl Isolate {
             pending_array_concat: registry
                 .try_register("PendingArrayConcat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_array_copy: registry
+                .try_register("PendingArrayCopy")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_array_splice: registry
                 .try_register("PendingArraySplice")
                 .map_err(IsolateCreationError::TypeRegistration)?,

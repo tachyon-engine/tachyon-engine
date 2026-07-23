@@ -1472,6 +1472,30 @@ impl Isolate {
         self.realm.array_copy_within = Some(copy_within);
         let copy_within_atom = self.intern_intrinsic_name(b"copyWithin")?;
         self.set_intrinsic_data_property(prototype, copy_within_atom, copy_within, true)?;
+        let to_reversed = self.allocate_native_function(
+            NativeFunction::ArrayToReversed,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_to_reversed = Some(to_reversed);
+        let to_reversed_atom = self.intern_intrinsic_name(b"toReversed")?;
+        self.set_intrinsic_data_property(prototype, to_reversed_atom, to_reversed, true)?;
+        let array_with = self.allocate_native_function(
+            NativeFunction::ArrayWith,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_with = Some(array_with);
+        let with_atom = self.intern_intrinsic_name(b"with")?;
+        self.set_intrinsic_data_property(prototype, with_atom, array_with, true)?;
         let flat = self.allocate_native_function(
             NativeFunction::ArrayFlat,
             OrdinaryObject {

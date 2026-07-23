@@ -253,6 +253,8 @@ pub(crate) enum NativeFunction {
     ArrayFill,
     ArrayLastIndexOf,
     ArrayCopyWithin,
+    ArrayToReversed,
+    ArrayWith,
     ArrayFlat,
     ArraySort,
     ArrayForEach,
@@ -795,7 +797,9 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
+            Self::ArrayWith => 2,
             Self::ArrayOf
+            | Self::ArrayToReversed
             | Self::MapConstructor
             | Self::SetConstructor
             | Self::WeakMapConstructor
@@ -1083,6 +1087,8 @@ impl NativeFunction {
             Self::ArrayFill => "fill",
             Self::ArrayLastIndexOf => "lastIndexOf",
             Self::ArrayCopyWithin => "copyWithin",
+            Self::ArrayToReversed => "toReversed",
+            Self::ArrayWith => "with",
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
             Self::ArrayForEach => "forEach",
@@ -1621,6 +1627,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_date_numeric_arguments: GcType<PendingDateNumericArguments>,
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
+    pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
