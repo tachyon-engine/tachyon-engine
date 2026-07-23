@@ -76,6 +76,17 @@ pub(super) struct IteratorRegisters {
 }
 
 impl Lowerer<'_> {
+    /// Identifies the current function's implicit arguments binding ahead of outer bindings.
+    pub(super) fn is_implicit_arguments_reference(
+        &self,
+        reference: &HirIdentifierReference,
+    ) -> bool {
+        reference.name.as_ref() == "arguments"
+            && self
+                .function_scope
+                .is_some_and(|scope| reference.binding_scope != Some(scope))
+    }
+
     /// Destructures one object binding into locals, preserving property and default evaluation order.
     pub(super) fn bind_pattern(
         &mut self,

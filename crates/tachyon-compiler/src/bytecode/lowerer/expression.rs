@@ -283,9 +283,7 @@ impl Lowerer<'_> {
                     Ok(destination)
                 }
                 HirExpressionKind::Identifier(reference)
-                    if self.function_scope.is_some()
-                        && reference.binding.is_none()
-                        && reference.name.as_ref() == "arguments" =>
+                    if self.is_implicit_arguments_reference(reference) =>
                 {
                     // FunctionDeclarationInstantiation creates a non-deletable arguments binding.
                     self.load_boolean(false, expression.span)
@@ -337,10 +335,7 @@ impl Lowerer<'_> {
                 right,
             } => self.logical(*operator, left, right, expression.span),
             HirExpressionKind::Identifier(reference) => {
-                if reference.binding.is_none()
-                    && reference.name.as_ref() == "arguments"
-                    && self.function_scope.is_some()
-                {
+                if self.is_implicit_arguments_reference(reference) {
                     self.needs_argument_source = true;
                     let destination = self.register()?;
                     self.emit(
@@ -553,7 +548,7 @@ impl Lowerer<'_> {
                     && matches!(
                         &object.kind,
                         HirExpressionKind::Identifier(reference)
-                            if reference.binding.is_none() && reference.name.as_ref() == "arguments"
+                            if self.is_implicit_arguments_reference(reference)
                     )
                 {
                     self.needs_argument_source = true;
