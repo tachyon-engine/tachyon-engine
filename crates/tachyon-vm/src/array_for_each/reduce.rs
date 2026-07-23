@@ -1,7 +1,7 @@
 //! Resumable Array.prototype.reduce and reduceRight accumulation state.
 
 use super::*;
-use crate::tuning::arrays::REDUCE_SPARSE_SKIP_THRESHOLD;
+use crate::tuning::arrays::ARRAY_ITERATION_SPARSE_SKIP_THRESHOLD;
 
 const REDUCE_RECEIVER: usize = 0;
 const REDUCE_CALLBACK: usize = 1;
@@ -327,7 +327,7 @@ impl Isolate {
         let pending = self.native_call_state_snapshot(state)?;
         let length = exact_nonnegative_integer(pending.values[REDUCE_LENGTH])?;
         let cursor = exact_nonnegative_integer(pending.values[REDUCE_CURSOR])?;
-        if length.saturating_sub(cursor) <= REDUCE_SPARSE_SKIP_THRESHOLD {
+        if length.saturating_sub(cursor) <= ARRAY_ITERATION_SPARSE_SKIP_THRESHOLD {
             return Ok(());
         }
         let Some(next_cursor) = self.next_array_reduce_candidate(
@@ -412,7 +412,7 @@ fn reduce_index(mode: u8, length: u64, cursor: u64) -> u64 {
 }
 
 /// Parses canonical decimal property names in the complete safe-integer index range.
-fn safe_integer_index(string: JsStringView<'_>) -> Option<u64> {
+pub(super) fn safe_integer_index(string: JsStringView<'_>) -> Option<u64> {
     let length = string.len();
     if length == 0 || length > 16 {
         return None;

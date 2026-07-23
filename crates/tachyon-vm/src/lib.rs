@@ -401,6 +401,7 @@ pub enum ExecutionError {
     SymbolIdExhausted,
     SymbolRegistryAllocationFailed,
     ArrayLengthOverflow,
+    InvalidArrayLength,
     OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),

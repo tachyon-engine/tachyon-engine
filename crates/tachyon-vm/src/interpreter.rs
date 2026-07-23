@@ -6018,6 +6018,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArraySome) => {
                     return self.begin_array_predicate(&site, false);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayMap) => {
+                    return self.begin_array_map(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayFilter) => {
                     return self.begin_array_filter(&site);
                 }

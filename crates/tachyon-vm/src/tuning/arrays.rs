@@ -5,4 +5,4 @@ pub(crate) const JOIN_INITIAL_UNITS_PER_ELEMENT: usize = 8;
 /// Caps speculative join reservation for sparse or adversarial array-like lengths.
 pub(crate) const JOIN_MAX_INITIAL_UNITS: usize = 4_096;
 /// Starts ordinary prototype-chain candidate scans instead of walking long proven hole runs.
-pub(crate) const REDUCE_SPARSE_SKIP_THRESHOLD: u64 = 256;
+pub(crate) const ARRAY_ITERATION_SPARSE_SKIP_THRESHOLD: u64 = 256;

@@ -1459,6 +1459,7 @@ impl Isolate {
         for (name, native) in [
             (b"every".as_slice(), NativeFunction::ArrayEvery),
             (b"some".as_slice(), NativeFunction::ArraySome),
+            (b"map".as_slice(), NativeFunction::ArrayMap),
             (b"reduce".as_slice(), NativeFunction::ArrayReduce),
             (b"reduceRight".as_slice(), NativeFunction::ArrayReduceRight),
         ] {

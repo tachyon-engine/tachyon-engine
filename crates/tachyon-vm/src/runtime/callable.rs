@@ -254,6 +254,7 @@ pub(crate) enum NativeFunction {
     ArrayForEach,
     ArrayEvery,
     ArraySome,
+    ArrayMap,
     ArrayFilter,
     ArrayReduce,
     ArrayReduceRight,
@@ -700,6 +701,7 @@ impl NativeFunction {
             | Self::ArrayForEach
             | Self::ArrayEvery
             | Self::ArraySome
+            | Self::ArrayMap
             | Self::ArrayFilter
             | Self::ArrayReduce
             | Self::ArrayReduceRight
@@ -1065,6 +1067,7 @@ impl NativeFunction {
             Self::ArrayForEach => "forEach",
             Self::ArrayEvery => "every",
             Self::ArraySome => "some",
+            Self::ArrayMap => "map",
             Self::ArrayFilter => "filter",
             Self::ArrayReduce => "reduce",
             Self::ArrayReduceRight => "reduceRight",
@@ -1696,6 +1699,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         }
         ExecutionError::InvalidNumberRadix(_)
         | ExecutionError::InvalidNumberPrecision(_)
+        | ExecutionError::InvalidArrayLength
         | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),

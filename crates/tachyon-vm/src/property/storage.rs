@@ -259,14 +259,14 @@ impl Isolate {
                 PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
                 _ => None,
             })
-            .ok_or(ExecutionError::ArrayLengthOverflow)?;
-        let new_length = numeric_value(value).ok_or(ExecutionError::ArrayLengthOverflow)?;
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let new_length = numeric_value(value).ok_or(ExecutionError::InvalidArrayLength)?;
         if !new_length.is_finite()
             || new_length < 0.0
             || new_length.fract() != 0.0
-            || new_length > f64::from(u32::MAX - 1)
+            || new_length > f64::from(u32::MAX)
         {
-            return Err(ExecutionError::ArrayLengthOverflow);
+            return Err(ExecutionError::InvalidArrayLength);
         }
         if new_length < old_length {
             let (_, snapshot) = self.object_snapshot(receiver)?;

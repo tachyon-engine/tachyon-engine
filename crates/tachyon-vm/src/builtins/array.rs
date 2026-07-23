@@ -30,6 +30,22 @@ impl Isolate {
                     .unwrap_or(Value::from_immediate(Immediate::Undefined)),
             );
         }
+        let array_length = if arguments.len() == 1 {
+            numeric_value(arguments[0])
+                .map(|length| {
+                    if !length.is_finite()
+                        || length < 0.0
+                        || length.fract() != 0.0
+                        || length > f64::from(u32::MAX)
+                    {
+                        return Err(ExecutionError::InvalidArrayLength);
+                    }
+                    Ok(safe_integer_value(length as u64))
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let default_prototype = self
             .realm
             .array_prototype
@@ -52,11 +68,8 @@ impl Isolate {
         let array = self.create_array_object_with_prototype(prototype)?;
         self.write(site.caller_base, site.destination, array)?;
         let length_atom = self.intern_intrinsic_name(b"length")?;
-        if arguments.len() == 1
-            && let Some(length) = arguments[0].as_i32()
-            && length >= 0
-        {
-            self.set_own_data_property(array, length_atom, arguments[0])?;
+        if let Some(length) = array_length {
+            self.set_own_data_property(array, length_atom, length)?;
             return Ok(array);
         }
         for (index, value) in arguments.into_iter().enumerate() {
