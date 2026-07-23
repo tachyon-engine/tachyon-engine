@@ -199,11 +199,11 @@ impl Isolate {
                     }
                     Ok(())
                 } else {
-                    self.finish_array_filter_species(site, state, value)
+                    self.finish_array_filter_species(site, state, value, false)
                 }
             }
             ArrayForEachStage::FilterSpecies => {
-                self.finish_array_filter_species(site, state, value)
+                self.finish_array_filter_species(site, state, value, true)
             }
             ArrayForEachStage::FilterConstruct => {
                 self.finish_array_filter_construct(site, state, value)
@@ -253,6 +253,7 @@ impl Isolate {
                 site,
                 state,
                 Value::from_immediate(Immediate::Undefined),
+                false,
             );
         }
         let constructor = self.constructor_atom()?;
@@ -281,11 +282,11 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
         constructor: Value,
+        from_species: bool,
     ) -> Result<(), ExecutionError> {
-        if matches!(
-            constructor.as_immediate(),
-            Some(Immediate::Undefined | Immediate::Null)
-        ) {
+        if constructor.as_immediate() == Some(Immediate::Undefined)
+            || (from_species && constructor.as_immediate() == Some(Immediate::Null))
+        {
             let prototype = self
                 .realm
                 .array_prototype
@@ -296,6 +297,10 @@ impl Isolate {
                 .ok_or(ExecutionError::MissingNativeContinuation)?;
             self.set_array_for_each_value(filter, FILTER_RESULT, result)?;
             return self.advance_array_for_each(site, state);
+        }
+        if constructor.as_immediate() == Some(Immediate::Null) || !self.is_object_value(constructor)
+        {
+            return Err(ExecutionError::NonConstructor(constructor));
         }
         let filter = self
             .array_filter_state(state)?
@@ -689,7 +694,16 @@ impl Isolate {
         )?;
         let key = self.safe_integer_property_atom(index)?;
         let result = self.native_call_state_snapshot(filter)?.values[FILTER_RESULT];
-        self.set_own_data_property(result, key, value)?;
+        self.define_data_property(
+            result,
+            key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+            },
+        )?;
         if self.is_array_value(result)? {
             let length = self.length_atom()?;
             self.set_own_data_property(result, length, safe_integer_value(index + 1))?;

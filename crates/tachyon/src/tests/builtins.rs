@@ -796,6 +796,14 @@ fn array_filter_runs_resumable_callback_iteration() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            1_146,
+            "var target = []; Object.defineProperty(target, '0', { value: 0, writable: false, enumerable: false, configurable: true }); var source = [7]; source.constructor = {}; source.constructor[Symbol.species] = function() { return target; }; var result = source.filter(function() { return true; }); var descriptor = Object.getOwnPropertyDescriptor(result, '0'); result[0] === 7 && descriptor.writable === true && descriptor.enumerable === true && descriptor.configurable === true;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
 
 #[test]
