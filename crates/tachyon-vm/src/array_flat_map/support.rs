@@ -301,7 +301,7 @@ impl Isolate {
                     .key
                     .atom()
                     .and_then(|atom| self.atoms.get(atom))
-                    .and_then(|string| flat_map_safe_integer_index(string.as_view()))
+                    .and_then(|string| safe_integer_property_index(string.as_view()))
                     .filter(|index| lower <= *index && *index < upper)
                 else {
                     continue;
@@ -318,33 +318,4 @@ impl Isolate {
         }
         Ok(Some(candidate.unwrap_or(upper)))
     }
-}
-
-/// Parses canonical safe-integer property names for ordinary sparse skipping.
-fn flat_map_safe_integer_index(string: JsStringView<'_>) -> Option<u64> {
-    let length = string.len();
-    if length == 0 || length > 16 {
-        return None;
-    }
-    let first = string.code_unit_at(0)?;
-    if first == u16::from(b'0') {
-        return (length == 1).then_some(0);
-    }
-    if !(u16::from(b'1')..=u16::from(b'9')).contains(&first) {
-        return None;
-    }
-    let mut value = u64::from(first - u16::from(b'0'));
-    for index in 1..length {
-        let unit = string.code_unit_at(index)?;
-        if !(u16::from(b'0')..=u16::from(b'9')).contains(&unit) {
-            return None;
-        }
-        value = value
-            .checked_mul(10)?
-            .checked_add(u64::from(unit - u16::from(b'0')))?;
-        if value > MAX_SAFE_INTEGER {
-            return None;
-        }
-    }
-    Some(value)
 }

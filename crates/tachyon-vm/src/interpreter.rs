@@ -2112,6 +2112,9 @@ impl Isolate {
             NativeContinuationKind::ArrayConcat(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayFlat(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayFlatMap(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6087,8 +6090,7 @@ impl Isolate {
                     return self.begin_array_to_sorted(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
-                    let value = self.array_flat(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_flat(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayFlatMap) => {
                     return self.begin_array_flat_map(&site);
@@ -7005,6 +7007,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayConcat(stage) => {
                     let state = self.pending_array_concat_reference(continuation.first())?;
                     self.resume_array_concat(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayFlat(stage) => {
+                    let state = self.pending_array_flat_reference(continuation.first())?;
+                    self.resume_array_flat(site, state, stage, value)
                 }
                 NativeContinuationKind::ArrayFlatMap(stage) => {
                     let state = self.pending_array_flat_map_reference(continuation.first())?;

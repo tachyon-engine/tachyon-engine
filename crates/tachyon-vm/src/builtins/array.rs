@@ -465,62 +465,6 @@ impl Isolate {
         Ok(())
     }
 
-    /// Implements `Array.prototype.flat` with an explicit work stack and bounded depth.
-    pub(crate) fn array_flat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let depth_value = self.call_argument(site, 0)?.unwrap_or(Value::from_i32(1));
-        let depth_number = numeric_value(self.convert_to_number(depth_value)?).unwrap_or(f64::NAN);
-        let depth = if depth_number.is_nan() || depth_number <= 0.0 {
-            0
-        } else {
-            depth_number.floor().min(u32::MAX as f64) as u32
-        };
-        let result = self.create_array_from_site(&CallSite {
-            argument_count: 0,
-            ..*site
-        })?;
-        let length = self.length_of_array_like(site.this_value)?;
-        let mut work = Vec::new();
-        for index in (0..length).rev() {
-            let key = self.safe_integer_property_atom(index)?;
-            if let Some(value) = self.get_data_property(site.this_value, key)? {
-                work.push(FlatWork::Value(value, depth));
-            } else {
-                work.push(FlatWork::Hole);
-            }
-        }
-        let mut next_index = 0_u64;
-        while let Some(item) = work.pop() {
-            match item {
-                FlatWork::Hole => {
-                    continue;
-                }
-                FlatWork::Value(value, remaining)
-                    if remaining > 0 && self.is_array_value(value)? =>
-                {
-                    let nested_length = self.length_of_array_like(value)?;
-                    for index in (0..nested_length).rev() {
-                        let key = self.safe_integer_property_atom(index)?;
-                        if let Some(nested) = self.get_data_property(value, key)? {
-                            work.push(FlatWork::Value(nested, remaining - 1));
-                        } else {
-                            work.push(FlatWork::Hole);
-                        }
-                    }
-                }
-                FlatWork::Value(value, _) => {
-                    let key = self.safe_integer_property_atom(next_index)?;
-                    self.set_own_data_property(result, key, value)?;
-                    next_index = next_index
-                        .checked_add(1)
-                        .ok_or(ExecutionError::ArrayLengthOverflow)?;
-                }
-            }
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(result, length_atom, safe_integer_value(next_index))?;
-        Ok(result)
-    }
-
     fn array_element_or_undefined(
         &mut self,
         receiver: Value,

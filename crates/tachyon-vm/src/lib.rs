@@ -13,6 +13,7 @@ mod argument_list;
 mod array;
 mod array_concat;
 mod array_copy;
+mod array_flat;
 mod array_flat_map;
 mod array_for_each;
 mod array_slice;
@@ -127,9 +128,10 @@ pub(crate) enum IntrinsicPrototypeKind {
 }
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
-use array::{ArrayObject, MAX_SAFE_INTEGER};
+use array::{ArrayObject, MAX_SAFE_INTEGER, safe_integer_property_index};
 use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
+use array_flat::PendingArrayFlat;
 use array_flat_map::PendingArrayFlatMap;
 use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
@@ -181,11 +183,11 @@ use runtime::code::is_conditional_branch;
 use runtime::{
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
-        DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics, FlatWork,
-        FunctionExecutable, FunctionObject, GenericPropertyDescriptor, GlobalNumberFunction,
-        GlobalUriFunction, IntrinsicPropertyAtoms, MathFunction, NativeCallState, NativeFunction,
-        ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue,
-        VmTypes, execution_error_kind,
+        DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics, FunctionExecutable,
+        FunctionObject, GenericPropertyDescriptor, GlobalNumberFunction, GlobalUriFunction,
+        IntrinsicPropertyAtoms, MathFunction, NativeCallState, NativeFunction, ObjectReceiver,
+        PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
+        execution_error_kind,
     },
     class::{
         ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,
@@ -198,21 +200,21 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayFlatMapStage,
-        ArrayForEachStage, ArraySliceStage, ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage,
-        BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
-        CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
-        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
-        DefinePropertiesStage, ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment,
-        Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
-        NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
-        ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
-        PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,
-        PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots, ProxyCallStage,
-        ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
-        ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
-        ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ArrayFlatStage, ArrayForEachStage, ArraySliceStage, ArraySpliceStage, ArrayStaticStage,
+        ArrayToSortedStage, BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots,
+        CollectionInitializerStage, CollectionIteratorCloseStage, ConversionCallbackStage,
+        ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
+        CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
+        ErrorToStringStage, EvalVarEnvironment, Fiber, Frame, GetOwnPropertyDescriptorsStage,
+        InstanceElementStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
+        PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
+        PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
+        PrototypeInitializationRoots, ProxyCallStage, ProxyContinuationStage, ProxyDefineMode,
+        ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
+        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
+        ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

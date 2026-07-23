@@ -389,58 +389,6 @@ fn array_identity_and_property_storage_survive_forced_major_allocations() {
 }
 
 #[test]
-fn array_flat_work_stack_survives_forced_major_allocations() {
-    let mut isolate = test_isolate();
-    let prototype = isolate.realm.array_prototype.unwrap();
-    let inner = isolate
-        .create_array_object_with_prototype(prototype)
-        .unwrap();
-    let outer = isolate
-        .create_array_object_with_prototype(prototype)
-        .unwrap();
-    let zero = isolate.safe_integer_property_atom(0).unwrap();
-    let length = isolate.length_atom().unwrap();
-    isolate
-        .set_own_data_property(inner, zero, Value::from_i32(42))
-        .unwrap();
-    isolate
-        .set_own_data_property(inner, length, Value::from_i32(1))
-        .unwrap();
-    isolate.set_own_data_property(outer, zero, inner).unwrap();
-    isolate
-        .set_own_data_property(outer, length, Value::from_i32(1))
-        .unwrap();
-    isolate.fiber.registers = vec![outer, Value::from_i32(1)];
-    isolate
-        .heap
-        .set_forced_collection_mode(ForcedCollectionMode::Major);
-    let result = isolate
-        .array_flat(&CallSite {
-            caller_base: 0,
-            destination: 0,
-            callee: isolate.realm.array_flat.unwrap(),
-            argument_base: 1,
-            argument_source: None,
-            argument_prefix: None,
-            argument_prefix_offset: 0,
-            argument_prefix_count: 0,
-            argument_count: 1,
-            this_value: outer,
-            new_target: Value::from_immediate(Immediate::Undefined),
-            construct_receiver: None,
-            call_site: WordOffset::new(0),
-        })
-        .unwrap();
-    assert_eq!(
-        isolate
-            .get_data_property(result, zero)
-            .unwrap()
-            .and_then(Value::as_i32),
-        Some(42)
-    );
-}
-
-#[test]
 /// Forces collection between loaded literals so pending and published caches must both trace.
 fn loaded_string_constants_survive_forced_major_during_module_load() {
     let mut isolate = test_isolate();

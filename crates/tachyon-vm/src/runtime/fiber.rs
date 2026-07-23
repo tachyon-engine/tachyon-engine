@@ -243,6 +243,9 @@ pub(crate) enum ConversionConsumer {
     ArrayLength,
     ArraySearchIndex,
     ArrayConcatLength,
+    ArrayFlatLength,
+    ArrayFlatDepth,
+    ArrayFlatElementLength,
     ArrayFlatMapLength,
     ArrayFlatMapInnerLength,
     ArrayCopyLength,
@@ -289,6 +292,9 @@ impl ConversionConsumer {
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayConcatLength
+            | Self::ArrayFlatLength
+            | Self::ArrayFlatDepth
+            | Self::ArrayFlatElementLength
             | Self::ArrayFlatMapLength
             | Self::ArrayFlatMapInnerLength
             | Self::ArrayCopyLength
@@ -373,6 +379,9 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::ArrayLength
                 | Self::ArrayConcatLength
+                | Self::ArrayFlatLength
+                | Self::ArrayFlatDepth
+                | Self::ArrayFlatElementLength
                 | Self::ArrayFlatMapLength
                 | Self::ArrayFlatMapInnerLength
                 | Self::ArraySliceLength
@@ -601,6 +610,20 @@ pub(crate) enum ArrayFlatMapStage {
     InnerLength,
     InnerHas,
     InnerGet,
+    Define,
+}
+
+/// One observable boundary in the resumable Array.prototype.flat algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayFlatStage {
+    Length,
+    SpeciesConstructor,
+    SpeciesValue,
+    SpeciesConstruct,
+    SourceHas,
+    SourceGet,
+    ElementLength,
     Define,
 }
 
@@ -911,6 +934,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     ArrayConcat(ArrayConcatStage),
+    ArrayFlat(ArrayFlatStage),
     ArrayFlatMap(ArrayFlatMapStage),
     ArrayCopy(ArrayCopyStage),
     ArrayToSorted(ArrayToSortedStage),
@@ -1681,6 +1705,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayFlatMap(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one flat state and operation-specific value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_flat(
+        site: NativeContinuationSite,
+        stage: ArrayFlatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayFlat(stage),
             first: state,
             second: retained,
         }

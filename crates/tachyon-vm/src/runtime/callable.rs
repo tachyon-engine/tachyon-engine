@@ -635,11 +635,6 @@ impl MathFunction {
     }
 }
 
-pub(crate) enum FlatWork {
-    Value(Value, u32),
-    Hole,
-}
-
 impl NativeFunction {
     #[inline(always)]
     pub(crate) const fn is_constructor(self) -> bool {
@@ -801,12 +796,12 @@ impl NativeFunction {
             | Self::ArrayFill
             | Self::ArrayLastIndexOf
             | Self::ArrayCopyWithin
-            | Self::ArrayFlat
             | Self::ArrayFlatMap
             | Self::ArraySort
             | Self::ArrayToSorted => 1,
             Self::ArrayWith | Self::ArrayToSpliced => 2,
             Self::ArrayOf
+            | Self::ArrayFlat
             | Self::ArrayToReversed
             | Self::MapConstructor
             | Self::SetConstructor
@@ -1639,6 +1634,7 @@ pub(crate) struct VmTypes {
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
+    pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,

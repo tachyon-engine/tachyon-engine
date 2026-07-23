@@ -444,6 +444,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArrayFlatLength
+                            | ConversionConsumer::ArrayFlatDepth
+                            | ConversionConsumer::ArrayFlatElementLength
+                    ) {
+                        let state = self.pending_array_flat_reference(continuation.receiver)?;
+                        return self.resume_array_flat_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ArrayFlatMapLength
                             | ConversionConsumer::ArrayFlatMapInnerLength
                     ) {
@@ -753,6 +767,11 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayConcatLength => {
                     unreachable!("Array concat length resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayFlatLength
+                | ConversionConsumer::ArrayFlatDepth
+                | ConversionConsumer::ArrayFlatElementLength => {
+                    unreachable!("Array flat conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArrayFlatMapLength
                 | ConversionConsumer::ArrayFlatMapInnerLength => {
