@@ -4937,7 +4937,9 @@ impl Isolate {
                         return Ok(());
                     }
                     if self.fiber.completions.len() > completion_depth {
-                        self.pop_native_continuation()?;
+                        let continuation = self.pop_native_continuation()?;
+                        let callback_result = self.read(site.caller_base, site.destination)?;
+                        return self.finish_promise_finally_callback(continuation, callback_result);
                     }
                     return self.write(site.caller_base, site.destination, original);
                 }

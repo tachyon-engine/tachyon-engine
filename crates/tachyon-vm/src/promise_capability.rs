@@ -199,23 +199,7 @@ impl Isolate {
             }
             PromiseStaticResolveStage::ResolveCallback
             | PromiseStaticResolveStage::RejectCallback => {
-                self.finish_generic_promise_resolve(continuation)?;
-                if let Some(parent) = self.fiber.completions.last_native()
-                    && parent.kind() == NativeContinuationKind::PromiseFinallyResolve
-                {
-                    let parent = self.pop_native_continuation()?;
-                    let state = self.native_call_state_reference(parent.first())?;
-                    let promise = self.read(
-                        parent.site().caller_base,
-                        parent
-                            .site()
-                            .destination
-                            .checked_add(1)
-                            .ok_or(ExecutionError::BoundArgumentCountOverflow)?,
-                    )?;
-                    return self.finish_promise_finally_resolved(parent, state, promise);
-                }
-                Ok(())
+                self.finish_generic_promise_resolve(continuation)
             }
         }
     }
@@ -306,7 +290,16 @@ impl Isolate {
             continuation.site().caller_base,
             continuation.site().destination,
             promise,
-        )
+        )?;
+        if let Some(parent) = self.fiber.completions.last_native()
+            && parent.kind() == NativeContinuationKind::PromiseFinallyResolve
+            && parent.site().destination.checked_add(1) == Some(continuation.site().destination)
+        {
+            let parent = self.pop_native_continuation()?;
+            let state = self.native_call_state_reference(parent.first())?;
+            return self.finish_promise_finally_resolved(parent, state, promise);
+        }
+        Ok(())
     }
 
     /// Allocates one fixed generic resolve state under the complete VM root set.

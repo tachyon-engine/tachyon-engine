@@ -843,14 +843,6 @@ impl Isolate {
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
         )?;
-        let value_handler = self.allocate_promise_finally_result_handler(original, rejected)?;
-        let throw_handler = self.allocate_promise_finally_result_handler(original, true)?;
-        self.perform_intrinsic_promise_then(
-            callback_promise,
-            Some(value_handler),
-            Some(throw_handler),
-            site,
-        )?;
         let resolution_site = NativeContinuationSite {
             caller_base: site.caller_base,
             destination: site
@@ -865,6 +857,7 @@ impl Isolate {
             resolution_site,
             PromiseResolutionMode::StaticResolve,
         )?;
+        self.begin_promise_finally_mapping(site, callback_promise, original, rejected)?;
         Ok(())
     }
 
@@ -878,15 +871,37 @@ impl Isolate {
         let pending = self.native_call_state_snapshot(state)?;
         let original = pending.values[FIN_RESULT_ORIGINAL];
         let rejected = pending.values[FIN_RESULT_REJECTED].as_immediate() == Some(Immediate::True);
+        self.begin_promise_finally_mapping(continuation.site(), promise, original, rejected)
+    }
+
+    /// Invokes the resolved callback promise's observable `then` with the restoration thunks.
+    fn begin_promise_finally_mapping(
+        &mut self,
+        site: NativeContinuationSite,
+        promise: Value,
+        original: Value,
+        rejected: bool,
+    ) -> Result<(), ExecutionError> {
         let value_handler = self.allocate_promise_finally_result_handler(original, rejected)?;
         let throw_handler = self.allocate_promise_finally_result_handler(original, true)?;
-        self.perform_intrinsic_promise_then(
+        let state = self.allocate_promise_then_state(NativeCallState {
+            values: [
+                promise,
+                Value::from_immediate(Immediate::Undefined),
+                value_handler,
+                throw_handler,
+                Value::from_immediate(Immediate::Undefined),
+            ],
+            count: 4,
+        })?;
+        let then_atom = self.intern_intrinsic_name(b"then")?;
+        self.dispatch_promise_finally_get(
+            site,
+            state,
+            PromiseFinallyMethodStage::Then,
             promise,
-            Some(value_handler),
-            Some(throw_handler),
-            continuation.site(),
-        )?;
-        Ok(())
+            then_atom.into(),
+        )
     }
 
     /// Creates the intrinsic result capability and publishes or enqueues both reactions.
