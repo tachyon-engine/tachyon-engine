@@ -135,6 +135,7 @@ pub(crate) struct Realm {
     pub(crate) array_copy_within: Option<Value>,
     pub(crate) array_to_reversed: Option<Value>,
     pub(crate) array_with: Option<Value>,
+    pub(crate) array_to_spliced: Option<Value>,
     pub(crate) array_flat: Option<Value>,
     pub(crate) array_sort: Option<Value>,
     pub(crate) array_for_each: Option<Value>,
@@ -270,6 +271,7 @@ impl Realm {
             array_copy_within: None,
             array_to_reversed: None,
             array_with: None,
+            array_to_spliced: None,
             array_flat: None,
             array_sort: None,
             array_for_each: None,
@@ -640,6 +642,7 @@ impl Trace for Realm {
         self.array_copy_within.trace(tracer);
         self.array_to_reversed.trace(tracer);
         self.array_with.trace(tracer);
+        self.array_to_spliced.trace(tracer);
         self.array_flat.trace(tracer);
         self.array_sort.trace(tracer);
         self.array_for_each.trace(tracer);

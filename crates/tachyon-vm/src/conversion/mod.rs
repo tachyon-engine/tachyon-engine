@@ -436,7 +436,10 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
-                        ConversionConsumer::ArrayCopyLength | ConversionConsumer::ArrayCopyIndex
+                        ConversionConsumer::ArrayCopyLength
+                            | ConversionConsumer::ArrayCopyIndex
+                            | ConversionConsumer::ArrayCopyStart
+                            | ConversionConsumer::ArrayCopyDeleteCount
                     ) {
                         let state = self.pending_array_copy_reference(continuation.receiver)?;
                         return self.resume_array_copy_conversion(
@@ -711,7 +714,10 @@ impl Isolate {
                 ConversionConsumer::ArrayStaticLength => {
                     unreachable!("Array static length resumes inside its state machine")
                 }
-                ConversionConsumer::ArrayCopyLength | ConversionConsumer::ArrayCopyIndex => {
+                ConversionConsumer::ArrayCopyLength
+                | ConversionConsumer::ArrayCopyIndex
+                | ConversionConsumer::ArrayCopyStart
+                | ConversionConsumer::ArrayCopyDeleteCount => {
                     unreachable!("Array copy conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArraySpliceStart

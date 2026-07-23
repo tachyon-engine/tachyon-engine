@@ -1,5 +1,7 @@
 //! Resumable change-array-by-copy algorithms with dense result semantics.
 
+use core::mem::size_of;
+
 use super::*;
 
 /// The copy traversal selected by the invoked Array prototype method.
@@ -7,6 +9,7 @@ use super::*;
 pub(crate) enum ArrayCopyKind {
     ToReversed,
     With,
+    ToSpliced,
 }
 
 /// GC-owned inputs and cursor state across observable source operations.
@@ -16,11 +19,17 @@ pub(crate) struct PendingArrayCopy {
     result: Value,
     retained: Value,
     index_argument: Value,
+    delete_argument: Value,
     replacement: Value,
+    items: Box<[Value]>,
     kind: ArrayCopyKind,
     length: u64,
+    result_length: u64,
     cursor: u64,
     replacement_index: u64,
+    start: u64,
+    delete_count: u64,
+    argument_count: u32,
 }
 
 impl Trace for PendingArrayCopy {
@@ -30,7 +39,16 @@ impl Trace for PendingArrayCopy {
         self.result.trace(tracer);
         self.retained.trace(tracer);
         self.index_argument.trace(tracer);
+        self.delete_argument.trace(tracer);
         self.replacement.trace(tracer);
+        self.items.trace(tracer);
+    }
+}
+
+impl GcExternalMemory for PendingArrayCopy {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.items.len().saturating_mul(size_of::<Value>())
     }
 }
 
@@ -41,8 +59,13 @@ struct ArrayCopySnapshot {
     replacement: Value,
     kind: ArrayCopyKind,
     length: u64,
+    result_length: u64,
     cursor: u64,
     replacement_index: u64,
+    start: u64,
+    delete_count: u64,
+    argument_count: u32,
+    item_count: u64,
 }
 
 impl Isolate {
@@ -55,17 +78,38 @@ impl Isolate {
         let receiver = self.coerce_to_object(site.this_value)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let index_argument = self.call_argument(site, 0)?.unwrap_or(undefined);
-        let replacement = self.call_argument(site, 1)?.unwrap_or(undefined);
+        let second_argument = self.call_argument(site, 1)?.unwrap_or(undefined);
+        let item_count = if kind == ArrayCopyKind::ToSpliced {
+            site.argument_count.saturating_sub(2) as usize
+        } else {
+            0
+        };
+        let mut items = Vec::new();
+        items
+            .try_reserve_exact(item_count)
+            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+        for index in 0..item_count {
+            items.push(
+                self.call_argument(site, index as u32 + 2)?
+                    .ok_or(ExecutionError::MissingNativeContinuation)?,
+            );
+        }
         let state = self.allocate_array_copy_state(PendingArrayCopy {
             receiver,
             result: undefined,
             retained: undefined,
             index_argument,
-            replacement,
+            delete_argument: second_argument,
+            replacement: second_argument,
+            items: items.into_boxed_slice(),
             kind,
             length: 0,
+            result_length: 0,
             cursor: 0,
             replacement_index: 0,
+            start: 0,
+            delete_count: 0,
+            argument_count: site.argument_count,
         })?;
         let native_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -112,6 +156,10 @@ impl Isolate {
                 self.finish_array_copy_length(site, state, value)
             }
             ConversionConsumer::ArrayCopyIndex => self.finish_array_copy_index(site, state, value),
+            ConversionConsumer::ArrayCopyStart => self.finish_array_copy_start(site, state, value),
+            ConversionConsumer::ArrayCopyDeleteCount => {
+                self.finish_array_copy_delete_count(site, state, value)
+            }
             _ => Err(ExecutionError::MissingNativeContinuation),
         }
     }
@@ -144,9 +192,14 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let length = array_copy_to_length(self.convert_to_number(value)?)?;
-        self.update_array_copy_scalars(state, |pending| pending.length = length)?;
-        if self.array_copy_snapshot(state)?.kind == ArrayCopyKind::With {
-            return self.begin_array_copy_index(site, state);
+        self.update_array_copy_scalars(state, |pending| {
+            pending.length = length;
+            pending.result_length = length;
+        })?;
+        match self.array_copy_snapshot(state)?.kind {
+            ArrayCopyKind::With => return self.begin_array_copy_index(site, state),
+            ArrayCopyKind::ToSpliced => return self.begin_array_copy_start(site, state),
+            ArrayCopyKind::ToReversed => {}
         }
         self.create_array_copy_result(site, state)
     }
@@ -157,7 +210,7 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<PendingArrayCopy>,
     ) -> Result<(), ExecutionError> {
-        let length = self.array_copy_snapshot(state)?.length;
+        let length = self.array_copy_snapshot(state)?.result_length;
         if length > u64::from(u32::MAX) {
             return Err(ExecutionError::InvalidArrayLength);
         }
@@ -209,6 +262,107 @@ impl Isolate {
         self.create_array_copy_result(site, state)
     }
 
+    /// Converts `toSpliced` start before deciding whether deleteCount is present.
+    fn begin_array_copy_start(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayCopy>,
+    ) -> Result<(), ExecutionError> {
+        let start = self.array_copy_index_argument(state)?;
+        if self.is_object_value(start) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::ArrayCopyStart,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                start,
+                site.call_site,
+            );
+        }
+        self.finish_array_copy_start(site, state, start)
+    }
+
+    /// Clamps the relative start and preserves omitted deleteCount semantics.
+    fn finish_array_copy_start(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayCopy>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let relative = array_copy_integer(self.convert_to_number(value)?)?;
+        let snapshot = self.array_copy_snapshot(state)?;
+        let start = relative_array_start(relative, snapshot.length);
+        self.update_array_copy_scalars(state, |pending| pending.start = start)?;
+        match snapshot.argument_count {
+            0 => self.finish_array_copy_counts(site, state, 0),
+            1 => self.finish_array_copy_counts(site, state, snapshot.length - start),
+            _ => self.begin_array_copy_delete_count(site, state),
+        }
+    }
+
+    /// Converts an explicitly supplied `toSpliced` deleteCount.
+    fn begin_array_copy_delete_count(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayCopy>,
+    ) -> Result<(), ExecutionError> {
+        let delete_count = self.array_copy_delete_argument(state)?;
+        if self.is_object_value(delete_count) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::ArrayCopyDeleteCount,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                delete_count,
+                site.call_site,
+            );
+        }
+        self.finish_array_copy_delete_count(site, state, delete_count)
+    }
+
+    /// Clamps deleteCount to the remaining source range.
+    fn finish_array_copy_delete_count(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayCopy>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let count = array_copy_integer(self.convert_to_number(value)?)?;
+        let snapshot = self.array_copy_snapshot(state)?;
+        let remaining = snapshot.length - snapshot.start;
+        let delete_count = if count <= 0.0 {
+            0
+        } else if !count.is_finite() || count >= remaining as f64 {
+            remaining
+        } else {
+            count as u64
+        };
+        self.finish_array_copy_counts(site, state, delete_count)
+    }
+
+    /// Computes the result length before allocating the intrinsic Array.
+    fn finish_array_copy_counts(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayCopy>,
+        delete_count: u64,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.array_copy_snapshot(state)?;
+        let result_length = snapshot
+            .length
+            .checked_sub(delete_count)
+            .and_then(|length| length.checked_add(snapshot.item_count))
+            .ok_or(ExecutionError::ArrayLengthOverflow)?;
+        if result_length > MAX_SAFE_INTEGER {
+            return Err(ExecutionError::ArrayLengthOverflow);
+        }
+        self.update_array_copy_scalars(state, |pending| {
+            pending.delete_count = delete_count;
+            pending.result_length = result_length;
+        })?;
+        self.create_array_copy_result(site, state)
+    }
+
     /// Reads each required source index in the specified observable order.
     fn advance_array_copy(
         &mut self,
@@ -216,15 +370,26 @@ impl Isolate {
         state: GcRef<PendingArrayCopy>,
     ) -> Result<(), ExecutionError> {
         let snapshot = self.array_copy_snapshot(state)?;
-        if snapshot.cursor >= snapshot.length {
+        if snapshot.cursor >= snapshot.result_length {
             return self.write(site.caller_base, site.destination, snapshot.result);
         }
         if snapshot.kind == ArrayCopyKind::With && snapshot.cursor == snapshot.replacement_index {
             return self.define_array_copy_value(site, state, snapshot.replacement);
         }
+        if snapshot.kind == ArrayCopyKind::ToSpliced
+            && snapshot.start <= snapshot.cursor
+            && snapshot.cursor < snapshot.start + snapshot.item_count
+        {
+            let item = self.array_copy_item(state, snapshot.cursor - snapshot.start)?;
+            return self.define_array_copy_value(site, state, item);
+        }
         let source_index = match snapshot.kind {
             ArrayCopyKind::ToReversed => snapshot.length - snapshot.cursor - 1,
             ArrayCopyKind::With => snapshot.cursor,
+            ArrayCopyKind::ToSpliced if snapshot.cursor < snapshot.start => snapshot.cursor,
+            ArrayCopyKind::ToSpliced => {
+                snapshot.cursor - snapshot.item_count + snapshot.delete_count
+            }
         };
         let key = self.safe_integer_property_atom(source_index)?;
         self.get_array_copy_property(
@@ -333,7 +498,7 @@ impl Isolate {
         )
     }
 
-    /// Allocates one fixed-size copy state under the complete VM root set.
+    /// Allocates captured items and fixed copy state under the complete root set.
     fn allocate_array_copy_state(
         &mut self,
         pending: PendingArrayCopy,
@@ -346,9 +511,8 @@ impl Isolate {
             loaded_code: &mut self.loaded_code,
         };
         self.heap
-            .try_allocate_with_gc(
+            .try_allocate_external_with_gc(
                 self.types.pending_array_copy,
-                0,
                 0,
                 pending,
                 AllocationSpace::Young,
@@ -387,8 +551,13 @@ impl Isolate {
                     replacement: pending.replacement,
                     kind: pending.kind,
                     length: pending.length,
+                    result_length: pending.result_length,
                     cursor: pending.cursor,
                     replacement_index: pending.replacement_index,
+                    start: pending.start,
+                    delete_count: pending.delete_count,
+                    argument_count: pending.argument_count,
+                    item_count: pending.items.len() as u64,
                 })
             })
         })
@@ -406,6 +575,43 @@ impl Isolate {
                     .borrow(state, self.types.pending_array_copy)
                     .map(|pending| pending.index_argument)
                     .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Reads the captured explicit deleteCount argument.
+    fn array_copy_delete_argument(
+        &mut self,
+        state: GcRef<PendingArrayCopy>,
+    ) -> Result<Value, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_array_copy)
+                    .map(|pending| pending.delete_argument)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Copies one immutable inserted item from the exact-size backing.
+    fn array_copy_item(
+        &mut self,
+        state: GcRef<PendingArrayCopy>,
+        index: u64,
+    ) -> Result<Value, ExecutionError> {
+        let index = usize::try_from(index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_array_copy)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .items
+                    .get(index)
+                    .copied()
+                    .ok_or(ExecutionError::MissingNativeContinuation)
             })
         })
     }
@@ -483,4 +689,18 @@ fn relative_array_index(relative: f64, length: u64) -> Option<u64> {
     }
     let index = length - (-relative as u64);
     (index < length).then_some(index)
+}
+
+#[inline(always)]
+fn relative_array_start(relative: f64, length: u64) -> u64 {
+    if relative == f64::NEG_INFINITY {
+        return 0;
+    }
+    if relative < 0.0 {
+        return length.saturating_sub((-relative).min(length as f64) as u64);
+    }
+    if !relative.is_finite() || relative >= length as f64 {
+        return length;
+    }
+    relative as u64
 }

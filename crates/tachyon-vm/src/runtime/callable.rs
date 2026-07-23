@@ -255,6 +255,7 @@ pub(crate) enum NativeFunction {
     ArrayCopyWithin,
     ArrayToReversed,
     ArrayWith,
+    ArrayToSpliced,
     ArrayFlat,
     ArraySort,
     ArrayForEach,
@@ -797,7 +798,7 @@ impl NativeFunction {
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
             | Self::ArraySort => 1,
-            Self::ArrayWith => 2,
+            Self::ArrayWith | Self::ArrayToSpliced => 2,
             Self::ArrayOf
             | Self::ArrayToReversed
             | Self::MapConstructor
@@ -1089,6 +1090,7 @@ impl NativeFunction {
             Self::ArrayCopyWithin => "copyWithin",
             Self::ArrayToReversed => "toReversed",
             Self::ArrayWith => "with",
+            Self::ArrayToSpliced => "toSpliced",
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
             Self::ArrayForEach => "forEach",

@@ -1496,6 +1496,18 @@ impl Isolate {
         self.realm.array_with = Some(array_with);
         let with_atom = self.intern_intrinsic_name(b"with")?;
         self.set_intrinsic_data_property(prototype, with_atom, array_with, true)?;
+        let to_spliced = self.allocate_native_function(
+            NativeFunction::ArrayToSpliced,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_to_spliced = Some(to_spliced);
+        let to_spliced_atom = self.intern_intrinsic_name(b"toSpliced")?;
+        self.set_intrinsic_data_property(prototype, to_spliced_atom, to_spliced, true)?;
         let flat = self.allocate_native_function(
             NativeFunction::ArrayFlat,
             OrdinaryObject {

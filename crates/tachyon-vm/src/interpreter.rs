@@ -6046,6 +6046,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayWith) => {
                     return self.begin_array_copy(&site, ArrayCopyKind::With);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayToSpliced) => {
+                    return self.begin_array_copy(&site, ArrayCopyKind::ToSpliced);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayFlat) => {
                     let value = self.array_flat(&site)?;
                     return self.write(site.caller_base, site.destination, value);

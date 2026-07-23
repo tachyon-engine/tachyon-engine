@@ -36,9 +36,19 @@ try {
   );
 } catch (error) { hugeOrder = converted && error instanceof RangeError; }
 
+order = "";
+var spliced = Array.prototype.toSpliced.call(source, 1, 1, "x", "y");
+var noArgs = [1, 2, 3].toSpliced();
+var startOnly = [1, 2, 3].toSpliced(1);
+var explicitUndefined = [1, 2, 3].toSpliced(1, undefined, 9);
+var spliceSemantics = order === "02" && spliced.length === 4 &&
+  spliced[0] === "a" && spliced[1] === "x" && spliced[2] === "y" && spliced[3] === "c" &&
+  noArgs.length === 3 && noArgs[2] === 3 && startOnly.length === 1 && startOnly[0] === 1 &&
+  explicitUndefined.length === 4 && explicitUndefined[1] === 9 && explicitUndefined[2] === 2;
+
 descending + 2 * denseHoles + 4 * replacementSkippedGet +
   8 * (negative[0] === 1 && negative[1] === 2 && negative[2] === 9) +
-  16 * range + 32 * hugeOrder;
+  16 * range + 32 * hugeOrder + 64 * spliceSemantics;
 "#;
 
 #[test]
@@ -83,5 +93,5 @@ fn assert_array_copy_source<const N: usize>(source: &str, source_id: u32, forced
             },
         )
         .expect("array copy fixture must execute");
-    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(63)));
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(127)));
 }

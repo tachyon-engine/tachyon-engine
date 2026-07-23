@@ -245,6 +245,8 @@ pub(crate) enum ConversionConsumer {
     ArrayConcatLength,
     ArrayCopyLength,
     ArrayCopyIndex,
+    ArrayCopyStart,
+    ArrayCopyDeleteCount,
     ArrayStaticLength,
     ArraySpliceLength,
     ArraySpliceStart,
@@ -280,6 +282,8 @@ impl ConversionConsumer {
             | Self::ArrayConcatLength
             | Self::ArrayCopyLength
             | Self::ArrayCopyIndex
+            | Self::ArrayCopyStart
+            | Self::ArrayCopyDeleteCount
             | Self::ArrayStaticLength
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
