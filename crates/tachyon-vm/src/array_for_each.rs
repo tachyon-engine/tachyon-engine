@@ -29,9 +29,7 @@ impl Trace for ArrayForEachRoots<'_> {
 impl Isolate {
     /// Validates the callback, publishes fixed state, and starts observable length lookup.
     pub(crate) fn begin_array_for_each(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
-        if !self.is_object_value(site.this_value) {
-            return Err(ExecutionError::NotObject(site.this_value));
-        }
+        let receiver = self.coerce_to_object(site.this_value)?;
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -40,7 +38,7 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let state = self.allocate_array_for_each_state(NativeCallState {
             values: [
-                site.this_value,
+                receiver,
                 callback,
                 this_argument,
                 Value::from_i32(0),
@@ -63,7 +61,7 @@ impl Isolate {
             continuation_site,
             state,
             ArrayForEachStage::Length,
-            site.this_value,
+            receiver,
             length.into(),
         )?;
         if let Some(value) = value {
@@ -72,7 +70,7 @@ impl Isolate {
                 state,
                 ArrayForEachStage::Length,
                 value,
-                site.this_value,
+                receiver,
             )?;
         }
         Ok(())
@@ -80,9 +78,7 @@ impl Isolate {
 
     /// Creates a filter result and starts the shared observable array-iteration state machine.
     pub(crate) fn begin_array_filter(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
-        if !self.is_object_value(site.this_value) {
-            return Err(ExecutionError::NotObject(site.this_value));
-        }
+        let receiver = self.coerce_to_object(site.this_value)?;
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -102,7 +98,7 @@ impl Isolate {
         })?;
         let state = self.allocate_array_for_each_state(NativeCallState {
             values: [
-                site.this_value,
+                receiver,
                 callback,
                 Value::from_heap_ref(filter.raw()),
                 Value::from_i32(0),
@@ -125,7 +121,7 @@ impl Isolate {
             continuation_site,
             state,
             ArrayForEachStage::Length,
-            site.this_value,
+            receiver,
             length.into(),
         )?;
         if let Some(value) = value {
@@ -134,7 +130,7 @@ impl Isolate {
                 state,
                 ArrayForEachStage::Length,
                 value,
-                site.this_value,
+                receiver,
             )?;
         }
         Ok(())

@@ -780,6 +780,22 @@ fn array_filter_runs_resumable_callback_iteration() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    assert_eq!(
+        execute_source(
+            1_144,
+            "var trace = ''; var result = Array.prototype.filter.call('abc', function(value, index, receiver) { trace += value + index; return index !== 1; }); trace === 'a0b1c2' && result.length === 2 && result[0] === 'a' && result[1] === 'c';",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            1_145,
+            "var calls = 0; Array.prototype.forEach.call(true, function() { calls += 1; }); calls === 0;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
 
 #[test]

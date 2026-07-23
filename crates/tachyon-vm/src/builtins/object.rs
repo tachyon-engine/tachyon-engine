@@ -469,6 +469,11 @@ impl Isolate {
 
     /// Implements Object.prototype.valueOf by applying the specification's ToObject operation.
     pub(crate) fn object_value_of(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        self.coerce_to_object(value)
+    }
+
+    /// Applies the shared ECMAScript ToObject operation without exposing host allocation policy.
+    pub(crate) fn coerce_to_object(&mut self, value: Value) -> Result<Value, ExecutionError> {
         if self.is_object_value(value) {
             return Ok(value);
         }
