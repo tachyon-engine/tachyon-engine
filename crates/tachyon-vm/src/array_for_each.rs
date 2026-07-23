@@ -172,6 +172,19 @@ impl Isolate {
             }
             ArrayForEachStage::FilterConstructor => {
                 if self.is_object_value(value) {
+                    if self.is_constructor_value(value)? {
+                        let constructor_realm = self.realm_for_callable(value)?;
+                        if constructor_realm != self.active_realm
+                            && self.realm_array_constructor(constructor_realm) == Some(value)
+                        {
+                            return self.finish_array_filter_species(
+                                site,
+                                state,
+                                Value::from_immediate(Immediate::Undefined),
+                                false,
+                            );
+                        }
+                    }
                     let filter = self
                         .array_filter_state(state)?
                         .ok_or(ExecutionError::MissingNativeContinuation)?;

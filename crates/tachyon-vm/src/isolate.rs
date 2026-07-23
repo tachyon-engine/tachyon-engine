@@ -82,6 +82,17 @@ impl Isolate {
             .and_then(|(_, realm)| lookup(realm))
     }
 
+    /// Returns one Realm's intrinsic Array constructor without switching execution contexts.
+    pub(crate) fn realm_array_constructor(&self, realm: RealmId) -> Option<Value> {
+        if realm == self.active_realm {
+            return self.realm.array_constructor;
+        }
+        self.inactive_realms
+            .iter()
+            .find(|(id, _)| *id == realm)
+            .and_then(|(_, realm)| realm.array_constructor)
+    }
+
     /// Creates an independent Realm in the same GC heap and returns its global object identity.
     pub fn create_realm(&mut self) -> Result<(RealmId, Value), ExecutionError> {
         let id = RealmId::from_non_zero(self.next_realm_serial);
