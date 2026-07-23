@@ -231,6 +231,8 @@ pub(crate) enum ConversionConsumer {
     ErrorToStringName,
     ErrorToStringMessage,
     DateNumericArgument,
+    DateToPrimitiveString,
+    DateToPrimitiveNumber,
 }
 
 impl ConversionConsumer {
@@ -253,7 +255,9 @@ impl ConversionConsumer {
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
             | Self::ErrorToStringMessage
-            | Self::DateNumericArgument => None,
+            | Self::DateNumericArgument
+            | Self::DateToPrimitiveString
+            | Self::DateToPrimitiveNumber => None,
         }
     }
 
@@ -277,6 +281,7 @@ impl ConversionConsumer {
                 | Self::ErrorConstructorMessage
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
+                | Self::DateToPrimitiveString
         )
     }
 
@@ -311,6 +316,8 @@ impl ConversionConsumer {
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
                 | Self::DateNumericArgument
+                | Self::DateToPrimitiveString
+                | Self::DateToPrimitiveNumber
         )
     }
 }

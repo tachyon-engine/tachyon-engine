@@ -63,6 +63,49 @@ impl Trace for PendingDateNumericRoots<'_> {
 }
 
 impl Isolate {
+    /// Implements Date.prototype[@@toPrimitive] through forced ordinary conversion ordering.
+    pub(crate) fn begin_date_to_primitive(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(site.this_value) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
+        let hint = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_string_value(hint) {
+            return Err(ExecutionError::InvalidDatePrimitiveHint(hint));
+        }
+        let hints = self.realm.primitive_hint_strings;
+        let string_first = self.strict_equal_values(hint, hints.string)?
+            || self.strict_equal_values(hint, hints.default)?;
+        let (consumer, stage) = if string_first {
+            (
+                ConversionConsumer::DateToPrimitiveString,
+                ToPrimitiveStage::ToString,
+            )
+        } else if self.strict_equal_values(hint, hints.number)? {
+            (
+                ConversionConsumer::DateToPrimitiveNumber,
+                ToPrimitiveStage::ValueOf,
+            )
+        } else {
+            return Err(ExecutionError::InvalidDatePrimitiveHint(hint));
+        };
+        self.advance_native_conversion(
+            ConversionContinuation {
+                site: Self::date_continuation_site(site),
+                consumer,
+                receiver: Value::from_immediate(Immediate::Undefined),
+                object: site.this_value,
+                stage,
+                callback_stage: ConversionCallbackStage::MethodCall,
+            },
+            None,
+        )
+    }
+
     /// Constructs the clock-independent single-argument Date form with Realm-correct prototype.
     pub(crate) fn create_date_from_site(
         &mut self,

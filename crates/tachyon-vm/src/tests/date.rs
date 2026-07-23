@@ -87,6 +87,36 @@ log === "ynumbermnumberdnumberhnumberinumbersnumberxnumber" +
 !brandConverted && stopped;
 "#;
 
+const DATE_TO_PRIMITIVE_SOURCE: &str = r#"
+var method = Date.prototype[Symbol.toPrimitive];
+var order = "";
+var object = {
+  toString() { order = order + "s"; return {}; },
+  valueOf() { order = order + "v"; return 7; }
+};
+var defaultResult = method.call(object, "default");
+var defaultOrder = order;
+order = "";
+var numberResult = method.call(object, "number");
+var numberOrder = order;
+order = "";
+var stringResult = method.call({
+  toString() { order = order + "S"; return "date"; },
+  get valueOf() { order = order + "V"; return function() { return 1; }; }
+}, "string");
+var invalidHint = false;
+var invalidReceiver = false;
+try { method.call(object, "invalid"); } catch (error) { invalidHint = error instanceof TypeError; }
+try { method.call(1, "default"); } catch (error) { invalidReceiver = error instanceof TypeError; }
+var descriptor = Object.getOwnPropertyDescriptor(Date.prototype, Symbol.toPrimitive);
+defaultResult === 7 && defaultOrder === "sv" &&
+numberResult === 7 && numberOrder === "v" &&
+stringResult === "date" && order === "S" && invalidHint && invalidReceiver &&
+method.name === "[Symbol.toPrimitive]" && method.length === 1 &&
+descriptor.value === method && descriptor.writable === false &&
+descriptor.enumerable === false && descriptor.configurable === true;
+"#;
+
 #[test]
 fn date_numeric_construction_is_stable_for_every_dispatch_batch() {
     assert_date_batch::<1>();
@@ -146,6 +176,37 @@ fn date_object_numeric_argument_state_survives_forced_major_collections() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "forced-major Date conversion fixture returned {outcome:?}"
+    );
+}
+
+#[test]
+fn date_to_primitive_resumes_for_every_dispatch_batch() {
+    assert_date_to_primitive_batch::<1>();
+    assert_date_to_primitive_batch::<2>();
+    assert_date_to_primitive_batch::<4>();
+    assert_date_to_primitive_batch::<8>();
+    assert_date_to_primitive_batch::<16>();
+}
+
+#[test]
+fn date_to_primitive_state_survives_forced_major_collections() {
+    let module = compile_date_program(DATE_TO_PRIMITIVE_SOURCE, 1_407);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("forced-major Date toPrimitive fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "forced-major Date toPrimitive fixture returned {outcome:?}"
     );
 }
 
@@ -221,6 +282,24 @@ fn assert_date_object_conversion_batch<const N: usize>() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Date object conversion batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes forced ordinary Date ToPrimitive for one interpreter dispatch batch.
+fn assert_date_to_primitive_batch<const N: usize>() {
+    let module = compile_date_program(DATE_TO_PRIMITIVE_SOURCE, 1_460 + N as u32);
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("Date toPrimitive fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date toPrimitive batch {N} returned {outcome:?}"
     );
 }
 

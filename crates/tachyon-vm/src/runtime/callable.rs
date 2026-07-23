@@ -209,6 +209,7 @@ pub(crate) enum NativeFunction {
     DateSetTime,
     DateToISOString,
     DateToUtcString,
+    DateToPrimitive,
     DateValueOf,
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
@@ -659,6 +660,7 @@ impl NativeFunction {
         }
         match self {
             Self::DateConstructor | Self::DateUtc => 7,
+            Self::DateToPrimitive => 1,
             Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
@@ -1002,6 +1004,7 @@ impl NativeFunction {
             Self::DateSetTime => "setTime",
             Self::DateToISOString => "toISOString",
             Self::DateToUtcString => "toUTCString",
+            Self::DateToPrimitive => "[Symbol.toPrimitive]",
             Self::DateValueOf => "valueOf",
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
@@ -1664,6 +1667,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::UnsupportedPropertyKey(_)
         | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
+        | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)

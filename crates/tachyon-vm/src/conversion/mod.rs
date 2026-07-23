@@ -629,6 +629,8 @@ impl Isolate {
                         "Date numeric arguments finish inside the conversion state machine"
                     )
                 }
+                ConversionConsumer::DateToPrimitiveString
+                | ConversionConsumer::DateToPrimitiveNumber => argument,
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }

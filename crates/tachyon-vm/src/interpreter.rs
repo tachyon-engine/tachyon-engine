@@ -5166,6 +5166,9 @@ impl Isolate {
                     let value = self.date_to_utc_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::DateToPrimitive) => {
+                    return self.begin_date_to_primitive(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::DateUtcGetter(field)) => {
                     let value = self.date_utc_field_value(site.this_value, field)?;
                     return self.write(site.caller_base, site.destination, value);

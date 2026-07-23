@@ -795,6 +795,23 @@ impl Isolate {
         let to_utc = allocate(self, NativeFunction::DateToUtcString)?;
         self.set_intrinsic_data_property(prototype, to_utc_atom, to_utc, true)?;
         self.set_intrinsic_data_property(prototype, to_gmt_atom, to_utc, true)?;
+        let to_primitive_symbol = self
+            .realm
+            .well_known_symbols
+            .to_primitive
+            .expect("Symbol.toPrimitive initializes before Date");
+        let to_primitive_key = self.property_key(to_primitive_symbol)?;
+        let to_primitive = allocate(self, NativeFunction::DateToPrimitive)?;
+        self.define_data_property(
+            prototype,
+            to_primitive_key,
+            DataPropertyDescriptor {
+                value: Some(to_primitive),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         for field in DateUtcField::ALL {
             let atom = self.intern_intrinsic_name(field.name().as_bytes())?;
             let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;
