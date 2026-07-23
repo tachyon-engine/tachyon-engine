@@ -263,6 +263,7 @@ pub(crate) enum ConversionConsumer {
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
+    ArrayRemoveLength,
 }
 
 impl ConversionConsumer {
@@ -311,7 +312,8 @@ impl ConversionConsumer {
             | Self::ArraySliceEnd
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
-            | Self::ArraySpliceDeleteCount => None,
+            | Self::ArraySpliceDeleteCount
+            | Self::ArrayRemoveLength => None,
         }
     }
 
@@ -390,6 +392,7 @@ impl ConversionConsumer {
                 | Self::ArraySpliceLength
                 | Self::ArraySpliceStart
                 | Self::ArraySpliceDeleteCount
+                | Self::ArrayRemoveLength
         )
     }
 }
@@ -659,6 +662,20 @@ pub(crate) enum ArraySpliceStage {
     MoveDelete,
     TailDelete,
     InsertSet,
+    FinalLength,
+}
+
+/// One observable boundary in the resumable Array pop/shift algorithms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayRemoveStage {
+    Length,
+    ElementGet,
+    SourceHas,
+    SourceGet,
+    TargetSet,
+    TargetDelete,
+    TailDelete,
     FinalLength,
 }
 
@@ -940,6 +957,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayToSorted(ArrayToSortedStage),
     ArraySlice(ArraySliceStage),
     ArraySplice(ArraySpliceStage),
+    ArrayRemove(ArrayRemoveStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1625,6 +1643,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArraySplice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one pop/shift state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_remove(
+        site: NativeContinuationSite,
+        stage: ArrayRemoveStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayRemove(stage),
             first: state,
             second: retained,
         }

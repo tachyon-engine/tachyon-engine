@@ -287,25 +287,6 @@ impl Isolate {
         })
     }
 
-    /// Implements `Array.prototype.pop` through the generic array-like property contract.
-    pub(crate) fn array_pop(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        if length == 0 {
-            return Ok(Value::from_immediate(Immediate::Undefined));
-        }
-        let index = length - 1;
-        let key = self.safe_integer_property_atom(index)?;
-        let value = self
-            .get_data_property(site.this_value, key)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        if !self.delete_own_data_property(site.this_value, key)? {
-            return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(index))?;
-        Ok(value)
-    }
-
     fn relative_array_index(&mut self, value: Value, length: u64) -> Result<u64, ExecutionError> {
         let number = numeric_value(self.convert_to_number(value)?).unwrap_or(f64::NAN);
         if number.is_nan() || number == 0.0 {
@@ -315,34 +296,6 @@ impl Isolate {
             return Ok(length.saturating_sub((-number).ceil() as u64));
         }
         Ok(number.floor().min(length as f64) as u64)
-    }
-
-    /// Implements `Array.prototype.shift` while preserving holes and generic receiver behavior.
-    pub(crate) fn array_shift(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        if length == 0 {
-            return Ok(Value::from_immediate(Immediate::Undefined));
-        }
-        let first_key = self.safe_integer_property_atom(0)?;
-        let first = self
-            .get_data_property(site.this_value, first_key)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        for index in 1..length {
-            let source_key = self.safe_integer_property_atom(index)?;
-            let target_key = self.safe_integer_property_atom(index - 1)?;
-            if let Some(value) = self.get_data_property(site.this_value, source_key)? {
-                self.set_own_data_property(site.this_value, target_key, value)?;
-            } else if !self.delete_own_data_property(site.this_value, target_key)? {
-                return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-            }
-        }
-        let last_key = self.safe_integer_property_atom(length - 1)?;
-        if !self.delete_own_data_property(site.this_value, last_key)? {
-            return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(length - 1))?;
-        Ok(first)
     }
 
     /// Implements `Array.prototype.unshift` with backwards indexed movement and exact length.

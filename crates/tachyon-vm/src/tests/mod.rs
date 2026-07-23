@@ -22,6 +22,7 @@ mod array_iterator;
 mod array_map;
 mod array_predicate;
 mod array_reduce;
+mod array_remove;
 mod array_search;
 mod array_slice;
 mod array_splice;

@@ -2130,6 +2130,9 @@ impl Isolate {
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayRemove(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayStatic(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6048,15 +6051,13 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayPop) => {
-                    let value = self.array_pop(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_remove(&site, false);
                 }
                 FunctionExecutable::Native(NativeFunction::ArraySlice) => {
                     return self.begin_array_slice(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayShift) => {
-                    let value = self.array_shift(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_remove(&site, true);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayUnshift) => {
                     let value = self.array_unshift(&site)?;
@@ -7040,6 +7041,10 @@ impl Isolate {
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;
                     self.resume_array_splice(site, state, stage, value, continuation.second())
+                }
+                NativeContinuationKind::ArrayRemove(stage) => {
+                    let state = self.pending_array_remove_reference(continuation.first())?;
+                    self.resume_array_remove(site, state, stage, value)
                 }
                 NativeContinuationKind::ArrayStatic(stage) => {
                     let state = self.pending_array_static_reference(continuation.first())?;

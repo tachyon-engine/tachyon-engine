@@ -388,6 +388,14 @@ impl Isolate {
                             _ => unreachable!("matched Error string conversion consumer"),
                         };
                     }
+                    if continuation.consumer == ConversionConsumer::ArrayRemoveLength {
+                        let state = self.pending_array_remove_reference(continuation.receiver)?;
+                        return self.resume_array_remove_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::DateNumericArgument {
                         return self.resume_date_numeric_arguments(
                             continuation.site,
@@ -517,6 +525,14 @@ impl Isolate {
                             continuation.site,
                             state,
                             continuation.consumer,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::ArrayRemoveLength {
+                        let state = self.pending_array_remove_reference(continuation.receiver)?;
+                        return self.resume_array_remove_conversion(
+                            continuation.site,
+                            state,
                             value,
                         );
                     }
@@ -801,6 +817,9 @@ impl Isolate {
                 | ConversionConsumer::ArraySpliceLength
                 | ConversionConsumer::ArraySpliceDeleteCount => {
                     unreachable!("Array splice conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayRemoveLength => {
+                    unreachable!("Array removal conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

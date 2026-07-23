@@ -1646,6 +1646,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
+    pub(crate) pending_array_remove: GcType<PendingArrayRemove>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,
     pub(crate) pending_array_to_sorted: GcType<PendingArrayToSorted>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
