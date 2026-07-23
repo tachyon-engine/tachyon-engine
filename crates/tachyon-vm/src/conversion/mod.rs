@@ -417,6 +417,20 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArraySpliceLength
+                            | ConversionConsumer::ArraySpliceStart
+                            | ConversionConsumer::ArraySpliceDeleteCount
+                    ) {
+                        let state = self.pending_array_splice_reference(continuation.receiver)?;
+                        return self.resume_array_splice_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -661,6 +675,11 @@ impl Isolate {
                 }
                 ConversionConsumer::ArraySearchIndex => {
                     unreachable!("Array search index resumes inside the conversion state machine")
+                }
+                ConversionConsumer::ArraySpliceStart
+                | ConversionConsumer::ArraySpliceLength
+                | ConversionConsumer::ArraySpliceDeleteCount => {
+                    unreachable!("Array splice conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

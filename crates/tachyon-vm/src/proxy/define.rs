@@ -110,6 +110,32 @@ impl Isolate {
                 return Err(ExecutionError::ProxyRevoked);
             }
             let trap_name = self.intern_intrinsic_name(b"defineProperty")?;
+            if self.is_proxy_value(snapshot.handler) {
+                let state = self.allocate_pending_proxy_define(
+                    snapshot.target,
+                    key,
+                    descriptor,
+                    result_object,
+                    proxy,
+                    Value::from_immediate(Immediate::Undefined),
+                )?;
+                self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                )?;
+                let pending_value = self.read(site.caller_base, site.destination)?;
+                let state = self.pending_proxy_define_reference(pending_value)?;
+                let active_proxy = self.pending_proxy_define_snapshot(state)?.active_proxy;
+                let handler = self.proxy_snapshot(active_proxy)?.handler;
+                return self.dispatch_proxy_define_handler_get(
+                    site,
+                    mode,
+                    state,
+                    handler,
+                    trap_name.into(),
+                );
+            }
             match self.resolve_property_read(snapshot.handler, trap_name.into())? {
                 PropertyRead::Missing => {
                     if self.is_proxy_value(snapshot.target) {
@@ -203,6 +229,44 @@ impl Isolate {
                 }
             }
         }
+    }
+
+    /// Reads `handler.defineProperty` through nested Proxy layers before applying GetMethod.
+    fn dispatch_proxy_define_handler_get(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxyDefineMode,
+        state: GcRef<PendingProxyDefine>,
+        handler: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::proxy_define(
+                site,
+                mode,
+                ProxyDefineStage::TrapGetter,
+                Value::from_heap_ref(state.raw()),
+                handler,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, handler, handler, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let trap = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_define(continuation, mode, ProxyDefineStage::TrapGetter, trap)
     }
 
     /// Resumes trap lookup/call and the two observable target invariant operations.

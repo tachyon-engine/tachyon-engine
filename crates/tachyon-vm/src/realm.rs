@@ -1469,6 +1469,7 @@ impl Isolate {
             (b"map".as_slice(), NativeFunction::ArrayMap),
             (b"reduce".as_slice(), NativeFunction::ArrayReduce),
             (b"reduceRight".as_slice(), NativeFunction::ArrayReduceRight),
+            (b"splice".as_slice(), NativeFunction::ArraySplice),
         ] {
             let function = self.allocate_native_function(
                 native,

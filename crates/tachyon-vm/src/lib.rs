@@ -12,6 +12,7 @@
 mod argument_list;
 mod array;
 mod array_for_each;
+mod array_splice;
 mod atom;
 mod bound_function;
 mod builtins;
@@ -121,6 +122,7 @@ pub(crate) enum IntrinsicPrototypeKind {
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
+use array_splice::PendingArraySplice;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
@@ -183,12 +185,12 @@ use runtime::{
         BindingState, Environment, EnvironmentAccessError, EnvironmentKind, EnvironmentOwner,
     },
     fiber::{
-        ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, BuiltinPropertyKeyConsumer,
-        ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
-        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
-        ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
+        ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, ArraySpliceStage,
+        BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
+        CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
+        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
+        DefinePropertiesStage, ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment,
+        Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
         ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
         PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,

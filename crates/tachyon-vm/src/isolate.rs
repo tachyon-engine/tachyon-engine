@@ -434,6 +434,9 @@ impl Isolate {
             native_call_state: registry
                 .try_register("NativeCallState")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_array_splice: registry
+                .try_register("PendingArraySplice")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_copy_data_properties: registry
                 .try_register("PendingCopyDataProperties")
                 .map_err(IsolateCreationError::TypeRegistration)?,

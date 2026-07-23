@@ -56,6 +56,19 @@ impl Isolate {
             Value::from_heap_ref(state.raw()),
         )?;
         let trap_name = self.intern_intrinsic_name(b"set")?;
+        if self.is_proxy_value(snapshot.handler) {
+            let state_value = self.read(site.caller_base, site.destination)?;
+            let state = self.native_call_state_reference(state_value)?;
+            let active_proxy = self.native_call_state_snapshot(state)?.values[SET_PROXY];
+            let handler = self.proxy_snapshot(active_proxy)?.handler;
+            return self.dispatch_proxy_set_handler_get(
+                site,
+                mode,
+                state,
+                handler,
+                trap_name.into(),
+            );
+        }
         match self.resolve_property_read(snapshot.handler, trap_name.into())? {
             PropertyRead::Missing => self.forward_proxy_set(site, state, mode),
             PropertyRead::Data(trap) => self.continue_proxy_set_lookup(site, mode, state, trap),
@@ -75,6 +88,35 @@ impl Isolate {
                 getter,
             ),
         }
+    }
+
+    /// Reads `handler.set` through nested Proxy layers before applying GetMethod.
+    fn dispatch_proxy_set_handler_get(
+        &mut self,
+        site: NativeContinuationSite,
+        mode: ProxySetMode,
+        state: GcRef<NativeCallState>,
+        handler: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_proxy_set_parent(site, mode, state, ProxySetStage::TrapGetter, handler)?;
+        let outcome = self.dispatch_proxy_aware_property_read(site, handler, handler, key);
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return outcome;
+        }
+        let continuation = self.pop_native_continuation()?;
+        let trap = self.read(site.caller_base, site.destination)?;
+        self.resume_proxy_set(continuation, mode, ProxySetStage::TrapGetter, trap)
     }
 
     /// Applies `GetMethod` and invokes the set trap with `(target, key, value, receiver)`.

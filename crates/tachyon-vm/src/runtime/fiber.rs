@@ -239,6 +239,9 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     ArrayLength,
     ArraySearchIndex,
+    ArraySpliceLength,
+    ArraySpliceStart,
+    ArraySpliceDeleteCount,
 }
 
 impl ConversionConsumer {
@@ -266,7 +269,10 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
             | Self::ArrayLength
-            | Self::ArraySearchIndex => None,
+            | Self::ArraySearchIndex
+            | Self::ArraySpliceLength
+            | Self::ArraySpliceStart
+            | Self::ArraySpliceDeleteCount => None,
         }
     }
 
@@ -330,6 +336,9 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
                 | Self::ArrayLength
+                | Self::ArraySpliceLength
+                | Self::ArraySpliceStart
+                | Self::ArraySpliceDeleteCount
         )
     }
 }
@@ -518,6 +527,27 @@ pub(crate) enum ArrayForEachStage {
     SearchGet,
     FindGet,
     FindCallback,
+}
+
+/// One observable boundary in the resumable Array.prototype.splice algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArraySpliceStage {
+    Length,
+    SpeciesConstructor,
+    SpeciesValue,
+    SpeciesConstruct,
+    CopyHas,
+    CopyGet,
+    CopyDefine,
+    ResultLength,
+    MoveHas,
+    MoveGet,
+    MoveSet,
+    MoveDelete,
+    TailDelete,
+    InsertSet,
+    FinalLength,
 }
 
 /// The first Proxy essential internal methods routed through the exotic slow path.
@@ -753,6 +783,7 @@ pub(crate) enum NativeContinuationKind {
     GetOwnPropertyDescriptors(GetOwnPropertyDescriptorsStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
+    ArraySplice(ArraySpliceStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
     InstanceOf,
@@ -1421,6 +1452,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayForEach(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one splice state and operation-specific value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_splice(
+        site: NativeContinuationSite,
+        stage: ArraySpliceStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArraySplice(stage),
             first: state,
             second: retained,
         }

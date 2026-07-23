@@ -262,6 +262,7 @@ pub(crate) enum NativeFunction {
     ArrayFilter,
     ArrayReduce,
     ArrayReduceRight,
+    ArraySplice,
     ArrayToString,
     ArrayValues,
     ArrayIteratorNext,
@@ -681,7 +682,7 @@ impl NativeFunction {
             Self::ObjectDefineGetter | Self::ObjectDefineSetter => 2,
             Self::ReflectApply => 3,
             Self::ReflectConstruct => 2,
-            Self::ProxyConstructor | Self::ProxyRevocable => 2,
+            Self::ProxyConstructor | Self::ProxyRevocable | Self::ArraySplice => 2,
             Self::ObjectAssign
             | Self::ObjectHasOwn
             | Self::ObjectIs
@@ -1083,6 +1084,7 @@ impl NativeFunction {
             Self::ArrayFilter => "filter",
             Self::ArrayReduce => "reduce",
             Self::ArrayReduceRight => "reduceRight",
+            Self::ArraySplice => "splice",
             Self::ArrayToString => "toString",
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",
@@ -1606,6 +1608,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_date_numeric_arguments: GcType<PendingDateNumericArguments>,
     pub(crate) native_call_state: GcType<NativeCallState>,
+    pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
