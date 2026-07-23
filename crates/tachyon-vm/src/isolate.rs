@@ -4,6 +4,19 @@ use core::mem;
 
 use super::*;
 
+struct PromiseFinallyRoots<'a> {
+    vm: VmRoots<'a>,
+    captured: Value,
+}
+
+impl Trace for PromiseFinallyRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.captured.trace(tracer);
+    }
+}
+
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
     prototype: Value,
@@ -582,6 +595,96 @@ impl Isolate {
                 },
                 AllocationSpace::Old,
                 roots,
+            )
+            .map(|function| Value::from_heap_ref(function.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates a traced reaction wrapper that preserves a finally argument across callback calls.
+    pub(crate) fn allocate_promise_finally_handler(
+        &mut self,
+        callback: Value,
+        rejected: bool,
+    ) -> Result<Value, ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Promise.finally");
+        let mut roots = PromiseFinallyRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            captured: callback,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    executable: FunctionExecutable::PromiseFinallyHandler {
+                        callback: roots.captured,
+                        rejected,
+                    },
+                    prototype_or_home_object: None,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|function| Value::from_heap_ref(function.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates the thunk that restores or throws the original finally settlement argument.
+    pub(crate) fn allocate_promise_finally_result_handler(
+        &mut self,
+        value: Value,
+        rejected: bool,
+    ) -> Result<Value, ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Promise.finally");
+        let mut roots = PromiseFinallyRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            captured: value,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    executable: FunctionExecutable::PromiseFinallyResultHandler {
+                        value: roots.captured,
+                        rejected,
+                    },
+                    prototype_or_home_object: None,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                &mut roots,
             )
             .map(|function| Value::from_heap_ref(function.raw()))
             .map_err(ExecutionError::HeapAllocation)
@@ -1588,7 +1691,9 @@ impl Isolate {
                     FunctionExecutable::Bound(_)
                     | FunctionExecutable::ProxyRevoker(_)
                     | FunctionExecutable::PromiseResolver { .. }
-                    | FunctionExecutable::PromiseCapabilityExecutor(_) => 2,
+                    | FunctionExecutable::PromiseCapabilityExecutor(_)
+                    | FunctionExecutable::PromiseFinallyHandler { .. }
+                    | FunctionExecutable::PromiseFinallyResultHandler { .. } => 2,
                     FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_) => 3,
                 },
                 Err(_) => 0,

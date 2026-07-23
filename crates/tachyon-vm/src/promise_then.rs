@@ -24,16 +24,32 @@ impl Trace for PromiseThenRoots<'_> {
 impl Isolate {
     /// Validates the Promise brand and begins the observable constructor lookup exactly once.
     pub(crate) fn begin_promise_then(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_promise_then_with_callbacks(site, None, None)
+    }
+
+    /// Begins Promise.then with prebuilt reaction callbacks, preserving SpeciesConstructor order.
+    pub(crate) fn begin_promise_then_with_callbacks(
+        &mut self,
+        site: &CallSite,
+        provided_fulfilled: Option<Value>,
+        provided_rejected: Option<Value>,
+    ) -> Result<(), ExecutionError> {
         self.promise_snapshot(site.this_value)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
-        let on_fulfilled = self
-            .call_argument(site, 0)?
-            .filter(|value| self.resolve_function_object(*value).is_ok())
-            .unwrap_or(undefined);
-        let on_rejected = self
-            .call_argument(site, 1)?
-            .filter(|value| self.resolve_function_object(*value).is_ok())
-            .unwrap_or(undefined);
+        let on_fulfilled = match provided_fulfilled {
+            Some(value) => value,
+            None => self
+                .call_argument(site, 0)?
+                .filter(|value| self.resolve_function_object(*value).is_ok())
+                .unwrap_or(undefined),
+        };
+        let on_rejected = match provided_rejected {
+            Some(value) => value,
+            None => self
+                .call_argument(site, 1)?
+                .filter(|value| self.resolve_function_object(*value).is_ok())
+                .unwrap_or(undefined),
+        };
         let state = self.allocate_promise_then_state(NativeCallState {
             values: [
                 site.this_value,

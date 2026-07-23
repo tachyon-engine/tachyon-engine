@@ -531,6 +531,63 @@ impl Isolate {
         )
     }
 
+    /// Implements the first Promise.prototype.finally slice with traced reaction wrappers.
+    ///
+    /// The wrapper invokes the user callback and restores the original settlement argument;
+    /// callback-returned thenables are handled by the follow-up resolution continuation.
+    pub(crate) fn promise_finally(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.promise_snapshot(site.this_value)?;
+        let callback = self
+            .call_argument(site, 0)?
+            .filter(|value| self.resolve_function_object(*value).is_ok());
+        let Some(callback) = callback else {
+            self.begin_promise_then(site)?;
+            return Ok(());
+        };
+        let on_fulfilled = self.allocate_promise_finally_handler(callback, false)?;
+        let on_rejected = self.allocate_promise_finally_handler(callback, true)?;
+        self.begin_promise_then_with_callbacks(site, Some(on_fulfilled), Some(on_rejected))?;
+        Ok(())
+    }
+
+    /// Resolves the callback result, then maps its settlement back to the original reaction.
+    pub(crate) fn finish_promise_finally_callback(
+        &mut self,
+        continuation: NativeContinuation,
+        callback_result: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        let original = continuation.first();
+        let rejected = continuation.second().as_immediate() == Some(Immediate::True);
+        let callback_promise = self.create_promise(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )?;
+        let value_handler = self.allocate_promise_finally_result_handler(original, rejected)?;
+        let throw_handler = self.allocate_promise_finally_result_handler(original, true)?;
+        self.perform_intrinsic_promise_then(
+            callback_promise,
+            Some(value_handler),
+            Some(throw_handler),
+            site,
+        )?;
+        let resolution_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site
+                .destination
+                .checked_add(1)
+                .ok_or(ExecutionError::BoundArgumentCountOverflow)?,
+            call_site: site.call_site,
+        };
+        self.begin_promise_resolution(
+            callback_promise,
+            callback_result,
+            resolution_site,
+            PromiseResolutionMode::StaticResolve,
+        )?;
+        Ok(())
+    }
+
     /// Creates the intrinsic result capability and publishes or enqueues both reactions.
     pub(crate) fn perform_intrinsic_promise_then(
         &mut self,
@@ -791,7 +848,15 @@ impl Isolate {
             construct_receiver: None,
             call_site: return_site,
         }) {
-            self.fiber.completions.pop_native();
+            let continuation = self
+                .fiber
+                .completions
+                .pop_native()
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            if let ExecutionError::HostThrown(reason) = error {
+                self.begin_promise_reaction_rejection(continuation, reason)?;
+                return Ok(None);
+            }
             return Err(error);
         }
         if self.fiber.frames.len() != frame_depth {

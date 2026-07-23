@@ -128,6 +128,7 @@ pub(crate) enum NativeFunction {
     PromiseResolve,
     PromiseReject,
     PromiseWithResolvers,
+    PromiseFinally,
     SpeciesGetter,
     PromiseThen,
     PromiseCatch,
@@ -576,6 +577,7 @@ impl NativeFunction {
             | Self::ReflectGetOwnPropertyDescriptor
             | Self::ReflectHas => 2,
             Self::PromiseThen => 2,
+            Self::PromiseFinally => 1,
             Self::ReflectGet => 2,
             Self::ReflectSet => 3,
             Self::ReflectSetPrototypeOf => 2,
@@ -905,6 +907,7 @@ impl NativeFunction {
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
             Self::PromiseWithResolvers => "withResolvers",
+            Self::PromiseFinally => "finally",
             Self::SpeciesGetter => "get [Symbol.species]",
             Self::PromiseThen => "then",
             Self::PromiseCatch => "catch",
@@ -1170,6 +1173,16 @@ pub(crate) enum FunctionExecutable {
         reject: bool,
     },
     PromiseCapabilityExecutor(GcRef<PromiseCapability>),
+    /// Reaction wrapper used by Promise.prototype.finally.
+    PromiseFinallyHandler {
+        callback: Value,
+        rejected: bool,
+    },
+    /// Continuation callback that restores or rethrows the original finally argument.
+    PromiseFinallyResultHandler {
+        value: Value,
+        rejected: bool,
+    },
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1383,6 +1396,13 @@ impl Trace for FunctionObject {
         }
         if let FunctionExecutable::PromiseCapabilityExecutor(capability) = &mut self.executable {
             capability.trace(tracer);
+        }
+        if let FunctionExecutable::PromiseFinallyHandler { callback, .. } = &mut self.executable {
+            callback.trace(tracer);
+        }
+        if let FunctionExecutable::PromiseFinallyResultHandler { value, .. } = &mut self.executable
+        {
+            value.trace(tracer);
         }
         self.prototype_or_home_object.trace(tracer);
         self.ordinary.trace(tracer);

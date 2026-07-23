@@ -2143,6 +2143,7 @@ impl Isolate {
         for (name, native) in [
             (b"then".as_slice(), NativeFunction::PromiseThen),
             (b"catch".as_slice(), NativeFunction::PromiseCatch),
+            (b"finally".as_slice(), NativeFunction::PromiseFinally),
         ] {
             let function = self.allocate_native_function(
                 native,

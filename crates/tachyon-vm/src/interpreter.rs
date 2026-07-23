@@ -2128,6 +2128,9 @@ impl Isolate {
             NativeContinuationKind::PromiseThen(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseFinally => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4377,6 +4380,12 @@ impl Isolate {
                 FunctionExecutable::PromiseCapabilityExecutor(_) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::PromiseFinallyHandler { .. } => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::PromiseFinallyResultHandler { .. } => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
             }
         };
         if derived {
@@ -4874,6 +4883,65 @@ impl Isolate {
                 }
                 FunctionExecutable::PromiseCapabilityExecutor(capability) => {
                     return self.call_promise_capability_executor(&site, capability);
+                }
+                FunctionExecutable::PromiseFinallyHandler { callback, rejected } => {
+                    let _rejected = rejected;
+                    let original = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let continuation_site = NativeContinuationSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        call_site: site.call_site,
+                    };
+                    let completion_depth = self.fiber.completions.len();
+                    self.fiber
+                        .completions
+                        .push_native(NativeContinuation::promise_finally(
+                            continuation_site,
+                            original,
+                            rejected,
+                        ))
+                        .map_err(Isolate::completion_stack_error)?;
+                    let frame_depth = self.fiber.frames.len();
+                    if let Err(error) = self.call(CallSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        callee: callback,
+                        argument_base: 0,
+                        argument_source: None,
+                        argument_prefix: None,
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: 0,
+                        argument_count: 0,
+                        this_value: Value::from_immediate(Immediate::Undefined),
+                        new_target: Value::from_immediate(Immediate::Undefined),
+                        construct_receiver: None,
+                        call_site: site.call_site,
+                    }) {
+                        self.pop_native_continuation()?;
+                        return Err(error);
+                    }
+                    if self.fiber.frames.len() != frame_depth {
+                        let frame = self
+                            .fiber
+                            .frames
+                            .last_mut()
+                            .expect("finally callback publishes one frame");
+                        frame.return_register = None;
+                        frame.return_continuation = true;
+                        return Ok(());
+                    }
+                    if self.fiber.completions.len() > completion_depth {
+                        self.pop_native_continuation()?;
+                    }
+                    return self.write(site.caller_base, site.destination, original);
+                }
+                FunctionExecutable::PromiseFinallyResultHandler { value, rejected } => {
+                    if rejected {
+                        return Err(ExecutionError::HostThrown(value));
+                    }
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
                     return self.write(
@@ -5595,6 +5663,9 @@ impl Isolate {
                     let result = self.promise_catch(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseFinally) => {
+                    return self.promise_finally(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -6001,6 +6072,8 @@ impl Isolate {
             FunctionExecutable::ProxyRevoker(_) => false,
             FunctionExecutable::PromiseResolver { .. } => false,
             FunctionExecutable::PromiseCapabilityExecutor(_) => false,
+            FunctionExecutable::PromiseFinallyHandler { .. } => false,
+            FunctionExecutable::PromiseFinallyResultHandler { .. } => false,
             FunctionExecutable::Bytecode { code, function, .. } => {
                 let kind = self
                     .loaded_code(code)?
@@ -6787,6 +6860,9 @@ impl Isolate {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_promise_then(site, state, stage, value)
                 }
+                NativeContinuationKind::PromiseFinally => {
+                    self.finish_promise_finally_callback(continuation, value)
+                }
                 NativeContinuationKind::PromiseStaticResolve(stage) => {
                     self.resume_generic_promise_resolve(continuation, stage, value)
                 }
@@ -6981,6 +7057,16 @@ impl Isolate {
                 if continuation.kind() == NativeContinuationKind::PromiseReaction {
                     self.begin_promise_reaction_rejection(continuation, value)?;
                     return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::PromiseFinally {
+                    if let Some(parent) = self.fiber.completions.last_native()
+                        && parent.kind() == NativeContinuationKind::PromiseReaction
+                    {
+                        let parent = self.pop_native_continuation()?;
+                        self.begin_promise_reaction_rejection(parent, value)?;
+                        return Ok(None);
+                    }
+                    return Err(ExecutionError::MissingNativeContinuation);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseCapabilityCall {
                     self.promise_jobs.finish_active();

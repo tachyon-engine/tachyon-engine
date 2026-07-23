@@ -199,6 +199,28 @@ impl Isolate {
                     JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?;
                 self.allocate_runtime_string(name).map(Some)
             }
+            FunctionExecutable::PromiseFinallyHandler { .. } => {
+                if key == self.length_atom()? {
+                    return Ok(Some(Value::from_i32(0)));
+                }
+                if key != self.name_atom()? {
+                    return Ok(None);
+                }
+                let name =
+                    JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
+            FunctionExecutable::PromiseFinallyResultHandler { .. } => {
+                if key == self.length_atom()? {
+                    return Ok(Some(Value::from_i32(0)));
+                }
+                if key != self.name_atom()? {
+                    return Ok(None);
+                }
+                let name =
+                    JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?;
+                self.allocate_runtime_string(name).map(Some)
+            }
             FunctionExecutable::Bytecode { code, function, .. } => {
                 self.bytecode_metadata_property(code, function, key)
             }
@@ -329,7 +351,9 @@ impl Isolate {
                 FunctionExecutable::Bound(_)
                 | FunctionExecutable::ProxyRevoker(_)
                 | FunctionExecutable::PromiseResolver { .. }
-                | FunctionExecutable::PromiseCapabilityExecutor(_) => false,
+                | FunctionExecutable::PromiseCapabilityExecutor(_)
+                | FunctionExecutable::PromiseFinallyHandler { .. }
+                | FunctionExecutable::PromiseFinallyResultHandler { .. } => false,
             })
     }
 
