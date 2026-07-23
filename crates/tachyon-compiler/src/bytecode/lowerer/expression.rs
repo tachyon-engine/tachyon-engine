@@ -282,6 +282,14 @@ impl Lowerer<'_> {
                     )?;
                     Ok(destination)
                 }
+                HirExpressionKind::Identifier(reference)
+                    if self.function_scope.is_some()
+                        && reference.binding.is_none()
+                        && reference.name.as_ref() == "arguments" =>
+                {
+                    // FunctionDeclarationInstantiation creates a non-deletable arguments binding.
+                    self.load_boolean(false, expression.span)
+                }
                 HirExpressionKind::Identifier(_) => self.load_boolean(true, expression.span),
                 _ => {
                     self.expression(argument)?;
