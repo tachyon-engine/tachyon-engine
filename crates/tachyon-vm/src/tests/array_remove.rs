@@ -22,8 +22,9 @@ var empty = {
 };
 var emptyResult = Array.prototype.pop.call(empty);
 var zeroOk = emptyResult === undefined && trace === "gs0";
+var metadataOk = Array.prototype.pop.length === 0 && Array.prototype.shift.length === 0;
 
-denseOk && sparseOk && zeroOk;
+denseOk && sparseOk && zeroOk && metadataOk;
 "#;
 
 const ARRAY_REMOVE_PROXY_SOURCE: &str = r#"

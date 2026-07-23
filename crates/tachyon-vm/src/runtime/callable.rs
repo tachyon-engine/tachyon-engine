@@ -791,8 +791,6 @@ impl NativeFunction {
             | Self::ArrayAt
             | Self::ArrayIndexOf
             | Self::ArrayIncludes
-            | Self::ArrayPop
-            | Self::ArrayShift
             | Self::ArrayUnshift
             | Self::ArrayReverse
             | Self::ArrayFill
@@ -804,6 +802,8 @@ impl NativeFunction {
             Self::ArrayWith | Self::ArrayToSpliced => 2,
             Self::ArrayOf
             | Self::ArrayFlat
+            | Self::ArrayPop
+            | Self::ArrayShift
             | Self::ArrayToReversed
             | Self::MapConstructor
             | Self::SetConstructor
