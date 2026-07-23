@@ -786,6 +786,15 @@ impl Isolate {
         let set_time_atom = self.intern_intrinsic_name(b"setTime")?;
         let set_time = allocate(self, NativeFunction::DateSetTime)?;
         self.set_intrinsic_data_property(prototype, set_time_atom, set_time, true)?;
+
+        let to_iso_atom = self.intern_intrinsic_name(b"toISOString")?;
+        let to_iso = allocate(self, NativeFunction::DateToISOString)?;
+        self.set_intrinsic_data_property(prototype, to_iso_atom, to_iso, true)?;
+        let to_utc_atom = self.intern_intrinsic_name(b"toUTCString")?;
+        let to_gmt_atom = self.intern_intrinsic_name(b"toGMTString")?;
+        let to_utc = allocate(self, NativeFunction::DateToUtcString)?;
+        self.set_intrinsic_data_property(prototype, to_utc_atom, to_utc, true)?;
+        self.set_intrinsic_data_property(prototype, to_gmt_atom, to_utc, true)?;
         for field in DateUtcField::ALL {
             let atom = self.intern_intrinsic_name(field.name().as_bytes())?;
             let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;

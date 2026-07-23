@@ -355,6 +355,7 @@ pub enum ExecutionError {
     UnsupportedNumberConversion(Value),
     InvalidNumberRadix(Value),
     InvalidNumberPrecision(Value),
+    InvalidDateValue,
     NumberFormatBufferExhausted,
     NumberFormatInvalidDigit,
     NumberStringAllocationFailed,

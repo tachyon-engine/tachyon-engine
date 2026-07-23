@@ -207,6 +207,8 @@ pub(crate) enum NativeFunction {
     DateUtc,
     DateGetTime,
     DateSetTime,
+    DateToISOString,
+    DateToUtcString,
     DateValueOf,
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
@@ -858,6 +860,8 @@ impl NativeFunction {
             | Self::BooleanToString
             | Self::BooleanValueOf
             | Self::DateGetTime
+            | Self::DateToISOString
+            | Self::DateToUtcString
             | Self::DateValueOf
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
@@ -996,6 +1000,8 @@ impl NativeFunction {
             Self::DateUtc => "UTC",
             Self::DateGetTime => "getTime",
             Self::DateSetTime => "setTime",
+            Self::DateToISOString => "toISOString",
+            Self::DateToUtcString => "toUTCString",
             Self::DateValueOf => "valueOf",
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
@@ -1668,6 +1674,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         }
         ExecutionError::InvalidNumberRadix(_)
         | ExecutionError::InvalidNumberPrecision(_)
+        | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),

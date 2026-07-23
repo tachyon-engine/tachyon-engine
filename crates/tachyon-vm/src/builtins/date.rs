@@ -7,6 +7,15 @@ const MS_PER_SECOND: i64 = 1_000;
 const MS_PER_MINUTE: i64 = 60 * MS_PER_SECOND;
 const MS_PER_HOUR: i64 = 60 * MS_PER_MINUTE;
 const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+const DATE_FORMAT_CAPACITY: usize = 40;
+const INVALID_DATE: &[u8] = b"Invalid Date";
+const WEEKDAY_NAMES: [[u8; 3]; 7] = [
+    *b"Sun", *b"Mon", *b"Tue", *b"Wed", *b"Thu", *b"Fri", *b"Sat",
+];
+const MONTH_NAMES: [[u8; 3]; 12] = [
+    *b"Jan", *b"Feb", *b"Mar", *b"Apr", *b"May", *b"Jun", *b"Jul", *b"Aug", *b"Sep", *b"Oct",
+    *b"Nov", *b"Dec",
+];
 const MONTH_START_DAYS: [[i64; 12]; 2] = [
     [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334],
     [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
@@ -152,6 +161,67 @@ impl Isolate {
         Ok(Value::from_f64(date_value))
     }
 
+    /// Formats the canonical simplified ISO UTC representation without heap intermediates.
+    pub(crate) fn date_to_iso_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        if date_value.is_nan() {
+            return Err(ExecutionError::InvalidDateValue);
+        }
+        let parts = UtcDateParts::from_time(date_value as i64);
+        let mut output = DateFormatBuffer::new();
+        if (0..=9_999).contains(&parts.year) {
+            output.push_unsigned(parts.year as u64, 4);
+        } else {
+            output.push_byte(if parts.year < 0 { b'-' } else { b'+' });
+            output.push_unsigned(parts.year.unsigned_abs(), 6);
+        }
+        output.push_byte(b'-');
+        output.push_unsigned(parts.month as u64 + 1, 2);
+        output.push_byte(b'-');
+        output.push_unsigned(parts.date as u64, 2);
+        output.push_byte(b'T');
+        output.push_clock(parts);
+        output.push_byte(b'.');
+        output.push_unsigned(parts.milliseconds as u64, 3);
+        output.push_byte(b'Z');
+        self.allocate_date_format(output.as_bytes())
+    }
+
+    /// Formats the implementation-independent UTC Date string and invalid-Date sentinel.
+    pub(crate) fn date_to_utc_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        if date_value.is_nan() {
+            return self.allocate_date_format(INVALID_DATE);
+        }
+        let parts = UtcDateParts::from_time(date_value as i64);
+        let mut output = DateFormatBuffer::new();
+        output.push_bytes(&WEEKDAY_NAMES[parts.day as usize]);
+        output.push_bytes(b", ");
+        output.push_unsigned(parts.date as u64, 2);
+        output.push_byte(b' ');
+        output.push_bytes(&MONTH_NAMES[parts.month as usize]);
+        output.push_byte(b' ');
+        if parts.year < 0 {
+            output.push_byte(b'-');
+        }
+        output.push_unsigned(parts.year.unsigned_abs(), 4);
+        output.push_byte(b' ');
+        output.push_clock(parts);
+        output.push_bytes(b" GMT");
+        self.allocate_date_format(output.as_bytes())
+    }
+
+    /// Copies one audited ASCII Date format buffer into a managed ECMAScript string.
+    fn allocate_date_format(&mut self, bytes: &[u8]) -> Result<Value, ExecutionError> {
+        self.allocate_runtime_string(
+            JsString::try_from_latin1(bytes).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Converts only supplied setter arguments and leaves optional defaults distinguishable.
     fn date_setter_arguments(
         &mut self,
@@ -231,6 +301,67 @@ struct UtcDateParts {
     minutes: i64,
     seconds: i64,
     milliseconds: i64,
+}
+
+struct DateFormatBuffer {
+    bytes: [u8; DATE_FORMAT_CAPACITY],
+    length: usize,
+}
+
+impl DateFormatBuffer {
+    #[inline(always)]
+    const fn new() -> Self {
+        Self {
+            bytes: [0; DATE_FORMAT_CAPACITY],
+            length: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+
+    #[inline(always)]
+    fn push_byte(&mut self, byte: u8) {
+        self.bytes[self.length] = byte;
+        self.length += 1;
+    }
+
+    #[inline(always)]
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        let end = self.length + bytes.len();
+        self.bytes[self.length..end].copy_from_slice(bytes);
+        self.length = end;
+    }
+
+    /// Emits an unsigned decimal integer with at least the requested zero-padded width.
+    fn push_unsigned(&mut self, mut value: u64, minimum_width: usize) {
+        let mut scratch = [0; 20];
+        let mut cursor = scratch.len();
+        loop {
+            cursor -= 1;
+            scratch[cursor] = b'0' + (value % 10) as u8;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        let digits = scratch.len() - cursor;
+        for _ in digits..minimum_width {
+            self.push_byte(b'0');
+        }
+        self.push_bytes(&scratch[cursor..]);
+    }
+
+    #[inline(always)]
+    fn push_clock(&mut self, parts: UtcDateParts) {
+        self.push_unsigned(parts.hours as u64, 2);
+        self.push_byte(b':');
+        self.push_unsigned(parts.minutes as u64, 2);
+        self.push_byte(b':');
+        self.push_unsigned(parts.seconds as u64, 2);
+    }
 }
 
 impl UtcDateParts {
@@ -418,5 +549,18 @@ mod tests {
             MAX_TIME_VALUE
         );
         assert!(make_utc_date([275_760.0, 8.0, 13.0, 0.0, 0.0, 0.0, 1.0]).is_nan());
+    }
+
+    #[test]
+    fn date_format_buffer_zero_pads_and_preserves_extended_years() {
+        let mut output = DateFormatBuffer::new();
+        output.push_unsigned(20, 4);
+        output.push_byte(b' ');
+        output.push_byte(b'-');
+        output.push_unsigned(1, 4);
+        output.push_byte(b' ');
+        output.push_byte(b'+');
+        output.push_unsigned(275_760, 6);
+        assert_eq!(output.as_bytes(), b"0020 -0001 +275760");
     }
 }

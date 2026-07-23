@@ -23,6 +23,9 @@ utc.getUTCFullYear() === 2000 && utc.getUTCMonth() === 1 &&
 utc.getUTCDate() === 29 && utc.getUTCDay() === 2 &&
 utc.getUTCHours() === 23 && utc.getUTCMinutes() === 58 &&
 utc.getUTCSeconds() === 57 && utc.getUTCMilliseconds() === 456 &&
+utc.toISOString() === "2000-02-29T23:58:57.456Z" &&
+utc.toUTCString() === "Tue, 29 Feb 2000 23:58:57 GMT" &&
+utc.toGMTString === utc.toUTCString &&
 utc.setTime(-1) === -1 && utc.getUTCFullYear() === 1969 &&
 utc.getUTCMonth() === 11 && utc.getUTCDate() === 31 &&
 utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59 &&
