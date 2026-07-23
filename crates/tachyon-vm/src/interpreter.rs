@@ -1134,10 +1134,16 @@ impl Isolate {
                 let home_object = self.read(base, operands[1])?;
                 self.set_function_home_object(function, home_object)?;
             }
-            Opcode::DefineFieldById | Opcode::DefineFieldByValue => {
+            Opcode::DefineFieldById
+            | Opcode::DefineFieldByValue
+            | Opcode::CreateDataPropertyById
+            | Opcode::CreateDataPropertyByValue => {
                 let target = self.read(base, operands[0])?;
                 let value = self.read(base, operands[1])?;
-                let key = if opcode == Opcode::DefineFieldById {
+                let key = if matches!(
+                    opcode,
+                    Opcode::DefineFieldById | Opcode::CreateDataPropertyById
+                ) {
                     self.scope_atom(code, operands[2])?.into()
                 } else {
                     self.property_key(self.read(base, operands[2])?)?

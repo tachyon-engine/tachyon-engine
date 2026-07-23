@@ -289,9 +289,13 @@ pub enum Opcode {
     DirectEval = 121,
     /// Initializes one uninitialized environment slot exactly once from register operand 0.
     InitializeEnvironment = 122,
+    /// Defines one own enumerable data property without consulting the prototype chain.
+    CreateDataPropertyById = 123,
+    /// Defines one own enumerable data property with an already-normalized key.
+    CreateDataPropertyByValue = 124,
 }
 
-pub(super) const OPCODE_COUNT: usize = 123;
+pub(super) const OPCODE_COUNT: usize = 125;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -416,10 +420,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // TailCallWithReceiver
     3, // DirectEval
     3, // InitializeEnvironment
+    3, // CreateDataPropertyById
+    3, // CreateDataPropertyByValue
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::InitializeEnvironment as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CreateDataPropertyByValue as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -588,6 +594,8 @@ impl Opcode {
             56 => Some(Self::TailCallWithReceiver),
             57 => Some(Self::DirectEval),
             58 => Some(Self::InitializeEnvironment),
+            59 => Some(Self::CreateDataPropertyById),
+            60 => Some(Self::CreateDataPropertyByValue),
             _ => None,
         }
     }

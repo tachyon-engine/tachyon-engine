@@ -403,6 +403,7 @@ impl Lowerer<'_> {
                 })
             }
             HirExpressionKind::Object(properties) | HirExpressionKind::Array(properties) => {
+                let is_array_literal = matches!(&expression.kind, HirExpressionKind::Array(_));
                 let object = self.register()?;
                 let create = if matches!(&expression.kind, HirExpressionKind::Array(_)) {
                     Opcode::CreateArray
@@ -424,8 +425,23 @@ impl Lowerer<'_> {
                     match &property.value {
                         HirObjectPropertyValue::Data(value) => {
                             let value = self.expression(value)?;
+                            let data_opcode = if is_array_literal {
+                                match &property.key {
+                                    HirObjectPropertyKey::Static(key)
+                                        if key.as_ref() != "length" =>
+                                    {
+                                        Opcode::CreateDataPropertyById
+                                    }
+                                    HirObjectPropertyKey::Static(_) => opcode,
+                                    HirObjectPropertyKey::Computed(_) => {
+                                        Opcode::CreateDataPropertyByValue
+                                    }
+                                }
+                            } else {
+                                opcode
+                            };
                             self.emit(
-                                opcode,
+                                data_opcode,
                                 &[object.index(), value.index(), key],
                                 property.span,
                             )?;

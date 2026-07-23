@@ -44,6 +44,28 @@ fn compiler_emits_verified_bytecode_for_one_plus_two() {
 }
 
 #[test]
+fn compiler_uses_own_definition_for_array_elements_but_not_synthetic_length() {
+    let module = Compiler
+        .compile(
+            source(MediaType::JavaScript, "[11];"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(disassembly.contains("CreateDataPropertyById target=r0, value=r1, name=0"));
+    assert!(disassembly.contains("SetById receiver=r0,"));
+    assert!(disassembly.contains("name=1"));
+    assert!(!disassembly.contains("CreateDataPropertyByValue"));
+    assert_eq!(module.scope_names(), &[Arc::from("0"), Arc::from("length")]);
+}
+
+#[test]
 fn compiler_materializes_the_arguments_object_in_function_scope() {
     let module = Compiler
         .compile(

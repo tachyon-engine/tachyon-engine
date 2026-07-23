@@ -172,6 +172,16 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " target=r{}, value=r{}, key=r{}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::CreateDataPropertyById => write!(
+            output,
+            " target=r{}, value=r{}, name={}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::CreateDataPropertyByValue => write!(
+            output,
+            " target=r{}, value=r{}, key=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::SetFunctionHomeObject => {
             write!(output, " function=r{}, home=r{}", operands[0], operands[1])?
         }

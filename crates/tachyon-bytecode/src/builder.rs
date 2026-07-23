@@ -346,7 +346,8 @@ impl BytecodeBuilder {
             | Opcode::DefineClassSetterByValue
             | Opcode::DefineFieldByValue => &[0, 1, 2],
             Opcode::SetFunctionHomeObject => &[0, 1],
-            Opcode::DefineFieldById => &[0, 1],
+            Opcode::DefineFieldById | Opcode::CreateDataPropertyById => &[0, 1],
+            Opcode::CreateDataPropertyByValue => &[0, 1, 2],
             Opcode::GetSuperById => &[0],
             Opcode::GetSuperByValue => &[0, 1, 2],
             Opcode::Call

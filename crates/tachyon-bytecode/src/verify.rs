@@ -936,6 +936,7 @@ fn verify_instruction(
         | Opcode::DefineClassGetterByValue
         | Opcode::DefineClassSetterByValue
         | Opcode::DefineFieldByValue
+        | Opcode::CreateDataPropertyByValue
         | Opcode::GetPrivate
         | Opcode::SetPrivate
         | Opcode::CreateAccessorPair
@@ -976,6 +977,7 @@ fn verify_instruction(
         | Opcode::SetById
         | Opcode::DefineClassMethodById
         | Opcode::DefineFieldById
+        | Opcode::CreateDataPropertyById
         | Opcode::SetFunctionHomeObject => {
             check_register(operands[0])?;
             check_register(operands[1])?;
@@ -1082,7 +1084,8 @@ fn verify_instruction(
         | Opcode::DefineClassMethodById
         | Opcode::DefineClassGetterById
         | Opcode::DefineClassSetterById
-        | Opcode::DefineFieldById => Some(operands[2]),
+        | Opcode::DefineFieldById
+        | Opcode::CreateDataPropertyById => Some(operands[2]),
         _ => None,
     };
     if scope_name.is_some_and(|scope_name| scope_name >= context.scope_name_count) {

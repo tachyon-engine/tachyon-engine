@@ -169,6 +169,8 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::GetSuperByValue,
                 Opcode::DefineFieldById,
                 Opcode::DefineFieldByValue,
+                Opcode::CreateDataPropertyById,
+                Opcode::CreateDataPropertyByValue,
                 Opcode::AttachInstanceFields,
                 Opcode::GetPrivate,
                 Opcode::SetPrivate,
@@ -422,6 +424,37 @@ fn verifier_rejects_scope_name_index_past_module_table() {
             scope_name_count: 1,
             ..
         })
+    ));
+}
+
+#[test]
+fn create_data_property_opcodes_verify_their_distinct_key_operands() {
+    for (opcode, operands) in [
+        (Opcode::CreateDataPropertyById, [0, 1, 0]),
+        (Opcode::CreateDataPropertyByValue, [0, 1, 2]),
+    ] {
+        let mut words = encode_instruction(opcode, &operands).unwrap();
+        let decoded = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        assert_eq!(decoded.opcode, opcode);
+        assert_eq!(decoded.operand_count, 3);
+        assert_eq!(decoded.operands, operands);
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        assert!(Bytecode::from_words(words).verify(context()).is_ok());
+    }
+
+    let mut invalid_name = encode_instruction(Opcode::CreateDataPropertyById, &[0, 1, 1]).unwrap();
+    invalid_name.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    assert!(matches!(
+        Bytecode::from_words(invalid_name).verify(context()),
+        Err(VerifyError::ScopeNameOutOfRange { scope_name: 1, .. })
+    ));
+
+    let mut invalid_key =
+        encode_instruction(Opcode::CreateDataPropertyByValue, &[0, 1, 4]).unwrap();
+    invalid_key.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    assert!(matches!(
+        Bytecode::from_words(invalid_key).verify(context()),
+        Err(VerifyError::RegisterOutOfRange { register: 4, .. })
     ));
 }
 

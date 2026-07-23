@@ -28,6 +28,15 @@ var result = source.filter(function() { return true; });
 result.length === 2 && result[0] === 4 && result[1] === 7;
 "#;
 
+const ARRAY_LITERAL_INHERITED_GETTER_SOURCE: &str = r#"
+Object.defineProperty(Array.prototype, "0", {
+  get: function() { return 9; },
+  configurable: true
+});
+var result = [11].filter(function(value) { return value === 11; });
+result.length === 1 && result[0] === 11;
+"#;
+
 #[test]
 fn array_filter_proxy_define_is_stable_for_every_dispatch_batch() {
     assert_filter_proxy_batch::<1>();
@@ -79,6 +88,34 @@ fn array_filter_proxy_define_survives_forced_major_collections() {
         outcome,
         RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
     ));
+}
+
+#[test]
+fn array_literal_elements_ignore_inherited_accessors_for_every_dispatch_batch() {
+    assert_array_literal_inherited_getter_batch::<1>();
+    assert_array_literal_inherited_getter_batch::<2>();
+    assert_array_literal_inherited_getter_batch::<4>();
+    assert_array_literal_inherited_getter_batch::<8>();
+    assert_array_literal_inherited_getter_batch::<16>();
+}
+
+/// Executes the inherited-accessor regression through one interpreter dispatch batch size.
+fn assert_array_literal_inherited_getter_batch<const N: usize>() {
+    let module = compile_filter_source(ARRAY_LITERAL_INHERITED_GETTER_SOURCE, 1_310 + N as u32);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("array literal inherited-accessor fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
+    );
 }
 
 /// Compiles and executes the resumable Proxy result fixture for one dispatch batch.
