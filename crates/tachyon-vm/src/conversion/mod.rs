@@ -395,6 +395,13 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::DateToJson {
+                        return self.resume_date_to_json_after_primitive(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -631,6 +638,9 @@ impl Isolate {
                 }
                 ConversionConsumer::DateToPrimitiveString
                 | ConversionConsumer::DateToPrimitiveNumber => argument,
+                ConversionConsumer::DateToJson => {
+                    unreachable!("Date toJSON resumes inside the conversion state machine")
+                }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }

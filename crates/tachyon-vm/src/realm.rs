@@ -812,6 +812,9 @@ impl Isolate {
                 configurable: Some(true),
             },
         )?;
+        let to_json_atom = self.intern_intrinsic_name(b"toJSON")?;
+        let to_json = allocate(self, NativeFunction::DateToJson)?;
+        self.set_intrinsic_data_property(prototype, to_json_atom, to_json, true)?;
         for field in DateUtcField::ALL {
             let atom = self.intern_intrinsic_name(field.name().as_bytes())?;
             let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;
@@ -876,7 +879,8 @@ impl Isolate {
         let prototype =
             self.allocate_symbol_object(None, object_prototype, AllocationSpace::Old)?;
         self.realm.symbol_prototype = Some(prototype);
-        self.set_function_prototype(symbol_constructor, prototype)?;
+        let prototype_atom = self.prototype_atom()?;
+        self.set_intrinsic_constant_property(symbol_constructor, prototype_atom, prototype)?;
         let constructor = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor, symbol_constructor, true)?;
         for (name, native) in [

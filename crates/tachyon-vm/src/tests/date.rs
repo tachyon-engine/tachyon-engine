@@ -117,6 +117,59 @@ descriptor.value === method && descriptor.writable === false &&
 descriptor.enumerable === false && descriptor.configurable === true;
 "#;
 
+const DATE_TO_JSON_SOURCE: &str = r#"
+var date = new Date(0);
+var iso = date.toJSON();
+var order = "";
+var receiver = {
+  [Symbol.toPrimitive](hint) {
+    order = order + "p" + hint;
+    return Symbol("finite-enough");
+  },
+  get toISOString() {
+    order = order + "g";
+    return function() {
+      order = order + "c" + (this === receiver) + arguments.length;
+      return 42;
+    };
+  }
+};
+var generic = Date.prototype.toJSON.call(receiver);
+var observedNonFinite = false;
+var nonFinite = Date.prototype.toJSON.call({
+  valueOf() { return -Infinity; },
+  get toISOString() { observedNonFinite = true; throw 1; }
+});
+var boxedThis = false;
+Number.prototype.toISOString = function() {
+  boxedThis = typeof this === "object" && this.valueOf() === 3;
+  return "boxed";
+};
+var boxed = Date.prototype.toJSON.call(3);
+delete Number.prototype.toISOString;
+Symbol.prototype.toISOString = function() { return 10; };
+var symbolBoxed = Date.prototype.toJSON.call(Symbol("boxed"));
+delete Symbol.prototype.toISOString;
+var symbolPrototypeDescriptor = Object.getOwnPropertyDescriptor(Symbol, "prototype");
+var conversionStopped = false;
+try {
+  Date.prototype.toJSON.call({
+    [Symbol.toPrimitive]() { throw 9; },
+    get toISOString() { conversionStopped = true; }
+  });
+} catch (error) { conversionStopped = !conversionStopped && error === 9; }
+var nullThrows = false;
+try { Date.prototype.toJSON.call(null); } catch (error) { nullThrows = error instanceof TypeError; }
+iso === "1970-01-01T00:00:00.000Z" && generic === 42 &&
+order === "pnumbergctrue0" && nonFinite === null && !observedNonFinite &&
+boxed === "boxed" && boxedThis && conversionStopped && nullThrows &&
+symbolBoxed === 10 &&
+symbolPrototypeDescriptor.value === Symbol.prototype &&
+!symbolPrototypeDescriptor.writable && !symbolPrototypeDescriptor.enumerable &&
+!symbolPrototypeDescriptor.configurable &&
+Date.prototype.toJSON.name === "toJSON" && Date.prototype.toJSON.length === 1;
+"#;
+
 #[test]
 fn date_numeric_construction_is_stable_for_every_dispatch_batch() {
     assert_date_batch::<1>();
@@ -211,6 +264,37 @@ fn date_to_primitive_state_survives_forced_major_collections() {
 }
 
 #[test]
+fn date_to_json_resumes_for_every_dispatch_batch() {
+    assert_date_to_json_batch::<1>();
+    assert_date_to_json_batch::<2>();
+    assert_date_to_json_batch::<4>();
+    assert_date_to_json_batch::<8>();
+    assert_date_to_json_batch::<16>();
+}
+
+#[test]
+fn date_to_json_state_survives_forced_major_collections() {
+    let module = compile_date_program(DATE_TO_JSON_SOURCE, 1_408);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("forced-major Date toJSON fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "forced-major Date toJSON fixture returned {outcome:?}"
+    );
+}
+
+#[test]
 /// Exercises TimeClip conversion without relying on any host clock capability.
 fn date_time_clip_covers_numeric_and_boolean_constructor_inputs() {
     for (index, (input, expected)) in [
@@ -300,6 +384,24 @@ fn assert_date_to_primitive_batch<const N: usize>() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Date toPrimitive batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes generic Date toJSON conversion and invocation for one interpreter dispatch batch.
+fn assert_date_to_json_batch<const N: usize>() {
+    let module = compile_date_program(DATE_TO_JSON_SOURCE, 1_480 + N as u32);
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("Date toJSON fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date toJSON batch {N} returned {outcome:?}"
     );
 }
 

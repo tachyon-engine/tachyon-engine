@@ -2122,6 +2122,12 @@ impl Isolate {
                 }
                 (continuation.first(), 0, None, 0)
             }
+            NativeContinuationKind::DateToJson(stage) => {
+                if stage != DateToJsonStage::Call {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                (continuation.first(), 0, None, 0)
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5169,6 +5175,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::DateToPrimitive) => {
                     return self.begin_date_to_primitive(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::DateToJson) => {
+                    return self.begin_date_to_json(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::DateUtcGetter(field)) => {
                     let value = self.date_utc_field_value(site.this_value, field)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -6899,6 +6908,9 @@ impl Isolate {
                     .map(|_| ()),
                 NativeContinuationKind::ObjectToLocaleString(stage) => {
                     self.resume_object_to_locale_string(continuation, stage, value)
+                }
+                NativeContinuationKind::DateToJson(stage) => {
+                    self.resume_date_to_json(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())

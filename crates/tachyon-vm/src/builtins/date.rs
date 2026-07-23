@@ -63,6 +63,92 @@ impl Trace for PendingDateNumericRoots<'_> {
 }
 
 impl Isolate {
+    /// Starts generic Date.prototype.toJSON through ToObject and number-hint ToPrimitive.
+    pub(crate) fn begin_date_to_json(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let receiver = self.coerce_to_object(site.this_value)?;
+        let native_site = Self::date_continuation_site(site);
+        self.dispatch_object_primitive_conversion(
+            ConversionConsumer::DateToJson,
+            native_site.caller_base,
+            native_site.destination,
+            receiver,
+            receiver,
+            native_site.call_site,
+        )
+    }
+
+    /// Continues toJSON after ToPrimitive or returns null before observing toISOString.
+    pub(crate) fn resume_date_to_json_after_primitive(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        if numeric_value(primitive).is_some_and(|number| !number.is_finite()) {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Null),
+            );
+        }
+        self.begin_date_to_json_invoke(site, receiver)
+    }
+
+    /// Performs the Proxy/accessor-aware toISOString Get and handles its synchronous fast path.
+    fn begin_date_to_json_invoke(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+    ) -> Result<(), ExecutionError> {
+        let continuation = NativeContinuation::date_to_json(site, DateToJsonStage::Get, receiver);
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let to_iso_string = self.intern_intrinsic_name(b"toISOString")?;
+        if let Err(error) =
+            self.dispatch_proxy_aware_property_read(site, receiver, receiver, to_iso_string.into())
+        {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let callee = self.read(site.caller_base, site.destination)?;
+        self.resume_date_to_json(continuation, DateToJsonStage::Get, callee)
+    }
+
+    /// Resumes the toISOString lookup or its receiver-preserving zero-argument call.
+    pub(crate) fn resume_date_to_json(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: DateToJsonStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            DateToJsonStage::Get => {
+                self.resolve_function_object(value)?;
+                self.dispatch_property_callback(
+                    NativeContinuation::date_to_json(
+                        continuation.site(),
+                        DateToJsonStage::Call,
+                        continuation.first(),
+                    ),
+                    value,
+                )?;
+                Ok(())
+            }
+            DateToJsonStage::Call => self.write(
+                continuation.site().caller_base,
+                continuation.site().destination,
+                value,
+            ),
+        }
+    }
+
     /// Implements Date.prototype[@@toPrimitive] through forced ordinary conversion ordering.
     pub(crate) fn begin_date_to_primitive(
         &mut self,

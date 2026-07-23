@@ -233,6 +233,7 @@ pub(crate) enum ConversionConsumer {
     DateNumericArgument,
     DateToPrimitiveString,
     DateToPrimitiveNumber,
+    DateToJson,
 }
 
 impl ConversionConsumer {
@@ -257,7 +258,8 @@ impl ConversionConsumer {
             | Self::ErrorToStringMessage
             | Self::DateNumericArgument
             | Self::DateToPrimitiveString
-            | Self::DateToPrimitiveNumber => None,
+            | Self::DateToPrimitiveNumber
+            | Self::DateToJson => None,
         }
     }
 
@@ -318,6 +320,7 @@ impl ConversionConsumer {
                 | Self::DateNumericArgument
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber
+                | Self::DateToJson
         )
     }
 }
@@ -678,6 +681,13 @@ pub(crate) enum ObjectToLocaleStringStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DateToJsonStage {
+    Get,
+    Call,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
         consumer: ConversionConsumer,
@@ -738,6 +748,7 @@ pub(crate) enum NativeContinuationKind {
         setter: bool,
     },
     ObjectToLocaleString(ObjectToLocaleStringStage),
+    DateToJson(DateToJsonStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -802,6 +813,20 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ObjectToLocaleString(stage),
+            first: receiver,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn date_to_json(
+        site: NativeContinuationSite,
+        stage: DateToJsonStage,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::DateToJson(stage),
             first: receiver,
             second: Value::from_immediate(Immediate::Undefined),
         }

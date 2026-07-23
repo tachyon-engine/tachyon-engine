@@ -210,6 +210,7 @@ pub(crate) enum NativeFunction {
     DateToISOString,
     DateToUtcString,
     DateToPrimitive,
+    DateToJson,
     DateValueOf,
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
@@ -660,7 +661,7 @@ impl NativeFunction {
         }
         match self {
             Self::DateConstructor | Self::DateUtc => 7,
-            Self::DateToPrimitive => 1,
+            Self::DateToPrimitive | Self::DateToJson => 1,
             Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
@@ -1005,6 +1006,7 @@ impl NativeFunction {
             Self::DateToISOString => "toISOString",
             Self::DateToUtcString => "toUTCString",
             Self::DateToPrimitive => "[Symbol.toPrimitive]",
+            Self::DateToJson => "toJSON",
             Self::DateValueOf => "valueOf",
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),

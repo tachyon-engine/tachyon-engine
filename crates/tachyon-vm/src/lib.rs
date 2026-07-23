@@ -186,7 +186,7 @@ use runtime::{
         ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, BuiltinPropertyKeyConsumer,
         ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
         ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        ConversionNativeFunction, CopyDataPropertiesStage, DefinePropertiesStage,
+        ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
         ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
         GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
