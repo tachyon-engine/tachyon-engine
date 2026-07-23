@@ -14,6 +14,7 @@ use super::*;
 mod accessors;
 mod array_filter;
 mod array_predicate;
+mod array_reduce;
 mod assign;
 mod calls;
 mod class;

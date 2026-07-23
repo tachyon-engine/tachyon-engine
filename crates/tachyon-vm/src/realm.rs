@@ -1459,6 +1459,8 @@ impl Isolate {
         for (name, native) in [
             (b"every".as_slice(), NativeFunction::ArrayEvery),
             (b"some".as_slice(), NativeFunction::ArraySome),
+            (b"reduce".as_slice(), NativeFunction::ArrayReduce),
+            (b"reduceRight".as_slice(), NativeFunction::ArrayReduceRight),
         ] {
             let function = self.allocate_native_function(
                 native,

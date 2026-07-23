@@ -255,6 +255,8 @@ pub(crate) enum NativeFunction {
     ArrayEvery,
     ArraySome,
     ArrayFilter,
+    ArrayReduce,
+    ArrayReduceRight,
     ArrayToString,
     ArrayValues,
     ArrayIteratorNext,
@@ -699,6 +701,8 @@ impl NativeFunction {
             | Self::ArrayEvery
             | Self::ArraySome
             | Self::ArrayFilter
+            | Self::ArrayReduce
+            | Self::ArrayReduceRight
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
@@ -1062,6 +1066,8 @@ impl NativeFunction {
             Self::ArrayEvery => "every",
             Self::ArraySome => "some",
             Self::ArrayFilter => "filter",
+            Self::ArrayReduce => "reduce",
+            Self::ArrayReduceRight => "reduceRight",
             Self::ArrayToString => "toString",
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",
@@ -1658,6 +1664,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::SuperAlreadyCalled => Some(NativeErrorKind::Reference),
         ExecutionError::NonCallable(_)
         | ExecutionError::NonConstructor(_)
+        | ExecutionError::ArrayReduceEmpty
         | ExecutionError::ClassConstructorCalledWithoutNew(_)
         | ExecutionError::InvalidDerivedConstructorReturn(_)
         | ExecutionError::InvalidInstanceofPrototype(_)

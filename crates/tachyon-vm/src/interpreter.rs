@@ -6021,6 +6021,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayFilter) => {
                     return self.begin_array_filter(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayReduce) => {
+                    return self.begin_array_reduce(&site, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayReduceRight) => {
+                    return self.begin_array_reduce(&site, true);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
                     let value = self.array_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);

@@ -401,6 +401,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::ArrayLength {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_array_for_each_after_length_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -639,6 +647,9 @@ impl Isolate {
                 | ConversionConsumer::DateToPrimitiveNumber => argument,
                 ConversionConsumer::DateToJson => {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
+                }
+                ConversionConsumer::ArrayLength => {
+                    unreachable!("Array length resumes inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod reduce;
+
 const FOREACH_RECEIVER: usize = 0;
 const FOREACH_CALLBACK: usize = 1;
 const FOREACH_THIS_ARGUMENT: usize = 2;
@@ -218,27 +220,17 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         match stage {
             ArrayForEachStage::Length => {
-                let guard = NativeContinuation::array_for_each(
-                    site,
-                    stage,
-                    Value::from_heap_ref(state.raw()),
-                    value,
-                );
-                self.fiber
-                    .completions
-                    .push_native(guard)
-                    .map_err(Isolate::completion_stack_error)?;
-                let length = self.array_for_each_to_length(value);
-                self.pop_native_continuation()?;
-                let length = length?;
-                self.set_array_for_each_number(state, FOREACH_LENGTH, length)?;
-                let callback = self.native_call_state_snapshot(state)?.values[FOREACH_CALLBACK];
-                self.resolve_function_object(callback)?;
-                if self.array_filter_state(state)?.is_some() {
-                    self.begin_array_filter_species(site, state)
-                } else {
-                    self.advance_array_for_each(site, state)
+                if self.is_object_value(value) {
+                    return self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::ArrayLength,
+                        site.caller_base,
+                        site.destination,
+                        Value::from_heap_ref(state.raw()),
+                        value,
+                        site.call_site,
+                    );
                 }
+                self.resume_array_for_each_after_length_primitive(site, state, value)
             }
             ArrayForEachStage::FilterConstructor => {
                 if self.is_object_value(value) {
@@ -335,6 +327,43 @@ impl Isolate {
                 }
                 self.advance_array_for_each(site, state)
             }
+            ArrayForEachStage::ReduceHas => self.resume_array_reduce_has(site, state, value),
+            ArrayForEachStage::ReduceGet => self.resume_array_reduce_get(site, state, value),
+            ArrayForEachStage::ReduceCallback => {
+                self.finish_array_reduce_callback(site, state, value)
+            }
+        }
+    }
+
+    /// Applies ToLength to a primitive and resumes the selected shared Array iteration contract.
+    pub(crate) fn resume_array_for_each_after_length_primitive(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let guard = NativeContinuation::array_for_each(
+            site,
+            ArrayForEachStage::Length,
+            Value::from_heap_ref(state.raw()),
+            value,
+        );
+        self.fiber
+            .completions
+            .push_native(guard)
+            .map_err(Isolate::completion_stack_error)?;
+        let length = self.array_for_each_to_length(value);
+        self.pop_native_continuation()?;
+        let length = length?;
+        self.set_array_for_each_number(state, FOREACH_LENGTH, length)?;
+        let callback = self.native_call_state_snapshot(state)?.values[FOREACH_CALLBACK];
+        self.resolve_function_object(callback)?;
+        if self.is_array_reduce_state(state)? {
+            self.advance_array_reduce(site, state)
+        } else if self.array_filter_state(state)?.is_some() {
+            self.begin_array_filter_species(site, state)
+        } else {
+            self.advance_array_for_each(site, state)
         }
     }
 
@@ -518,9 +547,10 @@ impl Isolate {
             }
             self.set_array_for_each_number(state, FOREACH_NEXT_INDEX, index + 1)?;
             let key = Value::from_f64(index as f64);
-            let Some(has) = self.dispatch_array_for_each_has(
+            let Some(has) = self.dispatch_array_iteration_has(
                 site,
                 state,
+                ArrayForEachStage::Has,
                 pending.values[FOREACH_RECEIVER],
                 key,
             )?
@@ -666,16 +696,17 @@ impl Isolate {
     }
 
     /// Publishes an Array parent continuation around an ordinary or Proxy HasProperty operation.
-    fn dispatch_array_for_each_has(
+    pub(super) fn dispatch_array_iteration_has(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        stage: ArrayForEachStage,
         receiver: Value,
         key: Value,
     ) -> Result<Option<Value>, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
-        self.push_array_for_each_parent(site, state, ArrayForEachStage::Has, key)?;
+        self.push_array_for_each_parent(site, state, stage, key)?;
         let outcome = self.dispatch_has_property(site, receiver, key);
         if let Err(error) = outcome {
             if self.fiber.completions.len() > completion_depth {

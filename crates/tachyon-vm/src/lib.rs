@@ -322,6 +322,7 @@ pub enum ExecutionError {
     InvalidRegister(RegisterId),
     NonCallable(Value),
     NonConstructor(Value),
+    ArrayReduceEmpty,
     ClassConstructorCalledWithoutNew(Value),
     UninitializedThis,
     SuperAlreadyCalled,
