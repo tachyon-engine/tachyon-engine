@@ -17,7 +17,7 @@ impl Isolate {
     }
 
     /// Allocates a Promise with the prototype selected from the active constructor/newTarget.
-    fn create_promise_with_prototype(
+    pub(crate) fn create_promise_with_prototype(
         &mut self,
         state: PromiseState,
         result: Value,

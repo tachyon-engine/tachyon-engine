@@ -2118,6 +2118,10 @@ impl Isolate {
         for (name, native) in [
             (b"resolve".as_slice(), NativeFunction::PromiseResolve),
             (b"reject".as_slice(), NativeFunction::PromiseReject),
+            (
+                b"withResolvers".as_slice(),
+                NativeFunction::PromiseWithResolvers,
+            ),
         ] {
             let function = self.allocate_native_function(
                 native,

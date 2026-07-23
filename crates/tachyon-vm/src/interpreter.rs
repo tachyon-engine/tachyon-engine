@@ -5581,6 +5581,10 @@ impl Isolate {
                     let promise = self.create_promise(PromiseState::Rejected, reason)?;
                     return self.write(site.caller_base, site.destination, promise);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseWithResolvers) => {
+                    let result = self.promise_with_resolvers(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::SpeciesGetter) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }

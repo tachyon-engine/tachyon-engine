@@ -19,6 +19,46 @@ impl Trace for PromiseStaticResolveRoots<'_> {
 }
 
 impl Isolate {
+    /// Implements Promise.withResolvers using the existing managed capability/resolver records.
+    pub(crate) fn promise_with_resolvers(
+        &mut self,
+        constructor: Value,
+    ) -> Result<Value, ExecutionError> {
+        if !self.is_constructor_value(constructor)? {
+            return Err(ExecutionError::NonConstructor(constructor));
+        }
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(constructor, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .unwrap_or(
+                self.realm
+                    .promise_prototype
+                    .expect("Promise prototype initializes before withResolvers"),
+            );
+        let promise = self.create_promise_with_prototype(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+            prototype,
+        )?;
+        let state = self.create_promise_capability_arguments(promise)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let result = self.create_ordinary_object()?;
+        let attributes = |value| DataPropertyDescriptor {
+            value: Some(value),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
+        };
+        let promise_atom = self.intern_intrinsic_name(b"promise")?;
+        let resolve_atom = self.intern_intrinsic_name(b"resolve")?;
+        let reject_atom = self.intern_intrinsic_name(b"reject")?;
+        self.define_data_property(result, promise_atom, attributes(promise))?;
+        self.define_data_property(result, resolve_atom, attributes(pending.values[0]))?;
+        self.define_data_property(result, reject_atom, attributes(pending.values[1]))?;
+        Ok(result)
+    }
+
     /// Runs generic NewPromiseCapability for Promise.resolve without recursing into bytecode.
     pub(crate) fn begin_generic_promise_resolve(
         &mut self,
