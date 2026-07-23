@@ -5962,8 +5962,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIndexOf) => {
-                    let value = self.array_search(&site, false)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_index_search(&site, false);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIncludes) => {
                     let value = self.array_search(&site, true)?;
@@ -5994,8 +5993,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayLastIndexOf) => {
-                    let value = self.array_last_index_of(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_index_search(&site, true);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayCopyWithin) => {
                     let value = self.array_copy_within(&site)?;

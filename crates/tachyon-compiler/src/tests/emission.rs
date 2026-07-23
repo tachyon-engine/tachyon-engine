@@ -66,6 +66,27 @@ fn compiler_uses_own_definition_for_array_elements_but_not_synthetic_length() {
 }
 
 #[test]
+fn compiler_uses_own_definition_for_object_literal_data_properties() {
+    let module = Compiler
+        .compile(
+            source(MediaType::JavaScript, "({ fixed: 1, ['computed']: 2 });"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert!(disassembly.contains("CreateDataPropertyById"));
+    assert!(disassembly.contains("CreateDataPropertyByValue"));
+    assert!(!disassembly.contains("SetById"));
+    assert!(!disassembly.contains("SetByValue"));
+}
+
+#[test]
 fn compiler_materializes_the_arguments_object_in_function_scope() {
     let module = Compiler
         .compile(

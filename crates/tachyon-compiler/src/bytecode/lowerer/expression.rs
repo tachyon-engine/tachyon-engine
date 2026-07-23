@@ -425,20 +425,16 @@ impl Lowerer<'_> {
                     match &property.value {
                         HirObjectPropertyValue::Data(value) => {
                             let value = self.expression(value)?;
-                            let data_opcode = if is_array_literal {
-                                match &property.key {
-                                    HirObjectPropertyKey::Static(key)
-                                        if key.as_ref() != "length" =>
-                                    {
-                                        Opcode::CreateDataPropertyById
-                                    }
-                                    HirObjectPropertyKey::Static(_) => opcode,
-                                    HirObjectPropertyKey::Computed(_) => {
-                                        Opcode::CreateDataPropertyByValue
-                                    }
+                            let data_opcode = match &property.key {
+                                HirObjectPropertyKey::Static(key)
+                                    if is_array_literal && key.as_ref() == "length" =>
+                                {
+                                    opcode
                                 }
-                            } else {
-                                opcode
+                                HirObjectPropertyKey::Static(_) => Opcode::CreateDataPropertyById,
+                                HirObjectPropertyKey::Computed(_) => {
+                                    Opcode::CreateDataPropertyByValue
+                                }
                             };
                             self.emit(
                                 data_opcode,

@@ -5,6 +5,7 @@ use super::*;
 mod map;
 mod output;
 mod reduce;
+mod search;
 
 const FOREACH_RECEIVER: usize = 0;
 const FOREACH_CALLBACK: usize = 1;
@@ -353,6 +354,8 @@ impl Isolate {
             ArrayForEachStage::ReduceCallback => {
                 self.finish_array_reduce_callback(site, state, value)
             }
+            ArrayForEachStage::SearchHas => self.resume_array_search_has(site, state, value),
+            ArrayForEachStage::SearchGet => self.resume_array_search_get(site, state, value),
         }
     }
 
@@ -377,6 +380,9 @@ impl Isolate {
         self.pop_native_continuation()?;
         let length = length?;
         self.set_array_for_each_number(state, FOREACH_LENGTH, length)?;
+        if self.is_array_search_state(state)? {
+            return self.begin_array_search_index(site, state);
+        }
         let callback = self.native_call_state_snapshot(state)?.values[FOREACH_CALLBACK];
         self.resolve_function_object(callback)?;
         if self.is_array_reduce_state(state)? {

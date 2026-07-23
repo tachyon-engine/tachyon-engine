@@ -409,6 +409,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::ArraySearchIndex {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_array_search_after_index_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -650,6 +658,9 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayLength => {
                     unreachable!("Array length resumes inside the conversion state machine")
+                }
+                ConversionConsumer::ArraySearchIndex => {
+                    unreachable!("Array search index resumes inside the conversion state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

@@ -238,6 +238,7 @@ pub(crate) enum ConversionConsumer {
     DateToPrimitiveNumber,
     DateToJson,
     ArrayLength,
+    ArraySearchIndex,
 }
 
 impl ConversionConsumer {
@@ -264,7 +265,8 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
-            | Self::ArrayLength => None,
+            | Self::ArrayLength
+            | Self::ArraySearchIndex => None,
         }
     }
 
@@ -512,6 +514,8 @@ pub(crate) enum ArrayForEachStage {
     ReduceHas,
     ReduceGet,
     ReduceCallback,
+    SearchHas,
+    SearchGet,
 }
 
 /// The first Proxy essential internal methods routed through the exotic slow path.

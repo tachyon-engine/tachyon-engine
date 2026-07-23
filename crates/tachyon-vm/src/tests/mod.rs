@@ -16,6 +16,7 @@ mod array_filter;
 mod array_map;
 mod array_predicate;
 mod array_reduce;
+mod array_search;
 mod assign;
 mod calls;
 mod class;

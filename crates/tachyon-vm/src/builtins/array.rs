@@ -315,7 +315,7 @@ impl Isolate {
         self.array_element_or_undefined(site.this_value, index as u64)
     }
 
-    /// Implements `indexOf` and `includes` without allocating an iterator or callback closure.
+    /// Implements `includes` without allocating an iterator or callback closure.
     pub(crate) fn array_search(
         &mut self,
         site: &CallSite,
@@ -533,41 +533,6 @@ impl Isolate {
             self.set_own_data_property(site.this_value, key, value)?;
         }
         Ok(site.this_value)
-    }
-
-    /// Implements `Array.prototype.lastIndexOf` using reverse strict-equality search.
-    pub(crate) fn array_last_index_of(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        if length == 0 {
-            return Ok(Value::from_i32(-1));
-        }
-        let search = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let from = self
-            .call_argument(site, 1)?
-            .unwrap_or(safe_integer_value(length - 1));
-        let number = numeric_value(self.convert_to_number(from)?).unwrap_or(f64::NAN);
-        let mut index = if number.is_nan() {
-            length - 1
-        } else if number.is_sign_negative() {
-            length.saturating_sub((-number).ceil() as u64)
-        } else {
-            number.floor().min((length - 1) as f64) as u64
-        };
-        loop {
-            let key = self.safe_integer_property_atom(index)?;
-            if let Some(value) = self.get_data_property(site.this_value, key)?
-                && self.strict_equal_values(value, search)?
-            {
-                return Ok(safe_integer_value(index));
-            }
-            if index == 0 {
-                break;
-            }
-            index -= 1;
-        }
-        Ok(Value::from_i32(-1))
     }
 
     /// Implements `Array.prototype.copyWithin` with overlap-safe direction and hole preservation.
