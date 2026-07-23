@@ -230,6 +230,7 @@ pub(crate) enum ConversionConsumer {
     ErrorConstructorMessage,
     ErrorToStringName,
     ErrorToStringMessage,
+    DateNumericArgument,
 }
 
 impl ConversionConsumer {
@@ -251,7 +252,8 @@ impl ConversionConsumer {
             | Self::BuiltinPropertyKey(_)
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
-            | Self::ErrorToStringMessage => None,
+            | Self::ErrorToStringMessage
+            | Self::DateNumericArgument => None,
         }
     }
 
@@ -308,6 +310,7 @@ impl ConversionConsumer {
                 | Self::ErrorConstructorMessage
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
+                | Self::DateNumericArgument
         )
     }
 }

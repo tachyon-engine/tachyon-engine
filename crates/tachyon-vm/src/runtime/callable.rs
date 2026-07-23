@@ -1570,6 +1570,7 @@ pub(crate) struct VmTypes {
     pub(crate) promise_reaction: GcType<PromiseReaction>,
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
+    pub(crate) pending_date_numeric_arguments: GcType<PendingDateNumericArguments>,
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,

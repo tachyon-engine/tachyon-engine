@@ -428,6 +428,9 @@ impl Isolate {
             pending_native_property_key: registry
                 .try_register("PendingNativePropertyKey")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_date_numeric_arguments: registry
+                .try_register("PendingDateNumericArguments")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             native_call_state: registry
                 .try_register("NativeCallState")
                 .map_err(IsolateCreationError::TypeRegistration)?,

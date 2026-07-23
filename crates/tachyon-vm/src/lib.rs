@@ -122,6 +122,7 @@ pub(crate) enum IntrinsicPrototypeKind {
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use bound_function::BoundFunctionData;
+use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,

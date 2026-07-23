@@ -5153,12 +5153,10 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::DateUtc) => {
-                    let value = self.date_utc_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_date_utc(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::DateSetTime) => {
-                    let value = self.date_set_time_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_date_set_time(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::DateToISOString) => {
                     let value = self.date_to_iso_string(site.this_value)?;
@@ -5173,8 +5171,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::DateUtcSetter(setter)) => {
-                    let value = self.date_utc_setter_from_site(&site, setter)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_date_utc_setter(&site, setter);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpExec) => {
                     let result = self.regexp_exec(&site)?;

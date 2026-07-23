@@ -43,6 +43,50 @@ Date.name === "Date" && Date.length === 7 &&
 Date.prototype.constructor === Date && brandThrows;
 "#;
 
+const DATE_OBJECT_CONVERSION_SOURCE: &str = r#"
+var log = "";
+function numeric(label, value) {
+  return {
+    [Symbol.toPrimitive](hint) {
+      log = log + label + hint;
+      return value;
+    }
+  };
+}
+var utc = Date.UTC(
+  numeric("y", 2000), numeric("m", 1), numeric("d", 29),
+  numeric("h", 23), numeric("i", 58), numeric("s", 57), numeric("x", 456)
+);
+var date = new Date(0);
+var setTimeResult = date.setTime(numeric("t", -1));
+var setterResult = date.setUTCHours(
+  numeric("H", 1), numeric("I", 2), numeric("S", 3), numeric("X", 4)
+);
+var invalid = new Date(NaN);
+var invalidResult = invalid.setUTCMonth({
+  [Symbol.toPrimitive](hint) {
+    log = log + "M" + hint;
+    invalid.setTime(0);
+    return 2;
+  }
+}, numeric("D", 3));
+var brandConverted = false;
+try {
+  Date.prototype.setTime.call({}, { valueOf() { brandConverted = true; return 1; } });
+} catch (error) {}
+var stopped = true;
+try {
+  Date.UTC({ valueOf() { throw 42; } }, { valueOf() { stopped = false; return 1; } });
+} catch (error) {
+  stopped = stopped && error === 42;
+}
+utc === 951868737456 && setTimeResult === -1 &&
+setterResult === -82676996 && invalidResult !== invalidResult && invalid.getTime() === 0 &&
+log === "ynumbermnumberdnumberhnumberinumbersnumberxnumber" +
+       "tnumberHnumberInumberSnumberXnumberMnumberDnumber" &&
+!brandConverted && stopped;
+"#;
+
 #[test]
 fn date_numeric_construction_is_stable_for_every_dispatch_batch() {
     assert_date_batch::<1>();
@@ -72,6 +116,37 @@ fn date_payload_and_prototype_survive_forced_major_collections() {
         outcome,
         RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
     ));
+}
+
+#[test]
+fn date_object_numeric_arguments_resume_for_every_dispatch_batch() {
+    assert_date_object_conversion_batch::<1>();
+    assert_date_object_conversion_batch::<2>();
+    assert_date_object_conversion_batch::<4>();
+    assert_date_object_conversion_batch::<8>();
+    assert_date_object_conversion_batch::<16>();
+}
+
+#[test]
+fn date_object_numeric_argument_state_survives_forced_major_collections() {
+    let module = compile_date_program(DATE_OBJECT_CONVERSION_SOURCE, 1_406);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("forced-major Date conversion fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "forced-major Date conversion fixture returned {outcome:?}"
+    );
 }
 
 #[test]
@@ -128,6 +203,24 @@ fn assert_date_batch<const N: usize>() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes observable Date numeric conversion for one interpreter dispatch batch.
+fn assert_date_object_conversion_batch<const N: usize>() {
+    let module = compile_date_program(DATE_OBJECT_CONVERSION_SOURCE, 1_440 + N as u32);
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("Date object conversion fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date object conversion batch {N} returned {outcome:?}"
     );
 }
 

@@ -21,6 +21,47 @@ const MONTH_START_DAYS: [[i64; 12]; 2] = [
     [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335],
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum DateNumericOperation {
+    Utc,
+    SetTime,
+    UtcSetter(DateUtcSetter),
+}
+
+/// Traced cold-path state retained while Date numeric arguments invoke JavaScript conversion code.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingDateNumericArguments {
+    receiver: Value,
+    arguments: [Value; 7],
+    fields: [f64; 7],
+    operation: DateNumericOperation,
+    argument_count: u8,
+    next_argument: u8,
+    preserve_invalid_receiver: bool,
+}
+
+impl Trace for PendingDateNumericArguments {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.receiver.trace(tracer);
+        self.arguments.trace(tracer);
+    }
+}
+
+struct PendingDateNumericRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: PendingDateNumericArguments,
+}
+
+impl Trace for PendingDateNumericRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
+
 impl Isolate {
     /// Constructs the clock-independent single-argument Date form with Realm-correct prototype.
     pub(crate) fn create_date_from_site(
@@ -97,68 +138,63 @@ impl Isolate {
         Ok(Value::from_f64(value as f64))
     }
 
-    /// Implements Date.UTC with ordered primitive ToNumber conversion and UTC field normalization.
-    pub(crate) fn date_utc_from_site(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let mut fields = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
-        for index in 0..site.argument_count.min(fields.len() as u32) {
-            let argument = self
-                .call_argument(site, index)?
-                .expect("Date.UTC argument remains inside the call window");
-            let converted = self.convert_to_number(argument)?;
-            fields[index as usize] = numeric_value(converted)
-                .ok_or(ExecutionError::UnsupportedNumberConversion(argument))?
-                .trunc();
-        }
-        if (0.0..=99.0).contains(&fields[0]) {
-            fields[0] += 1900.0;
-        }
-        Ok(Value::from_f64(make_utc_date(fields)))
+    /// Starts Date.UTC argument conversion, allocating continuation state only for object operands.
+    pub(crate) fn begin_date_utc(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let pending = self.pending_date_arguments(
+            site,
+            DateNumericOperation::Utc,
+            Value::from_immediate(Immediate::Undefined),
+            [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            site.argument_count.min(7) as u8,
+            false,
+        )?;
+        self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
     }
 
-    /// Implements Date.prototype.setTime for the currently synchronous ToNumber subset.
-    pub(crate) fn date_set_time_from_site(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
+    /// Starts Date.prototype.setTime after applying its receiver brand check.
+    pub(crate) fn begin_date_set_time(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.date_time_value(site.this_value)?
             .ok_or(ExecutionError::NotObject(site.this_value))?;
-        let argument = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let converted = self.convert_to_number(argument)?;
-        let clipped = time_clip(
-            numeric_value(converted)
-                .ok_or(ExecutionError::UnsupportedNumberConversion(argument))?,
-        );
-        self.set_date_time_value(site.this_value, clipped)?;
-        Ok(Value::from_f64(clipped))
+        let pending = self.pending_date_arguments(
+            site,
+            DateNumericOperation::SetTime,
+            site.this_value,
+            [f64::NAN; 7],
+            1,
+            false,
+        )?;
+        self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
     }
 
-    /// Applies one UTC setter after preserving its ordered argument conversion contract.
-    pub(crate) fn date_utc_setter_from_site(
+    /// Starts one UTC setter after snapshotting the branded receiver before any conversion.
+    pub(crate) fn begin_date_utc_setter(
         &mut self,
         site: &CallSite,
         setter: DateUtcSetter,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let original = self
             .date_time_value(site.this_value)?
             .ok_or(ExecutionError::NotObject(site.this_value))?;
-        let arguments = self.date_setter_arguments(site, setter.length() as u32)?;
-        let base_time = if original.is_nan() {
-            if setter == DateUtcSetter::FullYear {
+        let fields = if original.is_nan() && setter != DateUtcSetter::FullYear {
+            [f64::NAN; 7]
+        } else {
+            UtcDateParts::from_time(if original.is_nan() {
                 0
             } else {
-                self.set_date_time_value(site.this_value, f64::NAN)?;
-                return Ok(Value::from_f64(f64::NAN));
-            }
-        } else {
-            original as i64
+                original as i64
+            })
+            .make_date_fields()
         };
-        let mut fields = UtcDateParts::from_time(base_time).make_date_fields();
-        apply_utc_setter(&mut fields, setter, arguments);
-        let date_value = make_utc_date(fields);
-        self.set_date_time_value(site.this_value, date_value)?;
-        Ok(Value::from_f64(date_value))
+        let count = site.argument_count.min(setter.length() as u32).max(1) as u8;
+        let pending = self.pending_date_arguments(
+            site,
+            DateNumericOperation::UtcSetter(setter),
+            site.this_value,
+            fields,
+            count,
+            original.is_nan() && setter != DateUtcSetter::FullYear,
+        )?;
+        self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
     }
 
     /// Formats the canonical simplified ISO UTC representation without heap intermediates.
@@ -222,28 +258,217 @@ impl Isolate {
         )
     }
 
-    /// Converts only supplied setter arguments and leaves optional defaults distinguishable.
-    fn date_setter_arguments(
+    /// Resumes a Date conversion after one object argument has produced its primitive value.
+    pub(crate) fn resume_date_numeric_arguments(
+        &mut self,
+        site: NativeContinuationSite,
+        state_value: Value,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        let state = self.pending_date_numeric_reference(state_value)?;
+        let pending = self.pending_date_numeric_snapshot(state)?;
+        self.drive_date_numeric_arguments(site, pending, Some(state), Some(primitive))
+    }
+
+    /// Copies the bounded argument window before any nested JavaScript callback can replace it.
+    fn pending_date_arguments(
         &mut self,
         site: &CallSite,
-        maximum: u32,
-    ) -> Result<[Option<f64>; 4], ExecutionError> {
-        let mut arguments = [None; 4];
-        for index in 0..site.argument_count.min(maximum) {
-            let argument = self
-                .call_argument(site, index)?
-                .expect("Date setter argument remains inside the call window");
-            let converted = self.convert_to_number(argument)?;
-            arguments[index as usize] = Some(
-                numeric_value(converted)
-                    .ok_or(ExecutionError::UnsupportedNumberConversion(argument))?
-                    .trunc(),
-            );
+        operation: DateNumericOperation,
+        receiver: Value,
+        fields: [f64; 7],
+        argument_count: u8,
+        preserve_invalid_receiver: bool,
+    ) -> Result<PendingDateNumericArguments, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let mut arguments = [undefined; 7];
+        for index in 0..argument_count {
+            arguments[index as usize] = self
+                .call_argument(site, u32::from(index))?
+                .unwrap_or(undefined);
         }
-        if arguments[0].is_none() {
-            arguments[0] = Some(f64::NAN);
+        Ok(PendingDateNumericArguments {
+            receiver,
+            arguments,
+            fields,
+            operation,
+            argument_count,
+            next_argument: 0,
+            preserve_invalid_receiver,
+        })
+    }
+
+    /// Drives primitive fast paths and publishes a shared ToPrimitive continuation when required.
+    fn drive_date_numeric_arguments(
+        &mut self,
+        site: NativeContinuationSite,
+        mut pending: PendingDateNumericArguments,
+        state: Option<GcRef<PendingDateNumericArguments>>,
+        returned: Option<Value>,
+    ) -> Result<(), ExecutionError> {
+        if let Some(primitive) = returned {
+            self.store_date_numeric_argument(&mut pending, primitive)?;
         }
-        Ok(arguments)
+        while pending.next_argument < pending.argument_count {
+            let argument = pending.arguments[pending.next_argument as usize];
+            if self.is_object_value(argument) {
+                let state = match state {
+                    Some(state) => {
+                        self.replace_pending_date_numeric(state, pending)?;
+                        state
+                    }
+                    None => self.allocate_pending_date_numeric(pending)?,
+                };
+                return self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::DateNumericArgument,
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                    argument,
+                    site.call_site,
+                );
+            }
+            self.store_date_numeric_argument(&mut pending, argument)?;
+        }
+        let result = self.finish_date_numeric_arguments(pending)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Converts one primitive and stores it in the operation-specific MakeDate field.
+    fn store_date_numeric_argument(
+        &mut self,
+        pending: &mut PendingDateNumericArguments,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(pending.next_argument < pending.argument_count);
+        let converted = self.convert_to_number(primitive)?;
+        let number = numeric_value(converted)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(primitive))?
+            .trunc();
+        let field = match pending.operation {
+            DateNumericOperation::Utc => pending.next_argument as usize,
+            DateNumericOperation::SetTime => 0,
+            DateNumericOperation::UtcSetter(setter) => {
+                date_utc_setter_start(setter) + pending.next_argument as usize
+            }
+        };
+        pending.fields[field] = number;
+        pending.next_argument += 1;
+        Ok(())
+    }
+
+    /// Commits Date.UTC or one branded Date mutation after every observable conversion completes.
+    fn finish_date_numeric_arguments(
+        &mut self,
+        mut pending: PendingDateNumericArguments,
+    ) -> Result<Value, ExecutionError> {
+        let date_value = match pending.operation {
+            DateNumericOperation::Utc => {
+                if (0.0..=99.0).contains(&pending.fields[0]) {
+                    pending.fields[0] += 1900.0;
+                }
+                make_utc_date(pending.fields)
+            }
+            DateNumericOperation::SetTime => time_clip(pending.fields[0]),
+            DateNumericOperation::UtcSetter(_) if pending.preserve_invalid_receiver => f64::NAN,
+            DateNumericOperation::UtcSetter(_) => make_utc_date(pending.fields),
+        };
+        if pending.operation != DateNumericOperation::Utc && !pending.preserve_invalid_receiver {
+            self.set_date_time_value(pending.receiver, date_value)?;
+        }
+        Ok(Value::from_f64(date_value))
+    }
+
+    #[inline(always)]
+    fn date_continuation_site(site: &CallSite) -> NativeContinuationSite {
+        NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        }
+    }
+
+    /// Allocates the cold conversion payload under the complete isolate root set.
+    fn allocate_pending_date_numeric(
+        &mut self,
+        pending: PendingDateNumericArguments,
+    ) -> Result<GcRef<PendingDateNumericArguments>, ExecutionError> {
+        let mut roots = PendingDateNumericRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.pending_date_numeric_arguments,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Recovers a checked Date numeric continuation reference from its traced Value handle.
+    fn pending_date_numeric_reference(
+        &mut self,
+        value: Value,
+    ) -> Result<GcRef<PendingDateNumericArguments>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.heap
+            .checked_reference(raw, self.types.pending_date_numeric_arguments)
+            .map_err(|_| ExecutionError::MissingNativeContinuation)
+    }
+
+    /// Copies the payload without retaining a heap borrow across conversion or callback work.
+    fn pending_date_numeric_snapshot(
+        &mut self,
+        state: GcRef<PendingDateNumericArguments>,
+    ) -> Result<PendingDateNumericArguments, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(state, self.types.pending_date_numeric_arguments)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Publishes scalar progress before another object argument can invoke arbitrary JavaScript.
+    fn replace_pending_date_numeric(
+        &mut self,
+        state: GcRef<PendingDateNumericArguments>,
+        pending: PendingDateNumericArguments,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let current = no_gc
+                    .borrow_mut(state, self.types.pending_date_numeric_arguments)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                debug_assert_eq!(current.receiver, pending.receiver);
+                debug_assert_eq!(current.arguments, pending.arguments);
+                debug_assert_eq!(current.operation, pending.operation);
+                debug_assert_eq!(current.argument_count, pending.argument_count);
+                debug_assert_eq!(
+                    current.preserve_invalid_receiver,
+                    pending.preserve_invalid_receiver
+                );
+                current.fields = pending.fields;
+                current.next_argument = pending.next_argument;
+                Ok(())
+            })
+        })
     }
 
     /// Reads `[[DateValue]]` only from a genuine Date payload.
@@ -396,9 +621,9 @@ impl UtcDateParts {
     }
 }
 
-/// Replaces the contiguous MakeDate fields controlled by one UTC setter.
-fn apply_utc_setter(fields: &mut [f64; 7], setter: DateUtcSetter, arguments: [Option<f64>; 4]) {
-    let start = match setter {
+#[inline(always)]
+const fn date_utc_setter_start(setter: DateUtcSetter) -> usize {
+    match setter {
         DateUtcSetter::FullYear => 0,
         DateUtcSetter::Month => 1,
         DateUtcSetter::Date => 2,
@@ -406,12 +631,6 @@ fn apply_utc_setter(fields: &mut [f64; 7], setter: DateUtcSetter, arguments: [Op
         DateUtcSetter::Minutes => 4,
         DateUtcSetter::Seconds => 5,
         DateUtcSetter::Milliseconds => 6,
-    };
-    for (offset, argument) in arguments.into_iter().enumerate() {
-        let Some(argument) = argument else {
-            break;
-        };
-        fields[start + offset] = argument;
     }
 }
 
@@ -487,6 +706,11 @@ fn time_clip(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_numeric_argument_state_keeps_the_audited_cold_path_size() {
+        assert_eq!(core::mem::size_of::<PendingDateNumericArguments>(), 128);
+    }
 
     #[test]
     fn time_clip_rejects_the_specification_boundary_and_truncates_finite_values() {

@@ -388,6 +388,13 @@ impl Isolate {
                             _ => unreachable!("matched Error string conversion consumer"),
                         };
                     }
+                    if continuation.consumer == ConversionConsumer::DateNumericArgument {
+                        return self.resume_date_numeric_arguments(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -616,6 +623,11 @@ impl Isolate {
                 | ConversionConsumer::ErrorToStringName
                 | ConversionConsumer::ErrorToStringMessage => {
                     unreachable!("Error messages finish inside the conversion state machine")
+                }
+                ConversionConsumer::DateNumericArgument => {
+                    unreachable!(
+                        "Date numeric arguments finish inside the conversion state machine"
+                    )
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
