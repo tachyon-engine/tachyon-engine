@@ -1642,6 +1642,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
     pub(crate) pending_array_copy_within: GcType<PendingArrayCopyWithin>,
+    pub(crate) pending_array_fill: GcType<PendingArrayFill>,
     pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,

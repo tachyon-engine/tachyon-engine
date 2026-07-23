@@ -270,6 +270,9 @@ pub(crate) enum ConversionConsumer {
     ArrayRemoveLength,
     ArrayInsertLength,
     ArrayReverseLength,
+    ArrayFillLength,
+    ArrayFillStart,
+    ArrayFillEnd,
 }
 
 impl ConversionConsumer {
@@ -326,6 +329,7 @@ impl ConversionConsumer {
             | Self::ArrayRemoveLength
             | Self::ArrayInsertLength
             | Self::ArrayReverseLength => None,
+            Self::ArrayFillLength | Self::ArrayFillStart | Self::ArrayFillEnd => None,
         }
     }
 
@@ -407,6 +411,9 @@ impl ConversionConsumer {
                 | Self::ArrayRemoveLength
                 | Self::ArrayInsertLength
                 | Self::ArrayReverseLength
+                | Self::ArrayFillLength
+                | Self::ArrayFillStart
+                | Self::ArrayFillEnd
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -723,6 +730,14 @@ pub(crate) enum ArrayReverseStage {
     SecondMutation,
 }
 
+/// One observable boundary in the resumable Array fill algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayFillStage {
+    Length,
+    Set,
+}
+
 /// One observable boundary in a resumable static Array constructor algorithm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1016,6 +1031,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayRemove(ArrayRemoveStage),
     ArrayInsert(ArrayInsertStage),
     ArrayReverse(ArrayReverseStage),
+    ArrayFill(ArrayFillStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1749,6 +1765,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayReverse(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one fill state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_fill(
+        site: NativeContinuationSite,
+        stage: ArrayFillStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayFill(stage),
             first: state,
             second: retained,
         }

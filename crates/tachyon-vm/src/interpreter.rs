@@ -2142,6 +2142,9 @@ impl Isolate {
             NativeContinuationKind::ArrayReverse(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayFill(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayStatic(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6074,8 +6077,7 @@ impl Isolate {
                     return self.begin_array_reverse(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayFill) => {
-                    let value = self.array_fill(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_fill(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayLastIndexOf) => {
                     return self.begin_array_index_search(&site, true);
@@ -7062,6 +7064,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayReverse(stage) => {
                     let state = self.pending_array_reverse_reference(continuation.first())?;
                     self.resume_array_reverse(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayFill(stage) => {
+                    let state = self.pending_array_fill_reference(continuation.first())?;
+                    self.resume_array_fill(site, state, stage, value)
                 }
                 NativeContinuationKind::ArrayStatic(stage) => {
                     let state = self.pending_array_static_reference(continuation.first())?;

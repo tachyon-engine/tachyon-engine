@@ -263,36 +263,6 @@ impl Isolate {
         })
     }
 
-    fn relative_array_index(&mut self, value: Value, length: u64) -> Result<u64, ExecutionError> {
-        let number = numeric_value(self.convert_to_number(value)?).unwrap_or(f64::NAN);
-        if number.is_nan() || number == 0.0 {
-            return Ok(0);
-        }
-        if number.is_sign_negative() {
-            return Ok(length.saturating_sub((-number).ceil() as u64));
-        }
-        Ok(number.floor().min(length as f64) as u64)
-    }
-
-    /// Implements `Array.prototype.fill` with ToInteger-relative bounds and hole materialization.
-    pub(crate) fn array_fill(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        let value = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
-        let end_value = self
-            .call_argument(site, 2)?
-            .unwrap_or(safe_integer_value(length));
-        let start = self.relative_array_index(start_value, length)?;
-        let end = self.relative_array_index(end_value, length)?;
-        for index in start..end {
-            let key = self.safe_integer_property_atom(index)?;
-            self.set_own_data_property(site.this_value, key, value)?;
-        }
-        Ok(site.this_value)
-    }
-
     fn array_element_or_undefined(
         &mut self,
         receiver: Value,

@@ -414,6 +414,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArrayFillLength
+                            | ConversionConsumer::ArrayFillStart
+                            | ConversionConsumer::ArrayFillEnd
+                    ) {
+                        let state = self.pending_array_fill_reference(continuation.receiver)?;
+                        return self.resume_array_fill_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ArrayCopyWithinLength
                             | ConversionConsumer::ArrayCopyWithinTarget
                             | ConversionConsumer::ArrayCopyWithinStart
@@ -597,6 +611,20 @@ impl Isolate {
                         return self.resume_array_reverse_conversion(
                             continuation.site,
                             state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayFillLength
+                            | ConversionConsumer::ArrayFillStart
+                            | ConversionConsumer::ArrayFillEnd
+                    ) {
+                        let state = self.pending_array_fill_reference(continuation.receiver)?;
+                        return self.resume_array_fill_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
                             value,
                         );
                     }
@@ -896,6 +924,11 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayReverseLength => {
                     unreachable!("Array reverse conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayFillLength
+                | ConversionConsumer::ArrayFillStart
+                | ConversionConsumer::ArrayFillEnd => {
+                    unreachable!("Array fill conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

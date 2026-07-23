@@ -15,6 +15,7 @@ mod accessors;
 mod array_concat;
 mod array_copy;
 mod array_copy_within;
+mod array_fill;
 mod array_filter;
 mod array_find;
 mod array_flat;

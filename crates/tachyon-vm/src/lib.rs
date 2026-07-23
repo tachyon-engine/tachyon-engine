@@ -14,6 +14,7 @@ mod array;
 mod array_concat;
 mod array_copy;
 mod array_copy_within;
+mod array_fill;
 mod array_flat;
 mod array_flat_map;
 mod array_for_each;
@@ -136,6 +137,7 @@ use array::{ArrayObject, MAX_SAFE_INTEGER, safe_integer_property_index};
 use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
 use array_copy_within::PendingArrayCopyWithin;
+use array_fill::PendingArrayFill;
 use array_flat::PendingArrayFlat;
 use array_flat_map::PendingArrayFlatMap;
 use array_insert::PendingArrayInsert;
@@ -208,7 +210,7 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage,
-        ArrayCopyWithinStage, ArrayFlatMapStage, ArrayFlatStage, ArrayForEachStage,
+        ArrayCopyWithinStage, ArrayFillStage, ArrayFlatMapStage, ArrayFlatStage, ArrayForEachStage,
         ArrayInsertStage, ArrayRemoveStage, ArrayReverseStage, ArraySliceStage, ArraySpliceStage,
         ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer, ClassActivation,
         CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
