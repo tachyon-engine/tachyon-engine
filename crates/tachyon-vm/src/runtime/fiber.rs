@@ -463,6 +463,13 @@ pub(crate) enum PromiseFinallyMethodStage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+pub(crate) enum PromiseCatchStage {
+    Then,
+    ThenCall,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub(crate) enum PromiseStaticResolveStage {
     ResolveConstructor,
     ResolveCallback,
@@ -726,6 +733,7 @@ pub(crate) enum NativeContinuationKind {
     /// Resumes finally after PromiseResolve(C, callbackResult) completes.
     PromiseFinallyResolve,
     PromiseFinallyMethod(PromiseFinallyMethodStage),
+    PromiseCatch(PromiseCatchStage),
     PromiseStaticResolve(PromiseStaticResolveStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
@@ -1219,6 +1227,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::PromiseFinallyMethod(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots catch's observable `then` lookup and call across bytecode frames.
+    #[inline]
+    pub(crate) const fn promise_catch(
+        site: NativeContinuationSite,
+        stage: PromiseCatchStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseCatch(stage),
             first: state,
             second: retained,
         }

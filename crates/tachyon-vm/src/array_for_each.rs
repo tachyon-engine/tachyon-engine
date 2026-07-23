@@ -7,6 +7,10 @@ const FOREACH_CALLBACK: usize = 1;
 const FOREACH_THIS_ARGUMENT: usize = 2;
 const FOREACH_LENGTH: usize = 3;
 const FOREACH_NEXT_INDEX: usize = 4;
+const FILTER_RESULT: usize = 0;
+const FILTER_THIS_ARGUMENT: usize = 1;
+const FILTER_NEXT_INDEX: usize = 2;
+const FILTER_STATE_COUNT: u8 = 3;
 
 struct ArrayForEachRoots<'a> {
     vm: VmRoots<'a>,
@@ -64,6 +68,63 @@ impl Isolate {
         )
     }
 
+    /// Creates a filter result and starts the shared observable array-iteration state machine.
+    pub(crate) fn begin_array_filter(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if !self.is_object_value(site.this_value) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
+        let callback = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.resolve_function_object(callback)?;
+        let this_argument = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let result = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        })?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let filter = self.allocate_array_for_each_state(NativeCallState {
+            values: [
+                result,
+                this_argument,
+                Value::from_i32(0),
+                undefined,
+                undefined,
+            ],
+            count: FILTER_STATE_COUNT,
+        })?;
+        let state = self.allocate_array_for_each_state(NativeCallState {
+            values: [
+                site.this_value,
+                callback,
+                Value::from_heap_ref(filter.raw()),
+                Value::from_i32(0),
+                Value::from_i32(0),
+            ],
+            count: 5,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let length = self.length_atom()?;
+        self.dispatch_array_for_each_get(
+            continuation_site,
+            state,
+            ArrayForEachStage::Length,
+            site.this_value,
+            length.into(),
+        )
+    }
+
     /// Resumes length, HasProperty, Get, or callback completion from the iterative trampoline.
     pub(crate) fn resume_array_for_each(
         &mut self,
@@ -71,6 +132,7 @@ impl Isolate {
         state: GcRef<NativeCallState>,
         stage: ArrayForEachStage,
         value: Value,
+        retained: Value,
     ) -> Result<(), ExecutionError> {
         match stage {
             ArrayForEachStage::Length => {
@@ -103,7 +165,14 @@ impl Isolate {
                 }
             }
             ArrayForEachStage::Get => self.call_array_for_each_callback(site, state, value),
-            ArrayForEachStage::Callback => self.advance_array_for_each(site, state),
+            ArrayForEachStage::Callback => {
+                if let Some(filter) = self.array_filter_state(state)?
+                    && self.is_truthy_value(value)?
+                {
+                    self.append_array_filter_value(filter, retained)?;
+                }
+                self.advance_array_for_each(site, state)
+            }
         }
     }
 
@@ -122,11 +191,12 @@ impl Isolate {
         let length = exact_nonnegative_integer(pending.values[FOREACH_LENGTH])?;
         let index = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
         if index >= length {
-            return self.write(
-                site.caller_base,
-                site.destination,
-                Value::from_immediate(Immediate::Undefined),
-            );
+            let result = if let Some(filter) = self.array_filter_state(state)? {
+                self.native_call_state_snapshot(filter)?.values[FILTER_RESULT]
+            } else {
+                Value::from_immediate(Immediate::Undefined)
+            };
+            return self.write(site.caller_base, site.destination, result);
         }
         self.set_array_for_each_number(state, FOREACH_NEXT_INDEX, index + 1)?;
         let key = Value::from_f64(index as f64);
@@ -161,6 +231,11 @@ impl Isolate {
         let pending = self.native_call_state_snapshot(state)?;
         let next = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
         let index = Value::from_f64((next - 1) as f64);
+        let this_argument = if let Some(filter) = self.array_filter_state(state)? {
+            self.native_call_state_snapshot(filter)?.values[FILTER_THIS_ARGUMENT]
+        } else {
+            pending.values[FOREACH_THIS_ARGUMENT]
+        };
         let continuation = NativeContinuation::array_for_each(
             site,
             ArrayForEachStage::Callback,
@@ -173,7 +248,7 @@ impl Isolate {
             .map_err(Isolate::completion_stack_error)?;
         let prefix = match self.create_apply_argument_prefix(
             pending.values[FOREACH_CALLBACK],
-            pending.values[FOREACH_THIS_ARGUMENT],
+            this_argument,
             vec![value, index, pending.values[FOREACH_RECEIVER]],
         ) {
             Ok(prefix) => prefix,
@@ -193,7 +268,7 @@ impl Isolate {
             argument_prefix_offset: 0,
             argument_prefix_count: 3,
             argument_count: 3,
-            this_value: pending.values[FOREACH_THIS_ARGUMENT],
+            this_value: this_argument,
             new_target: Value::from_immediate(Immediate::Undefined),
             construct_receiver: None,
             call_site: site.call_site,
@@ -212,6 +287,12 @@ impl Isolate {
             return Ok(());
         }
         self.pop_native_continuation()?;
+        let returned = self.read(site.caller_base, site.destination)?;
+        if let Some(filter) = self.array_filter_state(state)?
+            && self.is_truthy_value(returned)?
+        {
+            self.append_array_filter_value(filter, value)?;
+        }
         self.advance_array_for_each(site, state)
     }
 
@@ -241,7 +322,7 @@ impl Isolate {
         }
         let continuation = self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_array_for_each(site, state, stage, value)?;
+        self.resume_array_for_each(site, state, stage, value, continuation.second())?;
         debug_assert_eq!(
             continuation.kind(),
             NativeContinuationKind::ArrayForEach(stage)
@@ -274,7 +355,13 @@ impl Isolate {
         }
         self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_array_for_each(site, state, ArrayForEachStage::Has, value)
+        self.resume_array_for_each(
+            site,
+            state,
+            ArrayForEachStage::Has,
+            value,
+            Value::from_immediate(Immediate::Undefined),
+        )
     }
 
     fn push_array_for_each_parent(
@@ -354,6 +441,42 @@ impl Isolate {
             return Ok(MAX_SAFE_INTEGER);
         }
         Ok(number.floor() as u64)
+    }
+
+    /// Returns the filter side-state when an iteration state represents Array.prototype.filter.
+    fn array_filter_state(
+        &mut self,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Option<GcRef<NativeCallState>>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let Some(raw) = pending.values[FOREACH_CALLBACK + 1].as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(filter) = self
+            .heap
+            .checked_reference(raw, self.types.native_call_state)
+        else {
+            return Ok(None);
+        };
+        let snapshot = self.native_call_state_snapshot(filter)?;
+        Ok((snapshot.count == FILTER_STATE_COUNT).then_some(filter))
+    }
+
+    /// Appends a selected value to the filter result with one indexed write and length update.
+    fn append_array_filter_value(
+        &mut self,
+        filter: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let index = exact_nonnegative_integer(
+            self.native_call_state_snapshot(filter)?.values[FILTER_NEXT_INDEX],
+        )?;
+        let key = self.safe_integer_property_atom(index)?;
+        let result = self.native_call_state_snapshot(filter)?.values[FILTER_RESULT];
+        self.set_own_data_property(result, key, value)?;
+        let length = self.length_atom()?;
+        self.set_own_data_property(result, length, safe_integer_value(index + 1))?;
+        self.set_array_for_each_number(filter, FILTER_NEXT_INDEX, index + 1)
     }
 }
 

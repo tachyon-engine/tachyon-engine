@@ -723,6 +723,19 @@ fn array_identity_push_and_join_follow_array_like_semantics() {
 }
 
 #[test]
+/// Runs Array.prototype.filter through callback frames and preserves selected order.
+fn array_filter_runs_resumable_callback_iteration() {
+    assert_eq!(
+        execute_source(
+            1_140,
+            "var result = [1, 2, 3, 4].filter(function(value) { return value % 2 === 0; }); result.length === 2 && result[0] === 2 && result[1] === 4;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+}
+
+#[test]
 /// Covers descriptor harness primitives used by multiple built-in test262 directories.
 fn object_names_enumerability_and_math_pow_are_available() {
     assert_eq!(

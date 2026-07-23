@@ -523,20 +523,139 @@ impl Isolate {
     }
 
     /// Implements the current intrinsic catch path through the shared reaction substrate.
-    pub(crate) fn promise_catch(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    pub(crate) fn promise_catch(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let on_rejected = self
             .call_argument(site, 0)?
             .filter(|value| self.resolve_function_object(*value).is_ok());
-        self.perform_intrinsic_promise_then(
+        if !self.is_object_value(site.this_value) {
+            return Err(ExecutionError::NotObject(site.this_value));
+        }
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_promise_then_state(NativeCallState {
+            values: [
+                site.this_value,
+                on_rejected.unwrap_or(undefined),
+                undefined,
+                undefined,
+                undefined,
+            ],
+            count: 2,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let then_atom = self.intern_intrinsic_name(b"then")?;
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::promise_catch(
+                continuation_site,
+                PromiseCatchStage::Then,
+                Value::from_heap_ref(state.raw()),
+                site.this_value,
+            ))
+            .map_err(Isolate::completion_stack_error)?;
+        let outcome = self.dispatch_proxy_aware_property_read(
+            continuation_site,
             site.this_value,
-            None,
-            on_rejected,
-            NativeContinuationSite {
-                caller_base: site.caller_base,
-                destination: site.destination,
-                call_site: site.call_site,
-            },
-        )
+            site.this_value,
+            then_atom.into(),
+        );
+        if let Err(error) = outcome {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(());
+        }
+        self.pop_native_continuation()?;
+        let then = self.read(continuation_site.caller_base, continuation_site.destination)?;
+        self.resume_promise_catch(continuation_site, state, PromiseCatchStage::Then, then)
+    }
+
+    /// Resumes catch's observable `then` lookup and invokes it with the standard catch arguments.
+    pub(crate) fn resume_promise_catch(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: PromiseCatchStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match stage {
+            PromiseCatchStage::Then => {
+                self.resolve_function_object(value)
+                    .map_err(|_| ExecutionError::NonCallable(value))?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let undefined = Value::from_immediate(Immediate::Undefined);
+                let arguments = self.allocate_promise_then_state(NativeCallState {
+                    values: [
+                        undefined,
+                        pending.values[1],
+                        undefined,
+                        undefined,
+                        undefined,
+                    ],
+                    count: 2,
+                })?;
+                let continuation = NativeContinuation::promise_catch(
+                    site,
+                    PromiseCatchStage::ThenCall,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                );
+                let completion_depth = self.fiber.completions.len();
+                let frame_depth = self.fiber.frames.len();
+                self.fiber
+                    .completions
+                    .push_native(continuation)
+                    .map_err(Isolate::completion_stack_error)?;
+                if let Err(error) = self.call(CallSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    callee: value,
+                    argument_base: 0,
+                    argument_source: Some(arguments),
+                    argument_prefix: None,
+                    argument_prefix_offset: 0,
+                    argument_prefix_count: 0,
+                    argument_count: 2,
+                    this_value: pending.values[0],
+                    new_target: undefined,
+                    construct_receiver: None,
+                    call_site: site.call_site,
+                }) {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+                if self.fiber.frames.len() != frame_depth {
+                    let frame = self
+                        .fiber
+                        .frames
+                        .last_mut()
+                        .ok_or(ExecutionError::MissingEnvironment)?;
+                    frame.return_register = None;
+                    frame.return_continuation = true;
+                    return Ok(());
+                }
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                Ok(())
+            }
+            PromiseCatchStage::ThenCall => self.write(site.caller_base, site.destination, value),
+        }
     }
 
     /// Implements the first Promise.prototype.finally slice with traced reaction wrappers.
@@ -657,15 +776,20 @@ impl Isolate {
                 self.resolve_function_object(value)
                     .map_err(|_| ExecutionError::NonCallable(value))?;
                 let pending = self.native_call_state_snapshot(state)?;
+                let mapping = pending.count == 4;
                 let arguments = self.allocate_promise_then_state(NativeCallState {
                     values: [
                         pending.values[FIN_FULFILLED],
-                        pending.values[FIN_REJECTED],
+                        if mapping {
+                            Value::from_immediate(Immediate::Undefined)
+                        } else {
+                            pending.values[FIN_REJECTED]
+                        },
                         Value::from_immediate(Immediate::Undefined),
                         Value::from_immediate(Immediate::Undefined),
                         Value::from_immediate(Immediate::Undefined),
                     ],
-                    count: 2,
+                    count: if mapping { 1 } else { 2 },
                 })?;
                 let continuation = NativeContinuation::promise_finally_method(
                     site,
@@ -688,7 +812,7 @@ impl Isolate {
                     argument_prefix: None,
                     argument_prefix_offset: 0,
                     argument_prefix_count: 0,
-                    argument_count: 2,
+                    argument_count: if mapping { 1 } else { 2 },
                     this_value: pending.values[FIN_SOURCE],
                     new_target: Value::from_immediate(Immediate::Undefined),
                     construct_receiver: None,
@@ -865,6 +989,9 @@ impl Isolate {
             }
             return Ok(());
         }
+        if let Some(promise) = self.promise_resolve_same_constructor(callback_result, intrinsic)? {
+            return self.begin_promise_finally_mapping(site, promise, original, rejected);
+        }
         let callback_promise = self.create_promise(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
@@ -924,14 +1051,13 @@ impl Isolate {
         original: Value,
         rejected: bool,
     ) -> Result<(), ExecutionError> {
-        let value_handler = self.allocate_promise_finally_result_handler(original, rejected)?;
-        let throw_handler = self.allocate_promise_finally_result_handler(original, true)?;
+        let handler = self.allocate_promise_finally_result_handler(original, rejected)?;
         let state = self.allocate_promise_then_state(NativeCallState {
             values: [
                 promise,
                 Value::from_immediate(Immediate::Undefined),
-                value_handler,
-                throw_handler,
+                handler,
+                Value::from_immediate(Immediate::Undefined),
                 Value::from_immediate(Immediate::Undefined),
             ],
             count: 4,

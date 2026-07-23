@@ -151,6 +151,7 @@ pub(crate) enum NativeFunction {
     ArrayFlat,
     ArraySort,
     ArrayForEach,
+    ArrayFilter,
     ArrayToString,
     ArrayValues,
     ArrayIteratorNext,
@@ -588,6 +589,7 @@ impl NativeFunction {
             | Self::PromiseWithResolvers
             | Self::PromiseCatch
             | Self::ArrayForEach
+            | Self::ArrayFilter
             | Self::ObjectGetOwnPropertyNames
             | Self::ObjectGetOwnPropertySymbols
             | Self::ObjectHasOwnProperty
@@ -930,6 +932,7 @@ impl NativeFunction {
             Self::ArrayFlat => "flat",
             Self::ArraySort => "sort",
             Self::ArrayForEach => "forEach",
+            Self::ArrayFilter => "filter",
             Self::ArrayToString => "toString",
             Self::ArrayValues => "values",
             Self::ArrayIteratorNext => "next",

@@ -2132,6 +2132,7 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseFinallyMethod(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::PromiseCatch(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::PromiseFinallyResolve => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5667,8 +5668,7 @@ impl Isolate {
                     return self.begin_promise_then(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::PromiseCatch) => {
-                    let result = self.promise_catch(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.promise_catch(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::PromiseFinally) => {
                     return self.promise_finally(&site);
@@ -5958,6 +5958,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayForEach) => {
                     return self.begin_array_for_each(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayFilter) => {
+                    return self.begin_array_filter(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayToString) => {
                     let value = self.array_to_string(site.this_value)?;
@@ -6827,7 +6830,7 @@ impl Isolate {
                 }
                 NativeContinuationKind::ArrayForEach(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
-                    self.resume_array_for_each(site, state, stage, value)
+                    self.resume_array_for_each(site, state, stage, value, continuation.second())
                 }
                 NativeContinuationKind::MapGetOrInsertComputed => {
                     let state = self.pending_map_upsert_reference(continuation.first())?;
@@ -6873,6 +6876,10 @@ impl Isolate {
                 NativeContinuationKind::PromiseFinallyMethod(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_promise_finally_method(site, state, stage, value)
+                }
+                NativeContinuationKind::PromiseCatch(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_promise_catch(site, state, stage, value)
                 }
                 NativeContinuationKind::PromiseFinallyResolve => {
                     let state = self.native_call_state_reference(continuation.first())?;

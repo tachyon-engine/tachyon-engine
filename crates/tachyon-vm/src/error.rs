@@ -181,7 +181,21 @@ impl Isolate {
         let options = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let error = self.create_native_error(kind, None)?;
+        let intrinsic_prototype = self
+            .realm
+            .error_intrinsics
+            .get(kind)
+            .prototype
+            .expect("native Error prototypes initialize before execution");
+        let prototype = if site.new_target.as_immediate() == Some(Immediate::Undefined) {
+            intrinsic_prototype
+        } else {
+            let prototype_atom = self.prototype_atom()?;
+            self.constructor_prototype_value(site.new_target, prototype_atom)?
+                .filter(|value| self.is_object_value(*value))
+                .unwrap_or(intrinsic_prototype)
+        };
+        let error = self.allocate_native_error_with_prototype(kind, None, prototype)?;
         let state = self.allocate_error_constructor_state(error, options)?;
         let state_value = Value::from_heap_ref(state.raw());
         let continuation_site = NativeContinuationSite {

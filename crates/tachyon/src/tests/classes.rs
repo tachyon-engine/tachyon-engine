@@ -15,6 +15,10 @@ fn base_class_construction_and_prototype_wiring() {
             "class A {} var value = new A(); value instanceof A && Object.getPrototypeOf(A) === Function.prototype && Object.getPrototypeOf(A.prototype) === Object.prototype && A.prototype.constructor === A;",
         ),
         (
+            1_810,
+            "class MyError extends Error {} var error = new MyError(); error instanceof MyError && error instanceof Error && error.constructor === MyError;",
+        ),
+        (
             1_071,
             "class A {} var descriptor = Object.getOwnPropertyDescriptor(A, 'prototype'); descriptor.writable === false && descriptor.enumerable === false && descriptor.configurable === false;",
         ),

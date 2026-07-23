@@ -335,16 +335,17 @@ fn promise_finally_custom_same_constructor_chain_completes() {
     );
     let probe = compile_promise_fixture(1_040, "promise-finally-custom", "done;");
     let mut isolate = test_isolate();
-    assert!(matches!(
-        isolate.execute(
-            &setup,
-            ExecutionBudget {
-                fuel: 4096,
-                quantum: 4096
-            }
-        ),
-        Ok(RunOutcome::Completed(_))
-    ));
+    let setup_outcome = isolate.execute(
+        &setup,
+        ExecutionBudget {
+            fuel: 4096,
+            quantum: 4096,
+        },
+    );
+    assert!(
+        matches!(setup_outcome, Ok(RunOutcome::Completed(_))),
+        "setup: {setup_outcome:?}"
+    );
     let outcome = isolate.execute(
         &probe,
         ExecutionBudget {
