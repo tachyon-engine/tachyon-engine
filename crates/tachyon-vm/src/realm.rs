@@ -773,6 +773,9 @@ impl Isolate {
         let utc_atom = self.intern_intrinsic_name(b"UTC")?;
         let utc = allocate(self, NativeFunction::DateUtc)?;
         self.set_intrinsic_data_property(constructor, utc_atom, utc, true)?;
+        let parse_atom = self.intern_intrinsic_name(b"parse")?;
+        let parse = allocate(self, NativeFunction::DateParse)?;
+        self.set_intrinsic_data_property(constructor, parse_atom, parse, true)?;
 
         let get_time = allocate(self, NativeFunction::DateGetTime)?;
         self.realm.date_get_time = Some(get_time);

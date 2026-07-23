@@ -1,6 +1,9 @@
 //! Date branded-object construction and clock-independent primitive operations.
 
+mod parse;
+
 use super::super::*;
+use parse::{ParsedDateTime, parse_iso_date_time};
 
 const MAX_TIME_VALUE: f64 = 8.64e15;
 const MS_PER_SECOND: i64 = 1_000;
@@ -63,6 +66,19 @@ impl Trace for PendingDateNumericRoots<'_> {
 }
 
 impl Isolate {
+    /// Parses an already-ToString-converted Date.parse argument without consulting host timezone state.
+    pub(crate) fn date_parse_primitive_value(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let units = self.string_value_to_utf16(value)?;
+        let parsed = match parse_iso_date_time(&units) {
+            Some(ParsedDateTime::Utc(value)) => value,
+            Some(ParsedDateTime::Local(_)) | None => f64::NAN,
+        };
+        Ok(Value::from_f64(parsed))
+    }
+
     /// Starts generic Date.prototype.toJSON through ToObject and number-hint ToPrimitive.
     pub(crate) fn begin_date_to_json(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = self.coerce_to_object(site.this_value)?;
@@ -785,6 +801,11 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 
 /// Applies MakeDay, MakeTime, MakeDate, and TimeClip in specification evaluation order.
 fn make_utc_date(fields: [f64; 7]) -> f64 {
+    time_clip(make_utc_date_unclipped(fields))
+}
+
+/// Applies MakeDay, MakeTime, and MakeDate while leaving final TimeClip to the caller.
+fn make_utc_date_unclipped(fields: [f64; 7]) -> f64 {
     if fields.iter().any(|field| !field.is_finite()) {
         return f64::NAN;
     }
@@ -804,8 +825,7 @@ fn make_utc_date(fields: [f64; 7]) -> f64 {
     time += fields[4] * MS_PER_MINUTE as f64;
     time += fields[5] * MS_PER_SECOND as f64;
     time += fields[6];
-    let date = day * MS_PER_DAY as f64 + time;
-    time_clip(date)
+    day * MS_PER_DAY as f64 + time
 }
 
 #[inline(always)]

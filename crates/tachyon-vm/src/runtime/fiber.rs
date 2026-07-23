@@ -160,6 +160,7 @@ pub(crate) enum ConversionNativeFunction {
     GlobalDecodeUriComponent,
     GlobalEncodeUri,
     GlobalEncodeUriComponent,
+    DateParse,
 }
 
 impl ConversionNativeFunction {
@@ -183,6 +184,7 @@ impl ConversionNativeFunction {
             NativeFunction::GlobalDecodeUriComponent => Some(Self::GlobalDecodeUriComponent),
             NativeFunction::GlobalEncodeUri => Some(Self::GlobalEncodeUri),
             NativeFunction::GlobalEncodeUriComponent => Some(Self::GlobalEncodeUriComponent),
+            NativeFunction::DateParse => Some(Self::DateParse),
             _ => None,
         }
     }
@@ -207,6 +209,7 @@ impl ConversionNativeFunction {
             Self::GlobalDecodeUriComponent => NativeFunction::GlobalDecodeUriComponent,
             Self::GlobalEncodeUri => NativeFunction::GlobalEncodeUri,
             Self::GlobalEncodeUriComponent => NativeFunction::GlobalEncodeUriComponent,
+            Self::DateParse => NativeFunction::DateParse,
         }
     }
 }
@@ -278,6 +281,7 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUriComponent)
                 | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUri)
                 | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUriComponent)
+                | Self::NativeCall(ConversionNativeFunction::DateParse)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
                 | Self::ErrorConstructorMessage

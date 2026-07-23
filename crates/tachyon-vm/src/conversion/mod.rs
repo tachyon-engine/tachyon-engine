@@ -173,9 +173,8 @@ impl Isolate {
             | NativeFunction::GlobalDecodeUri
             | NativeFunction::GlobalDecodeUriComponent
             | NativeFunction::GlobalEncodeUri
-            | NativeFunction::GlobalEncodeUriComponent => {
-                Value::from_immediate(Immediate::Undefined)
-            }
+            | NativeFunction::GlobalEncodeUriComponent
+            | NativeFunction::DateParse => Value::from_immediate(Immediate::Undefined),
             _ => unreachable!("only argument conversion consumers enter this dispatch path"),
         };
         self.dispatch_native_conversion_operand(consumer, site, receiver, argument)
@@ -694,6 +693,9 @@ impl Isolate {
                     native,
                     NativeFunction::StringToUpperCase | NativeFunction::StringToLocaleUpperCase
                 ),
+            ),
+            NativeFunction::DateParse => self.date_parse_primitive_value(
+                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
             ),
             _ => unreachable!("only conversion consumers create this continuation"),
         }

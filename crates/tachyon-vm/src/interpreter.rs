@@ -5143,7 +5143,8 @@ impl Isolate {
                     | NativeFunction::NumberToFixed
                     | NativeFunction::NumberToPrecision
                     | NativeFunction::NumberToString
-                    | NativeFunction::NumberConstructor),
+                    | NativeFunction::NumberConstructor
+                    | NativeFunction::DateParse),
                 ) => return self.dispatch_conversion_native(native, &site, false),
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;

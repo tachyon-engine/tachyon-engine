@@ -170,6 +170,31 @@ symbolPrototypeDescriptor.value === Symbol.prototype &&
 Date.prototype.toJSON.name === "toJSON" && Date.prototype.toJSON.length === 1;
 "#;
 
+const DATE_PARSE_SOURCE: &str = r#"
+var trace = "";
+var parsedObject = Date.parse({
+  [Symbol.toPrimitive](hint) {
+    trace = trace + hint;
+    return "+275760-09-13T00:00:00.000Z";
+  }
+});
+var descriptor = Object.getOwnPropertyDescriptor(Date, "parse");
+var constructThrows = false;
+try { new Date.parse(); } catch (error) { constructThrows = error instanceof TypeError; }
+Date.parse("1970-01-01") === 0 &&
+Date.parse("1970-01-01T01:30:00+01:30") === 0 &&
+Date.parse("1969-12-31T23:59:59.9999Z") === -1 &&
+Date.parse("-271821-04-20T00:00:00.000Z") === -8640000000000000 &&
+parsedObject === 8640000000000000 &&
+Number.isNaN(Date.parse("-271821-04-19T23:59:59.999Z")) &&
+Number.isNaN(Date.parse("+275760-09-13T00:00:00.001Z")) &&
+Number.isNaN(Date.parse("-000000-03-31T00:45Z")) &&
+Number.isNaN(Date.parse("2023-02-29")) &&
+trace === "string" && Date.parse.name === "parse" && Date.parse.length === 1 &&
+descriptor.value === Date.parse && descriptor.writable &&
+!descriptor.enumerable && descriptor.configurable && constructThrows;
+"#;
+
 #[test]
 fn date_numeric_construction_is_stable_for_every_dispatch_batch() {
     assert_date_batch::<1>();
@@ -295,6 +320,37 @@ fn date_to_json_state_survives_forced_major_collections() {
 }
 
 #[test]
+fn date_parse_resumes_for_every_dispatch_batch() {
+    assert_date_parse_batch::<1>();
+    assert_date_parse_batch::<2>();
+    assert_date_parse_batch::<4>();
+    assert_date_parse_batch::<8>();
+    assert_date_parse_batch::<16>();
+}
+
+#[test]
+fn date_parse_conversion_survives_forced_major_collections() {
+    let module = compile_date_program(DATE_PARSE_SOURCE, 1_409);
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("forced-major Date.parse fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "forced-major Date.parse fixture returned {outcome:?}"
+    );
+}
+
+#[test]
 /// Exercises TimeClip conversion without relying on any host clock capability.
 fn date_time_clip_covers_numeric_and_boolean_constructor_inputs() {
     for (index, (input, expected)) in [
@@ -402,6 +458,24 @@ fn assert_date_to_json_batch<const N: usize>() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Date toJSON batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes Date.parse conversion and UTC/offset parsing for one interpreter dispatch batch.
+fn assert_date_parse_batch<const N: usize>() {
+    let module = compile_date_program(DATE_PARSE_SOURCE, 1_520 + N as u32);
+    let outcome = test_isolate()
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 12_288,
+                quantum: 12_288,
+            },
+        )
+        .expect("Date.parse fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date.parse batch {N} returned {outcome:?}"
     );
 }
 
