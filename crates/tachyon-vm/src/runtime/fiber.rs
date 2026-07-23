@@ -152,6 +152,7 @@ pub(crate) enum ConversionNativeFunction {
     StringToUpperCase,
     StringToLocaleLowerCase,
     StringToLocaleUpperCase,
+    StringIterator,
     GlobalIsFinite,
     GlobalIsNaN,
     GlobalParseFloat,
@@ -176,6 +177,7 @@ impl ConversionNativeFunction {
             NativeFunction::StringToUpperCase => Some(Self::StringToUpperCase),
             NativeFunction::StringToLocaleLowerCase => Some(Self::StringToLocaleLowerCase),
             NativeFunction::StringToLocaleUpperCase => Some(Self::StringToLocaleUpperCase),
+            NativeFunction::StringIterator => Some(Self::StringIterator),
             NativeFunction::GlobalIsFinite => Some(Self::GlobalIsFinite),
             NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
             NativeFunction::GlobalParseFloat => Some(Self::GlobalParseFloat),
@@ -201,6 +203,7 @@ impl ConversionNativeFunction {
             Self::StringToUpperCase => NativeFunction::StringToUpperCase,
             Self::StringToLocaleLowerCase => NativeFunction::StringToLocaleLowerCase,
             Self::StringToLocaleUpperCase => NativeFunction::StringToLocaleUpperCase,
+            Self::StringIterator => NativeFunction::StringIterator,
             Self::GlobalIsFinite => NativeFunction::GlobalIsFinite,
             Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
             Self::GlobalParseFloat => NativeFunction::GlobalParseFloat,
@@ -239,6 +242,7 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     ArrayLength,
     ArraySearchIndex,
+    ArrayConcatLength,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -270,6 +274,7 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::ArrayLength
             | Self::ArraySearchIndex
+            | Self::ArrayConcatLength
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount => None,
@@ -285,6 +290,7 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::StringToUpperCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToLocaleLowerCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToLocaleUpperCase)
+                | Self::NativeCall(ConversionNativeFunction::StringIterator)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)
                 | Self::NativeCall(ConversionNativeFunction::GlobalDecodeUri)
@@ -336,6 +342,7 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
                 | Self::ArrayLength
+                | Self::ArrayConcatLength
                 | Self::ArraySpliceLength
                 | Self::ArraySpliceStart
                 | Self::ArraySpliceDeleteCount
@@ -527,6 +534,22 @@ pub(crate) enum ArrayForEachStage {
     SearchGet,
     FindGet,
     FindCallback,
+}
+
+/// One observable boundary in the resumable Array.prototype.concat algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayConcatStage {
+    SpeciesConstructor,
+    SpeciesValue,
+    SpeciesConstruct,
+    Spreadable,
+    Length,
+    ElementHas,
+    ElementGet,
+    ElementDefine,
+    ValueDefine,
+    FinalLength,
 }
 
 /// One observable boundary in the resumable Array.prototype.splice algorithm.
@@ -783,6 +806,7 @@ pub(crate) enum NativeContinuationKind {
     GetOwnPropertyDescriptors(GetOwnPropertyDescriptorsStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
+    ArrayConcat(ArrayConcatStage),
     ArraySplice(ArraySpliceStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1468,6 +1492,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArraySplice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one concat state and operation-specific value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_concat(
+        site: NativeContinuationSite,
+        stage: ArrayConcatStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayConcat(stage),
             first: state,
             second: retained,
         }

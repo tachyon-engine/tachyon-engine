@@ -12,6 +12,7 @@ use tachyon_value::RawHeapRef;
 use super::*;
 
 mod accessors;
+mod array_concat;
 mod array_filter;
 mod array_find;
 mod array_map;

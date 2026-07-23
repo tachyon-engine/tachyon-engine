@@ -37,6 +37,14 @@ pub enum HirObjectExpressionPart {
     Spread(HirExpression),
 }
 
+/// One ordered ArrayAccumulation item retained when a literal contains spread.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirArrayExpressionPart {
+    Element(HirExpression),
+    Elision,
+    Spread(HirExpression),
+}
+
 /// Owns the definition mode for one object or array literal property.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirObjectPropertyValue {
@@ -190,6 +198,7 @@ pub enum HirExpressionKind {
     Object(Arc<[HirObjectProperty]>),
     ObjectSpread(Arc<[HirObjectExpressionPart]>),
     Array(Arc<[HirObjectProperty]>),
+    ArrayAccumulation(Arc<[HirArrayExpressionPart]>),
     StaticMember {
         object: Box<HirExpression>,
         property: Arc<str>,
@@ -398,7 +407,35 @@ pub(super) fn lower_expression(
             HirExpressionKind::Sequence(expressions.into())
         }
         Expression::ArrayExpression(array) => {
-            let mut accumulated = None;
+            if array.elements.iter().any(ArrayExpressionElement::is_spread) {
+                let mut parts = Vec::new();
+                parts.try_reserve_exact(array.elements.len()).map_err(|_| {
+                    CompileError::LoweringCapacityOverflow {
+                        collection: "HIR array elements",
+                    }
+                })?;
+                for element in &array.elements {
+                    let part = if let Some(value) = element.as_expression() {
+                        HirArrayExpressionPart::Element(lower_expression(
+                            value, source, semantic, functions,
+                        )?)
+                    } else if let ArrayExpressionElement::SpreadElement(spread) = element {
+                        HirArrayExpressionPart::Spread(lower_expression(
+                            &spread.argument,
+                            source,
+                            semantic,
+                            functions,
+                        )?)
+                    } else {
+                        HirArrayExpressionPart::Elision
+                    };
+                    parts.push(part);
+                }
+                return Ok(HirExpression {
+                    span,
+                    kind: HirExpressionKind::ArrayAccumulation(parts.into()),
+                });
+            }
             let mut chunk_properties = Vec::new();
             let mut chunk_length = 0usize;
             for element in &array.elements {
@@ -413,35 +450,10 @@ pub(super) fn lower_expression(
                     chunk_length += 1;
                     continue;
                 }
-                if element.is_spread() {
-                    let spread = match element {
-                        ArrayExpressionElement::SpreadElement(spread) => &spread.argument,
-                        _ => {
-                            return Err(unsupported(
-                                source.name(),
-                                source_span(element.span()),
-                                "array spread",
-                            ));
-                        }
-                    };
-                    let spread = lower_expression(spread, source, semantic, functions)?;
-                    let chunk = lower_array_chunk(chunk_properties, chunk_length, span);
-                    accumulated = Some(match accumulated {
-                        Some(left) => lower_array_concat(left, spread, span),
-                        None => lower_array_concat(chunk, spread, span),
-                    });
-                    chunk_properties = Vec::new();
-                    chunk_length = 0;
-                } else {
-                    chunk_length += 1;
-                }
+                debug_assert!(!element.is_spread(), "spread literals return above");
+                chunk_length += 1;
             }
-            let tail = lower_array_chunk(chunk_properties, chunk_length, span);
-            match accumulated {
-                Some(left) if chunk_length != 0 => lower_array_concat(left, tail, span).kind,
-                Some(left) => left.kind,
-                None => tail.kind,
-            }
+            lower_array_chunk(chunk_properties, chunk_length, span).kind
         }
         Expression::ObjectExpression(expression) => {
             let mut properties = Vec::with_capacity(expression.properties.len());
@@ -1315,7 +1327,7 @@ fn class_method_name(key: &HirObjectPropertyKey, kind: HirClassMethodKind) -> Op
     }
 }
 
-/// Builds one owned array chunk used by spread lowering and sparse-element preservation.
+/// Builds one owned ordinary array literal while preserving its trailing sparse length.
 fn lower_array_chunk(
     mut properties: Vec<HirObjectProperty>,
     length: usize,
@@ -1332,27 +1344,6 @@ fn lower_array_chunk(
     HirExpression {
         span,
         kind: HirExpressionKind::Array(properties.into()),
-    }
-}
-
-/// Reifies one spread chunk as a receiver-preserving Array.prototype.concat call.
-fn lower_array_concat(
-    left: HirExpression,
-    right: HirExpression,
-    span: SourceSpan,
-) -> HirExpression {
-    HirExpression {
-        span,
-        kind: HirExpressionKind::Call {
-            callee: Box::new(HirExpression {
-                span,
-                kind: HirExpressionKind::StaticMember {
-                    object: Box::new(left),
-                    property: Arc::from("concat"),
-                },
-            }),
-            arguments: Arc::from([right]),
-        },
     }
 }
 

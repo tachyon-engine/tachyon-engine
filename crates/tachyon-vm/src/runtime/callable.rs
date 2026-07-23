@@ -179,6 +179,8 @@ pub(crate) enum NativeFunction {
     StringToUpperCase,
     StringToLocaleLowerCase,
     StringToLocaleUpperCase,
+    StringIterator,
+    StringIteratorNext,
     RegExpConstructor,
     RegExpExec,
     RegExpTest,
@@ -893,7 +895,9 @@ impl NativeFunction {
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
-            | Self::StringToLocaleUpperCase => 0,
+            | Self::StringToLocaleUpperCase
+            | Self::StringIterator
+            | Self::StringIteratorNext => 0,
             Self::ArrayValues | Self::ArrayIteratorNext | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString | Self::SymbolValueOf | Self::SymbolDescription => 0,
@@ -999,6 +1003,8 @@ impl NativeFunction {
             Self::StringToUpperCase => "toUpperCase",
             Self::StringToLocaleLowerCase => "toLocaleLowerCase",
             Self::StringToLocaleUpperCase => "toLocaleUpperCase",
+            Self::StringIterator => "[Symbol.iterator]",
+            Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",
             Self::SymbolFor => "for",
             Self::SymbolKeyFor => "keyFor",
@@ -1608,6 +1614,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_date_numeric_arguments: GcType<PendingDateNumericArguments>,
     pub(crate) native_call_state: GcType<NativeCallState>,
+    pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_copy_data_properties: GcType<PendingCopyDataProperties>,
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,

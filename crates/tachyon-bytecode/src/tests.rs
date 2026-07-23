@@ -192,7 +192,12 @@ fn operand_count_table_covers_every_opcode_once() {
         (2, &[Opcode::GetSuperById]),
         (
             1,
-            &[Opcode::LoadSuperBase, Opcode::InitializeInstanceElements],
+            &[
+                Opcode::LoadSuperBase,
+                Opcode::InitializeInstanceElements,
+                Opcode::LoadIteratorSymbol,
+                Opcode::CheckObject,
+            ],
         ),
         (2, &[Opcode::CreateBaseClass, Opcode::CreatePrivateName]),
     ];

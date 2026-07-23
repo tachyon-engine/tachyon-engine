@@ -250,6 +250,17 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnviro
                 }
             }
         }
+        HirExpressionKind::ArrayAccumulation(parts) => {
+            for part in parts.iter() {
+                match part {
+                    crate::hir::HirArrayExpressionPart::Element(expression)
+                    | crate::hir::HirArrayExpressionPart::Spread(expression) => {
+                        collect_expression(expression, bindings);
+                    }
+                    crate::hir::HirArrayExpressionPart::Elision => {}
+                }
+            }
+        }
         HirExpressionKind::StaticMember { object, .. } => collect_expression(object, bindings),
         HirExpressionKind::ComputedMember { object, property } => {
             collect_expression(object, bindings);

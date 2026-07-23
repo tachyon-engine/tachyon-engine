@@ -1,5 +1,7 @@
 //! Realm intrinsic construction and publication.
 
+mod string_iterator;
+
 use super::*;
 
 impl Isolate {
@@ -843,11 +845,21 @@ impl Isolate {
         let symbol = self.allocate_symbol(Some(description))?;
         self.realm.well_known_symbols.to_primitive = Some(symbol);
         let to_primitive = self.intern_intrinsic_name(b"toPrimitive")?;
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_primitive
+            .expect("Symbol.toPrimitive remains rooted during initialization");
         self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)?;
         let function_prototype = self
             .realm
             .function_prototype
             .expect("Function initializes before Symbol methods");
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_primitive
+            .expect("Symbol.toPrimitive remains rooted after property publication");
         let key = self.property_key(symbol)?;
         let method = self.allocate_native_function(
             NativeFunction::SymbolToPrimitive,
@@ -913,6 +925,11 @@ impl Isolate {
         let symbol = self.allocate_symbol(Some(description))?;
         self.realm.well_known_symbols.iterator = Some(symbol);
         let iterator = self.intern_intrinsic_name(b"iterator")?;
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator remains rooted during initialization");
         self.set_intrinsic_constant_property(symbol_constructor, iterator, symbol)
     }
 
@@ -945,20 +962,33 @@ impl Isolate {
             (b"toStringTag".as_slice(), b"Symbol.toStringTag".as_slice()),
             (b"unscopables".as_slice(), b"Symbol.unscopables".as_slice()),
         ] {
+            let property = self.intern_intrinsic_name(name)?;
             let description = self.allocate_runtime_string(
                 JsString::try_from_latin1(description)
                     .map_err(ExecutionError::PropertyKeyString)?,
             )?;
             let symbol = self.allocate_symbol(Some(description))?;
-            let property = self.intern_intrinsic_name(name)?;
-            self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
             if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag = Some(symbol);
+            } else if name == b"isConcatSpreadable" {
+                self.realm.well_known_symbols.is_concat_spreadable = Some(symbol);
             } else if name == b"replace" {
                 self.realm.well_known_symbols.replace = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
             }
+            let symbol = if name == b"toStringTag" {
+                self.realm.well_known_symbols.to_string_tag.unwrap()
+            } else if name == b"isConcatSpreadable" {
+                self.realm.well_known_symbols.is_concat_spreadable.unwrap()
+            } else if name == b"replace" {
+                self.realm.well_known_symbols.replace.unwrap()
+            } else if name == b"species" {
+                self.realm.well_known_symbols.species.unwrap()
+            } else {
+                symbol
+            };
+            self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
         }
         Ok(())
     }
@@ -1591,6 +1621,11 @@ impl Isolate {
                 enumerable: Some(false),
                 configurable: Some(true),
             },
+        )?;
+        self.initialize_string_iterator_intrinsics(
+            iterator_prototype,
+            function_prototype,
+            iterator_key,
         )
     }
 

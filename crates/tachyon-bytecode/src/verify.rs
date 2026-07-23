@@ -869,6 +869,8 @@ fn verify_instruction(
         | Opcode::InitializeThis
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
+        | Opcode::LoadIteratorSymbol
+        | Opcode::CheckObject
         | Opcode::LoadSuperBase => check_register(operands[0])?,
         Opcode::InitializeClassEnvironment => {
             check_register(operands[0])?;

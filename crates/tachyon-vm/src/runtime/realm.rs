@@ -142,6 +142,9 @@ pub(crate) struct Realm {
     pub(crate) array_iterator_prototype: Option<Value>,
     pub(crate) array_iterator_next: Option<Value>,
     pub(crate) iterator_identity: Option<Value>,
+    pub(crate) string_iterator_prototype: Option<Value>,
+    pub(crate) string_iterator: Option<Value>,
+    pub(crate) string_iterator_next: Option<Value>,
     pub(crate) map_constructor: Option<Value>,
     pub(crate) map_prototype: Option<Value>,
     pub(crate) map_iterator_prototype: Option<Value>,
@@ -272,6 +275,9 @@ impl Realm {
             array_iterator_prototype: None,
             array_iterator_next: None,
             iterator_identity: None,
+            string_iterator_prototype: None,
+            string_iterator: None,
+            string_iterator_next: None,
             map_constructor: None,
             map_prototype: None,
             map_iterator_prototype: None,
@@ -637,6 +643,9 @@ impl Trace for Realm {
         self.array_iterator_prototype.trace(tracer);
         self.array_iterator_next.trace(tracer);
         self.iterator_identity.trace(tracer);
+        self.string_iterator_prototype.trace(tracer);
+        self.string_iterator.trace(tracer);
+        self.string_iterator_next.trace(tracer);
         self.map_constructor.trace(tracer);
         self.map_prototype.trace(tracer);
         self.map_iterator_prototype.trace(tracer);
@@ -724,6 +733,7 @@ impl Trace for Realm {
 pub(crate) struct WellKnownSymbols {
     pub(crate) to_primitive: Option<Value>,
     pub(crate) iterator: Option<Value>,
+    pub(crate) is_concat_spreadable: Option<Value>,
     pub(crate) replace: Option<Value>,
     pub(crate) species: Option<Value>,
     pub(crate) to_string_tag: Option<Value>,
@@ -734,6 +744,7 @@ impl Trace for WellKnownSymbols {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.to_primitive.trace(tracer);
         self.iterator.trace(tracer);
+        self.is_concat_spreadable.trace(tracer);
         self.replace.trace(tracer);
         self.species.trace(tracer);
         self.to_string_tag.trace(tracer);

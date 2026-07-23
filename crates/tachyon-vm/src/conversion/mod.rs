@@ -155,6 +155,7 @@ impl Isolate {
                     Value::from_immediate(Immediate::Undefined)
                 }
             }
+            NativeFunction::StringIterator => Value::from_immediate(Immediate::Undefined),
             NativeFunction::NumberToExponential
             | NativeFunction::NumberToFixed
             | NativeFunction::NumberToPrecision
@@ -412,6 +413,14 @@ impl Isolate {
                     if continuation.consumer == ConversionConsumer::ArraySearchIndex {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_array_search_after_index_primitive(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if matches!(continuation.consumer, ConversionConsumer::ArrayConcatLength) {
+                        let state = self.pending_array_concat_reference(continuation.receiver)?;
+                        return self.resume_array_concat_length_conversion(
                             continuation.site,
                             state,
                             value,
@@ -676,6 +685,9 @@ impl Isolate {
                 ConversionConsumer::ArraySearchIndex => {
                     unreachable!("Array search index resumes inside the conversion state machine")
                 }
+                ConversionConsumer::ArrayConcatLength => {
+                    unreachable!("Array concat length resumes inside its state machine")
+                }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength
                 | ConversionConsumer::ArraySpliceDeleteCount => {
@@ -694,6 +706,10 @@ impl Isolate {
                 } else {
                     Ok(string)
                 }
+            }
+            NativeFunction::StringIterator => {
+                let string = self.primitive_string_value(argument)?;
+                self.create_string_iterator(string)
             }
             NativeFunction::NumberConstructor => {
                 let number = self.convert_to_number(argument.unwrap_or(Value::from_i32(0)))?;

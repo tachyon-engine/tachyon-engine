@@ -506,6 +506,9 @@ impl Lowerer<'_> {
                 }
                 Ok(object)
             }
+            HirExpressionKind::ArrayAccumulation(parts) => {
+                self.array_accumulation(parts, expression.span)
+            }
             HirExpressionKind::ObjectSpread(parts) => {
                 let object = self.register()?;
                 self.emit(Opcode::CreateObject, &[object.index()], expression.span)?;

@@ -86,73 +86,6 @@ impl Isolate {
         Ok(array)
     }
 
-    /// Appends one array-like source while preserving holes as length-only positions.
-    fn append_array_source(
-        &mut self,
-        destination: Value,
-        source: Value,
-        next_index: &mut i32,
-    ) -> Result<(), ExecutionError> {
-        if let Some(raw) = source.as_heap_ref()
-            && let Ok(reference) = self.heap.checked_reference(raw, self.types.string)
-        {
-            let units = self.heap.with_running_scope(|scope| {
-                let root = scope.root(reference).map_err(ExecutionError::Root)?;
-                scope.with_no_gc_scope(|no_gc| {
-                    let string = no_gc
-                        .borrow(root, self.types.string)
-                        .map_err(ExecutionError::NoGcBorrow)?;
-                    Ok::<Vec<u16>, ExecutionError>(match string.as_view() {
-                        JsStringView::Latin1(bytes) => {
-                            bytes.iter().map(|&byte| u16::from(byte)).collect()
-                        }
-                        JsStringView::Utf16(units) => units.to_vec(),
-                    })
-                })
-            })?;
-            for unit in units {
-                let character = self.allocate_runtime_string(
-                    JsString::try_from_utf16(&[unit]).map_err(ExecutionError::PropertyKeyString)?,
-                )?;
-                let key = self.property_key_atom(Value::from_i32(*next_index))?;
-                self.set_own_data_property(destination, key, character)?;
-                *next_index = next_index
-                    .checked_add(1)
-                    .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
-            }
-            return Ok(());
-        }
-        if !self.is_array_value(source)? {
-            let key = self.property_key_atom(Value::from_i32(*next_index))?;
-            self.set_own_data_property(destination, key, source)?;
-            *next_index = next_index
-                .checked_add(1)
-                .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
-            return Ok(());
-        }
-        let length_atom = self.intern_intrinsic_name(b"length")?;
-        let length_value = self
-            .get_data_property(source, length_atom)?
-            .expect("every Tachyon Array has a length property");
-        let Some(length) = length_value.as_i32() else {
-            return Err(ExecutionError::UnsupportedNumberConversion(length_value));
-        };
-        if length < 0 {
-            return Err(ExecutionError::UnsupportedNumberConversion(length_value));
-        }
-        for index in 0..length {
-            let key = self.property_key_atom(Value::from_i32(index))?;
-            if let Some(value) = self.get_data_property(source, key)? {
-                let destination_key = self.property_key_atom(Value::from_i32(*next_index))?;
-                self.set_own_data_property(destination, destination_key, value)?;
-            }
-            *next_index = next_index
-                .checked_add(1)
-                .ok_or(ExecutionError::RegisterWindowTooLarge(length as u32))?;
-        }
-        Ok(())
-    }
-
     /// Implements IsArray with a direct payload fast path and recursive Proxy target traversal.
     pub(crate) fn is_array_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
         let mut current = value;
@@ -166,7 +99,11 @@ impl Isolate {
             if !self.is_proxy_value(current) {
                 return Ok(false);
             }
-            current = self.proxy_snapshot(current)?.target;
+            let proxy = self.proxy_snapshot(current)?;
+            if proxy.handler.as_immediate() == Some(Immediate::Null) {
+                return Err(ExecutionError::ProxyRevoked);
+            }
+            current = proxy.target;
         }
     }
 
@@ -270,25 +207,6 @@ impl Isolate {
             return Ok(MAX_SAFE_INTEGER);
         }
         Ok(number.floor() as u64)
-    }
-
-    /// Implements the basic Array.prototype.concat flattening contract for ordinary arrays.
-    pub(crate) fn array_concat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let result = self.create_array_from_site(&CallSite {
-            argument_count: 0,
-            ..*site
-        })?;
-        let mut next_index = 0_i32;
-        self.append_array_source(result, site.this_value, &mut next_index)?;
-        for index in 0..site.argument_count {
-            let argument = self
-                .call_argument(site, index)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            self.append_array_source(result, argument, &mut next_index)?;
-        }
-        let length_atom = self.intern_intrinsic_name(b"length")?;
-        self.set_own_data_property(result, length_atom, Value::from_i32(next_index))?;
-        Ok(result)
     }
 
     /// Implements `Array.prototype.at` for the supported generic array-like receiver.

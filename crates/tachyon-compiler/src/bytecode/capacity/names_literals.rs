@@ -328,6 +328,22 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::ArrayAccumulation(parts) => {
+            let mut count = 4;
+            for part in parts.iter() {
+                let expression = match part {
+                    crate::hir::HirArrayExpressionPart::Element(expression)
+                    | crate::hir::HirArrayExpressionPart::Spread(expression) => expression,
+                    crate::hir::HirArrayExpressionPart::Elision => continue,
+                };
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(expression)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::StaticMember { object, .. } => {
             checked_count_add(expression_scope_name_count(object)?, 1, "scope names")
         }

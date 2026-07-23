@@ -11,6 +11,7 @@
 
 mod argument_list;
 mod array;
+mod array_concat;
 mod array_for_each;
 mod array_splice;
 mod atom;
@@ -122,6 +123,7 @@ pub(crate) enum IntrinsicPrototypeKind {
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
+use array_concat::PendingArrayConcat;
 use array_splice::PendingArraySplice;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
@@ -185,7 +187,7 @@ use runtime::{
         BindingState, Environment, EnvironmentAccessError, EnvironmentKind, EnvironmentOwner,
     },
     fiber::{
-        ActiveHandler, ArrayAllocationRoots, ArrayForEachStage, ArraySpliceStage,
+        ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayForEachStage, ArraySpliceStage,
         BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
         CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
         ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,

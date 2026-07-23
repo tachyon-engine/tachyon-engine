@@ -1065,6 +1065,20 @@ impl Isolate {
                 };
                 self.write(base, operands[0], value)?;
             }
+            Opcode::LoadIteratorSymbol => {
+                let symbol = self
+                    .realm
+                    .well_known_symbols
+                    .iterator
+                    .expect("Symbol.iterator initializes before bytecode execution");
+                self.write(base, operands[0], symbol)?;
+            }
+            Opcode::CheckObject => {
+                let value = self.read(base, operands[0])?;
+                if !self.is_object_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
+            }
             Opcode::StoreScope => {
                 let value = self.read(base, operands[0])?;
                 self.store_scope(code, operands[1], value)?;
@@ -2093,6 +2107,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::ArrayForEach(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::ArrayConcat(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::ArraySplice(_) => {
@@ -5140,6 +5157,16 @@ impl Isolate {
                     | NativeFunction::StringToLocaleLowerCase
                     | NativeFunction::StringToLocaleUpperCase),
                 ) => return self.dispatch_string_receiver_conversion(native, &site),
+                FunctionExecutable::Native(NativeFunction::StringIterator) => {
+                    return self.dispatch_string_receiver_conversion(
+                        NativeFunction::StringIterator,
+                        &site,
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::StringIteratorNext) => {
+                    let value = self.string_iterator_next(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
                     | NativeFunction::NumberToExponential
@@ -5949,8 +5976,7 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConcat) => {
-                    let array = self.array_concat(&site)?;
-                    return self.write(site.caller_base, site.destination, array);
+                    return self.begin_array_concat(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayPush) => {
                     let length = self.array_push(&site)?;
@@ -6915,6 +6941,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayForEach(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_array_for_each(site, state, stage, value, continuation.second())
+                }
+                NativeContinuationKind::ArrayConcat(stage) => {
+                    let state = self.pending_array_concat_reference(continuation.first())?;
+                    self.resume_array_concat(site, state, stage, value)
                 }
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;

@@ -1,3 +1,4 @@
+mod array_accumulation;
 mod expression;
 mod statement;
 
@@ -202,18 +203,11 @@ impl Lowerer<'_> {
         object: RegisterId,
         span: SourceSpan,
     ) -> Result<IteratorRegisters, CompileError> {
-        let symbol = self.register()?;
-        let symbol_scope = self.global_binding(&std::sync::Arc::from("Symbol"), false)?;
-        self.emit(Opcode::LoadScope, &[symbol.index(), symbol_scope], span)?;
         let iterator_key = self.register()?;
-        let iterator_atom = self.scope_name(&std::sync::Arc::from("iterator"))?;
-        self.emit(
-            Opcode::GetById,
-            &[iterator_key.index(), symbol.index(), iterator_atom],
-            span,
-        )?;
+        self.emit(Opcode::LoadIteratorSymbol, &[iterator_key.index()], span)?;
         self.prepare_property_key(iterator_key, object, false, span)?;
         let iterator = self.computed_method_call(object, iterator_key, span)?;
+        self.emit(Opcode::CheckObject, &[iterator.index()], span)?;
         let receiver = self.register()?;
         self.emit(Opcode::Move, &[receiver.index(), iterator.index()], span)?;
         let next = self.register()?;
@@ -239,6 +233,7 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<RegisterId, CompileError> {
         let result = self.call_receiver(iterator.receiver, iterator.next, span)?;
+        self.emit(Opcode::CheckObject, &[result.index()], span)?;
         let done =
             self.pattern_property(result, &HirObjectPropertyKey::Static("done".into()), span)?;
         self.emit(Opcode::Move, &[iterator.done.index(), done.index()], span)?;

@@ -22,6 +22,7 @@ pub(crate) enum ArrayIterationKind {
     Key,
     Value,
     KeyAndValue,
+    StringValue,
 }
 
 /// Result of one iterator step before an observable getter is entered.
@@ -226,6 +227,29 @@ impl Isolate {
             .realm
             .array_iterator_prototype
             .expect("Array iterator prototype initializes before iterator creation");
+        self.create_indexed_iterator(iterated_object, kind, prototype)
+    }
+
+    /// Creates a String iterator after the caller has applied RequireObjectCoercible and ToString.
+    pub(crate) fn create_string_iterator(
+        &mut self,
+        iterated_string: Value,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_string_value(iterated_string));
+        let prototype = self
+            .realm
+            .string_iterator_prototype
+            .expect("String iterator prototype initializes before iterator creation");
+        self.create_indexed_iterator(iterated_string, ArrayIterationKind::StringValue, prototype)
+    }
+
+    /// Allocates the shared cursor payload used by branded Array and String iterator objects.
+    fn create_indexed_iterator(
+        &mut self,
+        iterated_object: Value,
+        kind: ArrayIterationKind,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
         let mut roots = ArrayIteratorAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
@@ -271,6 +295,9 @@ impl Isolate {
     ) -> Result<ArrayIteratorNextAction, ExecutionError> {
         let reference = self.array_iterator_reference(iterator_value)?;
         let snapshot = self.array_iterator_snapshot(reference)?;
+        if snapshot.kind == ArrayIterationKind::StringValue {
+            return Err(ExecutionError::NotObject(iterator_value));
+        }
         let Some(iterated_object) = snapshot.iterated_object else {
             return Ok(ArrayIteratorNextAction::Done(self.create_iterator_result(
                 Value::from_immediate(Immediate::Undefined),
@@ -314,6 +341,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let reference = self.array_iterator_reference(iterator)?;
         let snapshot = self.array_iterator_snapshot(reference)?;
+        debug_assert_ne!(snapshot.kind, ArrayIterationKind::StringValue);
         self.create_iterator_result(
             if snapshot.kind == ArrayIterationKind::Key {
                 safe_integer_value(snapshot.next_index.saturating_sub(1))
@@ -322,6 +350,66 @@ impl Isolate {
             },
             false,
         )
+    }
+
+    /// Advances a branded String iterator by one Unicode code point without allocating a Vec.
+    pub(crate) fn string_iterator_next(
+        &mut self,
+        iterator_value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let reference = self.array_iterator_reference(iterator_value)?;
+        let snapshot = self.array_iterator_snapshot(reference)?;
+        if snapshot.kind != ArrayIterationKind::StringValue {
+            return Err(ExecutionError::NotObject(iterator_value));
+        }
+        let Some(string) = snapshot.iterated_object else {
+            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+        };
+        let index = usize::try_from(snapshot.next_index)
+            .map_err(|_| ExecutionError::UnsupportedStringValue(string))?;
+        let Some((units, width)) = self.string_iterator_units(string, index)? else {
+            self.finish_array_iterator(reference)?;
+            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+        };
+        self.set_array_iterator_index(reference, snapshot.next_index + u64::from(width))?;
+        let value = self.allocate_runtime_string(
+            crate::JsString::try_from_utf16(&units[..usize::from(width)])
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.create_iterator_result(value, false)
+    }
+
+    /// Reads at most one surrogate pair while the immutable String backing is borrowed no-GC.
+    fn string_iterator_units(
+        &mut self,
+        value: Value,
+        index: usize,
+    ) -> Result<Option<([u16; 2], u8)>, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedStringValue(value))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedStringValue(value))?;
+        self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let string = no_gc
+                    .borrow(string, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let Some(first) = string.code_unit_at(index) else {
+                    return Ok(None);
+                };
+                let second = string.code_unit_at(index + 1);
+                let paired = (0xd800..=0xdbff).contains(&first)
+                    && second.is_some_and(|unit| (0xdc00..=0xdfff).contains(&unit));
+                Ok(Some((
+                    [first, second.unwrap_or(0)],
+                    if paired { 2 } else { 1 },
+                )))
+            })
+        })
     }
 
     fn array_iterator_after_length(

@@ -293,9 +293,13 @@ pub enum Opcode {
     CreateDataPropertyById = 123,
     /// Defines one own enumerable data property with an already-normalized key.
     CreateDataPropertyByValue = 124,
+    /// Loads the current realm's immutable well-known `Symbol.iterator` identity.
+    LoadIteratorSymbol = 125,
+    /// Throws a language-level TypeError unless the selected register contains an Object.
+    CheckObject = 126,
 }
 
-pub(super) const OPCODE_COUNT: usize = 125;
+pub(super) const OPCODE_COUNT: usize = 127;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -422,10 +426,12 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // InitializeEnvironment
     3, // CreateDataPropertyById
     3, // CreateDataPropertyByValue
+    1, // LoadIteratorSymbol
+    1, // CheckObject
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CreateDataPropertyByValue as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::CheckObject as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -596,6 +602,8 @@ impl Opcode {
             58 => Some(Self::InitializeEnvironment),
             59 => Some(Self::CreateDataPropertyById),
             60 => Some(Self::CreateDataPropertyByValue),
+            61 => Some(Self::LoadIteratorSymbol),
+            62 => Some(Self::CheckObject),
             _ => None,
         }
     }
