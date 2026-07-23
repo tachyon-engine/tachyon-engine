@@ -444,6 +444,8 @@ pub struct FunctionLayout {
     pub needs_argument_source: bool,
     /// Whether a rest parameter makes the arguments object unmapped.
     pub has_rest_parameter: bool,
+    /// Whether every formal parameter is a plain binding identifier.
+    pub simple_parameter_list: bool,
 }
 
 /// Per-function metadata which the compiler owns until `CompiledModule::new` verifies and freezes it.

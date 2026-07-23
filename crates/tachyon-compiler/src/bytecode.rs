@@ -1117,6 +1117,10 @@ fn lower_function(
                 self_binding_slot,
                 needs_argument_source: lowerer.needs_argument_source,
                 has_rest_parameter: function.rest_parameter.is_some(),
+                simple_parameter_list: function
+                    .parameters
+                    .iter()
+                    .all(|parameter| matches!(parameter.kind, crate::HirPatternKind::Binding(_))),
                 ..FunctionLayout::default()
             },
             source_map,

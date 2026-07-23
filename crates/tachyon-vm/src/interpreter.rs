@@ -6194,7 +6194,9 @@ impl Isolate {
                 .function(frame.function)
                 .ok_or(ExecutionError::MissingEntryFunction(frame.function))?;
             let layout = function.layout();
-            (layout.function_length == layout.argument_count && !layout.has_rest_parameter)
+            (layout.function_length == layout.argument_count
+                && !layout.has_rest_parameter
+                && layout.simple_parameter_list)
                 .then_some((
                     u32::try_from(self.fiber.frames.len() - 1)
                         .map_err(|_| ExecutionError::RegisterAllocationFailed)?,
