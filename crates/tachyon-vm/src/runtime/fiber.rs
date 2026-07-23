@@ -482,6 +482,9 @@ pub(crate) enum PromiseStaticResolveStage {
 #[repr(u8)]
 pub(crate) enum ArrayForEachStage {
     Length,
+    FilterConstructor,
+    FilterSpecies,
+    FilterConstruct,
     Has,
     Get,
     Callback,

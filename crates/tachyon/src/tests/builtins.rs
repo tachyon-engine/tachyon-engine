@@ -764,6 +764,22 @@ fn array_filter_runs_resumable_callback_iteration() {
         Ok(RunOutcome::Completed(value))
             if value.as_immediate() == Some(tachyon_value::Immediate::True)
     ));
+    assert_eq!(
+        execute_source(
+            1_142,
+            "var instance = []; var calls = 0; function Species(length) { calls += 1; if (length !== 0) throw 1; return instance; } var values = [1, 2]; values.constructor = {}; values.constructor[Symbol.species] = Species; var result = values.filter(function(value) { return value === 2; }); calls === 1 && result === instance && result.length === 1 && result[0] === 2;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
+    assert_eq!(
+        execute_source(
+            1_143,
+            "var order = 0; var source = { get length() { order = 1; return 0; } }; try { Array.prototype.filter.call(source, null); } catch (error) { order = error instanceof TypeError ? order + 1 : -1; } order === 2;",
+        )
+        .as_immediate(),
+        Some(tachyon_value::Immediate::True)
+    );
 }
 
 #[test]

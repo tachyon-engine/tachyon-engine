@@ -10,6 +10,7 @@ const FOREACH_NEXT_INDEX: usize = 4;
 const FILTER_RESULT: usize = 0;
 const FILTER_THIS_ARGUMENT: usize = 1;
 const FILTER_NEXT_INDEX: usize = 2;
+const FILTER_CONSTRUCTOR: usize = 3;
 const FILTER_STATE_COUNT: u8 = 3;
 
 struct ArrayForEachRoots<'a> {
@@ -34,7 +35,6 @@ impl Isolate {
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.resolve_function_object(callback)?;
         let this_argument = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -86,18 +86,13 @@ impl Isolate {
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.resolve_function_object(callback)?;
         let this_argument = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let result = self.create_array_from_site(&CallSite {
-            argument_count: 0,
-            ..*site
-        })?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let filter = self.allocate_array_for_each_state(NativeCallState {
             values: [
-                result,
+                undefined,
                 this_argument,
                 Value::from_i32(0),
                 undefined,
@@ -170,7 +165,52 @@ impl Isolate {
                 self.pop_native_continuation()?;
                 let length = length?;
                 self.set_array_for_each_number(state, FOREACH_LENGTH, length)?;
-                self.advance_array_for_each(site, state)
+                let callback = self.native_call_state_snapshot(state)?.values[FOREACH_CALLBACK];
+                self.resolve_function_object(callback)?;
+                if self.array_filter_state(state)?.is_some() {
+                    self.begin_array_filter_species(site, state)
+                } else {
+                    self.advance_array_for_each(site, state)
+                }
+            }
+            ArrayForEachStage::FilterConstructor => {
+                if self.is_object_value(value) {
+                    let filter = self
+                        .array_filter_state(state)?
+                        .ok_or(ExecutionError::MissingNativeContinuation)?;
+                    self.set_array_for_each_value(filter, FILTER_CONSTRUCTOR, value)?;
+                    let species = self
+                        .realm
+                        .well_known_symbols
+                        .species
+                        .expect("Symbol.species initializes before Array");
+                    let key = self.property_key(species)?;
+                    let observed = self.dispatch_array_for_each_get(
+                        site,
+                        state,
+                        ArrayForEachStage::FilterSpecies,
+                        value,
+                        key,
+                    )?;
+                    if let Some(observed) = observed {
+                        self.resume_array_for_each(
+                            site,
+                            state,
+                            ArrayForEachStage::FilterSpecies,
+                            observed,
+                            value,
+                        )?;
+                    }
+                    Ok(())
+                } else {
+                    self.finish_array_filter_species(site, state, value)
+                }
+            }
+            ArrayForEachStage::FilterSpecies => {
+                self.finish_array_filter_species(site, state, value)
+            }
+            ArrayForEachStage::FilterConstruct => {
+                self.finish_array_filter_construct(site, state, value)
             }
             ArrayForEachStage::Has => {
                 self.write(
@@ -203,6 +243,126 @@ impl Isolate {
                 self.advance_array_for_each(site, state)
             }
         }
+    }
+
+    /// Starts ArraySpeciesCreate after length conversion and callback validation have completed.
+    fn begin_array_filter_species(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.native_call_state_snapshot(state)?.values[FOREACH_RECEIVER];
+        if !self.is_array_value(receiver)? {
+            return self.finish_array_filter_species(
+                site,
+                state,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
+        let constructor = self.constructor_atom()?;
+        let observed = self.dispatch_array_for_each_get(
+            site,
+            state,
+            ArrayForEachStage::FilterConstructor,
+            receiver,
+            constructor.into(),
+        )?;
+        if let Some(observed) = observed {
+            self.resume_array_for_each(
+                site,
+                state,
+                ArrayForEachStage::FilterConstructor,
+                observed,
+                receiver,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Selects the intrinsic Array fallback or constructs the observed species with length zero.
+    fn finish_array_filter_species(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        constructor: Value,
+    ) -> Result<(), ExecutionError> {
+        if matches!(
+            constructor.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            let prototype = self
+                .realm
+                .array_prototype
+                .expect("Array prototype initializes before filter");
+            let result = self.create_array_object_with_prototype(prototype)?;
+            let filter = self
+                .array_filter_state(state)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            self.set_array_for_each_value(filter, FILTER_RESULT, result)?;
+            return self.advance_array_for_each(site, state);
+        }
+        let filter = self
+            .array_filter_state(state)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.set_array_for_each_value(filter, FILTER_CONSTRUCTOR, constructor)?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let prefix =
+            self.create_apply_argument_prefix(constructor, undefined, vec![Value::from_i32(0)])?;
+        self.push_array_for_each_parent(
+            site,
+            state,
+            ArrayForEachStage::FilterConstruct,
+            constructor,
+        )?;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.construct_site(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: constructor,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: 1,
+            argument_count: 1,
+            this_value: undefined,
+            new_target: constructor,
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("Array species constructor publishes one frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(());
+        }
+        self.pop_native_continuation()?;
+        let result = self.read(site.caller_base, site.destination)?;
+        self.finish_array_filter_construct(site, state, result)
+    }
+
+    /// Publishes a custom species result only after Construct has returned an object.
+    fn finish_array_filter_construct(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        result: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(result) {
+            return Err(ExecutionError::NotObject(result));
+        }
+        let filter = self
+            .array_filter_state(state)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.set_array_for_each_value(filter, FILTER_RESULT, result)?;
+        self.advance_array_for_each(site, state)
     }
 
     /// Runs synchronous elements in a loop and exits whenever observable work suspends the fiber.
@@ -466,6 +626,29 @@ impl Isolate {
         })
     }
 
+    /// Updates one traced Array iteration state slot and records its managed edge.
+    fn set_array_for_each_value(
+        &mut self,
+        state: GcRef<NativeCallState>,
+        slot: usize,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.native_call_state)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .values[slot] = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(state, value)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })
+    }
+
     /// Applies the existing ToLength boundary after observable length Get completes.
     fn array_for_each_to_length(&mut self, value: Value) -> Result<u64, ExecutionError> {
         let number = self.convert_to_number(value)?;
@@ -511,8 +694,10 @@ impl Isolate {
         let key = self.safe_integer_property_atom(index)?;
         let result = self.native_call_state_snapshot(filter)?.values[FILTER_RESULT];
         self.set_own_data_property(result, key, value)?;
-        let length = self.length_atom()?;
-        self.set_own_data_property(result, length, safe_integer_value(index + 1))?;
+        if self.is_array_value(result)? {
+            let length = self.length_atom()?;
+            self.set_own_data_property(result, length, safe_integer_value(index + 1))?;
+        }
         self.set_array_for_each_number(filter, FILTER_NEXT_INDEX, index + 1)
     }
 
