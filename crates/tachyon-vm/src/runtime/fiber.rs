@@ -243,6 +243,7 @@ pub(crate) enum ConversionConsumer {
     ArrayLength,
     ArraySearchIndex,
     ArrayConcatLength,
+    ArrayStaticLength,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -275,6 +276,7 @@ impl ConversionConsumer {
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayConcatLength
+            | Self::ArrayStaticLength
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount => None,
@@ -577,6 +579,15 @@ pub(crate) enum ArraySpliceStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ArrayStaticStage {
+    IteratorMethod,
+    IteratorCall,
+    NextMethod,
+    NextCall,
+    ResultDone,
+    ResultValue,
+    Length,
+    SourceValue,
+    MapperCall,
     Construct,
     Define,
     FinalLength,

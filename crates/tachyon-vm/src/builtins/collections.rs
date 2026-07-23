@@ -701,6 +701,16 @@ impl Isolate {
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let reference = self.pending_collection_initializer_reference(state)?;
         let iterator = self.pending_collection_initializer(reference)?.iterator;
+        self.begin_iterator_close(site, iterator, original_throw)
+    }
+
+    /// Starts IteratorClose for any native iterable consumer with a rooted iterator identity.
+    pub(crate) fn begin_iterator_close(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+        original_throw: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
         let return_key = PropertyKey::Atom(self.intern_intrinsic_name(b"return")?);
         match self.resolve_property_read(iterator, return_key)? {
             PropertyRead::Missing => self.throw_value(original_throw, site.call_site),
@@ -720,7 +730,7 @@ impl Isolate {
             PropertyRead::Accessor(getter) => self.call_collection_iterator_close(
                 site,
                 CollectionIteratorCloseStage::ReturnGetter,
-                state,
+                iterator,
                 original_throw,
                 getter,
                 iterator,
@@ -728,7 +738,7 @@ impl Isolate {
             PropertyRead::Data(callee) => self.call_collection_iterator_close(
                 site,
                 CollectionIteratorCloseStage::ReturnCall,
-                state,
+                iterator,
                 original_throw,
                 callee,
                 iterator,
@@ -753,13 +763,11 @@ impl Isolate {
                 ) {
                     return self.throw_value(original_throw, site.call_site);
                 }
-                let state = continuation.first();
-                let reference = self.pending_collection_initializer_reference(state)?;
-                let iterator = self.pending_collection_initializer(reference)?.iterator;
+                let iterator = continuation.first();
                 self.call_collection_iterator_close(
                     site,
                     CollectionIteratorCloseStage::ReturnCall,
-                    state,
+                    iterator,
                     original_throw,
                     value,
                     iterator,
@@ -776,7 +784,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         stage: CollectionIteratorCloseStage,
-        state: Value,
+        iterator: Value,
         original_throw: Value,
         callee: Value,
         receiver: Value,
@@ -787,7 +795,7 @@ impl Isolate {
             .push_native(NativeContinuation::collection_iterator_close(
                 site,
                 stage,
-                state,
+                iterator,
                 original_throw,
             ))
             .map_err(Self::completion_stack_error)?;

@@ -4,7 +4,7 @@ use super::*;
 pub(in crate::tests) fn test_isolate() -> Isolate {
     Isolate::new(IsolateConfig::new(
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
-        HeapLimit::new(8 * SPAN_SIZE_BYTES),
+        HeapLimit::new(9 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
         RealmLimits::new(64, 1_024),
     ))

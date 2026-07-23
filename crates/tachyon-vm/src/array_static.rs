@@ -4,14 +4,33 @@ use core::mem::size_of;
 
 use super::*;
 
+mod from;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArrayStaticKind {
+    Of,
+    FromArrayLike,
+    FromIterable,
+}
+
 /// GC-owned inputs and cursor state shared by static Array algorithms.
 #[derive(Debug)]
 pub(crate) struct PendingArrayStatic {
     result: Value,
     constructor: Value,
     retained: Value,
+    source: Value,
+    mapper: Value,
+    this_argument: Value,
+    iterator: Value,
+    next_method: Value,
+    iterator_result: Value,
     arguments: Box<[Value]>,
-    cursor: u32,
+    kind: ArrayStaticKind,
+    cursor: u64,
+    length: u64,
+    mapping: bool,
+    close_on_abrupt: bool,
 }
 
 impl Trace for PendingArrayStatic {
@@ -20,6 +39,12 @@ impl Trace for PendingArrayStatic {
         self.result.trace(tracer);
         self.constructor.trace(tracer);
         self.retained.trace(tracer);
+        self.source.trace(tracer);
+        self.mapper.trace(tracer);
+        self.this_argument.trace(tracer);
+        self.iterator.trace(tracer);
+        self.next_method.trace(tracer);
+        self.iterator_result.trace(tracer);
         self.arguments.trace(tracer);
     }
 }
@@ -35,8 +60,17 @@ impl GcExternalMemory for PendingArrayStatic {
 struct ArrayStaticSnapshot {
     result: Value,
     constructor: Value,
-    cursor: u32,
-    length: u32,
+    source: Value,
+    mapper: Value,
+    this_argument: Value,
+    iterator: Value,
+    next_method: Value,
+    iterator_result: Value,
+    kind: ArrayStaticKind,
+    cursor: u64,
+    length: u64,
+    mapping: bool,
+    close_on_abrupt: bool,
 }
 
 impl Isolate {
@@ -59,8 +93,18 @@ impl Isolate {
             result: undefined,
             constructor: site.this_value,
             retained: undefined,
+            source: undefined,
+            mapper: undefined,
+            this_argument: undefined,
+            iterator: undefined,
+            next_method: undefined,
+            iterator_result: undefined,
             arguments: arguments.into_boxed_slice(),
+            kind: ArrayStaticKind::Of,
             cursor: 0,
+            length: site.argument_count.into(),
+            mapping: false,
+            close_on_abrupt: false,
         })?;
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -96,10 +140,12 @@ impl Isolate {
         match stage {
             ArrayStaticStage::Construct => self.finish_array_static_construct(site, state, value),
             ArrayStaticStage::Define => {
+                self.update_array_static_scalars(state, |pending| pending.close_on_abrupt = false)?;
                 self.increment_array_static_cursor(state)?;
-                self.advance_array_of(site, state)
+                self.advance_array_static_after_define(site, state)
             }
             ArrayStaticStage::FinalLength => self.finish_array_static(site, state),
+            _ => self.resume_array_from(site, state, stage, value),
         }
     }
 
@@ -117,17 +163,21 @@ impl Isolate {
             ArrayStaticStage::Construct,
             snapshot.constructor,
         )?;
-        let prefix = match self.create_apply_argument_prefix(
-            snapshot.constructor,
-            undefined,
-            vec![safe_integer_value(u64::from(snapshot.length))],
-        ) {
-            Ok(prefix) => prefix,
-            Err(error) => {
-                self.pop_native_continuation()?;
-                return Err(error);
-            }
+        let arguments = if snapshot.kind == ArrayStaticKind::FromIterable {
+            Vec::new()
+        } else {
+            vec![safe_integer_value(snapshot.length)]
         };
+        let argument_count = u32::try_from(arguments.len())
+            .map_err(|_| ExecutionError::BoundArgumentCountOverflow)?;
+        let prefix =
+            match self.create_apply_argument_prefix(snapshot.constructor, undefined, arguments) {
+                Ok(prefix) => prefix,
+                Err(error) => {
+                    self.pop_native_continuation()?;
+                    return Err(error);
+                }
+            };
         let rooted = self.pop_native_continuation()?;
         let state = self.pending_array_static_reference(rooted.first())?;
         let constructor = rooted.second();
@@ -146,8 +196,8 @@ impl Isolate {
             argument_source: None,
             argument_prefix: Some(prefix),
             argument_prefix_offset: 0,
-            argument_prefix_count: 1,
-            argument_count: 1,
+            argument_prefix_count: argument_count,
+            argument_count,
             this_value: undefined,
             new_target: constructor,
             construct_receiver: None,
@@ -183,7 +233,11 @@ impl Isolate {
             return Err(ExecutionError::NotObject(result));
         }
         self.set_array_static_value(state, |pending| &mut pending.result, result)?;
-        self.advance_array_of(site, state)
+        match self.array_static_snapshot(state)?.kind {
+            ArrayStaticKind::Of => self.advance_array_of(site, state),
+            ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
+            ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
+        }
     }
 
     /// Defines remaining items, suspending when an exotic target executes JavaScript.
@@ -201,12 +255,12 @@ impl Isolate {
                     state,
                     snapshot.result,
                     length.into(),
-                    safe_integer_value(u64::from(snapshot.length)),
+                    safe_integer_value(snapshot.length),
                 );
             }
             let value = self.array_static_argument(state, snapshot.cursor)?;
             self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
-            let key = self.safe_integer_property_atom(u64::from(snapshot.cursor))?;
+            let key = self.safe_integer_property_atom(snapshot.cursor)?;
             let descriptor = DataPropertyDescriptor {
                 value: Some(value),
                 writable: Some(true),
@@ -224,6 +278,19 @@ impl Isolate {
             }
             self.define_data_property(snapshot.result, key, descriptor)?;
             self.increment_array_static_cursor(state)?;
+        }
+    }
+
+    /// Continues the active static algorithm after one property definition commits.
+    fn advance_array_static_after_define(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+    ) -> Result<(), ExecutionError> {
+        match self.array_static_snapshot(state)?.kind {
+            ArrayStaticKind::Of => self.advance_array_of(site, state),
+            ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
+            ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
         }
     }
 
@@ -384,13 +451,20 @@ impl Isolate {
                 let pending = no_gc
                     .borrow(state, self.types.pending_array_static)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                let length = u32::try_from(pending.arguments.len())
-                    .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
                 Ok(ArrayStaticSnapshot {
                     result: pending.result,
                     constructor: pending.constructor,
+                    source: pending.source,
+                    mapper: pending.mapper,
+                    this_argument: pending.this_argument,
+                    iterator: pending.iterator,
+                    next_method: pending.next_method,
+                    iterator_result: pending.iterator_result,
+                    kind: pending.kind,
                     cursor: pending.cursor,
-                    length,
+                    length: pending.length,
+                    mapping: pending.mapping,
+                    close_on_abrupt: pending.close_on_abrupt,
                 })
             })
         })
@@ -400,7 +474,7 @@ impl Isolate {
     fn array_static_argument(
         &mut self,
         state: GcRef<PendingArrayStatic>,
-        index: u32,
+        index: u64,
     ) -> Result<Value, ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
@@ -409,7 +483,10 @@ impl Isolate {
                     .borrow(state, self.types.pending_array_static)
                     .map_err(ExecutionError::NoGcBorrow)?
                     .arguments
-                    .get(index as usize)
+                    .get(
+                        usize::try_from(index)
+                            .map_err(|_| ExecutionError::RegisterAllocationFailed)?,
+                    )
                     .copied()
                     .ok_or(ExecutionError::MissingNativeContinuation)
             })
@@ -431,6 +508,24 @@ impl Isolate {
                     .cursor
                     .checked_add(1)
                     .ok_or(ExecutionError::RegisterAllocationFailed)?;
+                Ok(())
+            })
+        })
+    }
+
+    /// Updates scalar protocol state without requiring a write barrier.
+    fn update_array_static_scalars(
+        &mut self,
+        state: GcRef<PendingArrayStatic>,
+        update: impl FnOnce(&mut PendingArrayStatic),
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_array_static)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                update(pending);
                 Ok(())
             })
         })

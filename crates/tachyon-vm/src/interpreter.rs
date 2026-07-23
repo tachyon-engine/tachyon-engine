@@ -5981,6 +5981,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayOf) => {
                     return self.begin_array_of(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayFrom) => {
+                    return self.begin_array_from(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConcat) => {
                     return self.begin_array_concat(&site);
                 }
@@ -7030,6 +7033,12 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if let Some(iterator) = self.array_static_close_iterator(continuation)?
+                    && let Some(kind) = execution_error_kind(&error)
+                {
+                    let original_throw = self.create_native_error(kind, None)?;
+                    return self.begin_iterator_close(site, iterator, original_throw);
+                }
                 if let Some(state) = self.collection_initializer_close_state(continuation)?
                     && let Some(kind) = execution_error_kind(&error)
                 {
@@ -7200,6 +7209,9 @@ impl Isolate {
                 }
                 if let Some(state) = self.collection_initializer_close_state(continuation)? {
                     return self.begin_collection_iterator_close(continuation.site(), state, value);
+                }
+                if let Some(iterator) = self.array_static_close_iterator(continuation)? {
+                    return self.begin_iterator_close(continuation.site(), iterator, value);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;

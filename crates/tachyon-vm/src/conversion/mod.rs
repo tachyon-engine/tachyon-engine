@@ -426,6 +426,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::ArrayStaticLength {
+                        let state = self.pending_array_static_reference(continuation.receiver)?;
+                        return self.resume_array_from_length_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::ArraySpliceLength
@@ -687,6 +695,9 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayConcatLength => {
                     unreachable!("Array concat length resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayStaticLength => {
+                    unreachable!("Array static length resumes inside its state machine")
                 }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength

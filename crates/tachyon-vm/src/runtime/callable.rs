@@ -237,6 +237,7 @@ pub(crate) enum NativeFunction {
     PromiseCatch,
     ArrayConstructor,
     ArrayIsArray,
+    ArrayFrom,
     ArrayOf,
     ArrayConcat,
     ArrayPush,
@@ -779,6 +780,7 @@ impl NativeFunction {
             | Self::ErrorIsError
             | Self::ArrayConstructor
             | Self::ArrayIsArray
+            | Self::ArrayFrom
             | Self::ArrayConcat
             | Self::ArrayAt
             | Self::ArrayIndexOf
@@ -1065,6 +1067,7 @@ impl NativeFunction {
             Self::PromiseCatch => "catch",
             Self::ArrayConstructor => "Array",
             Self::ArrayIsArray => "isArray",
+            Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
             Self::ArrayConcat => "concat",
             Self::ArrayPush => "push",
