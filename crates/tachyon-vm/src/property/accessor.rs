@@ -56,6 +56,42 @@ impl Trace for AccessorAllocationRoots<'_> {
 }
 
 impl Isolate {
+    /// Detects strict ArgumentsObject `callee` access without exposing a thrower object.
+    pub(crate) fn is_strict_arguments_restricted_property(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let Some(atom) = key.atom() else {
+            return Ok(false);
+        };
+        let restricted_name = self
+            .atoms
+            .get(atom)
+            .is_some_and(|name| name.equals_str("callee"));
+        if !restricted_name {
+            return Ok(false);
+        }
+        let Some(raw) = target.as_heap_ref() else {
+            return Ok(false);
+        };
+        let Ok(arguments) = self
+            .heap
+            .checked_reference(raw, self.types.arguments_object)
+        else {
+            return Ok(false);
+        };
+        self.heap.with_running_scope(|scope| {
+            let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(arguments, self.types.arguments_object)
+                    .map(|object| object.strict_restricted_properties)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Resolves a live mapped-arguments index to its owning activation without changing Frame size.
     fn mapped_argument_frame(
         &mut self,
@@ -254,6 +290,9 @@ impl Isolate {
         target: Value,
         key: PropertyKey,
     ) -> Result<PropertyReadResolution, ExecutionError> {
+        if self.is_strict_arguments_restricted_property(target, key)? {
+            return Err(ExecutionError::ReadOnlyProperty(target));
+        }
         if let Some(value) = self.mapped_argument_value(target, key)? {
             return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
         }
@@ -424,6 +463,11 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
+        if self.is_strict_arguments_restricted_property(receiver, key)? {
+            return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                false,
+            )));
+        }
         if self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             let virtual_index = key.atom().is_some_and(|atom| {

@@ -630,6 +630,7 @@ pub(crate) struct ArgumentsObject {
     pub(crate) mapped_parameter_count: u32,
     pub(crate) mapped_code: Option<CodeId>,
     pub(crate) mapped_function: Option<FunctionId>,
+    pub(crate) strict_restricted_properties: bool,
 }
 
 /// RegExp state whose observable properties remain in the ordinary-object base.

@@ -6219,7 +6219,8 @@ impl Isolate {
         } else {
             None
         };
-        let arguments = self.allocate_arguments_object(mapped)?;
+        let arguments =
+            self.allocate_arguments_object(mapped, frame.strictness == FunctionStrictness::Strict)?;
         if let Some(values) = mapped_values.as_ref() {
             for (index, value) in values.iter().copied().enumerate() {
                 self.write(

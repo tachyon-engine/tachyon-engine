@@ -971,6 +971,7 @@ impl Isolate {
     pub(crate) fn allocate_arguments_object(
         &mut self,
         mapped: Option<(u32, u32, u32, CodeId, FunctionId)>,
+        strict: bool,
     ) -> Result<Value, ExecutionError> {
         let prototype = self
             .realm
@@ -1000,6 +1001,7 @@ impl Isolate {
                     mapped_parameter_count: mapped.map_or(0, |mapping| mapping.2),
                     mapped_code: mapped.map(|mapping| mapping.3),
                     mapped_function: mapped.map(|mapping| mapping.4),
+                    strict_restricted_properties: strict,
                 },
                 AllocationSpace::Young,
                 roots,

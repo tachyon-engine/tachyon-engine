@@ -716,6 +716,17 @@ impl Isolate {
                 })));
             }
         }
+        if self.is_strict_arguments_restricted_property(receiver, key)? {
+            let undefined = Value::from_immediate(Immediate::Undefined);
+            return Ok(Some(PropertyDescriptor::Accessor(
+                AccessorPropertyDescriptor {
+                    getter: Some(undefined),
+                    setter: Some(undefined),
+                    enumerable: Some(false),
+                    configurable: Some(false),
+                },
+            )));
+        }
         let (_, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             if let Some(value) = self.function_metadata_property(receiver, key)? {
