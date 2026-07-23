@@ -92,7 +92,8 @@ impl DateUtcSetter {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
+// The standard native surface exceeds 256 identities without enlarging FunctionExecutable.
+#[repr(u16)]
 #[cfg_attr(
     not(test),
     allow(
@@ -258,6 +259,7 @@ pub(crate) enum NativeFunction {
     ArrayToSpliced,
     ArrayToSorted,
     ArrayFlat,
+    ArrayFlatMap,
     ArraySort,
     ArrayForEach,
     ArrayEvery,
@@ -800,6 +802,7 @@ impl NativeFunction {
             | Self::ArrayLastIndexOf
             | Self::ArrayCopyWithin
             | Self::ArrayFlat
+            | Self::ArrayFlatMap
             | Self::ArraySort
             | Self::ArrayToSorted => 1,
             Self::ArrayWith | Self::ArrayToSpliced => 2,
@@ -1097,6 +1100,7 @@ impl NativeFunction {
             Self::ArrayToSpliced => "toSpliced",
             Self::ArrayToSorted => "toSorted",
             Self::ArrayFlat => "flat",
+            Self::ArrayFlatMap => "flatMap",
             Self::ArraySort => "sort",
             Self::ArrayForEach => "forEach",
             Self::ArrayEvery => "every",
@@ -1635,6 +1639,7 @@ pub(crate) struct VmTypes {
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,
+    pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,

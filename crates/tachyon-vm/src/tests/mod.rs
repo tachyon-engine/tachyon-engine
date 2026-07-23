@@ -16,6 +16,7 @@ mod array_concat;
 mod array_copy;
 mod array_filter;
 mod array_find;
+mod array_flat_map;
 mod array_map;
 mod array_predicate;
 mod array_reduce;

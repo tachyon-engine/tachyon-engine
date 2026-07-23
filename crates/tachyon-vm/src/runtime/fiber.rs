@@ -243,6 +243,8 @@ pub(crate) enum ConversionConsumer {
     ArrayLength,
     ArraySearchIndex,
     ArrayConcatLength,
+    ArrayFlatMapLength,
+    ArrayFlatMapInnerLength,
     ArrayCopyLength,
     ArrayCopyIndex,
     ArrayCopyStart,
@@ -287,6 +289,8 @@ impl ConversionConsumer {
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayConcatLength
+            | Self::ArrayFlatMapLength
+            | Self::ArrayFlatMapInnerLength
             | Self::ArrayCopyLength
             | Self::ArrayCopyIndex
             | Self::ArrayCopyStart
@@ -369,6 +373,8 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::ArrayLength
                 | Self::ArrayConcatLength
+                | Self::ArrayFlatMapLength
+                | Self::ArrayFlatMapInnerLength
                 | Self::ArraySliceLength
                 | Self::ArraySliceStart
                 | Self::ArraySliceEnd
@@ -579,6 +585,23 @@ pub(crate) enum ArrayConcatStage {
     ElementDefine,
     ValueDefine,
     FinalLength,
+}
+
+/// One observable boundary in the resumable Array.prototype.flatMap algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayFlatMapStage {
+    Length,
+    SpeciesConstructor,
+    SpeciesValue,
+    SpeciesConstruct,
+    SourceHas,
+    SourceGet,
+    Callback,
+    InnerLength,
+    InnerHas,
+    InnerGet,
+    Define,
 }
 
 /// One observable boundary in the resumable Array.prototype.slice algorithm.
@@ -888,6 +911,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     ArrayConcat(ArrayConcatStage),
+    ArrayFlatMap(ArrayFlatMapStage),
     ArrayCopy(ArrayCopyStage),
     ArrayToSorted(ArrayToSortedStage),
     ArraySlice(ArraySliceStage),
@@ -1641,6 +1665,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayConcat(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one flatMap state and operation-specific value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_flat_map(
+        site: NativeContinuationSite,
+        stage: ArrayFlatMapStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayFlatMap(stage),
             first: state,
             second: retained,
         }

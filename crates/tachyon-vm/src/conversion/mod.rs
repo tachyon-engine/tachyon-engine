@@ -442,6 +442,19 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayFlatMapLength
+                            | ConversionConsumer::ArrayFlatMapInnerLength
+                    ) {
+                        let state = self.pending_array_flat_map_reference(continuation.receiver)?;
+                        return self.resume_array_flat_map_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::ArrayStaticLength {
                         let state = self.pending_array_static_reference(continuation.receiver)?;
                         return self.resume_array_from_length_conversion(
@@ -740,6 +753,10 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayConcatLength => {
                     unreachable!("Array concat length resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayFlatMapLength
+                | ConversionConsumer::ArrayFlatMapInnerLength => {
+                    unreachable!("Array flatMap conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArrayStaticLength => {
                     unreachable!("Array static length resumes inside its state machine")

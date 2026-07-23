@@ -13,6 +13,7 @@ mod argument_list;
 mod array;
 mod array_concat;
 mod array_copy;
+mod array_flat_map;
 mod array_for_each;
 mod array_slice;
 mod array_splice;
@@ -129,6 +130,7 @@ use argument_list::{ArgumentListOperation, PendingArgumentList};
 use array::{ArrayObject, MAX_SAFE_INTEGER};
 use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
+use array_flat_map::PendingArrayFlatMap;
 use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
 use array_static::PendingArrayStatic;
@@ -195,8 +197,8 @@ use runtime::{
         BindingState, Environment, EnvironmentAccessError, EnvironmentKind, EnvironmentOwner,
     },
     fiber::{
-        ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayForEachStage,
-        ArraySliceStage, ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage,
+        ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayFlatMapStage,
+        ArrayForEachStage, ArraySliceStage, ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage,
         BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
         CollectionIteratorCloseStage, ConversionCallbackStage, ConversionConsumer,
         ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,

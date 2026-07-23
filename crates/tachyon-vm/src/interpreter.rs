@@ -2112,6 +2112,9 @@ impl Isolate {
             NativeContinuationKind::ArrayConcat(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayFlatMap(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayCopy(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4838,16 +4841,42 @@ impl Isolate {
             }
             match self.resolve_function_executable(site.callee)? {
                 FunctionExecutable::Bound(data) => {
-                    if site.argument_prefix.is_some() {
-                        return Err(ExecutionError::BoundArgumentCountOverflow);
-                    }
                     let bound = self.bound_function_snapshot(data)?;
-                    site.argument_count = site
-                        .argument_count
-                        .checked_add(bound.argument_count)
-                        .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
-                    site.argument_prefix = Some(data);
-                    site.argument_prefix_count = bound.argument_count;
+                    if site.argument_prefix.is_some() || site.argument_source.is_some() {
+                        let argument_count = site
+                            .argument_count
+                            .checked_add(bound.argument_count)
+                            .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                        let mut arguments = Vec::new();
+                        arguments
+                            .try_reserve_exact(argument_count as usize)
+                            .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)?;
+                        self.append_bound_arguments(data, &mut arguments)?;
+                        for index in 0..site.argument_count {
+                            arguments.push(
+                                self.call_argument(&site, index)?
+                                    .expect("forwarded call argument remains in range"),
+                            );
+                        }
+                        let prefix = self.create_apply_argument_prefix(
+                            bound.call_target,
+                            bound.bound_this,
+                            arguments,
+                        )?;
+                        site.argument_count = argument_count;
+                        site.argument_prefix = Some(prefix);
+                        site.argument_prefix_offset = 0;
+                        site.argument_prefix_count = argument_count;
+                        site.argument_source = None;
+                        site.argument_base = 0;
+                    } else {
+                        site.argument_count = site
+                            .argument_count
+                            .checked_add(bound.argument_count)
+                            .ok_or(ExecutionError::BoundArgumentCountOverflow)?;
+                        site.argument_prefix = Some(data);
+                        site.argument_prefix_count = bound.argument_count;
+                    }
                     site.callee = bound.call_target;
                     site.this_value = bound.bound_this;
                 }
@@ -6061,6 +6090,9 @@ impl Isolate {
                     let value = self.array_flat(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayFlatMap) => {
+                    return self.begin_array_flat_map(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArraySort) => {
                     return self.begin_array_sort(&site);
                 }
@@ -6973,6 +7005,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayConcat(stage) => {
                     let state = self.pending_array_concat_reference(continuation.first())?;
                     self.resume_array_concat(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayFlatMap(stage) => {
+                    let state = self.pending_array_flat_map_reference(continuation.first())?;
+                    self.resume_array_flat_map(site, state, stage, value)
                 }
                 NativeContinuationKind::ArrayCopy(stage) => {
                     let state = self.pending_array_copy_reference(continuation.first())?;

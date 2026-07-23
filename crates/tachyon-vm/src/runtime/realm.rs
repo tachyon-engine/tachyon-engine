@@ -138,6 +138,7 @@ pub(crate) struct Realm {
     pub(crate) array_to_spliced: Option<Value>,
     pub(crate) array_to_sorted: Option<Value>,
     pub(crate) array_flat: Option<Value>,
+    pub(crate) array_flat_map: Option<Value>,
     pub(crate) array_sort: Option<Value>,
     pub(crate) array_for_each: Option<Value>,
     pub(crate) array_filter: Option<Value>,
@@ -275,6 +276,7 @@ impl Realm {
             array_to_spliced: None,
             array_to_sorted: None,
             array_flat: None,
+            array_flat_map: None,
             array_sort: None,
             array_for_each: None,
             array_filter: None,
@@ -647,6 +649,7 @@ impl Trace for Realm {
         self.array_to_spliced.trace(tracer);
         self.array_to_sorted.trace(tracer);
         self.array_flat.trace(tracer);
+        self.array_flat_map.trace(tracer);
         self.array_sort.trace(tracer);
         self.array_for_each.trace(tracer);
         self.array_filter.trace(tracer);

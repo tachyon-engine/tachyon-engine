@@ -440,6 +440,9 @@ impl Isolate {
             pending_array_copy: registry
                 .try_register("PendingArrayCopy")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_array_flat_map: registry
+                .try_register("PendingArrayFlatMap")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_array_slice: registry
                 .try_register("PendingArraySlice")
                 .map_err(IsolateCreationError::TypeRegistration)?,

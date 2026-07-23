@@ -1532,6 +1532,18 @@ impl Isolate {
         self.realm.array_flat = Some(flat);
         let flat_atom = self.intern_intrinsic_name(b"flat")?;
         self.set_intrinsic_data_property(prototype, flat_atom, flat, true)?;
+        let flat_map = self.allocate_native_function(
+            NativeFunction::ArrayFlatMap,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_flat_map = Some(flat_map);
+        let flat_map_atom = self.intern_intrinsic_name(b"flatMap")?;
+        self.set_intrinsic_data_property(prototype, flat_map_atom, flat_map, true)?;
         let sort = self.allocate_native_function(
             NativeFunction::ArraySort,
             OrdinaryObject {
