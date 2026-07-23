@@ -708,16 +708,30 @@ impl Isolate {
                 } else if self.fiber.completions.len() == completion_depth + 1 {
                     self.pop_native_continuation()?;
                     let result = self.read(site.caller_base, site.destination)?;
-                    self.write(site.caller_base, site.destination, result)?;
+                    return self.finish_promise_finally_mapping(site, result);
                 } else {
                     return Ok(());
                 }
                 Ok(())
             }
-            PromiseFinallyMethodStage::ThenCall => {
-                self.write(site.caller_base, site.destination, value)
-            }
+            PromiseFinallyMethodStage::ThenCall => self.finish_promise_finally_mapping(site, value),
         }
+    }
+
+    /// Completes the observable restoration `then` and settles the surrounding reaction.
+    fn finish_promise_finally_mapping(
+        &mut self,
+        site: NativeContinuationSite,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.write(site.caller_base, site.destination, value)?;
+        if let Some(parent) = self.fiber.completions.last_native()
+            && parent.kind() == NativeContinuationKind::PromiseReaction
+        {
+            let parent = self.pop_native_continuation()?;
+            return self.finish_promise_reaction(parent, value);
+        }
+        Ok(())
     }
 
     /// Wraps an observable property read with a finally method continuation.
