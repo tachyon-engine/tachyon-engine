@@ -166,10 +166,11 @@ use runtime::code::is_conditional_branch;
 use runtime::{
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
-        DataPropertyDescriptor, ErrorIntrinsics, FlatWork, FunctionExecutable, FunctionObject,
-        GenericPropertyDescriptor, GlobalNumberFunction, GlobalUriFunction, IntrinsicPropertyAtoms,
-        MathFunction, NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor,
-        RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
+        DataPropertyDescriptor, DateUtcField, ErrorIntrinsics, FlatWork, FunctionExecutable,
+        FunctionObject, GenericPropertyDescriptor, GlobalNumberFunction, GlobalUriFunction,
+        IntrinsicPropertyAtoms, MathFunction, NativeCallState, NativeFunction, ObjectReceiver,
+        PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
+        execution_error_kind,
     },
     class::{
         ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,

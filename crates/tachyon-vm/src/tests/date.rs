@@ -8,6 +8,7 @@ const DATE_SOURCE: &str = r#"
 var positive = new Date(1.9);
 var negative = new Date(-1.9);
 var invalid = new Date(Infinity);
+var utc = new Date(Date.UTC(2000, 1, 29, 23, 58, 57, 456));
 var brandThrows = false;
 try { Date.prototype.getTime.call({}); } catch (error) {
   brandThrows = error instanceof TypeError;
@@ -17,6 +18,14 @@ positive.getTime() === 1 &&
 positive.valueOf() === 1 &&
 negative.getTime() === -1 &&
 invalid.getTime() !== invalid.getTime() &&
+utc.getUTCFullYear() === 2000 && utc.getUTCMonth() === 1 &&
+utc.getUTCDate() === 29 && utc.getUTCDay() === 2 &&
+utc.getUTCHours() === 23 && utc.getUTCMinutes() === 58 &&
+utc.getUTCSeconds() === 57 && utc.getUTCMilliseconds() === 456 &&
+utc.setTime(-1) === -1 && utc.getUTCFullYear() === 1969 &&
+utc.getUTCMonth() === 11 && utc.getUTCDate() === 31 &&
+utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59 &&
+utc.getUTCSeconds() === 59 && utc.getUTCMilliseconds() === 999 &&
 Object.prototype.toString.call(positive) === "[object Date]" &&
 Date.name === "Date" && Date.length === 7 &&
 Date.prototype.constructor === Date && brandThrows;

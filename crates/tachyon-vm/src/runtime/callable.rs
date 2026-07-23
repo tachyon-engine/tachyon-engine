@@ -2,6 +2,47 @@
 
 use super::super::*;
 
+/// Clock-independent UTC fields exposed by Date prototype getters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DateUtcField {
+    FullYear,
+    Month,
+    Date,
+    Day,
+    Hours,
+    Minutes,
+    Seconds,
+    Milliseconds,
+}
+
+impl DateUtcField {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::FullYear,
+        Self::Month,
+        Self::Date,
+        Self::Day,
+        Self::Hours,
+        Self::Minutes,
+        Self::Seconds,
+        Self::Milliseconds,
+    ];
+
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::FullYear => "getUTCFullYear",
+            Self::Month => "getUTCMonth",
+            Self::Date => "getUTCDate",
+            Self::Day => "getUTCDay",
+            Self::Hours => "getUTCHours",
+            Self::Minutes => "getUTCMinutes",
+            Self::Seconds => "getUTCSeconds",
+            Self::Milliseconds => "getUTCMilliseconds",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 #[cfg_attr(
@@ -115,8 +156,11 @@ pub(crate) enum NativeFunction {
     BooleanToString,
     BooleanValueOf,
     DateConstructor,
+    DateUtc,
     DateGetTime,
+    DateSetTime,
     DateValueOf,
+    DateUtcGetter(DateUtcField),
     FunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
@@ -563,7 +607,7 @@ impl NativeFunction {
             return 1;
         }
         match self {
-            Self::DateConstructor => 7,
+            Self::DateConstructor | Self::DateUtc => 7,
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
             Self::ObjectDefineProperties => 2,
             Self::ObjectFromEntries => 1,
@@ -648,6 +692,7 @@ impl NativeFunction {
             | Self::StringTrimEnd
             | Self::NumberConstructor
             | Self::BooleanConstructor
+            | Self::DateSetTime
             | Self::FunctionPrototypeCall
             | Self::FunctionPrototypeApply
             | Self::FunctionPrototypeBind
@@ -764,6 +809,7 @@ impl NativeFunction {
             | Self::BooleanValueOf
             | Self::DateGetTime
             | Self::DateValueOf
+            | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
@@ -897,8 +943,11 @@ impl NativeFunction {
             Self::BooleanToString => "toString",
             Self::BooleanValueOf => "valueOf",
             Self::DateConstructor => "Date",
+            Self::DateUtc => "UTC",
             Self::DateGetTime => "getTime",
+            Self::DateSetTime => "setTime",
             Self::DateValueOf => "valueOf",
+            Self::DateUtcGetter(field) => field.name(),
             Self::FunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",

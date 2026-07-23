@@ -770,6 +770,10 @@ impl Isolate {
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
 
+        let utc_atom = self.intern_intrinsic_name(b"UTC")?;
+        let utc = allocate(self, NativeFunction::DateUtc)?;
+        self.set_intrinsic_data_property(constructor, utc_atom, utc, true)?;
+
         let get_time = allocate(self, NativeFunction::DateGetTime)?;
         self.realm.date_get_time = Some(get_time);
         let get_time_atom = self.intern_intrinsic_name(b"getTime")?;
@@ -777,7 +781,17 @@ impl Isolate {
         let value_of = allocate(self, NativeFunction::DateValueOf)?;
         self.realm.date_value_of = Some(value_of);
         let value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
-        self.set_intrinsic_data_property(prototype, value_of_atom, value_of, true)
+        self.set_intrinsic_data_property(prototype, value_of_atom, value_of, true)?;
+
+        let set_time_atom = self.intern_intrinsic_name(b"setTime")?;
+        let set_time = allocate(self, NativeFunction::DateSetTime)?;
+        self.set_intrinsic_data_property(prototype, set_time_atom, set_time, true)?;
+        for field in DateUtcField::ALL {
+            let atom = self.intern_intrinsic_name(field.name().as_bytes())?;
+            let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;
+            self.set_intrinsic_data_property(prototype, atom, getter, true)?;
+        }
+        Ok(())
     }
 
     /// Allocates and publishes the realm-local well-known `Symbol.toPrimitive` identity.
