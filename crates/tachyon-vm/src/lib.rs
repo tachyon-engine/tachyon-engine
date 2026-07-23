@@ -16,6 +16,7 @@ mod array_copy;
 mod array_flat;
 mod array_flat_map;
 mod array_for_each;
+mod array_insert;
 mod array_remove;
 mod array_slice;
 mod array_splice;
@@ -134,6 +135,7 @@ use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
 use array_flat::PendingArrayFlat;
 use array_flat_map::PendingArrayFlatMap;
+use array_insert::PendingArrayInsert;
 use array_remove::PendingArrayRemove;
 use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
@@ -202,9 +204,9 @@ use runtime::{
     },
     fiber::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage, ArrayFlatMapStage,
-        ArrayFlatStage, ArrayForEachStage, ArrayRemoveStage, ArraySliceStage, ArraySpliceStage,
-        ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer, ClassActivation,
-        CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
+        ArrayFlatStage, ArrayForEachStage, ArrayInsertStage, ArrayRemoveStage, ArraySliceStage,
+        ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer,
+        ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
         ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
         ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
         ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,

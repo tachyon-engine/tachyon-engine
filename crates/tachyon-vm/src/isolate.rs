@@ -455,6 +455,9 @@ impl Isolate {
             pending_array_remove: registry
                 .try_register("PendingArrayRemove")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_array_insert: registry
+                .try_register("PendingArrayInsert")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_array_static: registry
                 .try_register("PendingArrayStatic")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -396,6 +396,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::ArrayInsertLength {
+                        let state = self.pending_array_insert_reference(continuation.receiver)?;
+                        return self.resume_array_insert_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::DateNumericArgument {
                         return self.resume_date_numeric_arguments(
                             continuation.site,
@@ -531,6 +539,14 @@ impl Isolate {
                     if continuation.consumer == ConversionConsumer::ArrayRemoveLength {
                         let state = self.pending_array_remove_reference(continuation.receiver)?;
                         return self.resume_array_remove_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::ArrayInsertLength {
+                        let state = self.pending_array_insert_reference(continuation.receiver)?;
+                        return self.resume_array_insert_conversion(
                             continuation.site,
                             state,
                             value,
@@ -820,6 +836,9 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayRemoveLength => {
                     unreachable!("Array removal conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayInsertLength => {
+                    unreachable!("Array insertion conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

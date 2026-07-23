@@ -2133,6 +2133,9 @@ impl Isolate {
             NativeContinuationKind::ArrayRemove(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayInsert(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayStatic(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6032,8 +6035,7 @@ impl Isolate {
                     return self.begin_array_concat(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayPush) => {
-                    let length = self.array_push(&site)?;
-                    return self.write(site.caller_base, site.destination, length);
+                    return self.begin_array_insert(&site, false);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayJoin) => {
                     let value = self.array_join(&site)?;
@@ -6060,8 +6062,7 @@ impl Isolate {
                     return self.begin_array_remove(&site, true);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayUnshift) => {
-                    let value = self.array_unshift(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_insert(&site, true);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayReverse) => {
                     let value = self.array_reverse(&site)?;
@@ -7045,6 +7046,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayRemove(stage) => {
                     let state = self.pending_array_remove_reference(continuation.first())?;
                     self.resume_array_remove(site, state, stage, value)
+                }
+                NativeContinuationKind::ArrayInsert(stage) => {
+                    let state = self.pending_array_insert_reference(continuation.first())?;
+                    self.resume_array_insert(site, state, stage, value)
                 }
                 NativeContinuationKind::ArrayStatic(stage) => {
                     let state = self.pending_array_static_reference(continuation.first())?;

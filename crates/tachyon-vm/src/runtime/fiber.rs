@@ -264,6 +264,7 @@ pub(crate) enum ConversionConsumer {
     ArraySpliceStart,
     ArraySpliceDeleteCount,
     ArrayRemoveLength,
+    ArrayInsertLength,
 }
 
 impl ConversionConsumer {
@@ -313,7 +314,8 @@ impl ConversionConsumer {
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
-            | Self::ArrayRemoveLength => None,
+            | Self::ArrayRemoveLength
+            | Self::ArrayInsertLength => None,
         }
     }
 
@@ -393,6 +395,7 @@ impl ConversionConsumer {
                 | Self::ArraySpliceStart
                 | Self::ArraySpliceDeleteCount
                 | Self::ArrayRemoveLength
+                | Self::ArrayInsertLength
         )
     }
 }
@@ -679,6 +682,19 @@ pub(crate) enum ArrayRemoveStage {
     FinalLength,
 }
 
+/// One observable boundary in the resumable Array push/unshift algorithms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayInsertStage {
+    Length,
+    MoveHas,
+    MoveGet,
+    MoveSet,
+    MoveDelete,
+    ItemSet,
+    FinalLength,
+}
+
 /// One observable boundary in a resumable static Array constructor algorithm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -958,6 +974,7 @@ pub(crate) enum NativeContinuationKind {
     ArraySlice(ArraySliceStage),
     ArraySplice(ArraySpliceStage),
     ArrayRemove(ArrayRemoveStage),
+    ArrayInsert(ArrayInsertStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1659,6 +1676,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayRemove(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one push/unshift state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_insert(
+        site: NativeContinuationSite,
+        stage: ArrayInsertStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayInsert(stage),
             first: state,
             second: retained,
         }

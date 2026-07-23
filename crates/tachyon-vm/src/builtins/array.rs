@@ -107,30 +107,6 @@ impl Isolate {
         }
     }
 
-    /// Implements Array.prototype.push through the generic array-like Set contract.
-    pub(crate) fn array_push(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        let argument_count = u64::from(site.argument_count);
-        let new_length = length
-            .checked_add(argument_count)
-            .filter(|length| *length <= MAX_SAFE_INTEGER)
-            .ok_or(ExecutionError::ArrayLengthOverflow)?;
-        for index in 0..site.argument_count {
-            let value = self
-                .call_argument(site, index)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            let key = self.safe_integer_property_atom(
-                length
-                    .checked_add(u64::from(index))
-                    .ok_or(ExecutionError::ArrayLengthOverflow)?,
-            )?;
-            self.set_own_data_property(site.this_value, key, value)?;
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(new_length))?;
-        Ok(safe_integer_value(new_length))
-    }
-
     pub(crate) fn array_join(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let separator = self.call_argument(site, 0)?;
         self.join_array_like(site.this_value, separator)
@@ -296,35 +272,6 @@ impl Isolate {
             return Ok(length.saturating_sub((-number).ceil() as u64));
         }
         Ok(number.floor().min(length as f64) as u64)
-    }
-
-    /// Implements `Array.prototype.unshift` with backwards indexed movement and exact length.
-    pub(crate) fn array_unshift(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        let count = u64::from(site.argument_count);
-        let new_length = length
-            .checked_add(count)
-            .filter(|value| *value <= MAX_SAFE_INTEGER)
-            .ok_or(ExecutionError::ArrayLengthOverflow)?;
-        for index in (0..length).rev() {
-            let source_key = self.safe_integer_property_atom(index)?;
-            let target_key = self.safe_integer_property_atom(index + count)?;
-            if let Some(value) = self.get_data_property(site.this_value, source_key)? {
-                self.set_own_data_property(site.this_value, target_key, value)?;
-            } else if !self.delete_own_data_property(site.this_value, target_key)? {
-                return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-            }
-        }
-        for index in 0..site.argument_count {
-            let value = self
-                .call_argument(site, index)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            let key = self.safe_integer_property_atom(u64::from(index))?;
-            self.set_own_data_property(site.this_value, key, value)?;
-        }
-        let length_atom = self.length_atom()?;
-        self.set_own_data_property(site.this_value, length_atom, safe_integer_value(new_length))?;
-        Ok(safe_integer_value(new_length))
     }
 
     /// Implements `Array.prototype.reverse` by swapping present indexed properties and holes.
