@@ -1,4 +1,4 @@
-//! Resumable indexOf and lastIndexOf strict-equality search.
+//! Resumable indexOf, lastIndexOf, and includes search.
 
 use super::*;
 use crate::tuning::arrays::ARRAY_ITERATION_SPARSE_SKIP_THRESHOLD;
@@ -11,6 +11,7 @@ const SEARCH_CURSOR: usize = 4;
 const SEARCH_FORWARD: u8 = 20;
 const SEARCH_REVERSE_DEFAULT: u8 = 21;
 const SEARCH_REVERSE_EXPLICIT: u8 = 22;
+const SEARCH_INCLUDES: u8 = 23;
 
 impl Isolate {
     /// Captures search inputs before the observable length and fromIndex conversions.
@@ -19,17 +20,27 @@ impl Isolate {
         site: &CallSite,
         reverse: bool,
     ) -> Result<(), ExecutionError> {
-        let receiver = self.coerce_to_object(site.this_value)?;
-        let search = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let explicit_from = site.argument_count > 1;
-        let from_index = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
         let mode = match (reverse, explicit_from) {
             (false, _) => SEARCH_FORWARD,
             (true, false) => SEARCH_REVERSE_DEFAULT,
             (true, true) => SEARCH_REVERSE_EXPLICIT,
         };
+        self.begin_array_search(site, mode)
+    }
+
+    /// Begins includes with direct indexed Get and SameValueZero semantics.
+    pub(crate) fn begin_array_includes(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_array_search(site, SEARCH_INCLUDES)
+    }
+
+    /// Captures shared search inputs before observable length and index conversions.
+    fn begin_array_search(&mut self, site: &CallSite, mode: u8) -> Result<(), ExecutionError> {
+        let receiver = self.coerce_to_object(site.this_value)?;
+        let search = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let from_index = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
         let state = self.allocate_array_for_each_state(NativeCallState {
             values: [
                 receiver,
@@ -77,7 +88,7 @@ impl Isolate {
     ) -> Result<bool, ExecutionError> {
         Ok(matches!(
             self.native_call_state_snapshot(state)?.count,
-            SEARCH_FORWARD | SEARCH_REVERSE_DEFAULT | SEARCH_REVERSE_EXPLICIT
+            SEARCH_FORWARD | SEARCH_REVERSE_DEFAULT | SEARCH_REVERSE_EXPLICIT | SEARCH_INCLUDES
         ))
     }
 
@@ -95,7 +106,11 @@ impl Isolate {
         let pending = self.native_call_state_snapshot(state)?;
         let length = exact_nonnegative_integer(pending.values[SEARCH_LENGTH])?;
         if length == 0 {
-            return self.write(site.caller_base, site.destination, Value::from_i32(-1));
+            return self.write(
+                site.caller_base,
+                site.destination,
+                array_search_miss(pending.count),
+            );
         }
         if pending.count == SEARCH_REVERSE_DEFAULT {
             self.set_array_for_each_number(state, SEARCH_CURSOR, length)?;
@@ -154,7 +169,11 @@ impl Isolate {
             let cursor = exact_nonnegative_integer(pending.values[SEARCH_CURSOR])?;
             let reverse = is_search_reverse(pending.count);
             if (!reverse && cursor >= length) || (reverse && cursor == 0) {
-                return self.write(site.caller_base, site.destination, Value::from_i32(-1));
+                return self.write(
+                    site.caller_base,
+                    site.destination,
+                    array_search_miss(pending.count),
+                );
             }
             let index = if reverse { cursor - 1 } else { cursor };
             self.set_array_for_each_number(
@@ -162,6 +181,15 @@ impl Isolate {
                 SEARCH_CURSOR,
                 if reverse { index } else { index + 1 },
             )?;
+            if pending.count == SEARCH_INCLUDES {
+                let Some(value) = self.dispatch_array_search_get(site, state, index)? else {
+                    return Ok(());
+                };
+                if self.finish_array_search_get(site, state, value, index)? {
+                    return Ok(());
+                }
+                continue;
+            }
             let Some(has) = self.dispatch_array_iteration_has(
                 site,
                 state,
@@ -250,7 +278,7 @@ impl Isolate {
         )
     }
 
-    /// Compares one loaded element using strict equality and writes its index on success.
+    /// Compares one loaded element and publishes the method-specific success value.
     fn finish_array_search_get(
         &mut self,
         site: NativeContinuationSite,
@@ -258,14 +286,24 @@ impl Isolate {
         value: Value,
         index: u64,
     ) -> Result<bool, ExecutionError> {
-        let search = self.native_call_state_snapshot(state)?.values[SEARCH_ELEMENT];
-        if !self.strict_equal_values(value, search)? {
+        let pending = self.native_call_state_snapshot(state)?;
+        let search = pending.values[SEARCH_ELEMENT];
+        let equal = if pending.count == SEARCH_INCLUDES {
+            self.same_value_zero(value, search)?
+        } else {
+            self.strict_equal_values(value, search)?
+        };
+        if !equal {
             return Ok(false);
         }
         self.write(
             site.caller_base,
             site.destination,
-            safe_integer_value(index),
+            if pending.count == SEARCH_INCLUDES {
+                Value::from_immediate(Immediate::True)
+            } else {
+                safe_integer_value(index)
+            },
         )?;
         Ok(true)
     }
@@ -345,7 +383,16 @@ impl Isolate {
 
 #[inline(always)]
 fn is_search_reverse(mode: u8) -> bool {
-    mode != SEARCH_FORWARD
+    matches!(mode, SEARCH_REVERSE_DEFAULT | SEARCH_REVERSE_EXPLICIT)
+}
+
+#[inline(always)]
+fn array_search_miss(mode: u8) -> Value {
+    if mode == SEARCH_INCLUDES {
+        Value::from_immediate(Immediate::False)
+    } else {
+        Value::from_i32(-1)
+    }
 }
 
 #[inline(always)]
@@ -361,7 +408,7 @@ fn to_integer_or_infinity(number: f64) -> f64 {
 
 #[inline(always)]
 fn search_cursor(mode: u8, length: u64, from_index: f64) -> u64 {
-    if mode == SEARCH_FORWARD {
+    if matches!(mode, SEARCH_FORWARD | SEARCH_INCLUDES) {
         if from_index >= length as f64 {
             length
         } else if from_index >= 0.0 {

@@ -55,8 +55,47 @@ try {
   abrupt = error === marker;
 }
 
+var includesTrace = "";
+var includesTarget = { 0: undefined, 1: NaN, 2: -0, length: 3 };
+var includesProxy = new Proxy(includesTarget, {
+  get: function(object, key, receiver) {
+    includesTrace += "g" + key + ";";
+    return Reflect.get(object, key, receiver);
+  },
+  has: function() { includesTrace += "unexpected-has;"; return true; }
+});
+var includes = Array.prototype.includes.call(includesProxy, NaN, {
+  valueOf: function() { includesTrace += "i;"; return 0; }
+});
+var includesDirectGet = includes && includesTrace === "glength;i;g0;g1;" &&
+  [1].includes(1, Infinity) === false && [,].includes(undefined) &&
+  [-0].includes(+0);
+
 strict && inherited && overridesInheritedAccessor && omitted && explicitUndefined && boundaries &&
-  converted && empty && abrupt;
+  converted && empty && abrupt && includesDirectGet;
+"#;
+
+const ARRAY_INCLUDES_GETTER_SOURCE: &str = r#"
+var reads = 0;
+var object = {
+  length: 2,
+  get 0() { reads += 1; return reads; },
+  get 1() { reads += 1; return reads; }
+};
+var found = Array.prototype.includes.call(object, 2);
+var emptyConversions = 0;
+var empty = Array.prototype.includes.call(
+  { length: 0 },
+  1,
+  { valueOf: function() { emptyConversions += 1; return 0; } }
+);
+found && reads === 2 && empty === false && emptyConversions === 0;
+"#;
+
+const ARRAY_INCLUDES_LONG_SOURCE: &str = r#"
+var object = { length: 20000, 19999: 7 };
+Array.prototype.includes.call(object, 7) &&
+  !Array.prototype.includes.call(object, 8);
 "#;
 
 const ARRAY_SEARCH_PROXY_SOURCE: &str = r#"
@@ -115,11 +154,38 @@ fn array_search_proxy_paths_are_stable_for_every_dispatch_batch() {
 fn array_search_state_survives_forced_major_collections() {
     assert_array_search_source::<8>(ARRAY_SEARCH_SOURCE, 1_530, 16_384, true);
     assert_array_search_source::<8>(ARRAY_SEARCH_PROXY_SOURCE, 1_531, 16_384, true);
+    assert_array_search_source::<8>(ARRAY_INCLUDES_GETTER_SOURCE, 1_533, 16_384, true);
 }
 
 #[test]
 fn array_search_skips_proven_holes_near_the_safe_integer_limit() {
     assert_array_search_source::<8>(ARRAY_SEARCH_SAFE_INTEGER_SOURCE, 1_532, 32_768, false);
+}
+
+#[test]
+/// Uses a larger atom quota because generic indexed Gets materialize property keys.
+fn array_includes_long_sync_scan_does_not_grow_the_rust_stack() {
+    let module = compile_array_search_source(ARRAY_INCLUDES_LONG_SOURCE, 1_534);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(32_768, 4 * 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(32 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 32_768).with_max_shapes(32_768),
+    ))
+    .expect("large-atom includes isolate initializes");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("long synchronous includes executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "long synchronous includes returned {outcome:?}"
+    );
 }
 
 /// Executes ordinary search semantics under one interpreter dispatch batch size.

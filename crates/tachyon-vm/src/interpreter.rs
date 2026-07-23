@@ -6058,8 +6058,7 @@ impl Isolate {
                     return self.begin_array_index_search(&site, false);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayIncludes) => {
-                    let value = self.array_search(&site, true)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_array_includes(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayPop) => {
                     return self.begin_array_remove(&site, false);

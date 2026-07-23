@@ -209,60 +209,6 @@ impl Isolate {
         self.array_element_or_undefined(site.this_value, index as u64)
     }
 
-    /// Implements `includes` without allocating an iterator or callback closure.
-    pub(crate) fn array_search(
-        &mut self,
-        site: &CallSite,
-        includes: bool,
-    ) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        if length == 0 {
-            return Ok(if includes {
-                Value::from_immediate(Immediate::False)
-            } else {
-                Value::from_i32(-1)
-            });
-        }
-        let search = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let start_value = self.call_argument(site, 1)?.unwrap_or(Value::from_i32(0));
-        let start_number = numeric_value(self.convert_to_number(start_value)?).unwrap_or(f64::NAN);
-        let start = if start_number.is_nan() {
-            0
-        } else if start_number < 0.0 {
-            length.saturating_sub((-start_number).ceil() as u64)
-        } else {
-            start_number.floor() as u64
-        };
-        for index in start..length {
-            let key = self.safe_integer_property_atom(index)?;
-            let Some(value) = self.get_data_property(site.this_value, key)? else {
-                if includes && search.as_immediate() == Some(Immediate::Undefined) {
-                    return Ok(Value::from_immediate(Immediate::True));
-                }
-                continue;
-            };
-            let equal = if includes {
-                self.same_value_zero(value, search)?
-            } else {
-                self.strict_equal_values(value, search)?
-            };
-            if equal {
-                return Ok(if includes {
-                    Value::from_immediate(Immediate::True)
-                } else {
-                    safe_integer_value(index)
-                });
-            }
-        }
-        Ok(if includes {
-            Value::from_immediate(Immediate::False)
-        } else {
-            Value::from_i32(-1)
-        })
-    }
-
     fn array_element_or_undefined(
         &mut self,
         receiver: Value,
