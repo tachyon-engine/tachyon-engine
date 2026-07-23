@@ -1234,6 +1234,16 @@ impl Isolate {
             && self.heap.checked_reference(raw, self.types.string).is_ok()
         {
             "[object String]"
+        } else if self.realm.math_object.is_some_and(|math| math == value) {
+            "[object Math]"
+        } else if self.realm.json_object.is_some_and(|json| json == value) {
+            "[object JSON]"
+        } else if value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.arguments_object)
+                .is_ok()
+        }) {
+            "[object Arguments]"
         } else if let Some(raw) = value.as_heap_ref()
             && self
                 .heap

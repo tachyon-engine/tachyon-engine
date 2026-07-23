@@ -140,11 +140,21 @@ impl Isolate {
         Ok(())
     }
 
-    /// Implements the non-Proxy IsArray branch through the unforgeable GC payload type.
+    /// Implements IsArray with a direct payload fast path and recursive Proxy target traversal.
     pub(crate) fn is_array_value(&mut self, value: Value) -> Result<bool, ExecutionError> {
-        Ok(value
-            .as_heap_ref()
-            .is_some_and(|raw| self.heap.checked_reference(raw, self.types.array).is_ok()))
+        let mut current = value;
+        loop {
+            if current
+                .as_heap_ref()
+                .is_some_and(|raw| self.heap.checked_reference(raw, self.types.array).is_ok())
+            {
+                return Ok(true);
+            }
+            if !self.is_proxy_value(current) {
+                return Ok(false);
+            }
+            current = self.proxy_snapshot(current)?.target;
+        }
     }
 
     /// Implements Array.prototype.push through the generic array-like Set contract.

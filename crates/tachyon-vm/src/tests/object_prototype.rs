@@ -60,6 +60,42 @@ proxyResult === "proxy" && trace === "cgbxp" &&
 nonCallableThrows && abrupt && locale.name === "toLocaleString" && locale.length === 0;
 "#;
 
+#[test]
+/// Covers intrinsic singleton tags and the lazily materialized ArgumentsObject payload.
+fn object_to_string_reports_intrinsic_and_arguments_tags() {
+    let source = r#"
+var args = (function() { return arguments; })(1, 2);
+Object.prototype.toString.call(Math) === "[object Math]" &&
+Object.prototype.toString.call(JSON) === "[object JSON]" &&
+Object.prototype.toString.call(args) === "[object Arguments]";
+"#;
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1_307),
+                SourceName::new("object-to-string-brands"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("object tag fixture compiles");
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        )
+        .expect("object tag fixture executes");
+    assert!(matches!(
+        outcome,
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+}
+
 const OBJECT_IS_PROTOTYPE_OF_SOURCE: &str = r#"
 function A() {}
 function B() {}
