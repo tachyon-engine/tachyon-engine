@@ -254,6 +254,10 @@ pub(crate) enum NativeFunction {
     ArrayForEach,
     ArrayEvery,
     ArraySome,
+    ArrayFind,
+    ArrayFindIndex,
+    ArrayFindLast,
+    ArrayFindLastIndex,
     ArrayMap,
     ArrayFilter,
     ArrayReduce,
@@ -701,6 +705,10 @@ impl NativeFunction {
             | Self::ArrayForEach
             | Self::ArrayEvery
             | Self::ArraySome
+            | Self::ArrayFind
+            | Self::ArrayFindIndex
+            | Self::ArrayFindLast
+            | Self::ArrayFindLastIndex
             | Self::ArrayMap
             | Self::ArrayFilter
             | Self::ArrayReduce
@@ -1067,6 +1075,10 @@ impl NativeFunction {
             Self::ArrayForEach => "forEach",
             Self::ArrayEvery => "every",
             Self::ArraySome => "some",
+            Self::ArrayFind => "find",
+            Self::ArrayFindIndex => "findIndex",
+            Self::ArrayFindLast => "findLast",
+            Self::ArrayFindLastIndex => "findLastIndex",
             Self::ArrayMap => "map",
             Self::ArrayFilter => "filter",
             Self::ArrayReduce => "reduce",

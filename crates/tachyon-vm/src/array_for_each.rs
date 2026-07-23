@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod find;
 mod map;
 mod output;
 mod reduce;
@@ -356,6 +357,10 @@ impl Isolate {
             }
             ArrayForEachStage::SearchHas => self.resume_array_search_has(site, state, value),
             ArrayForEachStage::SearchGet => self.resume_array_search_get(site, state, value),
+            ArrayForEachStage::FindGet => self.resume_array_find_get(site, state, value),
+            ArrayForEachStage::FindCallback => {
+                self.resume_array_find_callback(site, state, value, retained)
+            }
         }
     }
 
@@ -385,7 +390,9 @@ impl Isolate {
         }
         let callback = self.native_call_state_snapshot(state)?.values[FOREACH_CALLBACK];
         self.resolve_function_object(callback)?;
-        if self.is_array_reduce_state(state)? {
+        if self.is_array_find_state(state)? {
+            self.begin_array_find_after_length(site, state)
+        } else if self.is_array_reduce_state(state)? {
             self.advance_array_reduce(site, state)
         } else if self.array_output_state(state)?.is_some() {
             self.begin_array_output_species(site, state)
@@ -483,9 +490,30 @@ impl Isolate {
         } else {
             pending.values[FOREACH_THIS_ARGUMENT]
         };
+        self.call_array_iteration_callback(
+            site,
+            state,
+            value,
+            index,
+            this_argument,
+            ArrayForEachStage::Callback,
+        )
+    }
+
+    /// Calls one Array predicate while preserving its state and element across suspension.
+    fn call_array_iteration_callback(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+        index: Value,
+        this_argument: Value,
+        stage: ArrayForEachStage,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
         let continuation = NativeContinuation::array_for_each(
             site,
-            ArrayForEachStage::Callback,
+            stage,
             Value::from_heap_ref(state.raw()),
             value,
         );
@@ -528,7 +556,7 @@ impl Isolate {
                 .fiber
                 .frames
                 .last_mut()
-                .expect("Array forEach callback publishes one frame");
+                .expect("Array iteration callback publishes one frame");
             frame.return_register = None;
             frame.return_continuation = true;
             return Ok(None);

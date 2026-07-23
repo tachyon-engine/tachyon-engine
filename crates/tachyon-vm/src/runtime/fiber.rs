@@ -516,6 +516,8 @@ pub(crate) enum ArrayForEachStage {
     ReduceCallback,
     SearchHas,
     SearchGet,
+    FindGet,
+    FindCallback,
 }
 
 /// The first Proxy essential internal methods routed through the exotic slow path.

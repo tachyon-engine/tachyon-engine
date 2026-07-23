@@ -6016,6 +6016,18 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArraySome) => {
                     return self.begin_array_predicate(&site, false);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayFind) => {
+                    return self.begin_array_find(&site, false, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayFindIndex) => {
+                    return self.begin_array_find(&site, false, true);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayFindLast) => {
+                    return self.begin_array_find(&site, true, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayFindLastIndex) => {
+                    return self.begin_array_find(&site, true, true);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayMap) => {
                     return self.begin_array_map(&site);
                 }
