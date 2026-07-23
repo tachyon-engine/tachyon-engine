@@ -2132,6 +2132,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::PromiseFinallyMethod(_) => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::PromiseFinallyResolve => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6868,6 +6871,10 @@ impl Isolate {
                 NativeContinuationKind::PromiseFinallyMethod(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_promise_finally_method(site, state, stage, value)
+                }
+                NativeContinuationKind::PromiseFinallyResolve => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.finish_promise_finally_resolved(continuation, state, value)
                 }
                 NativeContinuationKind::PromiseStaticResolve(stage) => {
                     self.resume_generic_promise_resolve(continuation, stage, value)

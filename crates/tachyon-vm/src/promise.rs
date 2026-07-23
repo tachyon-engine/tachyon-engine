@@ -7,6 +7,8 @@ const FIN_CALLBACK: usize = 1;
 const FIN_FULFILLED: usize = 2;
 const FIN_REJECTED: usize = 3;
 const FIN_CONSTRUCTOR: usize = 4;
+const FIN_RESULT_ORIGINAL: usize = 0;
+const FIN_RESULT_REJECTED: usize = 2;
 
 impl Isolate {
     /// Allocates one Promise with its state/result initialized before publication.
@@ -772,7 +774,71 @@ impl Isolate {
         else {
             return Err(ExecutionError::NonCallable(continuation.first()));
         };
-        let _constructor = self.native_call_state_snapshot(state)?.values[1];
+        let constructor = self.native_call_state_snapshot(state)?.values[1];
+        let intrinsic = self
+            .realm
+            .promise_constructor
+            .expect("Promise initializes before finally");
+        if constructor != intrinsic {
+            let result_state = self.allocate_promise_then_state(NativeCallState {
+                values: [
+                    original,
+                    constructor,
+                    if rejected {
+                        Value::from_immediate(Immediate::True)
+                    } else {
+                        Value::from_immediate(Immediate::False)
+                    },
+                    Value::from_immediate(Immediate::Undefined),
+                    Value::from_immediate(Immediate::Undefined),
+                ],
+                count: 3,
+            })?;
+            let parent = NativeContinuation::promise_finally_resolve(
+                site,
+                Value::from_heap_ref(result_state.raw()),
+            );
+            let completion_depth = self.fiber.completions.len();
+            self.fiber
+                .completions
+                .push_native(parent)
+                .map_err(Isolate::completion_stack_error)?;
+            let resolution_site = NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site
+                    .destination
+                    .checked_add(1)
+                    .ok_or(ExecutionError::BoundArgumentCountOverflow)?,
+                call_site: site.call_site,
+            };
+            let resolve_site = CallSite {
+                caller_base: resolution_site.caller_base,
+                destination: resolution_site.destination,
+                callee: self
+                    .realm
+                    .promise_resolve
+                    .expect("Promise.resolve initializes before finally"),
+                argument_base: 0,
+                argument_source: None,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: constructor,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: site.call_site,
+            };
+            self.begin_generic_promise_resolve(&resolve_site, constructor, callback_result)?;
+            if self.fiber.frames.len() == 1 && self.fiber.completions.len() == completion_depth + 1
+            {
+                let parent = self.pop_native_continuation()?;
+                let promise =
+                    self.read(resolution_site.caller_base, resolution_site.destination)?;
+                return self.finish_promise_finally_resolved(parent, result_state, promise);
+            }
+            return Ok(());
+        }
         let callback_promise = self.create_promise(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
@@ -798,6 +864,27 @@ impl Isolate {
             callback_result,
             resolution_site,
             PromiseResolutionMode::StaticResolve,
+        )?;
+        Ok(())
+    }
+
+    /// Attaches the final value/reason thunk after a custom PromiseResolve has produced its promise.
+    pub(crate) fn finish_promise_finally_resolved(
+        &mut self,
+        continuation: NativeContinuation,
+        state: GcRef<NativeCallState>,
+        promise: Value,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let original = pending.values[FIN_RESULT_ORIGINAL];
+        let rejected = pending.values[FIN_RESULT_REJECTED].as_immediate() == Some(Immediate::True);
+        let value_handler = self.allocate_promise_finally_result_handler(original, rejected)?;
+        let throw_handler = self.allocate_promise_finally_result_handler(original, true)?;
+        self.perform_intrinsic_promise_then(
+            promise,
+            Some(value_handler),
+            Some(throw_handler),
+            continuation.site(),
         )?;
         Ok(())
     }

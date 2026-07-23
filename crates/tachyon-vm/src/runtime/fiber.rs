@@ -723,6 +723,8 @@ pub(crate) enum NativeContinuationKind {
     PromiseThen(PromiseThenStage),
     /// Resumes a finally reaction after its user callback returns.
     PromiseFinally,
+    /// Resumes finally after PromiseResolve(C, callbackResult) completes.
+    PromiseFinallyResolve,
     PromiseFinallyMethod(PromiseFinallyMethodStage),
     PromiseStaticResolve(PromiseStaticResolveStage),
     PromiseResolution(PromiseResolutionMode),
@@ -1219,6 +1221,20 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PromiseFinallyMethod(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Roots finally state while a custom species constructor resolves callback output.
+    #[inline]
+    pub(crate) const fn promise_finally_resolve(
+        site: NativeContinuationSite,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseFinallyResolve,
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 
