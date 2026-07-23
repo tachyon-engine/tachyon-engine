@@ -733,6 +733,37 @@ fn array_filter_runs_resumable_callback_iteration() {
         .as_immediate(),
         Some(tachyon_value::Immediate::True)
     );
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1_141),
+                SourceName::new("sparse-filter-trampoline"),
+                MediaType::JavaScript,
+                Arc::from(
+                    "var values = []; values.length = 20000; values[19999] = 7; var calls = 0; var result = values.filter(function(value) { calls += 1; return true; }); calls === 1 && result.length === 1 && result[0] === 7;",
+                ),
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(32_768, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(8 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024).with_max_shapes(384),
+    ))
+    .unwrap();
+    assert!(matches!(
+        isolate.execute(
+            &module,
+            ExecutionBudget {
+                fuel: 512,
+                quantum: 512,
+            },
+        ),
+        Ok(RunOutcome::Completed(value))
+            if value.as_immediate() == Some(tachyon_value::Immediate::True)
+    ));
 }
 
 #[test]

@@ -59,13 +59,23 @@ impl Isolate {
             Value::from_heap_ref(state.raw()),
         )?;
         let length = self.length_atom()?;
-        self.dispatch_array_for_each_get(
+        let value = self.dispatch_array_for_each_get(
             continuation_site,
             state,
             ArrayForEachStage::Length,
             site.this_value,
             length.into(),
-        )
+        )?;
+        if let Some(value) = value {
+            self.resume_array_for_each(
+                continuation_site,
+                state,
+                ArrayForEachStage::Length,
+                value,
+                site.this_value,
+            )?;
+        }
+        Ok(())
     }
 
     /// Creates a filter result and starts the shared observable array-iteration state machine.
@@ -116,13 +126,23 @@ impl Isolate {
             Value::from_heap_ref(state.raw()),
         )?;
         let length = self.length_atom()?;
-        self.dispatch_array_for_each_get(
+        let value = self.dispatch_array_for_each_get(
             continuation_site,
             state,
             ArrayForEachStage::Length,
             site.this_value,
             length.into(),
-        )
+        )?;
+        if let Some(value) = value {
+            self.resume_array_for_each(
+                continuation_site,
+                state,
+                ArrayForEachStage::Length,
+                value,
+                site.this_value,
+            )?;
+        }
+        Ok(())
     }
 
     /// Resumes length, HasProperty, Get, or callback completion from the iterative trampoline.
@@ -159,48 +179,77 @@ impl Isolate {
                     Value::from_heap_ref(state.raw()),
                 )?;
                 if self.is_truthy_value(value)? {
-                    self.dispatch_array_for_each_element_get(site, state)
-                } else {
-                    self.advance_array_for_each(site, state)
+                    let Some(element) = self.dispatch_array_for_each_element_get(site, state)?
+                    else {
+                        return Ok(());
+                    };
+                    let Some(returned) = self.call_array_for_each_callback(site, state, element)?
+                    else {
+                        return Ok(());
+                    };
+                    self.select_array_filter_value(state, returned, element)?;
                 }
+                self.advance_array_for_each(site, state)
             }
-            ArrayForEachStage::Get => self.call_array_for_each_callback(site, state, value),
+            ArrayForEachStage::Get => {
+                let Some(returned) = self.call_array_for_each_callback(site, state, value)? else {
+                    return Ok(());
+                };
+                self.select_array_filter_value(state, returned, value)?;
+                self.advance_array_for_each(site, state)
+            }
             ArrayForEachStage::Callback => {
-                if let Some(filter) = self.array_filter_state(state)?
-                    && self.is_truthy_value(value)?
-                {
-                    self.append_array_filter_value(filter, retained)?;
-                }
+                self.select_array_filter_value(state, value, retained)?;
                 self.advance_array_for_each(site, state)
             }
         }
     }
 
-    /// Advances the fixed length snapshot and publishes one HasProperty operation at a time.
+    /// Runs synchronous elements in a loop and exits whenever observable work suspends the fiber.
     fn advance_array_for_each(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
     ) -> Result<(), ExecutionError> {
-        self.write(
-            site.caller_base,
-            site.destination,
-            Value::from_heap_ref(state.raw()),
-        )?;
-        let pending = self.native_call_state_snapshot(state)?;
-        let length = exact_nonnegative_integer(pending.values[FOREACH_LENGTH])?;
-        let index = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
-        if index >= length {
-            let result = if let Some(filter) = self.array_filter_state(state)? {
-                self.native_call_state_snapshot(filter)?.values[FILTER_RESULT]
-            } else {
-                Value::from_immediate(Immediate::Undefined)
+        loop {
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            let pending = self.native_call_state_snapshot(state)?;
+            let length = exact_nonnegative_integer(pending.values[FOREACH_LENGTH])?;
+            let index = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
+            if index >= length {
+                let result = if let Some(filter) = self.array_filter_state(state)? {
+                    self.native_call_state_snapshot(filter)?.values[FILTER_RESULT]
+                } else {
+                    Value::from_immediate(Immediate::Undefined)
+                };
+                return self.write(site.caller_base, site.destination, result);
+            }
+            self.set_array_for_each_number(state, FOREACH_NEXT_INDEX, index + 1)?;
+            let key = Value::from_f64(index as f64);
+            let Some(has) = self.dispatch_array_for_each_has(
+                site,
+                state,
+                pending.values[FOREACH_RECEIVER],
+                key,
+            )?
+            else {
+                return Ok(());
             };
-            return self.write(site.caller_base, site.destination, result);
+            if !self.is_truthy_value(has)? {
+                continue;
+            }
+            let Some(element) = self.dispatch_array_for_each_element_get(site, state)? else {
+                return Ok(());
+            };
+            let Some(returned) = self.call_array_for_each_callback(site, state, element)? else {
+                return Ok(());
+            };
+            self.select_array_filter_value(state, returned, element)?;
         }
-        self.set_array_for_each_number(state, FOREACH_NEXT_INDEX, index + 1)?;
-        let key = Value::from_f64(index as f64);
-        self.dispatch_array_for_each_has(site, state, pending.values[FOREACH_RECEIVER], key)
     }
 
     /// Dispatches element Get using the index already advanced before HasProperty observation.
@@ -208,7 +257,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<Value>, ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let next = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
         let key = self.property_key_atom(Value::from_f64((next - 1) as f64))?;
@@ -227,7 +276,7 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
         value: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<Value>, ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let next = exact_nonnegative_integer(pending.values[FOREACH_NEXT_INDEX])?;
         let index = Value::from_f64((next - 1) as f64);
@@ -284,16 +333,11 @@ impl Isolate {
                 .expect("Array forEach callback publishes one frame");
             frame.return_register = None;
             frame.return_continuation = true;
-            return Ok(());
+            return Ok(None);
         }
         self.pop_native_continuation()?;
         let returned = self.read(site.caller_base, site.destination)?;
-        if let Some(filter) = self.array_filter_state(state)?
-            && self.is_truthy_value(returned)?
-        {
-            self.append_array_filter_value(filter, value)?;
-        }
-        self.advance_array_for_each(site, state)
+        Ok(Some(returned))
     }
 
     /// Publishes an Array parent continuation around a Proxy-aware property Get.
@@ -304,7 +348,7 @@ impl Isolate {
         stage: ArrayForEachStage,
         receiver: Value,
         key: PropertyKey,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<Value>, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
         self.push_array_for_each_parent(site, state, stage, receiver)?;
@@ -318,16 +362,15 @@ impl Isolate {
         if self.fiber.frames.len() != frame_depth
             || self.fiber.completions.len() == completion_depth
         {
-            return Ok(());
+            return Ok(None);
         }
         let continuation = self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_array_for_each(site, state, stage, value, continuation.second())?;
         debug_assert_eq!(
             continuation.kind(),
             NativeContinuationKind::ArrayForEach(stage)
         );
-        Ok(())
+        Ok(Some(value))
     }
 
     /// Publishes an Array parent continuation around an ordinary or Proxy HasProperty operation.
@@ -337,7 +380,7 @@ impl Isolate {
         state: GcRef<NativeCallState>,
         receiver: Value,
         key: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<Value>, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
         self.push_array_for_each_parent(site, state, ArrayForEachStage::Has, key)?;
@@ -351,17 +394,11 @@ impl Isolate {
         if self.fiber.frames.len() != frame_depth
             || self.fiber.completions.len() == completion_depth
         {
-            return Ok(());
+            return Ok(None);
         }
         self.pop_native_continuation()?;
         let value = self.read(site.caller_base, site.destination)?;
-        self.resume_array_for_each(
-            site,
-            state,
-            ArrayForEachStage::Has,
-            value,
-            Value::from_immediate(Immediate::Undefined),
-        )
+        Ok(Some(value))
     }
 
     fn push_array_for_each_parent(
@@ -477,6 +514,21 @@ impl Isolate {
         let length = self.length_atom()?;
         self.set_own_data_property(result, length, safe_integer_value(index + 1))?;
         self.set_array_for_each_number(filter, FILTER_NEXT_INDEX, index + 1)
+    }
+
+    /// Appends the retained element when a filter callback completed truthily.
+    fn select_array_filter_value(
+        &mut self,
+        state: GcRef<NativeCallState>,
+        returned: Value,
+        element: Value,
+    ) -> Result<(), ExecutionError> {
+        if let Some(filter) = self.array_filter_state(state)?
+            && self.is_truthy_value(returned)?
+        {
+            self.append_array_filter_value(filter, element)?;
+        }
+        Ok(())
     }
 }
 
