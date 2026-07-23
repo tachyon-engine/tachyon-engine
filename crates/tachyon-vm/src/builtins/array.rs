@@ -274,38 +274,6 @@ impl Isolate {
         Ok(number.floor().min(length as f64) as u64)
     }
 
-    /// Implements `Array.prototype.reverse` by swapping present indexed properties and holes.
-    pub(crate) fn array_reverse(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(site.this_value)?;
-        for lower in 0..(length / 2) {
-            let upper = length - lower - 1;
-            let lower_key = self.safe_integer_property_atom(lower)?;
-            let upper_key = self.safe_integer_property_atom(upper)?;
-            let lower_value = self.get_data_property(site.this_value, lower_key)?;
-            let upper_value = self.get_data_property(site.this_value, upper_key)?;
-            match (lower_value, upper_value) {
-                (Some(left), Some(right)) => {
-                    self.set_own_data_property(site.this_value, lower_key, right)?;
-                    self.set_own_data_property(site.this_value, upper_key, left)?;
-                }
-                (Some(left), None) => {
-                    self.set_own_data_property(site.this_value, upper_key, left)?;
-                    if !self.delete_own_data_property(site.this_value, lower_key)? {
-                        return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-                    }
-                }
-                (None, Some(right)) => {
-                    self.set_own_data_property(site.this_value, lower_key, right)?;
-                    if !self.delete_own_data_property(site.this_value, upper_key)? {
-                        return Err(ExecutionError::ReadOnlyProperty(site.this_value));
-                    }
-                }
-                (None, None) => {}
-            }
-        }
-        Ok(site.this_value)
-    }
-
     /// Implements `Array.prototype.fill` with ToInteger-relative bounds and hole materialization.
     pub(crate) fn array_fill(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let length = self.length_of_array_like(site.this_value)?;

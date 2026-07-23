@@ -792,7 +792,6 @@ impl NativeFunction {
             | Self::ArrayIndexOf
             | Self::ArrayIncludes
             | Self::ArrayUnshift
-            | Self::ArrayReverse
             | Self::ArrayFill
             | Self::ArrayLastIndexOf
             | Self::ArrayFlatMap
@@ -803,6 +802,7 @@ impl NativeFunction {
             | Self::ArrayFlat
             | Self::ArrayPop
             | Self::ArrayShift
+            | Self::ArrayReverse
             | Self::ArrayToReversed
             | Self::MapConstructor
             | Self::SetConstructor
@@ -1647,6 +1647,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,
     pub(crate) pending_array_splice: GcType<PendingArraySplice>,
     pub(crate) pending_array_remove: GcType<PendingArrayRemove>,
+    pub(crate) pending_array_reverse: GcType<PendingArrayReverse>,
     pub(crate) pending_array_insert: GcType<PendingArrayInsert>,
     pub(crate) pending_array_static: GcType<PendingArrayStatic>,
     pub(crate) pending_array_to_sorted: GcType<PendingArrayToSorted>,

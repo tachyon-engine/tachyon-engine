@@ -404,6 +404,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::ArrayReverseLength {
+                        let state = self.pending_array_reverse_reference(continuation.receiver)?;
+                        return self.resume_array_reverse_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::ArrayCopyWithinLength
@@ -579,6 +587,14 @@ impl Isolate {
                     if continuation.consumer == ConversionConsumer::ArrayInsertLength {
                         let state = self.pending_array_insert_reference(continuation.receiver)?;
                         return self.resume_array_insert_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::ArrayReverseLength {
+                        let state = self.pending_array_reverse_reference(continuation.receiver)?;
+                        return self.resume_array_reverse_conversion(
                             continuation.site,
                             state,
                             value,
@@ -877,6 +893,9 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayInsertLength => {
                     unreachable!("Array insertion conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayReverseLength => {
+                    unreachable!("Array reverse conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

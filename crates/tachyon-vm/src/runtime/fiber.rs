@@ -269,6 +269,7 @@ pub(crate) enum ConversionConsumer {
     ArraySpliceDeleteCount,
     ArrayRemoveLength,
     ArrayInsertLength,
+    ArrayReverseLength,
 }
 
 impl ConversionConsumer {
@@ -323,7 +324,8 @@ impl ConversionConsumer {
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
             | Self::ArrayRemoveLength
-            | Self::ArrayInsertLength => None,
+            | Self::ArrayInsertLength
+            | Self::ArrayReverseLength => None,
         }
     }
 
@@ -404,6 +406,7 @@ impl ConversionConsumer {
                 | Self::ArraySpliceDeleteCount
                 | Self::ArrayRemoveLength
                 | Self::ArrayInsertLength
+                | Self::ArrayReverseLength
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -707,6 +710,19 @@ pub(crate) enum ArrayInsertStage {
     FinalLength,
 }
 
+/// One observable boundary in the resumable Array reverse algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayReverseStage {
+    Length,
+    LowerHas,
+    LowerGet,
+    UpperHas,
+    UpperGet,
+    FirstMutation,
+    SecondMutation,
+}
+
 /// One observable boundary in a resumable static Array constructor algorithm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -999,6 +1015,7 @@ pub(crate) enum NativeContinuationKind {
     ArraySplice(ArraySpliceStage),
     ArrayRemove(ArrayRemoveStage),
     ArrayInsert(ArrayInsertStage),
+    ArrayReverse(ArrayReverseStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1716,6 +1733,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayInsert(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one reverse state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_reverse(
+        site: NativeContinuationSite,
+        stage: ArrayReverseStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayReverse(stage),
             first: state,
             second: retained,
         }
