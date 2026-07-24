@@ -242,6 +242,9 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     ArrayLength,
     ArraySearchIndex,
+    ArrayJoinLength,
+    ArrayJoinSeparator,
+    ArrayJoinElement,
     ArrayConcatLength,
     ArrayFlatLength,
     ArrayFlatDepth,
@@ -301,6 +304,9 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::ArrayLength
             | Self::ArraySearchIndex
+            | Self::ArrayJoinLength
+            | Self::ArrayJoinSeparator
+            | Self::ArrayJoinElement
             | Self::ArrayConcatLength
             | Self::ArrayFlatLength
             | Self::ArrayFlatDepth
@@ -358,6 +364,8 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::ArrayToSortedLeftString
                 | Self::ArrayToSortedRightString
+                | Self::ArrayJoinSeparator
+                | Self::ArrayJoinElement
         )
     }
 
@@ -396,6 +404,9 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
                 | Self::ArrayLength
+                | Self::ArrayJoinLength
+                | Self::ArrayJoinSeparator
+                | Self::ArrayJoinElement
                 | Self::ArrayConcatLength
                 | Self::ArrayFlatLength
                 | Self::ArrayFlatDepth
@@ -738,6 +749,14 @@ pub(crate) enum ArrayFillStage {
     Set,
 }
 
+/// One observable Get boundary in the resumable Array join algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayJoinStage {
+    Length,
+    ElementGet,
+}
+
 /// One observable boundary in a resumable static Array constructor algorithm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1032,6 +1051,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayInsert(ArrayInsertStage),
     ArrayReverse(ArrayReverseStage),
     ArrayFill(ArrayFillStage),
+    ArrayJoin(ArrayJoinStage),
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
@@ -1781,6 +1801,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayFill(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one join state and retained value across nested JavaScript work.
+    #[inline]
+    pub(crate) const fn array_join(
+        site: NativeContinuationSite,
+        stage: ArrayJoinStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayJoin(stage),
             first: state,
             second: retained,
         }

@@ -28,3 +28,18 @@ pub(crate) const fn grown_array_flat_frame_capacity(current: usize) -> Option<us
         _ => None,
     }
 }
+
+/// Grows join backing geometrically while satisfying one exact append request.
+#[inline(always)]
+pub(crate) const fn grown_array_join_capacity(current: usize, required: usize) -> Option<usize> {
+    let base = if current == 0 { 1 } else { current };
+    let doubled = match base.checked_mul(2) {
+        Some(capacity) => capacity,
+        None => return None,
+    };
+    Some(if doubled < required {
+        required
+    } else {
+        doubled
+    })
+}

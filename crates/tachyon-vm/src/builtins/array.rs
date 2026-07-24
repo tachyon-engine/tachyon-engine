@@ -107,63 +107,6 @@ impl Isolate {
         }
     }
 
-    pub(crate) fn array_join(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let separator = self.call_argument(site, 0)?;
-        self.join_array_like(site.this_value, separator)
-    }
-
-    /// Joins one generic array-like receiver while retaining primitive conversion order.
-    fn join_array_like(
-        &mut self,
-        receiver: Value,
-        separator: Option<Value>,
-    ) -> Result<Value, ExecutionError> {
-        let length = self.length_of_array_like(receiver)?;
-        let mut separator_units = Vec::new();
-        if separator.is_none_or(|value| value.as_immediate() == Some(Immediate::Undefined)) {
-            separator_units
-                .try_reserve_exact(1)
-                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-            separator_units.push(u16::from(b','));
-        } else if let Some(separator) = separator {
-            self.append_primitive_string_units(separator, &mut separator_units)?;
-        }
-        let per_element =
-            tuning::arrays::JOIN_INITIAL_UNITS_PER_ELEMENT.saturating_add(separator_units.len());
-        let estimated = usize::try_from(length)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(per_element)
-            .min(tuning::arrays::JOIN_MAX_INITIAL_UNITS);
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(estimated)
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        for index in 0..length {
-            if index != 0 {
-                output
-                    .try_reserve(separator_units.len())
-                    .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-                output.extend_from_slice(&separator_units);
-            }
-            let key = self.safe_integer_property_atom(index)?;
-            let value = self
-                .get_data_property(receiver, key)?
-                .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            if value == receiver
-                || matches!(
-                    value.as_immediate(),
-                    Some(Immediate::Undefined | Immediate::Null)
-                )
-            {
-                continue;
-            }
-            self.append_primitive_string_units(value, &mut output)?;
-        }
-        let string =
-            JsString::try_from_utf16(&output).map_err(ExecutionError::PropertyKeyString)?;
-        self.allocate_runtime_string(string)
-    }
-
     /// Applies the currently supported ToLength boundary to one object length property.
     fn length_of_array_like(&mut self, receiver: Value) -> Result<u64, ExecutionError> {
         if !self.is_object_value(receiver) {
@@ -218,10 +161,5 @@ impl Isolate {
         Ok(self
             .get_data_property(receiver, key)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined)))
-    }
-
-    /// Implements Array.prototype.toString as comma-joined primitive elements for this subset.
-    pub(crate) fn array_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
-        self.join_array_like(receiver, None)
     }
 }

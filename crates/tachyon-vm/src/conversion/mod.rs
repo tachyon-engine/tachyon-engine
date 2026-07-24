@@ -428,6 +428,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArrayJoinLength
+                            | ConversionConsumer::ArrayJoinSeparator
+                            | ConversionConsumer::ArrayJoinElement
+                    ) {
+                        let state = self.pending_array_join_reference(continuation.receiver)?;
+                        return self.resume_array_join_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ArrayCopyWithinLength
                             | ConversionConsumer::ArrayCopyWithinTarget
                             | ConversionConsumer::ArrayCopyWithinStart
@@ -622,6 +636,20 @@ impl Isolate {
                     ) {
                         let state = self.pending_array_fill_reference(continuation.receiver)?;
                         return self.resume_array_fill_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::ArrayJoinLength
+                            | ConversionConsumer::ArrayJoinSeparator
+                            | ConversionConsumer::ArrayJoinElement
+                    ) {
+                        let state = self.pending_array_join_reference(continuation.receiver)?;
+                        return self.resume_array_join_conversion(
                             continuation.site,
                             state,
                             continuation.consumer,
@@ -929,6 +957,11 @@ impl Isolate {
                 | ConversionConsumer::ArrayFillStart
                 | ConversionConsumer::ArrayFillEnd => {
                     unreachable!("Array fill conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayJoinLength
+                | ConversionConsumer::ArrayJoinSeparator
+                | ConversionConsumer::ArrayJoinElement => {
+                    unreachable!("Array join conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

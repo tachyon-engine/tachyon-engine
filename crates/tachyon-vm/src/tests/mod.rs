@@ -22,6 +22,7 @@ mod array_flat;
 mod array_flat_map;
 mod array_insert;
 mod array_iterator;
+mod array_join;
 mod array_map;
 mod array_predicate;
 mod array_reduce;
