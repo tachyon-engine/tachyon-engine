@@ -8,6 +8,7 @@ use tachyon_value::Value;
 #[repr(u8)]
 pub(crate) enum PromiseCombinatorKind {
     All,
+    AllSettled,
     Race,
 }
 

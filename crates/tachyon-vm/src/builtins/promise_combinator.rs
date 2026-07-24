@@ -10,6 +10,14 @@ impl Isolate {
         self.begin_promise_combinator(site, PromiseCombinatorKind::All)
     }
 
+    /// Starts `Promise.allSettled` without duplicating iterator or capability protocol state.
+    pub(crate) fn begin_promise_all_settled(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        self.begin_promise_combinator(site, PromiseCombinatorKind::AllSettled)
+    }
+
     /// Starts `Promise.race` on the same observable iterator/capability protocol driver.
     pub(crate) fn begin_promise_race(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.begin_promise_combinator(site, PromiseCombinatorKind::Race)
@@ -359,7 +367,7 @@ impl Isolate {
         })
     }
 
-    /// Applies one indexed fulfillment or rejection to the shared Promise.all state.
+    /// Applies one indexed fulfillment or rejection under the selected result policy.
     pub(crate) fn call_promise_all_handler(
         &mut self,
         site: &CallSite,
@@ -374,6 +382,24 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let pending = self.promise_combinator_snapshot(state)?;
         if pending.settled {
+            return self.write_undefined(site);
+        }
+        if pending.kind == PromiseCombinatorKind::AllSettled {
+            let (state, values) =
+                self.create_promise_all_settled_result(site, state, index, argument, rejected)?;
+            let remaining = self.decrement_promise_combinator_remaining(state)?;
+            if remaining == 0 {
+                return self.finish_promise_combinator_fulfill(
+                    NativeContinuationSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        call_site: site.call_site,
+                    },
+                    state,
+                    values,
+                    false,
+                );
+            }
             return self.write_undefined(site);
         }
         if rejected {
@@ -546,7 +572,10 @@ impl Isolate {
             }
             PromiseCombinatorStage::ValueGet => {
                 let pending = self.promise_combinator_snapshot(state)?;
-                if pending.kind == PromiseCombinatorKind::All {
+                if matches!(
+                    pending.kind,
+                    PromiseCombinatorKind::All | PromiseCombinatorKind::AllSettled
+                ) {
                     let key = self.property_key_atom(safe_integer_value(pending.index))?;
                     self.set_own_data_property(
                         pending.values,
@@ -617,7 +646,11 @@ impl Isolate {
                     pending.promise,
                     pending.index,
                 )?;
-                let rejected = pending.capability_reject;
+                let rejected = if pending.kind == PromiseCombinatorKind::AllSettled {
+                    unused_rejected
+                } else {
+                    pending.capability_reject
+                };
                 let (state, attachment) = self.allocate_promise_all_attachment(
                     state,
                     NativeCallState {
@@ -708,13 +741,16 @@ impl Isolate {
             self.update_promise_combinator(state, |pending| pending.settled = false)?;
             return self.reject_promise_combinator(site, state, reason);
         }
-        let iterator_step_abrupt = matches!(
+        let no_close_abrupt = matches!(
             continuation.kind(),
             NativeContinuationKind::PromiseCombinator(
-                PromiseCombinatorStage::DoneGet | PromiseCombinatorStage::ValueGet
+                PromiseCombinatorStage::NextGet
+                    | PromiseCombinatorStage::NextCall
+                    | PromiseCombinatorStage::DoneGet
+                    | PromiseCombinatorStage::ValueGet
             )
         );
-        if iterator_step_abrupt {
+        if no_close_abrupt {
             self.update_promise_combinator(state, |pending| pending.iterator_done = true)?;
             return self.reject_promise_combinator(site, state, reason);
         }

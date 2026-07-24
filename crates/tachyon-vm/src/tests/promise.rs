@@ -247,6 +247,37 @@ RaceCapability.resolve = function(value) {
 var customRace = Promise.race.call(RaceCapability, [11]);
 "#;
 
+const PROMISE_ALL_SETTLED_SETUP: &str = r#"
+var settledFulfilledStatus = "";
+var settledFulfilledValue = 0;
+var settledRejectedStatus = "";
+var settledRejectedReason = 0;
+var settledEmptyLength = -1;
+var customSettledTrace = "";
+var customSettledReject = 0;
+Promise.allSettled([3, Promise.reject(7)]).then(function(values) {
+  settledFulfilledStatus = values[0].status;
+  settledFulfilledValue = values[0].value;
+  settledRejectedStatus = values[1].status;
+  settledRejectedReason = values[1].reason;
+});
+Promise.allSettled([]).then(function(values) { settledEmptyLength = values.length; });
+function SettledCapability(executor) {
+  executor(function(values) {
+    customSettledTrace = values[0].status + values[0].value + values[1].status + values[1].reason;
+  }, function(reason) { customSettledReject = reason; });
+}
+SettledCapability.resolve = function(value) {
+  return {
+    then: function(onFulfilled, onRejected) {
+      if (value === 4) onFulfilled(value);
+      else onRejected(value);
+    }
+  };
+};
+var customSettled = Promise.allSettled.call(SettledCapability, [4, 5]);
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -330,6 +361,16 @@ fn promise_race_is_stable_for_every_dispatch_batch_and_forced_major() {
     assert_promise_race::<8>(5_611, true);
 }
 
+#[test]
+fn promise_all_settled_is_stable_for_every_dispatch_batch_and_forced_major() {
+    assert_promise_all_settled::<1>(5_701, false);
+    assert_promise_all_settled::<2>(5_703, false);
+    assert_promise_all_settled::<4>(5_705, false);
+    assert_promise_all_settled::<8>(5_707, false);
+    assert_promise_all_settled::<16>(5_709, false);
+    assert_promise_all_settled::<8>(5_711, true);
+}
+
 /// Executes the setup and probe under one interpreter dispatch batch.
 fn assert_promise_all_source<const N: usize>(source_id: u32) {
     let setup = compile_promise_source(source_id, PROMISE_ALL_SETUP);
@@ -365,12 +406,12 @@ fn assert_promise_all_iterable_source<const N: usize>(source_id: u32, forced_maj
     );
 }
 
-/// Verifies abrupt iteration rejects instead of escaping and closes with original-error priority.
+/// Verifies an abrupt IteratorStep rejects without closing its already-done iterator record.
 fn assert_promise_all_abrupt_source<const N: usize>(source_id: u32, forced_major: bool) {
     let setup = compile_promise_source(source_id, PROMISE_ALL_ABRUPT_SETUP);
     let probe = compile_promise_source(
         source_id + 1,
-        "abruptOutside === 0 && abruptReason === 9 && closeCount === 1;",
+        "abruptOutside === 0 && abruptReason === 9 && closeCount === 0;",
     );
     let mut isolate = test_isolate();
     if forced_major {
@@ -413,6 +454,27 @@ fn assert_promise_race<const N: usize>(source_id: u32, forced_major: bool) {
     let probe = compile_promise_source(
         source_id + 1,
         "raceFulfill === 7 && raceReject === 9 && emptySettled === 0 && customRaceValue === 11 && customRaceReject === 0 && customRace instanceof RaceCapability;",
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Covers both settled record shapes, empty input, and generic capability settlement.
+fn assert_promise_all_settled<const N: usize>(source_id: u32, forced_major: bool) {
+    let setup = compile_promise_source(source_id, PROMISE_ALL_SETTLED_SETUP);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "settledFulfilledStatus === 'fulfilled' && settledFulfilledValue === 3 && settledRejectedStatus === 'rejected' && settledRejectedReason === 7 && settledEmptyLength === 0 && customSettledTrace === 'fulfilled4rejected5' && customSettledReject === 0 && customSettled instanceof SettledCapability;",
     );
     let mut isolate = test_isolate();
     if forced_major {

@@ -65,6 +65,63 @@ impl Trace for PromiseCombinatorPrefixRoots<'_> {
 }
 
 impl Isolate {
+    /// Builds and publishes one allSettled record while refreshing roots after every allocation.
+    pub(super) fn create_promise_all_settled_result(
+        &mut self,
+        site: &CallSite,
+        state: GcRef<PendingPromiseCombinator>,
+        index: u64,
+        argument: Value,
+        rejected: bool,
+    ) -> Result<(GcRef<PendingPromiseCombinator>, Value), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.set_promise_combinator_temporary(state, argument)?;
+        let index_key = self.property_key_atom(safe_integer_value(index))?;
+        let status_key = self.intern_intrinsic_name(b"status")?;
+        let payload_key =
+            self.intern_intrinsic_name(if rejected { b"reason" } else { b"value" })?;
+        let status_value_atom =
+            self.intern_intrinsic_name(if rejected { b"rejected" } else { b"fulfilled" })?;
+
+        let result = self.create_ordinary_object()?;
+        let state = self.promise_combinator_state_from_site(site)?;
+        let values = self.promise_combinator_snapshot(state)?.values;
+        self.set_own_data_property(values, index_key, result)?;
+
+        let status = self.atom_string_value(status_value_atom)?;
+        let state = self.promise_combinator_state_from_site(site)?;
+        let values = self.promise_combinator_snapshot(state)?.values;
+        let result = self
+            .get_data_property(values, index_key)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.set_own_data_property(result, status_key, status)?;
+
+        let state = self.promise_combinator_state_from_site(site)?;
+        let pending = self.promise_combinator_snapshot(state)?;
+        let values = pending.values;
+        let result = self
+            .get_data_property(values, index_key)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        self.set_own_data_property(result, payload_key, pending.temporary)?;
+
+        let state = self.promise_combinator_state_from_site(site)?;
+        let values = self.promise_combinator_snapshot(state)?.values;
+        Ok((state, values))
+    }
+
+    /// Reloads a combinator state retained in the native call destination across a safepoint.
+    fn promise_combinator_state_from_site(
+        &self,
+        site: &CallSite,
+    ) -> Result<GcRef<PendingPromiseCombinator>, ExecutionError> {
+        let value = self.read(site.caller_base, site.destination)?;
+        self.pending_promise_combinator_reference(value)
+    }
+
     /// Reads the stable intrinsic Array length used by the first combinator fast path.
     pub(super) fn promise_all_array_length(&mut self, array: Value) -> Result<u64, ExecutionError> {
         let length_atom = self.length_atom()?;
