@@ -167,7 +167,7 @@ impl Isolate {
     }
 
     /// Implements Number::toString for decimal and shortest round-trip radix representations.
-    pub(super) fn number_to_string(
+    pub(crate) fn number_to_string(
         &mut self,
         receiver: Value,
         radix: Option<Value>,

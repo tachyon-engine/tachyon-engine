@@ -5245,6 +5245,11 @@ impl Isolate {
                     | NativeFunction::NumberConstructor
                     | NativeFunction::DateParse),
                 ) => return self.dispatch_conversion_native(native, &site, false),
+                FunctionExecutable::Native(NativeFunction::NumberToLocaleString) => {
+                    let receiver = self.this_number_value(site.this_value)?;
+                    let value = self.number_to_string(receiver, None)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, regexp);

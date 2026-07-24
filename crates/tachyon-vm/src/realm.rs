@@ -746,6 +746,14 @@ impl Isolate {
         self.realm.number_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
         self.set_intrinsic_data_property(number_prototype, to_string_atom, to_string, true)?;
+        let to_locale_string = allocate(self, NativeFunction::NumberToLocaleString)?;
+        let to_locale_string_atom = self.intern_intrinsic_name(b"toLocaleString")?;
+        self.set_intrinsic_data_property(
+            number_prototype,
+            to_locale_string_atom,
+            to_locale_string,
+            true,
+        )?;
         let value_of = allocate(self, NativeFunction::NumberValueOf)?;
         self.realm.number_value_of = Some(value_of);
         let value_of_atom = self.intern_intrinsic_name(b"valueOf")?;
@@ -1907,6 +1915,37 @@ impl Isolate {
             )?;
             self.realm.global_uri_functions[function.index()] = Some(method);
         }
+        let number = self
+            .realm
+            .number_constructor
+            .expect("Number initializes before numeric globals");
+        for (name, function) in [
+            (b"parseFloat".as_slice(), GlobalNumberFunction::ParseFloat),
+            (b"parseInt".as_slice(), GlobalNumberFunction::ParseInt),
+        ] {
+            let method = self.realm.global_number_functions[function.index()]
+                .expect("numeric global initializes before Number aliases");
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(number, atom, method, true)?;
+        }
+        let tag_symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Math");
+        let tag_key = self.property_key(tag_symbol)?;
+        let tag_atom = self.intern_intrinsic_name(b"Math")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            object,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         Ok(())
     }
 

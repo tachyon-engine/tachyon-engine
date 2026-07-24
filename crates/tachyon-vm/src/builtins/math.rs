@@ -153,7 +153,12 @@ fn math_round(number: f64) -> f64 {
     if (-0.5..0.0).contains(&number) || number == -0.5 {
         return -0.0;
     }
-    (number + 0.5).floor()
+    let lower = number.floor();
+    if number - lower < 0.5 {
+        lower
+    } else {
+        lower + 1.0
+    }
 }
 
 #[inline]
@@ -269,6 +274,11 @@ mod tests {
         assert!(math_max(-0.0, 0.0).is_sign_positive());
         assert!(math_round(-0.1).is_sign_negative());
         assert_eq!(math_round(0.5), 1.0);
+        assert_eq!(math_round(0.5 - f64::EPSILON / 4.0), 0.0);
+        assert_eq!(
+            math_round((1.0 / f64::EPSILON) + 1.0),
+            4_503_599_627_370_497.0
+        );
         assert_eq!(math_pow(f64::NAN, 0.0), 1.0);
         assert!(math_pow(1.0, f64::INFINITY).is_nan());
     }

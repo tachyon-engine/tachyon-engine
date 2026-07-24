@@ -203,6 +203,7 @@ pub(crate) enum NativeFunction {
     NumberToFixed,
     NumberToPrecision,
     NumberToString,
+    NumberToLocaleString,
     NumberValueOf,
     BooleanConstructor,
     BooleanToString,
@@ -932,7 +933,10 @@ impl NativeFunction {
             | Self::ArrayIteratorNext
             | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
-            Self::SymbolToString | Self::SymbolValueOf | Self::SymbolDescription => 0,
+            Self::SymbolToString
+            | Self::SymbolValueOf
+            | Self::SymbolDescription
+            | Self::NumberToLocaleString => 0,
             Self::SymbolToPrimitive => 1,
             Self::JsonParse => 1,
             Self::JsonStringify => 3,
@@ -1053,6 +1057,7 @@ impl NativeFunction {
             Self::NumberToFixed => "toFixed",
             Self::NumberToPrecision => "toPrecision",
             Self::NumberToString => "toString",
+            Self::NumberToLocaleString => "toLocaleString",
             Self::NumberValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
             Self::BooleanToString => "toString",
