@@ -65,6 +65,37 @@ impl Trace for PromiseCombinatorPrefixRoots<'_> {
 }
 
 impl Isolate {
+    /// Creates the branded Promise.any rejection and its ordered non-enumerable errors Array.
+    pub(super) fn create_promise_any_aggregate_error(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingPromiseCombinator>,
+    ) -> Result<(GcRef<PendingPromiseCombinator>, Value), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        let error = self.create_native_error(NativeErrorKind::Aggregate, None)?;
+        let state = self.promise_combinator_state_from_native_site(site)?;
+        self.set_promise_combinator_temporary(state, error)?;
+        let pending = self.promise_combinator_snapshot(state)?;
+        let errors = self.intern_intrinsic_name(b"errors")?;
+        self.define_data_property(
+            pending.temporary,
+            errors,
+            DataPropertyDescriptor {
+                value: Some(pending.values),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let state = self.promise_combinator_state_from_native_site(site)?;
+        let error = self.promise_combinator_snapshot(state)?.temporary;
+        Ok((state, error))
+    }
+
     /// Builds and publishes one allSettled record while refreshing roots after every allocation.
     pub(super) fn create_promise_all_settled_result(
         &mut self,
@@ -117,6 +148,15 @@ impl Isolate {
     fn promise_combinator_state_from_site(
         &self,
         site: &CallSite,
+    ) -> Result<GcRef<PendingPromiseCombinator>, ExecutionError> {
+        let value = self.read(site.caller_base, site.destination)?;
+        self.pending_promise_combinator_reference(value)
+    }
+
+    /// Reloads a combinator state from a continuation site that carries no argument edges.
+    fn promise_combinator_state_from_native_site(
+        &self,
+        site: NativeContinuationSite,
     ) -> Result<GcRef<PendingPromiseCombinator>, ExecutionError> {
         let value = self.read(site.caller_base, site.destination)?;
         self.pending_promise_combinator_reference(value)

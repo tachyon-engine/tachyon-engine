@@ -18,6 +18,11 @@ impl Isolate {
         self.begin_promise_combinator(site, PromiseCombinatorKind::AllSettled)
     }
 
+    /// Starts `Promise.any` on the shared observable iterator/capability protocol driver.
+    pub(crate) fn begin_promise_any(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_promise_combinator(site, PromiseCombinatorKind::Any)
+    }
+
     /// Starts `Promise.race` on the same observable iterator/capability protocol driver.
     pub(crate) fn begin_promise_race(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.begin_promise_combinator(site, PromiseCombinatorKind::Race)
@@ -384,6 +389,35 @@ impl Isolate {
         if pending.settled {
             return self.write_undefined(site);
         }
+        if pending.kind == PromiseCombinatorKind::Any {
+            let continuation_site = NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            };
+            if !rejected {
+                return self.finish_promise_combinator_fulfill(
+                    continuation_site,
+                    state,
+                    argument,
+                    false,
+                );
+            }
+            let key = self.property_key_atom(safe_integer_value(index))?;
+            self.set_own_data_property(pending.values, key, argument)?;
+            let remaining = self.decrement_promise_combinator_remaining(state)?;
+            if remaining == 0 {
+                let (state, error) =
+                    self.create_promise_any_aggregate_error(continuation_site, state)?;
+                return self.finish_promise_combinator_reject(
+                    continuation_site,
+                    state,
+                    error,
+                    false,
+                );
+            }
+            return self.write_undefined(site);
+        }
         if pending.kind == PromiseCombinatorKind::AllSettled {
             let (state, values) =
                 self.create_promise_all_settled_result(site, state, index, argument, rejected)?;
@@ -551,6 +585,11 @@ impl Isolate {
                     let remaining = self.decrement_promise_combinator_remaining(state)?;
                     let pending = self.promise_combinator_snapshot(state)?;
                     if remaining == 0 && !pending.settled {
+                        if pending.kind == PromiseCombinatorKind::Any {
+                            let (state, error) =
+                                self.create_promise_any_aggregate_error(site, state)?;
+                            return self.finish_promise_combinator_reject(site, state, error, true);
+                        }
                         return self.finish_promise_combinator_fulfill(
                             site,
                             state,
@@ -574,7 +613,9 @@ impl Isolate {
                 let pending = self.promise_combinator_snapshot(state)?;
                 if matches!(
                     pending.kind,
-                    PromiseCombinatorKind::All | PromiseCombinatorKind::AllSettled
+                    PromiseCombinatorKind::All
+                        | PromiseCombinatorKind::AllSettled
+                        | PromiseCombinatorKind::Any
                 ) {
                     let key = self.property_key_atom(safe_integer_value(pending.index))?;
                     self.set_own_data_property(
@@ -640,13 +681,22 @@ impl Isolate {
                         &[values[1], values[2]],
                     );
                 }
-                let (state, fulfilled, unused_rejected) = self.allocate_promise_all_handlers(
-                    state,
-                    pending.current,
-                    pending.promise,
-                    pending.index,
-                )?;
-                let rejected = if pending.kind == PromiseCombinatorKind::AllSettled {
+                let (state, generated_fulfilled, unused_rejected) = self
+                    .allocate_promise_all_handlers(
+                        state,
+                        pending.current,
+                        pending.promise,
+                        pending.index,
+                    )?;
+                let fulfilled = if pending.kind == PromiseCombinatorKind::Any {
+                    pending.capability_resolve
+                } else {
+                    generated_fulfilled
+                };
+                let rejected = if matches!(
+                    pending.kind,
+                    PromiseCombinatorKind::AllSettled | PromiseCombinatorKind::Any
+                ) {
                     unused_rejected
                 } else {
                     pending.capability_reject
@@ -797,12 +847,23 @@ impl Isolate {
         state: GcRef<PendingPromiseCombinator>,
         reason: Value,
     ) -> Result<(), ExecutionError> {
+        self.finish_promise_combinator_reject(site, state, reason, true)
+    }
+
+    /// Calls generic reject or settles the intrinsic aggregate with caller-selected return mode.
+    fn finish_promise_combinator_reject(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingPromiseCombinator>,
+        reason: Value,
+        return_promise: bool,
+    ) -> Result<(), ExecutionError> {
         let pending = self.promise_combinator_snapshot(state)?;
         if !pending.settled {
             self.set_promise_combinator_settled(state)?;
             if pending.capability.as_immediate() != Some(Immediate::Undefined) {
                 self.update_promise_combinator(state, |pending| {
-                    pending.return_promise_after_capability_call = true
+                    pending.return_promise_after_capability_call = return_promise
                 })?;
                 return self.call_promise_combinator(
                     site,
@@ -815,7 +876,15 @@ impl Isolate {
             }
             self.settle_promise(pending.promise, PromiseState::Rejected, reason)?;
         }
-        self.write(site.caller_base, site.destination, pending.promise)
+        self.write(
+            site.caller_base,
+            site.destination,
+            if return_promise {
+                pending.promise
+            } else {
+                Value::from_immediate(Immediate::Undefined)
+            },
+        )
     }
 
     /// Calls a generic capability resolve or settles the intrinsic aggregate directly.

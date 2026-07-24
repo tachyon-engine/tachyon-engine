@@ -981,6 +981,7 @@ pub(crate) enum InstanceElementStage {
 pub(crate) enum ErrorConstructorStage {
     HasCause,
     CauseValue,
+    ErrorsList,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -236,6 +236,7 @@ pub(crate) enum NativeFunction {
     PromiseWithResolvers,
     PromiseAll,
     PromiseAllSettled,
+    PromiseAny,
     PromiseRace,
     PromiseFinally,
     SpeciesGetter,
@@ -692,6 +693,7 @@ impl NativeFunction {
         }
         match self {
             Self::DateConstructor | Self::DateUtc => 7,
+            Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
             Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
@@ -726,6 +728,7 @@ impl NativeFunction {
             | Self::PromiseReject
             | Self::PromiseAll
             | Self::PromiseAllSettled
+            | Self::PromiseAny
             | Self::PromiseRace
             | Self::PromiseWithResolvers
             | Self::PromiseCatch
@@ -1092,6 +1095,7 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Type) => "TypeError",
             Self::ErrorConstructor(NativeErrorKind::Range) => "RangeError",
             Self::ErrorConstructor(NativeErrorKind::Uri) => "URIError",
+            Self::ErrorConstructor(NativeErrorKind::Aggregate) => "AggregateError",
             Self::ErrorIsError => "isError",
             Self::ErrorToString => "toString",
             Self::ProxyConstructor => "Proxy",
@@ -1101,6 +1105,7 @@ impl NativeFunction {
             Self::PromiseReject => "reject",
             Self::PromiseAll => "all",
             Self::PromiseAllSettled => "allSettled",
+            Self::PromiseAny => "any",
             Self::PromiseRace => "race",
             Self::PromiseWithResolvers => "withResolvers",
             Self::PromiseFinally => "finally",
@@ -1316,10 +1321,11 @@ pub enum NativeErrorKind {
     Type,
     Range,
     Uri,
+    Aggregate,
 }
 
 impl NativeErrorKind {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::Error,
         Self::Eval,
         Self::Reference,
@@ -1327,6 +1333,7 @@ impl NativeErrorKind {
         Self::Type,
         Self::Range,
         Self::Uri,
+        Self::Aggregate,
     ];
 
     #[inline(always)]
@@ -1344,6 +1351,7 @@ impl NativeErrorKind {
             Self::Type => "TypeError",
             Self::Range => "RangeError",
             Self::Uri => "URIError",
+            Self::Aggregate => "AggregateError",
         }
     }
 }

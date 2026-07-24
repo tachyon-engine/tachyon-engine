@@ -31,6 +31,7 @@ pub(crate) struct PendingArrayStatic {
     length: u64,
     mapping: bool,
     close_on_abrupt: bool,
+    require_iterable: bool,
 }
 
 impl Trace for PendingArrayStatic {
@@ -71,6 +72,7 @@ struct ArrayStaticSnapshot {
     length: u64,
     mapping: bool,
     close_on_abrupt: bool,
+    require_iterable: bool,
 }
 
 impl Isolate {
@@ -105,6 +107,7 @@ impl Isolate {
             length: site.argument_count.into(),
             mapping: false,
             close_on_abrupt: false,
+            require_iterable: false,
         })?;
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -465,6 +468,7 @@ impl Isolate {
                     length: pending.length,
                     mapping: pending.mapping,
                     close_on_abrupt: pending.close_on_abrupt,
+                    require_iterable: pending.require_iterable,
                 })
             })
         })

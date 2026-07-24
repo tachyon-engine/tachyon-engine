@@ -56,6 +56,7 @@ impl Isolate {
             length: 0,
             mapping,
             close_on_abrupt: false,
+            require_iterable: false,
         })?;
         let native_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -79,6 +80,44 @@ impl Isolate {
             source,
             key,
         )
+    }
+
+    /// Collects a required synchronous iterable into an intrinsic Array for another builtin.
+    pub(crate) fn begin_iterable_to_list(
+        &mut self,
+        site: NativeContinuationSite,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_array_static_state(PendingArrayStatic {
+            result: undefined,
+            constructor: undefined,
+            retained: undefined,
+            source,
+            mapper: undefined,
+            this_argument: undefined,
+            iterator: undefined,
+            next_method: undefined,
+            iterator_result: undefined,
+            arguments: Box::new([]),
+            kind: ArrayStaticKind::FromIterable,
+            cursor: 0,
+            length: 0,
+            mapping: false,
+            close_on_abrupt: false,
+            require_iterable: true,
+        })?;
+        self.root_array_static_state(site, state)?;
+        if is_nullish(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let iterator = self
+            .realm
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before IterableToList");
+        let key = self.property_key(iterator)?;
+        self.get_array_static_property(site, state, ArrayStaticStage::IteratorMethod, source, key)
     }
 
     /// Routes each observable Array.from operation to its next protocol stage.
@@ -125,6 +164,9 @@ impl Isolate {
             method.as_immediate(),
             Some(Immediate::Undefined | Immediate::Null)
         ) {
+            if self.array_static_snapshot(state)?.require_iterable {
+                return Err(ExecutionError::NonCallable(method));
+            }
             let source = self.array_static_snapshot(state)?.source;
             let object = self.coerce_to_object(source)?;
             self.set_array_static_value(state, |pending| &mut pending.source, object)?;

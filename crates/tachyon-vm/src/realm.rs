@@ -1212,6 +1212,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"TypeError")?,
                 self.intern_intrinsic_name(b"RangeError")?,
                 self.intern_intrinsic_name(b"URIError")?,
+                self.intern_intrinsic_name(b"AggregateError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
@@ -2526,6 +2527,7 @@ impl Isolate {
             (b"reject".as_slice(), NativeFunction::PromiseReject),
             (b"all".as_slice(), NativeFunction::PromiseAll),
             (b"allSettled".as_slice(), NativeFunction::PromiseAllSettled),
+            (b"any".as_slice(), NativeFunction::PromiseAny),
             (b"race".as_slice(), NativeFunction::PromiseRace),
             (
                 b"withResolvers".as_slice(),

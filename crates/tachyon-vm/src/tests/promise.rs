@@ -278,6 +278,32 @@ SettledCapability.resolve = function(value) {
 var customSettled = Promise.allSettled.call(SettledCapability, [4, 5]);
 "#;
 
+const PROMISE_ANY_SETUP: &str = r#"
+var anyValue = 0;
+var anyErrorBrand = false;
+var anyErrorsTrace = 0;
+var emptyAnyLength = -1;
+var aggregateMessage = "";
+var aggregateCause = 0;
+var aggregateErrorsEnumerable = true;
+Promise.any([Promise.reject(1), 2]).then(function(value) { anyValue = value; });
+Promise.any([Promise.reject(3), Promise.reject(4)]).then(
+  function() { anyErrorsTrace = -1; },
+  function(error) {
+    anyErrorBrand = error instanceof AggregateError;
+    anyErrorsTrace = error.errors[0] * 10 + error.errors[1];
+  }
+);
+Promise.any([]).then(
+  function() { emptyAnyLength = -2; },
+  function(error) { emptyAnyLength = error.errors.length; }
+);
+var aggregate = new AggregateError([5, 6], "many", { cause: 7 });
+aggregateMessage = aggregate.message;
+aggregateCause = aggregate.cause;
+aggregateErrorsEnumerable = Object.getOwnPropertyDescriptor(aggregate, "errors").enumerable;
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -369,6 +395,16 @@ fn promise_all_settled_is_stable_for_every_dispatch_batch_and_forced_major() {
     assert_promise_all_settled::<8>(5_707, false);
     assert_promise_all_settled::<16>(5_709, false);
     assert_promise_all_settled::<8>(5_711, true);
+}
+
+#[test]
+fn promise_any_and_aggregate_error_are_stable_for_every_batch_and_forced_major() {
+    assert_promise_any::<1>(5_801, false);
+    assert_promise_any::<2>(5_803, false);
+    assert_promise_any::<4>(5_805, false);
+    assert_promise_any::<8>(5_807, false);
+    assert_promise_any::<16>(5_809, false);
+    assert_promise_any::<8>(5_811, true);
 }
 
 /// Executes the setup and probe under one interpreter dispatch batch.
@@ -475,6 +511,27 @@ fn assert_promise_all_settled<const N: usize>(source_id: u32, forced_major: bool
     let probe = compile_promise_source(
         source_id + 1,
         "settledFulfilledStatus === 'fulfilled' && settledFulfilledValue === 3 && settledRejectedStatus === 'rejected' && settledRejectedReason === 7 && settledEmptyLength === 0 && customSettledTrace === 'fulfilled4rejected5' && customSettledReject === 0 && customSettled instanceof SettledCapability;",
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Covers fulfillment, ordered rejection aggregation, empty input, and public construction.
+fn assert_promise_any<const N: usize>(source_id: u32, forced_major: bool) {
+    let setup = compile_promise_source(source_id, PROMISE_ANY_SETUP);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "anyValue === 2 && anyErrorBrand && anyErrorsTrace === 34 && emptyAnyLength === 0 && aggregateMessage === 'many' && aggregateCause === 7 && aggregateErrorsEnumerable === false;",
     );
     let mut isolate = test_isolate();
     if forced_major {

@@ -27,6 +27,7 @@ struct ErrorConstructorRoots<'a> {
     vm: VmRoots<'a>,
     error: Value,
     options: Value,
+    errors: Value,
 }
 
 struct ErrorToStringRoots<'a> {
@@ -48,12 +49,14 @@ impl Trace for ErrorConstructorRoots<'_> {
         self.vm.trace(tracer);
         self.error.trace(tracer);
         self.options.trace(tracer);
+        self.errors.trace(tracer);
     }
 }
 
 const ERROR_STATE_ERROR: usize = 0;
 const ERROR_STATE_OPTIONS: usize = 1;
 const ERROR_STATE_MESSAGE: usize = 2;
+const ERROR_STATE_ERRORS: usize = 3;
 const ERROR_STRING_RECEIVER: usize = 0;
 const ERROR_STRING_NAME: usize = 1;
 const ERROR_STRING_MESSAGE: usize = 2;
@@ -177,9 +180,16 @@ impl Isolate {
         site: &CallSite,
         kind: NativeErrorKind,
     ) -> Result<(), ExecutionError> {
-        let message = self.call_argument(site, 0)?;
+        let aggregate = kind == NativeErrorKind::Aggregate;
+        let errors = if aggregate {
+            self.call_argument(site, 0)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+        } else {
+            Value::from_immediate(Immediate::Undefined)
+        };
+        let message = self.call_argument(site, u32::from(aggregate))?;
         let options = self
-            .call_argument(site, 1)?
+            .call_argument(site, if aggregate { 2 } else { 1 })?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let intrinsic_prototype = self
             .realm
@@ -196,7 +206,7 @@ impl Isolate {
                 .unwrap_or(intrinsic_prototype)
         };
         let error = self.allocate_native_error_with_prototype(kind, None, prototype)?;
-        let state = self.allocate_error_constructor_state(error, options)?;
+        let state = self.allocate_error_constructor_state(error, options, errors)?;
         let state_value = Value::from_heap_ref(state.raw());
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -240,7 +250,7 @@ impl Isolate {
         match stage {
             ErrorConstructorStage::HasCause => {
                 if !self.is_truthy_value(value)? {
-                    return self.finish_error_constructor(continuation.site(), state);
+                    return self.finish_error_constructor_or_errors(continuation.site(), state);
                 }
                 self.dispatch_error_cause_get(continuation.site(), state)
             }
@@ -251,6 +261,23 @@ impl Isolate {
                     isolate.define_data_property(
                         snapshot.values[ERROR_STATE_ERROR],
                         cause,
+                        DataPropertyDescriptor {
+                            value: Some(value),
+                            writable: Some(true),
+                            enumerable: Some(false),
+                            configurable: Some(true),
+                        },
+                    )
+                })?;
+                self.finish_error_constructor_or_errors(continuation.site(), state)
+            }
+            ErrorConstructorStage::ErrorsList => {
+                let snapshot = self.native_call_state_snapshot(state)?;
+                self.with_error_state_root(continuation, |isolate| {
+                    let errors = isolate.intern_intrinsic_name(b"errors")?;
+                    isolate.define_data_property(
+                        snapshot.values[ERROR_STATE_ERROR],
+                        errors,
                         DataPropertyDescriptor {
                             value: Some(value),
                             writable: Some(true),
@@ -294,6 +321,7 @@ impl Isolate {
         &mut self,
         error: Value,
         options: Value,
+        errors: Value,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
         let mut roots = ErrorConstructorRoots {
             vm: VmRoots {
@@ -305,6 +333,7 @@ impl Isolate {
             },
             error,
             options,
+            errors,
         };
         self.heap
             .try_allocate_with_gc(
@@ -316,10 +345,10 @@ impl Isolate {
                         roots.error,
                         roots.options,
                         Value::from_immediate(Immediate::Undefined),
-                        Value::from_immediate(Immediate::Undefined),
+                        roots.errors,
                         Value::from_immediate(Immediate::Undefined),
                     ],
-                    count: 2,
+                    count: 4,
                 },
                 AllocationSpace::Young,
                 &mut roots,
@@ -481,7 +510,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let options = self.native_call_state_snapshot(state)?.values[ERROR_STATE_OPTIONS];
         if !self.is_object_value(options) {
-            return self.finish_error_constructor(site, state);
+            return self.finish_error_constructor_or_errors(site, state);
         }
         let continuation = NativeContinuation::error_constructor(
             site,
@@ -496,6 +525,28 @@ impl Isolate {
             isolate
                 .dispatch_has_property(site, options, key)
                 .map(|_| ())
+        })
+    }
+
+    /// Finishes ordinary Errors or collects the AggregateError iterable after message/cause.
+    fn finish_error_constructor_or_errors(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        if self.native_error_kind(snapshot.values[ERROR_STATE_ERROR])?
+            != Some(NativeErrorKind::Aggregate)
+        {
+            return self.finish_error_constructor(site, state);
+        }
+        let continuation = NativeContinuation::error_constructor(
+            site,
+            ErrorConstructorStage::ErrorsList,
+            Value::from_heap_ref(state.raw()),
+        );
+        self.dispatch_error_nested_operation(continuation, |isolate| {
+            isolate.begin_iterable_to_list(site, snapshot.values[ERROR_STATE_ERRORS])
         })
     }
 

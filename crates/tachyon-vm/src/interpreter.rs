@@ -5885,6 +5885,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::PromiseAllSettled) => {
                     return self.begin_promise_all_settled(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseAny) => {
+                    return self.begin_promise_any(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::PromiseRace) => {
                     return self.begin_promise_race(&site);
                 }
