@@ -67,10 +67,24 @@ impl Trace for PromiseCombinatorPrefixRoots<'_> {
 impl Isolate {
     /// Selects the guarded intrinsic Array fast path or the resumable iterable path.
     pub(crate) fn begin_promise_all(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_promise_combinator(site, PromiseCombinatorKind::All)
+    }
+
+    /// Starts `Promise.race` on the same observable iterator/capability protocol driver.
+    pub(crate) fn begin_promise_race(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_promise_combinator(site, PromiseCombinatorKind::Race)
+    }
+
+    /// Selects constructor handling and the only currently proven empty-Array fast path.
+    fn begin_promise_combinator(
+        &mut self,
+        site: &CallSite,
+        kind: PromiseCombinatorKind,
+    ) -> Result<(), ExecutionError> {
         let intrinsic = self
             .realm
             .promise_constructor
-            .expect("Promise initializes before Promise.all");
+            .expect("Promise initializes before combinators");
         if !self.is_constructor_value(site.this_value)? {
             return Err(ExecutionError::NonConstructor(site.this_value));
         }
@@ -78,12 +92,14 @@ impl Isolate {
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         if site.this_value != intrinsic {
-            return self.begin_generic_promise_all(site, site.this_value, iterable);
+            return self.begin_generic_promise_combinator(site, site.this_value, iterable, kind);
         }
-        if self.can_use_promise_all_array_fast_path(intrinsic, iterable)? {
+        if kind == PromiseCombinatorKind::All
+            && self.can_use_promise_all_array_fast_path(intrinsic, iterable)?
+        {
             return self.begin_intrinsic_promise_all_array(site, intrinsic, iterable);
         }
-        self.begin_intrinsic_promise_all_iterable(site, intrinsic, iterable)
+        self.begin_intrinsic_promise_combinator(site, intrinsic, iterable, kind)
     }
 
     /// Implements the guarded intrinsic Array-iterator fast path for `Promise.all`.
@@ -94,7 +110,14 @@ impl Isolate {
         iterable: Value,
     ) -> Result<(), ExecutionError> {
         let length = self.promise_all_array_length(iterable)?;
-        let state = self.create_promise_all_state(site, intrinsic, iterable, length, true)?;
+        let state = self.create_promise_combinator_state(
+            site,
+            intrinsic,
+            iterable,
+            length,
+            true,
+            PromiseCombinatorKind::All,
+        )?;
         let pending = self.promise_combinator_snapshot(state)?;
         let aggregate = pending.promise;
         let values = pending.values;
@@ -153,13 +176,15 @@ impl Isolate {
     }
 
     /// Starts the observable GetPromiseResolve and iterator protocol for intrinsic `%Promise%`.
-    fn begin_intrinsic_promise_all_iterable(
+    fn begin_intrinsic_promise_combinator(
         &mut self,
         site: &CallSite,
         intrinsic: Value,
         iterable: Value,
+        kind: PromiseCombinatorKind,
     ) -> Result<(), ExecutionError> {
-        let state = self.create_promise_all_state(site, intrinsic, iterable, 1, false)?;
+        let state =
+            self.create_promise_combinator_state(site, intrinsic, iterable, 1, false, kind)?;
         let native_site = NativeContinuationSite {
             caller_base: site.caller_base,
             destination: site.destination,
@@ -192,11 +217,12 @@ impl Isolate {
     }
 
     /// Runs NewPromiseCapability for a custom constructor before entering the shared iterator path.
-    fn begin_generic_promise_all(
+    fn begin_generic_promise_combinator(
         &mut self,
         site: &CallSite,
         constructor: Value,
         iterable: Value,
+        kind: PromiseCombinatorKind,
     ) -> Result<(), ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
         let values = self.create_array_object_with_prototype(
@@ -222,6 +248,7 @@ impl Isolate {
             current: undefined,
             index: 0,
             remaining: 1,
+            kind,
             stage: PromiseCombinatorStage::CapabilityConstructor,
             iterator_done: false,
             return_promise_after_capability_call: true,
@@ -339,13 +366,14 @@ impl Isolate {
     }
 
     /// Allocates the aggregate Promise, result Array, and typed state in root-safe order.
-    fn create_promise_all_state(
+    fn create_promise_combinator_state(
         &mut self,
         site: &CallSite,
         constructor: Value,
         iterable: Value,
         remaining: u64,
         iterator_done: bool,
+        kind: PromiseCombinatorKind,
     ) -> Result<GcRef<PendingPromiseCombinator>, ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
         let aggregate = self.create_promise(PromiseState::Pending, undefined)?;
@@ -383,6 +411,7 @@ impl Isolate {
             current: undefined,
             index: 0,
             remaining,
+            kind,
             stage: PromiseCombinatorStage::ResolveGet,
             iterator_done,
             return_promise_after_capability_call: true,
@@ -549,6 +578,10 @@ impl Isolate {
             PromiseCombinatorStage::DoneGet => {
                 if self.is_truthy_value(value)? {
                     self.update_promise_combinator(state, |pending| pending.iterator_done = true)?;
+                    let pending = self.promise_combinator_snapshot(state)?;
+                    if pending.kind == PromiseCombinatorKind::Race {
+                        return self.write(site.caller_base, site.destination, pending.promise);
+                    }
                     let remaining = self.decrement_promise_combinator_remaining(state)?;
                     let pending = self.promise_combinator_snapshot(state)?;
                     if remaining == 0 && !pending.settled {
@@ -573,16 +606,18 @@ impl Isolate {
             }
             PromiseCombinatorStage::ValueGet => {
                 let pending = self.promise_combinator_snapshot(state)?;
-                let key = self.property_key_atom(safe_integer_value(pending.index))?;
-                self.set_own_data_property(
-                    pending.values,
-                    key,
-                    Value::from_immediate(Immediate::Undefined),
-                )?;
+                if pending.kind == PromiseCombinatorKind::All {
+                    let key = self.property_key_atom(safe_integer_value(pending.index))?;
+                    self.set_own_data_property(
+                        pending.values,
+                        key,
+                        Value::from_immediate(Immediate::Undefined),
+                    )?;
+                    self.increment_promise_combinator_remaining(state)?;
+                }
                 self.set_promise_combinator_value(state, value, |pending, value| {
                     pending.current = value
                 })?;
-                self.increment_promise_combinator_remaining(state)?;
                 self.call_promise_combinator(
                     site,
                     state,
@@ -608,6 +643,34 @@ impl Isolate {
             PromiseCombinatorStage::ThenGet => {
                 self.resolve_function_object(value)?;
                 let pending = self.promise_combinator_snapshot(state)?;
+                if pending.kind == PromiseCombinatorKind::Race {
+                    let (state, attachment) = self.allocate_promise_all_attachment(
+                        state,
+                        NativeCallState {
+                            values: [
+                                pending.current,
+                                pending.capability_resolve,
+                                pending.capability_reject,
+                                value,
+                                Value::from_immediate(Immediate::Undefined),
+                            ],
+                            count: 4,
+                        },
+                    )?;
+                    let values = self.native_call_state_snapshot(attachment)?.values;
+                    self.set_promise_combinator_temporary(
+                        state,
+                        Value::from_heap_ref(attachment.raw()),
+                    )?;
+                    return self.call_promise_combinator(
+                        site,
+                        state,
+                        PromiseCombinatorStage::ThenCall,
+                        values[3],
+                        values[0],
+                        &[values[1], values[2]],
+                    );
+                }
                 let (state, fulfilled, unused_rejected) = self.allocate_promise_all_handlers(
                     state,
                     pending.current,

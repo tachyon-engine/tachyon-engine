@@ -235,6 +235,7 @@ pub(crate) enum NativeFunction {
     PromiseReject,
     PromiseWithResolvers,
     PromiseAll,
+    PromiseRace,
     PromiseFinally,
     SpeciesGetter,
     PromiseThen,
@@ -723,6 +724,7 @@ impl NativeFunction {
             | Self::PromiseResolve
             | Self::PromiseReject
             | Self::PromiseAll
+            | Self::PromiseRace
             | Self::PromiseWithResolvers
             | Self::PromiseCatch
             | Self::ArrayForEach
@@ -1096,6 +1098,7 @@ impl NativeFunction {
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
             Self::PromiseAll => "all",
+            Self::PromiseRace => "race",
             Self::PromiseWithResolvers => "withResolvers",
             Self::PromiseFinally => "finally",
             Self::SpeciesGetter => "get [Symbol.species]",

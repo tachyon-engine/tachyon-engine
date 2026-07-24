@@ -5882,6 +5882,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::PromiseAll) => {
                     return self.begin_promise_all(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseRace) => {
+                    return self.begin_promise_race(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::SpeciesGetter) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }

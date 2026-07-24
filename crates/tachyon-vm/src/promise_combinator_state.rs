@@ -3,6 +3,14 @@
 use tachyon_gc::{GcRef, Trace, Tracer};
 use tachyon_value::Value;
 
+/// Result policy layered over the shared Promise combinator protocol driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PromiseCombinatorKind {
+    All,
+    Race,
+}
+
 /// Observable operation whose completion advances a Promise combinator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -42,6 +50,7 @@ pub(crate) struct PendingPromiseCombinator {
     pub(crate) current: Value,
     pub(crate) index: u64,
     pub(crate) remaining: u64,
+    pub(crate) kind: PromiseCombinatorKind,
     pub(crate) stage: PromiseCombinatorStage,
     pub(crate) iterator_done: bool,
     pub(crate) return_promise_after_capability_call: bool,

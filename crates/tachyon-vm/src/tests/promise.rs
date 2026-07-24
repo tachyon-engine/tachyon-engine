@@ -224,6 +224,29 @@ CustomPromise.resolve = function(value) {
 var customCapabilityResult = Promise.all.call(CustomPromise, [2, 3]);
 "#;
 
+const PROMISE_RACE_SETUP: &str = r#"
+var raceFulfill = 0;
+var raceReject = 0;
+var emptySettled = 0;
+var customRaceValue = 0;
+var customRaceReject = 0;
+Promise.race([7, 8]).then(function(value) { raceFulfill = value; });
+Promise.race([Promise.reject(9), 10]).then(
+  function() { raceReject = -1; },
+  function(reason) { raceReject = reason; }
+);
+Promise.race([]).then(function() { emptySettled = 1; }, function() { emptySettled = -1; });
+function RaceCapability(executor) {
+  executor(function(value) { customRaceValue = value; }, function(reason) {
+    customRaceReject = reason;
+  });
+}
+RaceCapability.resolve = function(value) {
+  return { then: function(onFulfilled, onRejected) { onFulfilled(value); } };
+};
+var customRace = Promise.race.call(RaceCapability, [11]);
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -297,6 +320,16 @@ fn promise_all_custom_capability_is_stable_for_every_dispatch_batch() {
     assert_promise_all_custom_capability::<8>(5_511, true);
 }
 
+#[test]
+fn promise_race_is_stable_for_every_dispatch_batch_and_forced_major() {
+    assert_promise_race::<1>(5_601, false);
+    assert_promise_race::<2>(5_603, false);
+    assert_promise_race::<4>(5_605, false);
+    assert_promise_race::<8>(5_607, false);
+    assert_promise_race::<16>(5_609, false);
+    assert_promise_race::<8>(5_611, true);
+}
+
 /// Executes the setup and probe under one interpreter dispatch batch.
 fn assert_promise_all_source<const N: usize>(source_id: u32) {
     let setup = compile_promise_source(source_id, PROMISE_ALL_SETUP);
@@ -359,6 +392,27 @@ fn assert_promise_all_custom_capability<const N: usize>(source_id: u32, forced_m
     let probe = compile_promise_source(
         source_id + 1,
         "customCapabilityResult instanceof CustomPromise && capabilityResult === 23 && capabilityReject === 0 && capabilityResolveCalls === 2;",
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Covers both intrinsic settlement directions, empty iteration, and a custom capability.
+fn assert_promise_race<const N: usize>(source_id: u32, forced_major: bool) {
+    let setup = compile_promise_source(source_id, PROMISE_RACE_SETUP);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "raceFulfill === 7 && raceReject === 9 && emptySettled === 0 && customRaceValue === 11 && customRaceReject === 0 && customRace instanceof RaceCapability;",
     );
     let mut isolate = test_isolate();
     if forced_major {

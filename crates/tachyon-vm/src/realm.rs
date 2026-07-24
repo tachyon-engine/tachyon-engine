@@ -2525,6 +2525,7 @@ impl Isolate {
             (b"resolve".as_slice(), NativeFunction::PromiseResolve),
             (b"reject".as_slice(), NativeFunction::PromiseReject),
             (b"all".as_slice(), NativeFunction::PromiseAll),
+            (b"race".as_slice(), NativeFunction::PromiseRace),
             (
                 b"withResolvers".as_slice(),
                 NativeFunction::PromiseWithResolvers,

@@ -177,7 +177,8 @@ use object::{
     StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
 };
 use promise_combinator_state::{
-    PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorStage,
+    PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,
+    PromiseCombinatorStage,
 };
 use promise_state::{
     GenericPromiseCapabilityRoots, PromiseCapability, PromiseCapabilityRoots, PromiseJob,
