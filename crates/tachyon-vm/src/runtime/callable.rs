@@ -1,6 +1,7 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
+use crate::object::{ArrayBufferData, ArrayBufferObject};
 
 /// Clock-independent UTC fields exposed by Date prototype getters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +238,12 @@ pub(crate) enum NativeFunction {
     PromiseThen,
     PromiseCatch,
     ArrayConstructor,
+    ArrayBufferConstructor,
+    ArrayBufferIsView,
+    ArrayBufferByteLength,
+    ArrayBufferMaxByteLength,
+    ArrayBufferResizable,
+    ArrayBufferDetached,
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -654,6 +661,7 @@ impl NativeFunction {
                 | Self::ProxyConstructor
                 | Self::PromiseConstructor
                 | Self::ArrayConstructor
+                | Self::ArrayBufferConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
                 | Self::WeakMapConstructor
@@ -786,6 +794,8 @@ impl NativeFunction {
             | Self::ErrorConstructor(_)
             | Self::ErrorIsError
             | Self::ArrayConstructor
+            | Self::ArrayBufferConstructor
+            | Self::ArrayBufferIsView
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -906,6 +916,10 @@ impl NativeFunction {
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
+            | Self::ArrayBufferByteLength
+            | Self::ArrayBufferMaxByteLength
+            | Self::ArrayBufferResizable
+            | Self::ArrayBufferDetached
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
@@ -1080,6 +1094,12 @@ impl NativeFunction {
             Self::PromiseThen => "then",
             Self::PromiseCatch => "catch",
             Self::ArrayConstructor => "Array",
+            Self::ArrayBufferConstructor => "ArrayBuffer",
+            Self::ArrayBufferIsView => "isView",
+            Self::ArrayBufferByteLength => "get byteLength",
+            Self::ArrayBufferMaxByteLength => "get maxByteLength",
+            Self::ArrayBufferResizable => "get resizable",
+            Self::ArrayBufferDetached => "get detached",
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
@@ -1415,6 +1435,7 @@ impl Trace for AccessorPair {
 #[derive(Clone, Copy)]
 pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
+    ArrayBuffer(GcRef<ArrayBufferObject>),
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
@@ -1439,6 +1460,7 @@ impl ObjectReceiver {
     pub(crate) fn value(self) -> Value {
         match self {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
+            Self::ArrayBuffer(buffer) => Value::from_heap_ref(buffer.raw()),
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
@@ -1603,6 +1625,8 @@ impl Trace for FunctionObject {
 #[derive(Clone, Copy)]
 pub(crate) struct VmTypes {
     pub(crate) accessor_pair: GcType<AccessorPair>,
+    pub(crate) array_buffer_data: GcType<ArrayBufferData>,
+    pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
@@ -1685,6 +1709,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) infinity: AtomId,
     pub(crate) errors: [AtomId; NativeErrorKind::ALL.len()],
     pub(crate) array: AtomId,
+    pub(crate) array_buffer: AtomId,
     pub(crate) object: AtomId,
     pub(crate) string: AtomId,
     pub(crate) regexp: AtomId,
@@ -1708,7 +1733,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 22
+    pub(crate) const BINDING_COUNT: usize = 23
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
         + GlobalUriFunction::ALL.len();

@@ -320,6 +320,12 @@ impl Isolate {
             accessor_pair: registry
                 .try_register("AccessorPair")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            array_buffer_data: registry
+                .try_register("ArrayBufferData")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            array_buffer_object: registry
+                .try_register("ArrayBufferObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             arguments_object: registry
                 .try_register("ArgumentsObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

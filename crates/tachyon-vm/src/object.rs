@@ -627,6 +627,43 @@ pub(crate) struct DateObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Externally-accounted byte storage shared by ArrayBuffer views in one isolate.
+#[derive(Debug)]
+pub(crate) struct ArrayBufferData {
+    pub(crate) bytes: Box<[u8]>,
+    pub(crate) byte_length: usize,
+    pub(crate) max_byte_length: usize,
+    pub(crate) resizable: bool,
+}
+
+impl Trace for ArrayBufferData {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for ArrayBufferData {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+/// Ordinary object carrying a detachable `[[ArrayBufferData]]` edge.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct ArrayBufferObject {
+    pub(crate) data: Option<GcRef<ArrayBufferData>>,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for ArrayBufferObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 /// Function activation arguments with an ordinary property base and stable exotic identity.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]

@@ -28,6 +28,7 @@ impl Isolate {
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
+        self.initialize_array_buffer_intrinsics()?;
         self.initialize_collection_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
@@ -35,6 +36,85 @@ impl Isolate {
         self.initialize_proxy_intrinsics()?;
         self.initialize_promise_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
+    }
+
+    /// Builds the fixed-length ArrayBuffer constructor and branded prototype accessors.
+    fn initialize_array_buffer_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before ArrayBuffer");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before ArrayBuffer");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.array_buffer_prototype = Some(prototype);
+        let constructor = self.allocate_native_function(
+            NativeFunction::ArrayBufferConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_buffer_constructor = Some(constructor);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        let is_view = self.allocate_native_function(
+            NativeFunction::ArrayBufferIsView,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_buffer_is_view = Some(is_view);
+        let is_view_atom = self.intern_intrinsic_name(b"isView")?;
+        self.set_intrinsic_data_property(constructor, is_view_atom, is_view, true)?;
+        for (name, native) in [
+            (
+                b"byteLength".as_slice(),
+                NativeFunction::ArrayBufferByteLength,
+            ),
+            (
+                b"maxByteLength".as_slice(),
+                NativeFunction::ArrayBufferMaxByteLength,
+            ),
+            (
+                b"resizable".as_slice(),
+                NativeFunction::ArrayBufferResizable,
+            ),
+            (b"detached".as_slice(), NativeFunction::ArrayBufferDetached),
+        ] {
+            self.install_collection_accessor(prototype, function_prototype, name, native)?;
+        }
+        let tag = self.property_key(
+            self.realm
+                .well_known_symbols
+                .to_string_tag
+                .expect("well-known symbols initialize before ArrayBuffer"),
+        )?;
+        let tag_atom = self.intern_intrinsic_name(b"ArrayBuffer")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            prototype,
+            tag,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
     }
 
     /// Builds Object constructor, Object.prototype, and the basic own-property native methods.
@@ -1126,6 +1206,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"URIError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
+            array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
             regexp: self.intern_intrinsic_name(b"RegExp")?,
@@ -2523,6 +2604,13 @@ impl Isolate {
             self.realm
                 .array_constructor
                 .expect("Array initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.array_buffer,
+            self.realm
+                .array_buffer_constructor
+                .expect("ArrayBuffer initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

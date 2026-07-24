@@ -4407,6 +4407,10 @@ impl Isolate {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferConstructor) => {
+                    let buffer = self.create_array_buffer_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, buffer);
+                }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
                 }
@@ -5824,6 +5828,25 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferIsView) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.array_buffer_is_view(value);
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::ArrayBufferByteLength
+                    | NativeFunction::ArrayBufferMaxByteLength
+                    | NativeFunction::ArrayBufferResizable
+                    | NativeFunction::ArrayBufferDetached),
+                ) => {
+                    let value = self.array_buffer_getter(site.this_value, native)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);

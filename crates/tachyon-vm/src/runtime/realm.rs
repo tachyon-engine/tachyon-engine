@@ -117,6 +117,9 @@ pub(crate) struct Realm {
     pub(crate) function_prototype_call: Option<Value>,
     pub(crate) function_prototype_bind: Option<Value>,
     pub(crate) array_constructor: Option<Value>,
+    pub(crate) array_buffer_constructor: Option<Value>,
+    pub(crate) array_buffer_prototype: Option<Value>,
+    pub(crate) array_buffer_is_view: Option<Value>,
     pub(crate) array_prototype: Option<Value>,
     pub(crate) array_is_array: Option<Value>,
     pub(crate) array_concat: Option<Value>,
@@ -258,6 +261,9 @@ impl Realm {
             function_prototype_call: None,
             function_prototype_bind: None,
             array_constructor: None,
+            array_buffer_constructor: None,
+            array_buffer_prototype: None,
+            array_buffer_is_view: None,
             array_prototype: None,
             array_is_array: None,
             array_concat: None,
@@ -634,6 +640,9 @@ impl Trace for Realm {
         self.function_prototype_call.trace(tracer);
         self.function_prototype_bind.trace(tracer);
         self.array_constructor.trace(tracer);
+        self.array_buffer_constructor.trace(tracer);
+        self.array_buffer_prototype.trace(tracer);
+        self.array_buffer_is_view.trace(tracer);
         self.array_prototype.trace(tracer);
         self.array_is_array.trace(tracer);
         self.array_concat.trace(tracer);

@@ -1240,6 +1240,12 @@ impl Isolate {
             "[object JSON]"
         } else if value.as_heap_ref().is_some_and(|raw| {
             self.heap
+                .checked_reference(raw, self.types.array_buffer_object)
+                .is_ok()
+        }) {
+            "[object ArrayBuffer]"
+        } else if value.as_heap_ref().is_some_and(|raw| {
+            self.heap
                 .checked_reference(raw, self.types.arguments_object)
                 .is_ok()
         }) {
