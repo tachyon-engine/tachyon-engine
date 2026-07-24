@@ -234,6 +234,7 @@ pub(crate) enum NativeFunction {
     PromiseResolve,
     PromiseReject,
     PromiseWithResolvers,
+    PromiseAll,
     PromiseFinally,
     SpeciesGetter,
     PromiseThen,
@@ -721,6 +722,7 @@ impl NativeFunction {
             | Self::PromiseConstructor
             | Self::PromiseResolve
             | Self::PromiseReject
+            | Self::PromiseAll
             | Self::PromiseWithResolvers
             | Self::PromiseCatch
             | Self::ArrayForEach
@@ -1093,6 +1095,7 @@ impl NativeFunction {
             Self::PromiseConstructor => "Promise",
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
+            Self::PromiseAll => "all",
             Self::PromiseWithResolvers => "withResolvers",
             Self::PromiseFinally => "finally",
             Self::SpeciesGetter => "get [Symbol.species]",
@@ -1397,6 +1400,11 @@ pub(crate) enum FunctionExecutable {
         state: GcRef<NativeCallState>,
         rejected: bool,
     },
+    /// Indexed one-shot reaction callback used by Promise combinators.
+    PromiseCombinatorHandler {
+        element: GcRef<PromiseCombinatorElement>,
+        rejected: bool,
+    },
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1546,7 +1554,7 @@ impl From<DataPropertyDescriptor> for PropertyDescriptor {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct CallSite {
     pub(crate) caller_base: u32,
     pub(crate) destination: u32,
@@ -1561,6 +1569,18 @@ pub(crate) struct CallSite {
     pub(crate) new_target: Value,
     pub(crate) construct_receiver: Option<Value>,
     pub(crate) call_site: WordOffset,
+}
+
+impl Trace for CallSite {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.callee.trace(tracer);
+        self.argument_source.trace(tracer);
+        self.argument_prefix.trace(tracer);
+        self.this_value.trace(tracer);
+        self.new_target.trace(tracer);
+        self.construct_receiver.trace(tracer);
+    }
 }
 
 /// Fixed-capacity traced arguments for native state machines that call arbitrary JS functions.
@@ -1622,6 +1642,9 @@ impl Trace for FunctionObject {
         {
             state.trace(tracer);
         }
+        if let FunctionExecutable::PromiseCombinatorHandler { element, .. } = &mut self.executable {
+            element.trace(tracer);
+        }
         self.prototype_or_home_object.trace(tracer);
         self.ordinary.trace(tracer);
     }
@@ -1664,6 +1687,8 @@ pub(crate) struct VmTypes {
     pub(crate) pending_proxy_own_keys: GcType<PendingProxyOwnKeys>,
     pub(crate) promise_object: GcType<PromiseObject>,
     pub(crate) promise_capability: GcType<PromiseCapability>,
+    pub(crate) pending_promise_combinator: GcType<PendingPromiseCombinator>,
+    pub(crate) promise_combinator_element: GcType<PromiseCombinatorElement>,
     pub(crate) promise_resolution_cell: GcType<PromiseResolutionCell>,
     #[allow(dead_code, reason = "allocated by the Promise.then reaction slice")]
     pub(crate) promise_reaction: GcType<PromiseReaction>,

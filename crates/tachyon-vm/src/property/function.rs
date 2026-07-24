@@ -199,7 +199,8 @@ impl Isolate {
                     JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?;
                 self.allocate_runtime_string(name).map(Some)
             }
-            FunctionExecutable::PromiseFinallyHandler { .. } => {
+            FunctionExecutable::PromiseFinallyHandler { .. }
+            | FunctionExecutable::PromiseCombinatorHandler { .. } => {
                 if key == self.length_atom()? {
                     return Ok(Some(Value::from_i32(1)));
                 }
@@ -353,7 +354,8 @@ impl Isolate {
                 | FunctionExecutable::PromiseResolver { .. }
                 | FunctionExecutable::PromiseCapabilityExecutor(_)
                 | FunctionExecutable::PromiseFinallyHandler { .. }
-                | FunctionExecutable::PromiseFinallyResultHandler { .. } => false,
+                | FunctionExecutable::PromiseFinallyResultHandler { .. }
+                | FunctionExecutable::PromiseCombinatorHandler { .. } => false,
             })
     }
 

@@ -2210,6 +2210,9 @@ impl Isolate {
             NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseCombinator(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseResolution(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::PromiseThenable => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -4470,24 +4473,79 @@ impl Isolate {
                 FunctionExecutable::PromiseFinallyResultHandler { .. } => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::PromiseCombinatorHandler { .. } => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
             }
         };
         if derived {
             return self.call(site);
         }
-        let prototype_atom = self.prototype_atom()?;
-        let prototype = self
-            .constructor_prototype_value(site.new_target, prototype_atom)?
-            .filter(|value| self.is_object_value(*value))
-            .or_else(|| {
-                self.realm_for_callable(site.new_target)
-                    .ok()
-                    .and_then(|realm| {
-                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Object)
-                    })
-            })
-            .unwrap_or(Value::from_immediate(Immediate::Null));
-        let receiver = self.create_ordinary_object_with_prototype(prototype)?;
+        if self.fiber.pending_construct_sites.capacity() == 0 {
+            self.fiber
+                .pending_construct_sites
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::FrameAllocationFailed)?;
+        }
+        self.fiber.pending_construct_sites.push(site);
+        let prototype_result = (|| {
+            let prototype_atom = self.prototype_atom()?;
+            let new_target = self
+                .fiber
+                .pending_construct_sites
+                .last()
+                .expect("construct root is active")
+                .new_target;
+            let prototype = self
+                .constructor_prototype_value(new_target, prototype_atom)?
+                .filter(|value| self.is_object_value(*value));
+            if prototype.is_some() {
+                return Ok(prototype);
+            }
+            let new_target = self
+                .fiber
+                .pending_construct_sites
+                .last()
+                .expect("construct root is active")
+                .new_target;
+            Ok(self.realm_for_callable(new_target).ok().and_then(|realm| {
+                self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Object)
+            }))
+        })();
+        site = self
+            .fiber
+            .pending_construct_sites
+            .pop()
+            .expect("construct root is balanced");
+        let prototype = prototype_result?.unwrap_or(Value::from_immediate(Immediate::Null));
+        let mut roots = ConstructReceiverRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            site,
+        };
+        let receiver = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.ordinary_object,
+                0,
+                0,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|receiver| Value::from_heap_ref(receiver.raw()))
+            .map_err(ExecutionError::HeapAllocation)?;
+        site = roots.site;
         site.this_value = receiver;
         site.construct_receiver = Some(receiver);
         self.call(site)
@@ -5055,6 +5113,9 @@ impl Isolate {
                         return Err(ExecutionError::HostThrown(value));
                     }
                     return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::PromiseCombinatorHandler { element, rejected } => {
+                    return self.call_promise_all_handler(&site, element, rejected);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
                     return self.write(
@@ -5818,6 +5879,9 @@ impl Isolate {
                     let result = self.promise_with_resolvers(site.this_value)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseAll) => {
+                    return self.begin_promise_all(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::SpeciesGetter) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }
@@ -6307,6 +6371,7 @@ impl Isolate {
             FunctionExecutable::PromiseCapabilityExecutor(_) => false,
             FunctionExecutable::PromiseFinallyHandler { .. } => false,
             FunctionExecutable::PromiseFinallyResultHandler { .. } => false,
+            FunctionExecutable::PromiseCombinatorHandler { .. } => false,
             FunctionExecutable::Bytecode { code, function, .. } => {
                 let kind = self
                     .loaded_code(code)?
@@ -7170,6 +7235,10 @@ impl Isolate {
                 NativeContinuationKind::PromiseStaticResolve(stage) => {
                     self.resume_generic_promise_resolve(continuation, stage, value)
                 }
+                NativeContinuationKind::PromiseCombinator(stage) => {
+                    let state = self.pending_promise_combinator_reference(continuation.first())?;
+                    self.resume_promise_combinator(site, state, stage, value)
+                }
                 NativeContinuationKind::PromiseResolution(mode) => {
                     self.finish_promise_resolution(continuation, mode, value)
                 }
@@ -7181,6 +7250,14 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::PromiseCombinator(stage)
+                        if stage != PromiseCombinatorStage::CapabilityConstructor
+                ) && self.reject_promise_combinator_execution_error(continuation, &error)?
+                {
+                    return Ok(None);
+                }
                 if let Some(iterator) = self.array_static_close_iterator(continuation)?
                     && let Some(kind) = execution_error_kind(&error)
                 {
@@ -7393,11 +7470,30 @@ impl Isolate {
                     self.reject_promise_thenable(continuation, value)?;
                     return Ok(None);
                 }
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::PromiseCombinator(stage)
+                        if stage != PromiseCombinatorStage::CapabilityConstructor
+                ) {
+                    self.reject_or_close_promise_combinator(continuation, value)?;
+                    return Ok(None);
+                }
                 if let Some(parent) = self.fiber.completions.last_native()
                     && let NativeContinuationKind::PromiseResolution(mode) = parent.kind()
                 {
                     let parent = self.pop_native_continuation()?;
                     self.reject_promise_resolution(parent, mode, value)?;
+                    return Ok(None);
+                }
+                if let Some(parent) = self.fiber.completions.last_native()
+                    && matches!(
+                        parent.kind(),
+                        NativeContinuationKind::PromiseCombinator(stage)
+                            if stage != PromiseCombinatorStage::CapabilityConstructor
+                    )
+                {
+                    let parent = self.pop_native_continuation()?;
+                    self.reject_or_close_promise_combinator(parent, value)?;
                     return Ok(None);
                 }
             }

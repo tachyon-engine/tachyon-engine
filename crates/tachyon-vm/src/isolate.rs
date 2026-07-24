@@ -422,6 +422,12 @@ impl Isolate {
             promise_capability: registry
                 .try_register("PromiseCapability")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_promise_combinator: registry
+                .try_register("PendingPromiseCombinator")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            promise_combinator_element: registry
+                .try_register("PromiseCombinatorElement")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             promise_resolution_cell: registry
                 .try_register("PromiseResolutionCell")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1790,7 +1796,8 @@ impl Isolate {
                     | FunctionExecutable::PromiseResolver { .. }
                     | FunctionExecutable::PromiseCapabilityExecutor(_)
                     | FunctionExecutable::PromiseFinallyHandler { .. }
-                    | FunctionExecutable::PromiseFinallyResultHandler { .. } => 2,
+                    | FunctionExecutable::PromiseFinallyResultHandler { .. }
+                    | FunctionExecutable::PromiseCombinatorHandler { .. } => 2,
                     FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_) => 3,
                 },
                 Err(_) => 0,

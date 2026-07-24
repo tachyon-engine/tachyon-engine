@@ -34,6 +34,11 @@ pub(crate) struct ArrayAllocationRoots<'a> {
     pub(crate) prototype: Value,
 }
 
+pub(crate) struct ConstructReceiverRoots<'a> {
+    pub(crate) vm: VmRoots<'a>,
+    pub(crate) site: CallSite,
+}
+
 impl Trace for PropertyMutationRoots<'_> {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -66,6 +71,14 @@ impl Trace for ArrayAllocationRoots<'_> {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.vm.trace(tracer);
         self.prototype.trace(tracer);
+    }
+}
+
+impl Trace for ConstructReceiverRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.site.trace(tracer);
     }
 }
 
@@ -1078,6 +1091,7 @@ pub(crate) enum NativeContinuationKind {
     PromiseFinallyMethod(PromiseFinallyMethodStage),
     PromiseCatch(PromiseCatchStage),
     PromiseStaticResolve(PromiseStaticResolveStage),
+    PromiseCombinator(PromiseCombinatorStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
     ConversionCallRoot,
@@ -1631,6 +1645,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PromiseStaticResolve(stage),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots one Promise combinator state across an observable Get or Call.
+    #[inline]
+    pub(crate) const fn promise_combinator(
+        site: NativeContinuationSite,
+        stage: PromiseCombinatorStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseCombinator(stage),
+            first: state,
+            second: retained,
         }
     }
 
@@ -2195,6 +2225,8 @@ pub(crate) struct Fiber {
     pub(crate) class_environments: Vec<u32>,
     /// Persistent sloppy-eval var records, sparse across direct-eval-capable activations.
     pub(crate) eval_var_environments: Vec<EvalVarEnvironment>,
+    /// Transient construct calls that cross receiver/prototype allocation safepoints.
+    pub(crate) pending_construct_sites: Vec<CallSite>,
     pub(crate) registers: Vec<Value>,
     pub(crate) handlers: Vec<ActiveHandler>,
     pub(crate) completions: CompletionStack,
@@ -2214,6 +2246,7 @@ impl Fiber {
         self.derived_activations.trace(tracer);
         self.base_class_activations.trace(tracer);
         self.eval_var_environments.trace(tracer);
+        self.pending_construct_sites.trace(tracer);
         debug_assert_eq!(self.argument_objects.len(), self.frames.len());
         debug_assert_eq!(self.argument_sources.len(), self.frames.len());
         debug_assert_eq!(self.argument_callees.len(), self.frames.len());

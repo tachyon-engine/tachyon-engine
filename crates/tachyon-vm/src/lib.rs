@@ -44,6 +44,7 @@ mod number;
 mod object;
 mod promise;
 mod promise_capability;
+mod promise_combinator_state;
 mod promise_state;
 mod promise_then;
 mod property;
@@ -175,6 +176,9 @@ use object::{
     PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable,
     StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
 };
+use promise_combinator_state::{
+    PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorStage,
+};
 use promise_state::{
     GenericPromiseCapabilityRoots, PromiseCapability, PromiseCapabilityRoots, PromiseJob,
     PromiseJobQueue, PromiseObject, PromiseReaction, PromiseReactionRoots, PromiseResolutionCell,
@@ -216,10 +220,10 @@ use runtime::{
         ArrayInsertStage, ArrayJoinStage, ArrayRemoveStage, ArrayReverseStage, ArraySliceStage,
         ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer,
         ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
-        ConversionCallbackStage, ConversionConsumer, ConversionContinuation,
-        ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage,
-        ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
+        ConstructReceiverRoots, ConversionCallbackStage, ConversionConsumer,
+        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
+        DefinePropertiesStage, ErrorConstructorStage, ErrorToStringStage, EvalVarEnvironment,
+        Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
         ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
         PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,

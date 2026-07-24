@@ -2524,6 +2524,7 @@ impl Isolate {
         for (name, native) in [
             (b"resolve".as_slice(), NativeFunction::PromiseResolve),
             (b"reject".as_slice(), NativeFunction::PromiseReject),
+            (b"all".as_slice(), NativeFunction::PromiseAll),
             (
                 b"withResolvers".as_slice(),
                 NativeFunction::PromiseWithResolvers,
@@ -2542,8 +2543,10 @@ impl Isolate {
             self.set_intrinsic_data_property(constructor, atom, function, true)?;
             if native == NativeFunction::PromiseResolve {
                 self.realm.promise_resolve = Some(function);
-            } else {
+            } else if native == NativeFunction::PromiseReject {
                 self.realm.promise_reject = Some(function);
+            } else if native == NativeFunction::PromiseAll {
+                self.realm.promise_all = Some(function);
             }
         }
         for (name, native) in [

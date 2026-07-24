@@ -10,6 +10,7 @@ mod json;
 mod map_upsert;
 mod math;
 pub(crate) mod object;
+mod promise_combinator;
 mod regexp;
 mod string;
 mod symbol;
