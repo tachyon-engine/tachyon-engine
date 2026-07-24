@@ -755,6 +755,8 @@ pub(crate) enum ArrayFillStage {
 pub(crate) enum ArrayJoinStage {
     Length,
     ElementGet,
+    ElementLocaleGet,
+    ElementLocaleCall,
 }
 
 /// One observable boundary in a resumable static Array constructor algorithm.

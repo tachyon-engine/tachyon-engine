@@ -2145,9 +2145,12 @@ impl Isolate {
             NativeContinuationKind::ArrayFill(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
-            NativeContinuationKind::ArrayJoin(_) => {
-                return Err(ExecutionError::MissingNativeContinuation);
-            }
+            NativeContinuationKind::ArrayJoin(_) => match continuation.kind() {
+                NativeContinuationKind::ArrayJoin(ArrayJoinStage::ElementLocaleCall) => {
+                    (continuation.second(), 0, None, 0)
+                }
+                _ => return Err(ExecutionError::MissingNativeContinuation),
+            },
             NativeContinuationKind::ArrayStatic(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6051,6 +6054,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayJoin) => {
                     return self.begin_array_join(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayToLocaleString) => {
+                    return self.begin_array_to_locale_string(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayAt) => {
                     let value = self.array_at(&site)?;

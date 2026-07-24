@@ -120,6 +120,7 @@ impl Isolate {
                     cursor: pending.cursor,
                     output_len: pending.output_len,
                     output_capacity: pending.output.len(),
+                    locale: pending.locale,
                 })
             })
         })
@@ -233,6 +234,7 @@ impl Isolate {
             length: snapshot.length,
             cursor: snapshot.cursor,
             output_len: snapshot.output_len,
+            locale: snapshot.locale,
         })?;
         self.root_array_join_state(site, replacement)?;
         Ok(replacement)

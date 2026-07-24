@@ -122,6 +122,7 @@ pub(crate) struct Realm {
     pub(crate) array_concat: Option<Value>,
     pub(crate) array_push: Option<Value>,
     pub(crate) array_join: Option<Value>,
+    pub(crate) array_to_locale_string: Option<Value>,
     pub(crate) array_at: Option<Value>,
     pub(crate) array_index_of: Option<Value>,
     pub(crate) array_includes: Option<Value>,
@@ -262,6 +263,7 @@ impl Realm {
             array_concat: None,
             array_push: None,
             array_join: None,
+            array_to_locale_string: None,
             array_at: None,
             array_index_of: None,
             array_includes: None,
@@ -637,6 +639,7 @@ impl Trace for Realm {
         self.array_concat.trace(tracer);
         self.array_push.trace(tracer);
         self.array_join.trace(tracer);
+        self.array_to_locale_string.trace(tracer);
         self.array_at.trace(tracer);
         self.array_index_of.trace(tracer);
         self.array_includes.trace(tracer);

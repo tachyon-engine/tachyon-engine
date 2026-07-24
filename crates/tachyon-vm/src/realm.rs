@@ -1618,7 +1618,19 @@ impl Isolate {
         )?;
         self.realm.array_to_string = Some(to_string);
         let to_string_atom = self.intern_intrinsic_name(b"toString")?;
-        self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)
+        self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)?;
+        let to_locale_string = self.allocate_native_function(
+            NativeFunction::ArrayToLocaleString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.array_to_locale_string = Some(to_locale_string);
+        let to_locale_string_atom = self.intern_intrinsic_name(b"toLocaleString")?;
+        self.set_intrinsic_data_property(prototype, to_locale_string_atom, to_locale_string, true)
     }
 
     /// Builds `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and Array `values`/`@@iterator`.

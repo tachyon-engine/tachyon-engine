@@ -70,6 +70,11 @@ joined.length === 5999 && joined[0] === "x" && joined[2999] === "-" &&
   joined[5998] === "x";
 "#;
 
+const ARRAY_LOCALE_PRIMITIVE_SOURCE: &str = r#"
+Boolean.prototype.toLocaleString = function() { return "x"; };
+[true, false].toLocaleString() === "x,x";
+"#;
+
 #[test]
 fn array_join_is_stable_for_every_dispatch_batch() {
     assert_array_join_source::<1>(ARRAY_JOIN_SOURCE, 2_101, false);
@@ -83,6 +88,12 @@ fn array_join_is_stable_for_every_dispatch_batch() {
 fn array_join_state_survives_forced_major_collections() {
     assert_array_join_source::<8>(ARRAY_JOIN_SOURCE, 2_120, true);
     assert_array_join_source::<8>(ARRAY_JOIN_GC_SOURCE, 2_121, true);
+}
+
+#[test]
+fn array_to_locale_string_boxes_lookup_but_preserves_primitive_call_receiver() {
+    assert_array_join_source::<1>(ARRAY_LOCALE_PRIMITIVE_SOURCE, 2_123, false);
+    assert_array_join_source::<4>(ARRAY_LOCALE_PRIMITIVE_SOURCE, 2_124, true);
 }
 
 #[test]

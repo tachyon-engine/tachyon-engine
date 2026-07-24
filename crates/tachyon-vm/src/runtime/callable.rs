@@ -243,6 +243,7 @@ pub(crate) enum NativeFunction {
     ArrayConcat,
     ArrayPush,
     ArrayJoin,
+    ArrayToLocaleString,
     ArrayAt,
     ArrayIndexOf,
     ArrayIncludes,
@@ -904,6 +905,7 @@ impl NativeFunction {
             | Self::FunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
+            | Self::ArrayToLocaleString
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
@@ -1084,6 +1086,7 @@ impl NativeFunction {
             Self::ArrayConcat => "concat",
             Self::ArrayPush => "push",
             Self::ArrayJoin => "join",
+            Self::ArrayToLocaleString => "toLocaleString",
             Self::ArrayAt => "at",
             Self::ArrayIndexOf => "indexOf",
             Self::ArrayIncludes => "includes",

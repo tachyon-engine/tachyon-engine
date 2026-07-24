@@ -17,6 +17,7 @@ pub(crate) struct PendingArrayJoin {
     length: u64,
     cursor: u64,
     output_len: usize,
+    locale: bool,
 }
 
 impl Trace for PendingArrayJoin {
@@ -47,11 +48,29 @@ struct ArrayJoinSnapshot {
     cursor: u64,
     output_len: usize,
     output_capacity: usize,
+    locale: bool,
 }
 
 impl Isolate {
     /// Captures receiver and separator before the observable length lookup.
     pub(crate) fn begin_array_join(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.begin_array_join_mode(site, false)
+    }
+
+    /// Begins `Array.prototype.toLocaleString` with per-element method calls.
+    pub(crate) fn begin_array_to_locale_string(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        self.begin_array_join_mode(site, true)
+    }
+
+    /// Captures shared join state before the observable length lookup.
+    fn begin_array_join_mode(
+        &mut self,
+        site: &CallSite,
+        locale: bool,
+    ) -> Result<(), ExecutionError> {
         let receiver = self.coerce_to_object(site.this_value)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let separator_argument = self.call_argument(site, 0)?.unwrap_or(undefined);
@@ -64,6 +83,7 @@ impl Isolate {
             length: 0,
             cursor: 0,
             output_len: 0,
+            locale,
         })?;
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -92,11 +112,19 @@ impl Isolate {
         stage: ArrayJoinStage,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        self.set_array_join_retained(state, value)?;
+        if stage != ArrayJoinStage::ElementLocaleGet {
+            self.set_array_join_retained(state, value)?;
+        }
         self.root_array_join_state(site, state)?;
         match stage {
             ArrayJoinStage::Length => self.resume_array_join_length(site, state, value),
             ArrayJoinStage::ElementGet => self.finish_array_join_element(site, state, value),
+            ArrayJoinStage::ElementLocaleGet => {
+                self.finish_array_join_locale_get(site, state, value)
+            }
+            ArrayJoinStage::ElementLocaleCall => {
+                self.finish_array_join_locale_call(site, state, value)
+            }
         }
     }
 
@@ -190,6 +218,7 @@ impl Isolate {
             length: snapshot.length,
             cursor: 0,
             output_len: 0,
+            locale: snapshot.locale,
         })?;
         self.root_array_join_state(site, replacement)?;
         self.advance_array_join(site, replacement)
@@ -260,6 +289,21 @@ impl Isolate {
         {
             return Ok(Some(state));
         }
+        if self.array_join_snapshot(state)?.locale {
+            let key = self.intern_intrinsic_name(b"toLocaleString")?;
+            let Some((state, callee)) = self.dispatch_array_join_get(
+                site,
+                state,
+                ArrayJoinStage::ElementLocaleGet,
+                value,
+                key.into(),
+            )?
+            else {
+                return Ok(None);
+            };
+            self.finish_array_join_locale_get(site, state, callee)?;
+            return Ok(None);
+        }
         if self.is_object_value(value) {
             self.dispatch_object_primitive_conversion(
                 ConversionConsumer::ArrayJoinElement,
@@ -282,6 +326,48 @@ impl Isolate {
         state: GcRef<PendingArrayJoin>,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        let state = self.finish_array_join_element_string_value(site, state, value)?;
+        self.advance_array_join(site, state)
+    }
+
+    /// Looks up an element's `toLocaleString` method before invoking it.
+    fn finish_array_join_locale_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayJoin>,
+        callee: Value,
+    ) -> Result<(), ExecutionError> {
+        self.resolve_function_object(callee)?;
+        let element = self.array_join_snapshot(state)?.retained;
+        self.dispatch_property_callback(
+            NativeContinuation::array_join(
+                site,
+                ArrayJoinStage::ElementLocaleCall,
+                Value::from_heap_ref(state.raw()),
+                element,
+            ),
+            callee,
+        )?;
+        Ok(())
+    }
+
+    /// Converts a locale method result to string without another locale lookup.
+    fn finish_array_join_locale_call(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayJoin>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_object_value(value) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::ArrayJoinElement,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                value,
+                site.call_site,
+            );
+        }
         let state = self.finish_array_join_element_string_value(site, state, value)?;
         self.advance_array_join(site, state)
     }
