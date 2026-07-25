@@ -213,7 +213,7 @@ impl<'heap, 'scope> RunningScope<'heap, 'scope> {
         &mut self,
         target: Local<'scope, T>,
     ) -> Result<bool, crate::KeptObjectError> {
-        self.heap.keep_alive(target.as_gc_ref().raw())
+        self.heap.add_to_kept_objects(target.as_gc_ref().raw())
     }
 
     /// Creates a nested checkpoint whose locals are removed before the outer scope resumes.

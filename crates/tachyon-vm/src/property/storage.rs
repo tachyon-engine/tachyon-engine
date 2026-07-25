@@ -882,6 +882,18 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::WeakSet(set), ordinary));
         }
+        if let Ok(reference) = self.heap.checked_reference(raw, self.types.weak_ref_object) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let reference = scope.root(reference).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(reference, self.types.weak_ref_object)
+                        .map(|reference| reference.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::WeakRef(reference), ordinary));
+        }
         if let Ok(iterator) = self.heap.checked_reference(raw, self.types.array_iterator) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(iterator).map_err(ExecutionError::Root)?;
@@ -1152,6 +1164,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::WeakRef(reference) => self.heap.with_running_scope(|scope| {
+                let reference = scope.root(reference).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(reference, self.types.weak_ref_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1386,6 +1409,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(set, self.types.weak_set_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::WeakRef(reference) => self.heap.with_running_scope(|scope| {
+                let reference = scope.root(reference).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(reference, self.types.weak_ref_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1824,6 +1858,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::WeakRef(reference) => self.heap.with_running_scope(|scope| {
+                let reference = scope.root(reference).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let reference = no_gc
+                        .borrow_mut(reference, self.types.weak_ref_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    reference.ordinary.shape = shape;
+                    reference.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(reference, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1937,6 +1992,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.weak_set_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.weak_ref_object)
                 .is_ok()
             || self
                 .heap

@@ -4434,6 +4434,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::WeakSetConstructor) => {
                     return self.begin_weak_set_from_site(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::WeakRefConstructor) => {
+                    let reference = self.create_weak_ref_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, reference);
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     let function = self.create_dynamic_function_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, function);
@@ -5974,6 +5978,13 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::WeakSetConstructor) => {
                     return self.begin_weak_set_from_site(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WeakRefConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::Native(NativeFunction::WeakRefDeref) => {
+                    let target = self.weak_ref_deref(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, target);
                 }
                 FunctionExecutable::Native(NativeFunction::WeakMapGet) => {
                     let value = self.weak_map_get(&site)?;

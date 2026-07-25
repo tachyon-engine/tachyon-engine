@@ -79,8 +79,8 @@ use tachyon_bytecode::{
 };
 use tachyon_gc::{
     AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
-    HeapReferenceError, ManagedAllocationError, NoGcBorrowError, RootError, Trace, Tracer,
-    TypeRegistrationError, TypeRegistry,
+    HeapReferenceError, KeptObjectError, ManagedAllocationError, NoGcBorrowError, RootError, Trace,
+    Tracer, TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::Immediate;
 pub use tachyon_value::Value;
@@ -240,7 +240,7 @@ use runtime::{
         TypeofStrings,
     },
 };
-use weak_collection::{WeakCollection, WeakMapObject, WeakSetObject};
+use weak_collection::{WeakCollection, WeakMapObject, WeakRefObject, WeakSetObject};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
 #[derive(Clone, Copy, Debug, Default)]
@@ -366,6 +366,7 @@ pub enum ExecutionError {
     InvalidInstanceofPrototype(Value),
     HeapAllocation(ManagedAllocationError),
     HeapReference(HeapReferenceError),
+    KeptObject(KeptObjectError),
     Root(RootError),
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,

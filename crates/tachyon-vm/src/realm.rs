@@ -34,6 +34,7 @@ impl Isolate {
         self.initialize_data_view_intrinsics()?;
         self.initialize_typed_array_intrinsics()?;
         self.initialize_collection_intrinsics()?;
+        self.initialize_weak_ref_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
         self.initialize_reflect_intrinsics()?;
@@ -1430,6 +1431,7 @@ impl Isolate {
             set: self.intern_intrinsic_name(b"Set")?,
             weak_map: self.intern_intrinsic_name(b"WeakMap")?,
             weak_set: self.intern_intrinsic_name(b"WeakSet")?,
+            weak_ref: self.intern_intrinsic_name(b"WeakRef")?,
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
@@ -2487,6 +2489,60 @@ impl Isolate {
         Ok(())
     }
 
+    /// Installs the WeakRef constructor and its single branded dereference method.
+    fn initialize_weak_ref_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object_prototype = self.realm.object_prototype.expect("Object before WeakRef");
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function before WeakRef");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let constructor = self.allocate_native_function(
+            NativeFunction::WeakRefConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.weak_ref_prototype = Some(prototype);
+        self.realm.weak_ref_constructor = Some(constructor);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        self.install_collection_method(
+            prototype,
+            function_prototype,
+            b"deref",
+            NativeFunction::WeakRefDeref,
+        )?;
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol before WeakRef");
+        let tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"WeakRef").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let key = self.property_key(symbol)?;
+        self.define_data_property(
+            prototype,
+            key,
+            DataPropertyDescriptor {
+                value: Some(tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
     /// Installs a standard writable, non-enumerable collection prototype method.
     fn install_collection_method(
         &mut self,
@@ -2928,6 +2984,13 @@ impl Isolate {
             self.realm
                 .weak_set_constructor
                 .expect("WeakSet initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.weak_ref,
+            self.realm
+                .weak_ref_constructor
+                .expect("WeakRef initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

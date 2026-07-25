@@ -380,6 +380,9 @@ impl Isolate {
             weak_set_object: registry
                 .try_register("WeakSetObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            weak_ref_object: registry
+                .try_register("WeakRefObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             function: registry
                 .try_register("FunctionObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

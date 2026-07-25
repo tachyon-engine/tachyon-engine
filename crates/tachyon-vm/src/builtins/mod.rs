@@ -18,5 +18,6 @@ mod symbol;
 pub(crate) mod typed_array;
 mod uri;
 mod weak_collections;
+mod weak_ref;
 
 pub(crate) use date::PendingDateNumericArguments;

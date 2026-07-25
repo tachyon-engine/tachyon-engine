@@ -493,7 +493,7 @@ impl Heap {
     }
 
     /// Validates and retains one WeakRef dereference target until the host ends the current job.
-    pub(crate) fn keep_alive(&mut self, reference: RawHeapRef) -> Result<bool, KeptObjectError> {
+    pub fn add_to_kept_objects(&mut self, reference: RawHeapRef) -> Result<bool, KeptObjectError> {
         self.verify_reference(reference, None)
             .map_err(KeptObjectError::InvalidReference)?;
         self.kept_objects.try_insert(reference)

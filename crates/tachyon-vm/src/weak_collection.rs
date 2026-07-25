@@ -2,7 +2,7 @@
 
 use core::mem::size_of;
 
-use tachyon_gc::{Ephemeron, GcExternalMemory, GcRef, Trace, Tracer};
+use tachyon_gc::{Ephemeron, GcExternalMemory, GcRef, Trace, Tracer, WeakGcRef};
 use tachyon_value::Value;
 
 use crate::object::OrdinaryObject;
@@ -38,6 +38,24 @@ impl Trace for WeakSetObject {
         self.storage.trace(tracer);
     }
 }
+
+/// WeakRef private target plus its ordinary named-property base.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct WeakRefObject {
+    pub(crate) ordinary: OrdinaryObject,
+    pub(crate) target: WeakGcRef<()>,
+}
+
+impl Trace for WeakRefObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.ordinary.trace(tracer);
+        self.target.trace(tracer);
+    }
+}
+
+const _: [(); 32] = [(); core::mem::size_of::<WeakRefObject>()];
 
 /// Fixed-capacity ephemeron table shared by one weak collection exotic.
 ///
