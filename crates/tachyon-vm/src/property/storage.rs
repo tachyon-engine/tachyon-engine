@@ -894,6 +894,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::WeakRef(reference), ordinary));
         }
+        if let Ok(registry) = self
+            .heap
+            .checked_reference(raw, self.types.finalization_registry_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let registry = scope.root(registry).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(registry, self.types.finalization_registry_object)
+                        .map(|registry| registry.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::FinalizationRegistry(registry), ordinary));
+        }
         if let Ok(iterator) = self.heap.checked_reference(raw, self.types.array_iterator) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(iterator).map_err(ExecutionError::Root)?;
@@ -1175,6 +1190,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::FinalizationRegistry(registry) => {
+                self.heap.with_running_scope(|scope| {
+                    let registry = scope.root(registry).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(registry, self.types.finalization_registry_object)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .extensible = extensible;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1426,6 +1454,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::FinalizationRegistry(registry) => {
+                self.heap.with_running_scope(|scope| {
+                    let registry = scope.root(registry).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(registry, self.types.finalization_registry_object)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .shape = shape;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1879,6 +1920,29 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::FinalizationRegistry(registry) => {
+                self.heap.with_running_scope(|scope| {
+                    let registry = scope.root(registry).map_err(ExecutionError::Root)?;
+                    let storage_local = storage
+                        .map(|storage| scope.root(storage))
+                        .transpose()
+                        .map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        let registry = no_gc
+                            .borrow_mut(registry, self.types.finalization_registry_object)
+                            .map_err(ExecutionError::NoGcBorrow)?;
+                        registry.ordinary.shape = shape;
+                        registry.ordinary.storage = storage;
+                        Ok::<(), ExecutionError>(())
+                    })?;
+                    if let Some(storage) = storage_local {
+                        scope
+                            .write_barrier(registry, storage)
+                            .map_err(ExecutionError::HeapReference)?;
+                    }
+                    Ok(())
+                })
+            }
             ObjectReceiver::ArrayIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1996,6 +2060,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.weak_ref_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.finalization_registry_object)
                 .is_ok()
             || self
                 .heap

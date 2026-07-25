@@ -398,6 +398,9 @@ pub(crate) enum NativeFunction {
     WeakSetDelete,
     WeakRefConstructor,
     WeakRefDeref,
+    FinalizationRegistryConstructor,
+    FinalizationRegistryRegister,
+    FinalizationRegistryUnregister,
     JsonParse,
     JsonStringify,
     MathAbs,
@@ -746,6 +749,7 @@ impl NativeFunction {
                 | Self::WeakMapConstructor
                 | Self::WeakSetConstructor
                 | Self::WeakRefConstructor
+                | Self::FinalizationRegistryConstructor
         )
     }
 
@@ -914,6 +918,9 @@ impl NativeFunction {
             | Self::WeakSetConstructor => 0,
             Self::WeakRefConstructor => 1,
             Self::WeakRefDeref => 0,
+            Self::FinalizationRegistryConstructor => 1,
+            Self::FinalizationRegistryRegister => 2,
+            Self::FinalizationRegistryUnregister => 1,
             Self::MapGet
             | Self::MapSet
             | Self::MapHas
@@ -1301,6 +1308,9 @@ impl NativeFunction {
             Self::WeakSetDelete => "delete",
             Self::WeakRefConstructor => "WeakRef",
             Self::WeakRefDeref => "deref",
+            Self::FinalizationRegistryConstructor => "FinalizationRegistry",
+            Self::FinalizationRegistryRegister => "register",
+            Self::FinalizationRegistryUnregister => "unregister",
             Self::JsonParse => "parse",
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
@@ -1586,6 +1596,7 @@ pub(crate) enum ObjectReceiver {
     WeakMap(GcRef<WeakMapObject>),
     WeakSet(GcRef<WeakSetObject>),
     WeakRef(GcRef<WeakRefObject>),
+    FinalizationRegistry(GcRef<FinalizationRegistryObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
     CollectionIterator(GcRef<CollectionIteratorObject>),
 }
@@ -1614,6 +1625,7 @@ impl ObjectReceiver {
             Self::WeakMap(map) => Value::from_heap_ref(map.raw()),
             Self::WeakSet(set) => Value::from_heap_ref(set.raw()),
             Self::WeakRef(reference) => Value::from_heap_ref(reference.raw()),
+            Self::FinalizationRegistry(registry) => Value::from_heap_ref(registry.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
@@ -1799,6 +1811,8 @@ pub(crate) struct VmTypes {
     pub(crate) weak_map_object: GcType<WeakMapObject>,
     pub(crate) weak_set_object: GcType<WeakSetObject>,
     pub(crate) weak_ref_object: GcType<WeakRefObject>,
+    pub(crate) finalization_registry_object: GcType<FinalizationRegistryObject>,
+    pub(crate) finalization_cell: GcType<FinalizationCell>,
     pub(crate) function: GcType<FunctionObject>,
     pub(crate) error_object: GcType<ErrorObject>,
     pub(crate) date_object: GcType<DateObject>,
@@ -1878,6 +1892,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) weak_map: AtomId,
     pub(crate) weak_set: AtomId,
     pub(crate) weak_ref: AtomId,
+    pub(crate) finalization_registry: AtomId,
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
     pub(crate) boolean: AtomId,
@@ -1894,7 +1909,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 25
+    pub(crate) const BINDING_COUNT: usize = 26
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
@@ -1935,6 +1950,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ProxyInvariantViolation
         | ExecutionError::UnsupportedPropertyKey(_)
         | ExecutionError::IncompatibleCollectionReceiver(_)
+        | ExecutionError::IncompatibleFinalizationRegistryReceiver(_)
+        | ExecutionError::InvalidFinalizationRegistration(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),

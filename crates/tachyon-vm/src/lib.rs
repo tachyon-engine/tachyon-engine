@@ -36,6 +36,7 @@ mod error;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
 mod finalization;
+mod finalization_registry;
 mod for_in;
 mod interpreter;
 mod isolate;
@@ -78,9 +79,9 @@ use tachyon_bytecode::{
     RegisterId, VerifiedBytecode, VerifiedInstructionDecoder, WordOffset,
 };
 use tachyon_gc::{
-    AllocationSpace, GcExternalMemory, GcRef, GcType, Heap, HeapAllocationError, HeapLimit,
-    HeapReferenceError, KeptObjectError, ManagedAllocationError, NoGcBorrowError, RootError, Trace,
-    Tracer, TypeRegistrationError, TypeRegistry,
+    AllocationSpace, FinalizationRegistration, GcExternalMemory, GcRef, GcType, Heap,
+    HeapAllocationError, HeapLimit, HeapReferenceError, KeptObjectError, ManagedAllocationError,
+    NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::Immediate;
 pub use tachyon_value::Value;
@@ -164,6 +165,7 @@ use conversion::{
     strict_equal_hot,
 };
 use error::ErrorObject;
+use finalization_registry::{FinalizationCell, FinalizationRegistryObject};
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};
 #[cfg(test)]
 use interpreter::execute_verified_hot_instruction;
@@ -371,6 +373,8 @@ pub enum ExecutionError {
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     MissingNativeContinuation,
+    FinalizationCleanupReentrant,
+    FinalizationJobQueueAllocationFailed,
     HostThrown(Value),
     MissingCompletionRecord,
     UnsupportedExceptionHandler(HandlerKind),
@@ -428,6 +432,8 @@ pub enum ExecutionError {
     CollectionStorageAllocationFailed,
     UnsupportedCollectionInitializer,
     IncompatibleCollectionReceiver(Value),
+    IncompatibleFinalizationRegistryReceiver(Value),
+    InvalidFinalizationRegistration(Value),
     ExclusionListAllocationFailed,
     ExclusionListCapacityExceeded,
     InvalidExclusionList(Value),

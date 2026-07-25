@@ -175,6 +175,8 @@ pub(crate) struct Realm {
     pub(crate) weak_set_prototype: Option<Value>,
     pub(crate) weak_ref_constructor: Option<Value>,
     pub(crate) weak_ref_prototype: Option<Value>,
+    pub(crate) finalization_registry_constructor: Option<Value>,
+    pub(crate) finalization_registry_prototype: Option<Value>,
     pub(crate) object_constructor: Option<Value>,
     pub(crate) object_prototype: Option<Value>,
     pub(crate) object_define_property: Option<Value>,
@@ -328,6 +330,8 @@ impl Realm {
             weak_set_prototype: None,
             weak_ref_constructor: None,
             weak_ref_prototype: None,
+            finalization_registry_constructor: None,
+            finalization_registry_prototype: None,
             object_constructor: None,
             object_prototype: None,
             object_define_property: None,
@@ -716,6 +720,8 @@ impl Trace for Realm {
         self.weak_set_prototype.trace(tracer);
         self.weak_ref_constructor.trace(tracer);
         self.weak_ref_prototype.trace(tracer);
+        self.finalization_registry_constructor.trace(tracer);
+        self.finalization_registry_prototype.trace(tracer);
         self.object_constructor.trace(tracer);
         self.object_prototype.trace(tracer);
         self.object_define_property.trace(tracer);

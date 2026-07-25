@@ -46,6 +46,7 @@ mod dispatch;
 mod environments;
 mod errors;
 mod eval;
+mod finalization_registry;
 mod finally;
 mod fixtures;
 mod grouping;

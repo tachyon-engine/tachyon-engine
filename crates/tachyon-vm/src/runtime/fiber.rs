@@ -1095,6 +1095,7 @@ pub(crate) enum NativeContinuationKind {
     PromiseCombinator(PromiseCombinatorStage),
     PromiseResolution(PromiseResolutionMode),
     PromiseThenable,
+    FinalizationCleanup,
     ConversionCallRoot,
 }
 
@@ -1539,6 +1540,16 @@ impl NativeContinuation {
             site,
             kind: NativeContinuationKind::PromiseReaction,
             first: capability,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn finalization_cleanup(site: NativeContinuationSite) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::FinalizationCleanup,
+            first: Value::from_immediate(Immediate::Undefined),
             second: Value::from_immediate(Immediate::Undefined),
         }
     }

@@ -302,7 +302,7 @@ impl Marker<'_> {
                 .pending_finalizations
                 .get(index)
                 .expect("pending finalization indices remain stable during root marking");
-            self.enqueue(record.registry());
+            self.enqueue(record.owner());
             if let Some(held) = record.held_value().as_heap_ref() {
                 self.enqueue(held);
             }
@@ -688,7 +688,7 @@ impl YoungMarker<'_> {
                 .pending_finalizations
                 .get(index)
                 .expect("pending finalization indices remain stable during minor roots");
-            self.enqueue(record.registry());
+            self.enqueue(record.owner());
             if let Some(held) = record.held_value().as_heap_ref() {
                 self.enqueue(held);
             }

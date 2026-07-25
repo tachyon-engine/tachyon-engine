@@ -1239,6 +1239,12 @@ impl Isolate {
         self.promise_jobs.begin_checkpoint(result);
         loop {
             let Some(job) = self.promise_jobs.begin_next() else {
+                if self.begin_finalization_cleanup_job(return_site)? {
+                    return Ok(None);
+                }
+                if self.finalization_jobs.has_pending_work(&self.heap) {
+                    continue;
+                }
                 let result = self
                     .promise_jobs
                     .finish_checkpoint()

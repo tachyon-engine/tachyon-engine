@@ -13,8 +13,8 @@ pub struct FinalizationCleanupJob(PendingFinalization);
 
 impl FinalizationCleanupJob {
     #[must_use]
-    pub const fn registry(self) -> RawHeapRef {
-        self.0.registry()
+    pub const fn owner(self) -> RawHeapRef {
+        self.0.owner()
     }
 
     #[must_use]
@@ -122,6 +122,10 @@ impl FinalizationJobs {
             slack_entries: self.entries.capacity() - self.entries.len(),
         }
     }
+
+    pub(crate) fn has_pending_work(&self, heap: &Heap) -> bool {
+        !self.entries.is_empty() || heap.finalization_queue_stats().pending != 0
+    }
 }
 
 impl Trace for FinalizationJobs {
@@ -133,6 +137,110 @@ impl Trace for FinalizationJobs {
 }
 
 impl Isolate {
+    /// Starts one JavaScript cleanup callback through the ordinary non-recursive call trampoline.
+    pub(crate) fn begin_finalization_cleanup_job(
+        &mut self,
+        return_site: tachyon_bytecode::WordOffset,
+    ) -> Result<bool, crate::ExecutionError> {
+        if self.finalization_jobs.running {
+            return Err(crate::ExecutionError::FinalizationCleanupReentrant);
+        }
+        self.finalization_jobs
+            .try_schedule_snapshot(&mut self.heap)
+            .map_err(|()| crate::ExecutionError::FinalizationJobQueueAllocationFailed)?;
+        let Some(job) = self.finalization_jobs.front() else {
+            return Ok(false);
+        };
+        let callback = self.finalization_callback_for_owner(job.owner())?;
+        let arguments = self.allocate_promise_job_arguments(job.held_value())?;
+        let frame = *self
+            .fiber
+            .frames
+            .last()
+            .ok_or(crate::ExecutionError::MissingEnvironment)?;
+        let site = crate::runtime::fiber::NativeContinuationSite {
+            caller_base: frame.base,
+            destination: 0,
+            call_site: return_site,
+        };
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(crate::runtime::fiber::NativeContinuation::finalization_cleanup(site))
+            .map_err(Isolate::completion_stack_error)?;
+        self.finalization_jobs.running = true;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(crate::runtime::callable::CallSite {
+            caller_base: frame.base,
+            destination: 0,
+            callee: callback,
+            argument_base: 0,
+            argument_source: Some(arguments),
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 1,
+            this_value: Value::from_immediate(tachyon_value::Immediate::Undefined),
+            new_target: Value::from_immediate(tachyon_value::Immediate::Undefined),
+            construct_receiver: None,
+            call_site: return_site,
+        }) {
+            self.fiber.completions.pop_native();
+            self.finish_finalization_cleanup_job();
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("cleanup callback publishes a frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(true);
+        }
+        if self.fiber.completions.len() > completion_depth {
+            self.fiber.completions.pop_native();
+        }
+        self.finish_finalization_cleanup_job();
+        Ok(false)
+    }
+
+    /// Completes the rooted front cleanup record after normal or abrupt callback completion.
+    pub(crate) fn finish_finalization_cleanup_job(&mut self) {
+        self.finalization_jobs.running = false;
+        self.finalization_jobs.complete_front();
+    }
+
+    /// Resolves a collector-enqueued registration-cell owner to its registry callback.
+    fn finalization_callback_for_owner(
+        &mut self,
+        owner: RawHeapRef,
+    ) -> Result<Value, crate::ExecutionError> {
+        let cell = self
+            .heap
+            .checked_reference(owner, self.types.finalization_cell)
+            .map_err(|_| crate::ExecutionError::MissingNativeContinuation)?;
+        let registry = self.heap.with_running_scope(|scope| {
+            let cell = scope.root(cell).map_err(crate::ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(cell, self.types.finalization_cell)
+                    .map(|cell| cell.registry)
+                    .map_err(crate::ExecutionError::NoGcBorrow)
+            })
+        })?;
+        self.heap.with_running_scope(|scope| {
+            let registry = scope.root(registry).map_err(crate::ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(registry, self.types.finalization_registry_object)
+                    .map(|registry| registry.cleanup_callback)
+                    .map_err(crate::ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Runs the eligible FIFO cleanup jobs at a post-collection VM safepoint.
     ///
     /// If an earlier callback left jobs queued, they run before newly pending collector records.
@@ -346,10 +454,10 @@ mod tests {
             .run_finalization_cleanup_safepoint(&mut heap, |isolate, heap, job| {
                 heap.collect_major(&mut FinalizationRoots { isolate })
                     .unwrap();
-                heap.verify_reference(job.registry(), None).unwrap();
+                heap.verify_reference(job.owner(), None).unwrap();
                 heap.verify_reference(job.held_value().as_heap_ref().unwrap(), None)
                     .unwrap();
-                observed.push((job.registry(), job.held_value()));
+                observed.push((job.owner(), job.held_value()));
                 Ok::<_, ()>(())
             })
             .unwrap();

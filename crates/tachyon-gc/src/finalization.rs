@@ -37,6 +37,13 @@ impl<T: ?Sized> FinalizationRegistration<T> {
     pub const fn held_value(&self) -> Value {
         self.held_value
     }
+
+    /// Deactivates a registration and releases its strongly held cleanup value.
+    pub fn deactivate(&mut self) -> bool {
+        let active = self.target.take().is_some();
+        self.held_value = Value::from_immediate(tachyon_value::Immediate::Undefined);
+        active
+    }
 }
 
 impl<T: ?Sized> Trace for FinalizationRegistration<T> {
@@ -49,14 +56,14 @@ impl<T: ?Sized> Trace for FinalizationRegistration<T> {
 /// One cleanup command retained as a strong root until a post-collection safepoint consumes it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PendingFinalization {
-    registry: RawHeapRef,
+    owner: RawHeapRef,
     held_value: Value,
 }
 
 impl PendingFinalization {
     #[must_use]
-    pub const fn registry(self) -> RawHeapRef {
-        self.registry
+    pub const fn owner(self) -> RawHeapRef {
+        self.owner
     }
 
     #[must_use]
@@ -67,7 +74,7 @@ impl PendingFinalization {
 
 impl Trace for PendingFinalization {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.registry.trace(tracer);
+        self.owner.trace(tracer);
         self.held_value.trace(tracer);
     }
 }
@@ -127,7 +134,7 @@ impl PendingFinalizations {
     /// Reserves queue capacity before publishing a record whose registration will then be cleared.
     pub fn try_enqueue(
         &mut self,
-        registry: RawHeapRef,
+        owner: RawHeapRef,
         held_value: Value,
     ) -> Result<(), FinalizationQueueError> {
         if self.entries.len() == self.max_entries {
@@ -155,10 +162,8 @@ impl PendingFinalizations {
                 self.growth_count += 1;
             }
         }
-        self.entries.push_back(PendingFinalization {
-            registry,
-            held_value,
-        });
+        self.entries
+            .push_back(PendingFinalization { owner, held_value });
         self.peak_len = self.peak_len.max(self.entries.len());
         Ok(())
     }
@@ -201,6 +206,6 @@ mod tests {
         assert_eq!(stats.initial_capacity, 64);
         assert_eq!(stats.growth_count, 2);
         assert_eq!(stats.peak_len, 100);
-        assert_eq!(queue.pop().unwrap().registry().offset(), 1);
+        assert_eq!(queue.pop().unwrap().owner().offset(), 1);
     }
 }

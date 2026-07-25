@@ -2217,6 +2217,9 @@ impl Isolate {
             NativeContinuationKind::PromiseThenable => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::FinalizationCleanup => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::Conversion { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4438,6 +4441,10 @@ impl Isolate {
                     let reference = self.create_weak_ref_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, reference);
                 }
+                FunctionExecutable::Native(NativeFunction::FinalizationRegistryConstructor) => {
+                    let registry = self.create_finalization_registry_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, registry);
+                }
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     let function = self.create_dynamic_function_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, function);
@@ -5986,6 +5993,17 @@ impl Isolate {
                     let target = self.weak_ref_deref(site.this_value)?;
                     return self.write(site.caller_base, site.destination, target);
                 }
+                FunctionExecutable::Native(NativeFunction::FinalizationRegistryConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::Native(NativeFunction::FinalizationRegistryRegister) => {
+                    let result = self.finalization_registry_register(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::FinalizationRegistryUnregister) => {
+                    let result = self.finalization_registry_unregister(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::WeakMapGet) => {
                     let value = self.weak_map_get(&site)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -7302,6 +7320,15 @@ impl Isolate {
                 NativeContinuationKind::PromiseThenable => {
                     self.finish_promise_thenable(continuation)
                 }
+                NativeContinuationKind::FinalizationCleanup => {
+                    self.finish_finalization_cleanup_job();
+                    self.fiber
+                        .frames
+                        .last_mut()
+                        .ok_or(ExecutionError::MissingEnvironment)?
+                        .pc = site.call_site;
+                    Ok(())
+                }
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")
                 }
@@ -7526,6 +7553,9 @@ impl Isolate {
                 if continuation.kind() == NativeContinuationKind::PromiseThenable {
                     self.reject_promise_thenable(continuation, value)?;
                     return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::FinalizationCleanup {
+                    self.finish_finalization_cleanup_job();
                 }
                 if matches!(
                     continuation.kind(),

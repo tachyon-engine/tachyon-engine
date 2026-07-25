@@ -414,7 +414,7 @@ fn finalization_queue_roots_cleanup_until_safepoint_consumption() {
     let queued = heap.collect_major(&mut no_roots).unwrap();
     assert_eq!(queued.sweep.live_objects, 2);
     let record = heap.pop_pending_finalization().unwrap();
-    assert_eq!(record.registry(), registry.raw());
+    assert_eq!(record.owner(), registry.raw());
     assert_eq!(record.held_value().as_heap_ref(), Some(held.raw()));
     let drained = heap.collect_major(&mut no_roots).unwrap();
     assert_eq!(drained.sweep.reclaimed_objects, 2);
@@ -455,6 +455,6 @@ fn minor_enqueues_dead_young_finalization_targets() {
     assert_eq!(stats.mark.mark.finalizations_enqueued, 1);
     assert_eq!(stats.sweep.sweep.reclaimed_objects, 1);
     let record = heap.pop_pending_finalization().unwrap();
-    assert_eq!(record.registry(), registry.raw());
+    assert_eq!(record.owner(), registry.raw());
     assert_eq!(record.held_value().as_i32(), Some(7));
 }
