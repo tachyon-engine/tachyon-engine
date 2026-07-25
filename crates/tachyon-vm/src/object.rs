@@ -664,6 +664,24 @@ impl Trace for ArrayBufferObject {
     }
 }
 
+/// Ordinary object carrying a fixed view into an ArrayBuffer.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct DataViewObject {
+    pub(crate) buffer: Value,
+    pub(crate) byte_offset: u32,
+    pub(crate) byte_length: u32,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for DataViewObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.buffer.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 /// Function activation arguments with an ordinary property base and stable exotic identity.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -747,8 +765,8 @@ mod tests {
     use core::mem::size_of;
 
     use super::{
-        DateObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind, ShapeId,
-        ShapeTable, SymbolId,
+        DataViewObject, DateObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind,
+        ShapeId, ShapeTable, SymbolId,
     };
     use crate::AtomId;
 
@@ -860,5 +878,6 @@ mod tests {
     fn extensibility_uses_existing_object_alignment_padding() {
         assert_eq!(size_of::<OrdinaryObject>(), 24);
         assert_eq!(size_of::<DateObject>(), 32);
+        assert_eq!(size_of::<DataViewObject>(), 40);
     }
 }

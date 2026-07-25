@@ -326,6 +326,9 @@ impl Isolate {
             array_buffer_object: registry
                 .try_register("ArrayBufferObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            data_view_object: registry
+                .try_register("DataViewObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             arguments_object: registry
                 .try_register("ArgumentsObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

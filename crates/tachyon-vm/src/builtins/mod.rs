@@ -4,6 +4,7 @@ mod array;
 mod array_buffer;
 mod boolean;
 mod collections;
+mod data_view;
 mod date;
 mod global;
 mod json;

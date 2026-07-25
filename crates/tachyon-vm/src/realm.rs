@@ -3,6 +3,7 @@
 mod string_iterator;
 
 use super::*;
+use crate::runtime::callable::DataViewElement;
 
 impl Isolate {
     /// Builds the object/function prototype graph and intrinsic constructors before publication.
@@ -29,6 +30,7 @@ impl Isolate {
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
         self.initialize_array_buffer_intrinsics()?;
+        self.initialize_data_view_intrinsics()?;
         self.initialize_collection_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
@@ -104,6 +106,90 @@ impl Isolate {
                 .expect("well-known symbols initialize before ArrayBuffer"),
         )?;
         let tag_atom = self.intern_intrinsic_name(b"ArrayBuffer")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            prototype,
+            tag,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
+    /// Builds the fixed DataView constructor, accessors, and Number element methods.
+    fn initialize_data_view_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before DataView");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before DataView");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.data_view_prototype = Some(prototype);
+        let constructor = self.allocate_native_function(
+            NativeFunction::DataViewConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.data_view_constructor = Some(constructor);
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        for (name, native) in [
+            (b"buffer".as_slice(), NativeFunction::DataViewBuffer),
+            (b"byteLength".as_slice(), NativeFunction::DataViewByteLength),
+            (b"byteOffset".as_slice(), NativeFunction::DataViewByteOffset),
+        ] {
+            self.install_collection_accessor(prototype, function_prototype, name, native)?;
+        }
+        for element in [
+            DataViewElement::Int8,
+            DataViewElement::Uint8,
+            DataViewElement::Int16,
+            DataViewElement::Uint16,
+            DataViewElement::Int32,
+            DataViewElement::Uint32,
+            DataViewElement::Float32,
+            DataViewElement::Float64,
+        ] {
+            for native in [
+                NativeFunction::DataViewGet(element),
+                NativeFunction::DataViewSet(element),
+            ] {
+                let function = self.allocate_native_function(
+                    native,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                )?;
+                let name = self.intern_intrinsic_name(native.name().as_bytes())?;
+                self.set_intrinsic_data_property(prototype, name, function, true)?;
+            }
+        }
+        let tag = self.property_key(
+            self.realm
+                .well_known_symbols
+                .to_string_tag
+                .expect("well-known symbols initialize before DataView"),
+        )?;
+        let tag_atom = self.intern_intrinsic_name(b"DataView")?;
         let tag_value = self.atom_string_value(tag_atom)?;
         self.define_data_property(
             prototype,
@@ -1216,6 +1302,7 @@ impl Isolate {
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
+            data_view: self.intern_intrinsic_name(b"DataView")?,
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
             regexp: self.intern_intrinsic_name(b"RegExp")?,
@@ -2657,6 +2744,13 @@ impl Isolate {
             self.realm
                 .array_buffer_constructor
                 .expect("ArrayBuffer initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.data_view,
+            self.realm
+                .data_view_constructor
+                .expect("DataView initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

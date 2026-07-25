@@ -120,6 +120,8 @@ pub(crate) struct Realm {
     pub(crate) array_buffer_constructor: Option<Value>,
     pub(crate) array_buffer_prototype: Option<Value>,
     pub(crate) array_buffer_is_view: Option<Value>,
+    pub(crate) data_view_constructor: Option<Value>,
+    pub(crate) data_view_prototype: Option<Value>,
     pub(crate) array_prototype: Option<Value>,
     pub(crate) array_is_array: Option<Value>,
     pub(crate) array_concat: Option<Value>,
@@ -265,6 +267,8 @@ impl Realm {
             array_buffer_constructor: None,
             array_buffer_prototype: None,
             array_buffer_is_view: None,
+            data_view_constructor: None,
+            data_view_prototype: None,
             array_prototype: None,
             array_is_array: None,
             array_concat: None,
@@ -645,6 +649,8 @@ impl Trace for Realm {
         self.array_buffer_constructor.trace(tracer);
         self.array_buffer_prototype.trace(tracer);
         self.array_buffer_is_view.trace(tracer);
+        self.data_view_constructor.trace(tracer);
+        self.data_view_prototype.trace(tracer);
         self.array_prototype.trace(tracer);
         self.array_is_array.trace(tracer);
         self.array_concat.trace(tracer);

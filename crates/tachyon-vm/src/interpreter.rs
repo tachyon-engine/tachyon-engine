@@ -4414,6 +4414,10 @@ impl Isolate {
                     let buffer = self.create_array_buffer_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, buffer);
                 }
+                FunctionExecutable::Native(NativeFunction::DataViewConstructor) => {
+                    let view = self.create_data_view_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, view);
+                }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
                 }
@@ -5910,6 +5914,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayBufferConstructor) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::Native(NativeFunction::DataViewConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayBufferIsView) => {
                     let value = self
                         .call_argument(&site, 0)?
@@ -5924,6 +5931,22 @@ impl Isolate {
                     | NativeFunction::ArrayBufferDetached),
                 ) => {
                     let value = self.array_buffer_getter(site.this_value, native)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::DataViewBuffer
+                    | NativeFunction::DataViewByteLength
+                    | NativeFunction::DataViewByteOffset),
+                ) => {
+                    let value = self.data_view_getter(site.this_value, native)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::DataViewGet(element)) => {
+                    let value = self.data_view_get(&site, element)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::DataViewSet(element)) => {
+                    let value = self.data_view_set(&site, element)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {

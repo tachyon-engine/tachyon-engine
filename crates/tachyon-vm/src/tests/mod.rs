@@ -39,6 +39,7 @@ mod calls;
 mod class;
 mod control;
 mod conversion;
+mod data_view;
 mod date;
 mod define_properties;
 mod dispatch;

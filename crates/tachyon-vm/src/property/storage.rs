@@ -710,6 +710,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::ArrayBuffer(buffer), ordinary));
         }
+        if let Ok(view) = self
+            .heap
+            .checked_reference(raw, self.types.data_view_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(view).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.data_view_object)
+                        .map(|view| view.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::DataView(view), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -969,6 +984,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::DataView(view) => self.heap.with_running_scope(|scope| {
+                let view = scope.root(view).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(view, self.types.data_view_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
                 let date = scope.root(date).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1181,6 +1207,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(buffer, self.types.array_buffer_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::DataView(view) => self.heap.with_running_scope(|scope| {
+                let view = scope.root(view).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(view, self.types.data_view_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1463,6 +1500,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(buffer, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::DataView(view) => self.heap.with_running_scope(|scope| {
+                let view = scope.root(view).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let view = no_gc
+                        .borrow_mut(view, self.types.data_view_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    view.ordinary.shape = shape;
+                    view.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(view, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -1759,6 +1817,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.array_buffer_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.data_view_object)
                 .is_ok()
             || self
                 .heap

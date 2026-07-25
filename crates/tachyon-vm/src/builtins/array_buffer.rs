@@ -175,9 +175,13 @@ impl Isolate {
         })
     }
 
-    /// Implements `ArrayBuffer.isView`; views are not installed until the typed-array slice.
+    /// Implements `ArrayBuffer.isView` for the currently installed view brands.
     pub(crate) fn array_buffer_is_view(&mut self, value: Value) -> Value {
-        let _ = value;
-        Value::from_immediate(Immediate::False)
+        let is_view = value.as_heap_ref().is_some_and(|raw| {
+            self.heap
+                .checked_reference(raw, self.types.data_view_object)
+                .is_ok()
+        });
+        boolean_value(is_view)
     }
 }

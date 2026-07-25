@@ -1,7 +1,55 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
-use crate::object::{ArrayBufferData, ArrayBufferObject};
+use crate::object::{ArrayBufferData, ArrayBufferObject, DataViewObject};
+
+/// Number-backed element formats exposed by the fixed DataView implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum DataViewElement {
+    Int8,
+    Uint8,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl DataViewElement {
+    #[inline(always)]
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 => 1,
+            Self::Int16 | Self::Uint16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::Float64 => 8,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn name(self, setter: bool) -> &'static str {
+        match (setter, self) {
+            (false, Self::Int8) => "getInt8",
+            (false, Self::Uint8) => "getUint8",
+            (false, Self::Int16) => "getInt16",
+            (false, Self::Uint16) => "getUint16",
+            (false, Self::Int32) => "getInt32",
+            (false, Self::Uint32) => "getUint32",
+            (false, Self::Float32) => "getFloat32",
+            (false, Self::Float64) => "getFloat64",
+            (true, Self::Int8) => "setInt8",
+            (true, Self::Uint8) => "setUint8",
+            (true, Self::Int16) => "setInt16",
+            (true, Self::Uint16) => "setUint16",
+            (true, Self::Int32) => "setInt32",
+            (true, Self::Uint32) => "setUint32",
+            (true, Self::Float32) => "setFloat32",
+            (true, Self::Float64) => "setFloat64",
+        }
+    }
+}
 
 /// Clock-independent UTC fields exposed by Date prototype getters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,6 +297,12 @@ pub(crate) enum NativeFunction {
     ArrayBufferMaxByteLength,
     ArrayBufferResizable,
     ArrayBufferDetached,
+    DataViewConstructor,
+    DataViewBuffer,
+    DataViewByteLength,
+    DataViewByteOffset,
+    DataViewGet(DataViewElement),
+    DataViewSet(DataViewElement),
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -667,6 +721,7 @@ impl NativeFunction {
                 | Self::PromiseConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
+                | Self::DataViewConstructor
                 | Self::MapConstructor
                 | Self::SetConstructor
                 | Self::WeakMapConstructor
@@ -806,6 +861,8 @@ impl NativeFunction {
             | Self::ArrayConstructor
             | Self::ArrayBufferConstructor
             | Self::ArrayBufferIsView
+            | Self::DataViewConstructor
+            | Self::DataViewGet(_)
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -818,7 +875,10 @@ impl NativeFunction {
             | Self::ArrayFlatMap
             | Self::ArraySort
             | Self::ArrayToSorted => 1,
-            Self::ArrayCopyWithin | Self::ArrayWith | Self::ArrayToSpliced => 2,
+            Self::ArrayCopyWithin
+            | Self::ArrayWith
+            | Self::ArrayToSpliced
+            | Self::DataViewSet(_) => 2,
             Self::ArrayOf
             | Self::ArrayFlat
             | Self::ArrayPop
@@ -930,6 +990,9 @@ impl NativeFunction {
             | Self::ArrayBufferMaxByteLength
             | Self::ArrayBufferResizable
             | Self::ArrayBufferDetached
+            | Self::DataViewBuffer
+            | Self::DataViewByteLength
+            | Self::DataViewByteOffset
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
@@ -1119,6 +1182,12 @@ impl NativeFunction {
             Self::ArrayBufferMaxByteLength => "get maxByteLength",
             Self::ArrayBufferResizable => "get resizable",
             Self::ArrayBufferDetached => "get detached",
+            Self::DataViewConstructor => "DataView",
+            Self::DataViewBuffer => "get buffer",
+            Self::DataViewByteLength => "get byteLength",
+            Self::DataViewByteOffset => "get byteOffset",
+            Self::DataViewGet(element) => element.name(false),
+            Self::DataViewSet(element) => element.name(true),
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
@@ -1463,6 +1532,7 @@ impl Trace for AccessorPair {
 pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
     ArrayBuffer(GcRef<ArrayBufferObject>),
+    DataView(GcRef<DataViewObject>),
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
@@ -1488,6 +1558,7 @@ impl ObjectReceiver {
         match self {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
             Self::ArrayBuffer(buffer) => Value::from_heap_ref(buffer.raw()),
+            Self::DataView(view) => Value::from_heap_ref(view.raw()),
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
@@ -1669,6 +1740,7 @@ pub(crate) struct VmTypes {
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array_buffer_data: GcType<ArrayBufferData>,
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
+    pub(crate) data_view_object: GcType<DataViewObject>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
@@ -1754,6 +1826,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) errors: [AtomId; NativeErrorKind::ALL.len()],
     pub(crate) array: AtomId,
     pub(crate) array_buffer: AtomId,
+    pub(crate) data_view: AtomId,
     pub(crate) object: AtomId,
     pub(crate) string: AtomId,
     pub(crate) regexp: AtomId,
@@ -1777,7 +1850,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 23
+    pub(crate) const BINDING_COUNT: usize = 24
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
         + GlobalUriFunction::ALL.len();
