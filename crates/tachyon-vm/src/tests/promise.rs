@@ -9,7 +9,7 @@ fn test_isolate() -> Isolate {
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
         HeapLimit::new(16 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
-        RealmLimits::new(64, 1_024).with_max_shapes(384),
+        RealmLimits::new(64, 1_024).with_max_shapes(512),
     ))
     .unwrap()
 }

@@ -8,7 +8,7 @@ use tachyon_vm::{
 };
 
 fn test_isolate() -> Isolate {
-    test_isolate_with_realm_limits(RealmLimits::new(64, 1_024).with_max_shapes(384))
+    test_isolate_with_realm_limits(RealmLimits::new(64, 1_024).with_max_shapes(512))
 }
 
 fn test_isolate_with_realm_limits(realm_limits: RealmLimits) -> Isolate {
@@ -47,7 +47,7 @@ fn execute_source_with_heap(
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
         heap_limit,
         StackLimits::new(64, 4_096),
-        RealmLimits::new(64, 1_024).with_max_shapes(384),
+        RealmLimits::new(64, 1_024).with_max_shapes(512),
     ))
     .expect("test isolate descriptors register");
     match isolate

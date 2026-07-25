@@ -56,4 +56,5 @@ mod property_keys;
 mod proxy;
 mod realm_gc;
 mod string_case;
+mod typed_array;
 mod uri;

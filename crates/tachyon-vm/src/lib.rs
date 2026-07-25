@@ -174,7 +174,7 @@ use iterator::{
 use object::{
     ArgumentsObject, BooleanObject, DateObject, NumberObject, OrdinaryObject, PropertyAttributes,
     PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject, ShapeId, ShapeTable,
-    StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
+    StringObject, SymbolId, SymbolObject, SymbolPropertyKey, TypedArrayKind,
 };
 use promise_combinator_state::{
     PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,

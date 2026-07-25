@@ -49,7 +49,7 @@ impl Isolate {
         let offset_value = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let offset = self.data_view_to_index(offset_value)?;
+        let offset = self.ecma_to_index(offset_value)?;
         if offset > buffer_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
@@ -57,7 +57,7 @@ impl Isolate {
             if value.as_immediate() == Some(Immediate::Undefined) {
                 buffer_length - offset
             } else {
-                self.data_view_to_index(value)?
+                self.ecma_to_index(value)?
             }
         } else {
             buffer_length - offset
@@ -124,7 +124,7 @@ impl Isolate {
         let offset_value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let offset = self.data_view_to_index(offset_value)?;
+        let offset = self.ecma_to_index(offset_value)?;
         let endian_value = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -143,7 +143,7 @@ impl Isolate {
         let offset_value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let offset = self.data_view_to_index(offset_value)?;
+        let offset = self.ecma_to_index(offset_value)?;
         let input = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -156,20 +156,6 @@ impl Isolate {
         let encoded = data_view_encode(element, number, little_endian);
         self.data_view_write_bytes(snapshot, offset, element.byte_width(), encoded)?;
         Ok(Value::from_immediate(Immediate::Undefined))
-    }
-
-    #[inline]
-    fn data_view_to_index(&mut self, value: Value) -> Result<usize, ExecutionError> {
-        let number = numeric_value(self.convert_to_number(value)?)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-        if number.is_nan() || number == 0.0 {
-            return Ok(0);
-        }
-        let integer = number.trunc();
-        if !integer.is_finite() || integer < 0.0 || integer > 9_007_199_254_740_991.0 {
-            return Err(ExecutionError::InvalidArrayLength);
-        }
-        usize::try_from(integer as u64).map_err(|_| ExecutionError::InvalidArrayLength)
     }
 
     /// Selects the new-target prototype with the current realm as fallback.
@@ -308,7 +294,7 @@ fn data_view_range(
 
 #[inline]
 /// Decodes a stack-local byte word without native-endian or unaligned loads.
-fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little: bool) -> Value {
+pub(super) fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little: bool) -> Value {
     let order2 = |input: [u8; 2]| {
         if little {
             u16::from_le_bytes(input)
@@ -350,7 +336,7 @@ fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little: bool) -> V
 
 #[inline]
 /// Encodes ECMAScript Number conversion results into a stack-local byte word.
-fn data_view_encode(element: DataViewElement, number: f64, little: bool) -> [u8; 8] {
+pub(super) fn data_view_encode(element: DataViewElement, number: f64, little: bool) -> [u8; 8] {
     let mut output = [0_u8; 8];
     let bits = match element {
         DataViewElement::Float32 => (number as f32).to_bits() as u64,

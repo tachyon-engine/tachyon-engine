@@ -4418,6 +4418,10 @@ impl Isolate {
                     let view = self.create_data_view_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, view);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayConstructor(kind)) => {
+                    let array = self.create_typed_array_from_site(&site, kind)?;
+                    return self.write(site.caller_base, site.destination, array);
+                }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
                 }
@@ -5917,6 +5921,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::DataViewConstructor) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::Native(
+                    NativeFunction::TypedArrayBaseConstructor
+                    | NativeFunction::TypedArrayConstructor(_),
+                ) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayBufferIsView) => {
                     let value = self
                         .call_argument(&site, 0)?
@@ -5947,6 +5957,10 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::DataViewSet(element)) => {
                     let value = self.data_view_set(&site, element)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayGetter(getter)) => {
+                    let value = self.typed_array_getter(site.this_value, getter)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {

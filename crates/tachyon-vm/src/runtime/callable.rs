@@ -1,7 +1,20 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
-use crate::object::{ArrayBufferData, ArrayBufferObject, DataViewObject};
+use crate::object::{
+    ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
+};
+
+/// Shared accessors installed on `%TypedArray.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayGetter {
+    Length,
+    Buffer,
+    ByteLength,
+    ByteOffset,
+    ToStringTag,
+}
 
 /// Number-backed element formats exposed by the fixed DataView implementation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,6 +316,9 @@ pub(crate) enum NativeFunction {
     DataViewByteOffset,
     DataViewGet(DataViewElement),
     DataViewSet(DataViewElement),
+    TypedArrayBaseConstructor,
+    TypedArrayConstructor(TypedArrayKind),
+    TypedArrayGetter(TypedArrayGetter),
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -722,6 +738,7 @@ impl NativeFunction {
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
                 | Self::DataViewConstructor
+                | Self::TypedArrayConstructor(_)
                 | Self::MapConstructor
                 | Self::SetConstructor
                 | Self::WeakMapConstructor
@@ -732,7 +749,8 @@ impl NativeFunction {
     /// Distinguishes constructibility from constructors that expose a default prototype object.
     #[inline(always)]
     pub(crate) const fn has_default_prototype(self) -> bool {
-        self.is_constructor() && !matches!(self, Self::ProxyConstructor)
+        matches!(self, Self::TypedArrayBaseConstructor)
+            || (self.is_constructor() && !matches!(self, Self::ProxyConstructor))
     }
 
     #[inline(always)]
@@ -751,7 +769,9 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
             Self::DateUtcSetter(setter) => setter.length(),
-            Self::ObjectDefineProperty | Self::ReflectDefineProperty => 3,
+            Self::ObjectDefineProperty
+            | Self::ReflectDefineProperty
+            | Self::TypedArrayConstructor(_) => 3,
             Self::ObjectDefineProperties => 2,
             Self::ObjectFromEntries => 1,
             Self::ObjectGroupBy => 2,
@@ -993,6 +1013,8 @@ impl NativeFunction {
             | Self::DataViewBuffer
             | Self::DataViewByteLength
             | Self::DataViewByteOffset
+            | Self::TypedArrayBaseConstructor
+            | Self::TypedArrayGetter(_)
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
@@ -1188,6 +1210,13 @@ impl NativeFunction {
             Self::DataViewByteOffset => "get byteOffset",
             Self::DataViewGet(element) => element.name(false),
             Self::DataViewSet(element) => element.name(true),
+            Self::TypedArrayBaseConstructor => "TypedArray",
+            Self::TypedArrayConstructor(kind) => kind.name(),
+            Self::TypedArrayGetter(TypedArrayGetter::Length) => "get length",
+            Self::TypedArrayGetter(TypedArrayGetter::Buffer) => "get buffer",
+            Self::TypedArrayGetter(TypedArrayGetter::ByteLength) => "get byteLength",
+            Self::TypedArrayGetter(TypedArrayGetter::ByteOffset) => "get byteOffset",
+            Self::TypedArrayGetter(TypedArrayGetter::ToStringTag) => "get [Symbol.toStringTag]",
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
@@ -1533,6 +1562,7 @@ pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
     ArrayBuffer(GcRef<ArrayBufferObject>),
     DataView(GcRef<DataViewObject>),
+    TypedArray(GcRef<TypedArrayObject>),
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
@@ -1559,6 +1589,7 @@ impl ObjectReceiver {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
             Self::ArrayBuffer(buffer) => Value::from_heap_ref(buffer.raw()),
             Self::DataView(view) => Value::from_heap_ref(view.raw()),
+            Self::TypedArray(array) => Value::from_heap_ref(array.raw()),
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
@@ -1741,6 +1772,7 @@ pub(crate) struct VmTypes {
     pub(crate) array_buffer_data: GcType<ArrayBufferData>,
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
     pub(crate) data_view_object: GcType<DataViewObject>,
+    pub(crate) typed_array_object: GcType<TypedArrayObject>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
@@ -1827,6 +1859,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) array: AtomId,
     pub(crate) array_buffer: AtomId,
     pub(crate) data_view: AtomId,
+    pub(crate) typed_arrays: [AtomId; TypedArrayKind::ALL.len()],
     pub(crate) object: AtomId,
     pub(crate) string: AtomId,
     pub(crate) regexp: AtomId,
@@ -1851,6 +1884,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 
 impl RealmIntrinsicAtoms {
     pub(crate) const BINDING_COUNT: usize = 24
+        + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
         + GlobalUriFunction::ALL.len();

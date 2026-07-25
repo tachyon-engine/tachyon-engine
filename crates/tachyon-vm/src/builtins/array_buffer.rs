@@ -181,6 +181,10 @@ impl Isolate {
             self.heap
                 .checked_reference(raw, self.types.data_view_object)
                 .is_ok()
+                || self
+                    .heap
+                    .checked_reference(raw, self.types.typed_array_object)
+                    .is_ok()
         });
         boolean_value(is_view)
     }

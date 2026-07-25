@@ -15,6 +15,7 @@ pub(crate) use accessor::{
 };
 pub(crate) use descriptor_parse::PendingDefineProperties;
 pub(crate) use descriptor_parse::PendingPropertyDescriptor;
+pub(crate) use keys::array_index;
 
 impl Isolate {
     #[inline(always)]
@@ -36,6 +37,9 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<Value>, ExecutionError> {
         let key = key.into();
+        if let Some(indexed) = self.typed_array_index_get(receiver, key)? {
+            return Ok(indexed);
+        }
         let mut current = if self.is_string_value(receiver) || self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {
@@ -108,6 +112,9 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<(Value, PropertyAttributes)>, ExecutionError> {
         let key = key.into();
+        if let Some(indexed) = self.typed_array_index_get(receiver, key)? {
+            return Ok(indexed.map(|value| (value, PropertyAttributes::data(true, true, true))));
+        }
         let (_, snapshot) = self.object_snapshot(receiver)?;
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             return Ok(self

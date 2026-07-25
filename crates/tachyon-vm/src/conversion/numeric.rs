@@ -470,7 +470,7 @@ pub(crate) fn safe_integer_value(value: u64) -> Value {
 }
 
 /// Parses ECMAScript numeric string forms after the string has been detached from the heap.
-pub(super) fn parse_number_code_units(units: &[u16]) -> f64 {
+pub(crate) fn parse_number_code_units(units: &[u16]) -> f64 {
     let Ok(text) = String::from_utf16(units) else {
         return f64::NAN;
     };

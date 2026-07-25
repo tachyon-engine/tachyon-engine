@@ -1250,6 +1250,18 @@ impl Isolate {
                 .is_ok()
         }) {
             "[object DataView]"
+        } else if self.is_typed_array_value(value) {
+            match self.typed_array_snapshot(value)?.kind {
+                TypedArrayKind::Int8 => "[object Int8Array]",
+                TypedArrayKind::Uint8 => "[object Uint8Array]",
+                TypedArrayKind::Uint8Clamped => "[object Uint8ClampedArray]",
+                TypedArrayKind::Int16 => "[object Int16Array]",
+                TypedArrayKind::Uint16 => "[object Uint16Array]",
+                TypedArrayKind::Int32 => "[object Int32Array]",
+                TypedArrayKind::Uint32 => "[object Uint32Array]",
+                TypedArrayKind::Float32 => "[object Float32Array]",
+                TypedArrayKind::Float64 => "[object Float64Array]",
+            }
         } else if value.as_heap_ref().is_some_and(|raw| {
             self.heap
                 .checked_reference(raw, self.types.arguments_object)

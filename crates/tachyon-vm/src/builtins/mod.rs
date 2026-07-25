@@ -15,6 +15,7 @@ mod promise_combinator;
 mod regexp;
 mod string;
 mod symbol;
+pub(crate) mod typed_array;
 mod uri;
 mod weak_collections;
 

@@ -172,6 +172,34 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        if self.is_typed_array_value(receiver) {
+            match self.typed_array_index(key)? {
+                crate::builtins::typed_array::TypedArrayIndex::NonNumeric => {}
+                crate::builtins::typed_array::TypedArrayIndex::Invalid => {
+                    return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Valid(index) => {
+                    if index >= self.typed_array_snapshot(receiver)?.length {
+                        return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+                    }
+                    let PropertyDescriptor::Data(data) = descriptor else {
+                        return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+                    };
+                    if data.configurable == Some(false)
+                        || data.enumerable == Some(false)
+                        || data.writable == Some(false)
+                    {
+                        return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+                    }
+                    if let Some(value) = data.value
+                        && self.typed_array_index_set(receiver, key, value)? != Some(true)
+                    {
+                        return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+                    }
+                    return Ok(());
+                }
+            }
+        }
         let mapped_value_before_freeze = match &descriptor {
             PropertyDescriptor::Data(data)
                 if data.writable == Some(false) && data.value.is_none() =>
@@ -706,6 +734,16 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<PropertyDescriptor>, ExecutionError> {
         let key = key.into();
+        if let Some(indexed) = self.typed_array_index_get(receiver, key)? {
+            return Ok(indexed.map(|value| {
+                PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                })
+            }));
+        }
         if self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {

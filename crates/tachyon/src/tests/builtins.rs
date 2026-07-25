@@ -750,7 +750,7 @@ fn array_filter_runs_resumable_callback_iteration() {
         AtomTableConfig::new(32_768, 1024 * 1024, AtomHashSeed::new(1, 2)),
         HeapLimit::new(8 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
-        RealmLimits::new(64, 1_024).with_max_shapes(384),
+        RealmLimits::new(64, 1_024).with_max_shapes(512),
     ))
     .unwrap();
     assert!(matches!(

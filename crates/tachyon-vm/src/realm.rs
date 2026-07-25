@@ -3,7 +3,8 @@
 mod string_iterator;
 
 use super::*;
-use crate::runtime::callable::DataViewElement;
+use crate::object::TypedArrayKind;
+use crate::runtime::callable::{DataViewElement, TypedArrayGetter};
 
 impl Isolate {
     /// Builds the object/function prototype graph and intrinsic constructors before publication.
@@ -31,6 +32,7 @@ impl Isolate {
         self.initialize_array_intrinsics()?;
         self.initialize_array_buffer_intrinsics()?;
         self.initialize_data_view_intrinsics()?;
+        self.initialize_typed_array_intrinsics()?;
         self.initialize_collection_intrinsics()?;
         self.initialize_math_intrinsics()?;
         self.initialize_json_intrinsics()?;
@@ -201,6 +203,113 @@ impl Isolate {
                 configurable: Some(true),
             },
         )
+    }
+
+    /// Builds the shared TypedArray hierarchy and concrete Number-view constructors.
+    fn initialize_typed_array_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before TypedArray");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before TypedArray");
+        let base_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.typed_array_prototype = Some(base_prototype);
+        let base_constructor = self.allocate_native_function(
+            NativeFunction::TypedArrayBaseConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.typed_array_base_constructor = Some(base_constructor);
+        self.set_function_prototype(base_constructor, base_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(base_prototype, constructor_atom, base_constructor, true)?;
+        self.install_species_accessor(base_constructor, function_prototype)?;
+        for (name, getter) in [
+            (b"length".as_slice(), TypedArrayGetter::Length),
+            (b"buffer".as_slice(), TypedArrayGetter::Buffer),
+            (b"byteLength".as_slice(), TypedArrayGetter::ByteLength),
+            (b"byteOffset".as_slice(), TypedArrayGetter::ByteOffset),
+        ] {
+            self.install_collection_accessor(
+                base_prototype,
+                function_prototype,
+                name,
+                NativeFunction::TypedArrayGetter(getter),
+            )?;
+        }
+        let tag_getter = self.allocate_native_function(
+            NativeFunction::TypedArrayGetter(TypedArrayGetter::ToStringTag),
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let tag = self.property_key(
+            self.realm
+                .well_known_symbols
+                .to_string_tag
+                .expect("Symbol.toStringTag initializes before TypedArray"),
+        )?;
+        self.define_property(
+            base_prototype,
+            tag,
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(tag_getter),
+                setter: Some(Value::from_immediate(Immediate::Undefined)),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )?;
+        let bytes_per_element = self.intern_intrinsic_name(b"BYTES_PER_ELEMENT")?;
+        for kind in TypedArrayKind::ALL {
+            let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: base_prototype,
+            })?;
+            let constructor = self.allocate_native_function(
+                NativeFunction::TypedArrayConstructor(kind),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: base_constructor,
+                },
+            )?;
+            self.realm.typed_array_prototypes[kind.index()] = Some(prototype);
+            self.realm.typed_array_constructors[kind.index()] = Some(constructor);
+            self.set_function_prototype(constructor, prototype)?;
+            self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+            let width = Value::from_i32(kind.byte_width() as i32);
+            for target in [constructor, prototype] {
+                self.define_data_property(
+                    target,
+                    bytes_per_element,
+                    DataPropertyDescriptor {
+                        value: Some(width),
+                        writable: Some(false),
+                        enumerable: Some(false),
+                        configurable: Some(false),
+                    },
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Builds Object constructor, Object.prototype, and the basic own-property native methods.
@@ -1303,6 +1412,17 @@ impl Isolate {
             array: self.intern_intrinsic_name(b"Array")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
             data_view: self.intern_intrinsic_name(b"DataView")?,
+            typed_arrays: [
+                self.intern_intrinsic_name(b"Int8Array")?,
+                self.intern_intrinsic_name(b"Uint8Array")?,
+                self.intern_intrinsic_name(b"Uint8ClampedArray")?,
+                self.intern_intrinsic_name(b"Int16Array")?,
+                self.intern_intrinsic_name(b"Uint16Array")?,
+                self.intern_intrinsic_name(b"Int32Array")?,
+                self.intern_intrinsic_name(b"Uint32Array")?,
+                self.intern_intrinsic_name(b"Float32Array")?,
+                self.intern_intrinsic_name(b"Float64Array")?,
+            ],
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,
             regexp: self.intern_intrinsic_name(b"RegExp")?,
@@ -2753,6 +2873,14 @@ impl Isolate {
                 .expect("DataView initializes before global publication"),
             true,
         )?;
+        for kind in TypedArrayKind::ALL {
+            self.realm.publish_intrinsic(
+                atoms.typed_arrays[kind.index()],
+                self.realm.typed_array_constructors[kind.index()]
+                    .expect("TypedArray constructor initializes before global publication"),
+                true,
+            )?;
+        }
         self.realm.publish_intrinsic(
             atoms.object,
             self.realm

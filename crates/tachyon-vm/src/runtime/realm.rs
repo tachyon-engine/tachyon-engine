@@ -1,6 +1,7 @@
 //! Realm bindings, intrinsic roots, and stable global slot identities.
 
 use super::super::*;
+use crate::object::TypedArrayKind;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct GlobalBinding {
@@ -122,6 +123,10 @@ pub(crate) struct Realm {
     pub(crate) array_buffer_is_view: Option<Value>,
     pub(crate) data_view_constructor: Option<Value>,
     pub(crate) data_view_prototype: Option<Value>,
+    pub(crate) typed_array_base_constructor: Option<Value>,
+    pub(crate) typed_array_prototype: Option<Value>,
+    pub(crate) typed_array_constructors: [Option<Value>; TypedArrayKind::ALL.len()],
+    pub(crate) typed_array_prototypes: [Option<Value>; TypedArrayKind::ALL.len()],
     pub(crate) array_prototype: Option<Value>,
     pub(crate) array_is_array: Option<Value>,
     pub(crate) array_concat: Option<Value>,
@@ -269,6 +274,10 @@ impl Realm {
             array_buffer_is_view: None,
             data_view_constructor: None,
             data_view_prototype: None,
+            typed_array_base_constructor: None,
+            typed_array_prototype: None,
+            typed_array_constructors: [None; TypedArrayKind::ALL.len()],
+            typed_array_prototypes: [None; TypedArrayKind::ALL.len()],
             array_prototype: None,
             array_is_array: None,
             array_concat: None,
@@ -651,6 +660,10 @@ impl Trace for Realm {
         self.array_buffer_is_view.trace(tracer);
         self.data_view_constructor.trace(tracer);
         self.data_view_prototype.trace(tracer);
+        self.typed_array_base_constructor.trace(tracer);
+        self.typed_array_prototype.trace(tracer);
+        self.typed_array_constructors.trace(tracer);
+        self.typed_array_prototypes.trace(tracer);
         self.array_prototype.trace(tracer);
         self.array_is_array.trace(tracer);
         self.array_concat.trace(tracer);

@@ -1,6 +1,7 @@
 //! Ordinary object slots, shapes, storage publication, and write barriers.
 
 use super::{super::*, accessor::StoredProperty};
+use crate::builtins::typed_array::TypedArrayIndex;
 
 #[derive(Clone, Copy)]
 struct RetainedProperty {
@@ -326,6 +327,15 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         let key = key.into();
+        if self.is_typed_array_value(receiver) {
+            match self.typed_array_index(key)? {
+                TypedArrayIndex::Valid(index) => {
+                    return Ok(index >= self.typed_array_snapshot(receiver)?.length);
+                }
+                TypedArrayIndex::Invalid => return Ok(true),
+                TypedArrayIndex::NonNumeric => {}
+            }
+        }
         if self.is_string_wrapper(receiver) {
             let length = self.length_atom()?;
             let existing_index = key.atom().is_some_and(|atom| {
@@ -725,6 +735,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::DataView(view), ordinary));
         }
+        if let Ok(array) = self
+            .heap
+            .checked_reference(raw, self.types.typed_array_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.typed_array_object)
+                        .map(|array| array.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::TypedArray(array), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -995,6 +1020,17 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::TypedArray(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(array, self.types.typed_array_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
                 let date = scope.root(date).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1218,6 +1254,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(view, self.types.data_view_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::TypedArray(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(array, self.types.typed_array_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1525,6 +1572,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::TypedArray(array) => self.heap.with_running_scope(|scope| {
+                let array = scope.root(array).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let array = no_gc
+                        .borrow_mut(array, self.types.typed_array_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    array.ordinary.shape = shape;
+                    array.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(array, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
             ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
                 let date = scope.root(date).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1821,6 +1889,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.data_view_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.typed_array_object)
                 .is_ok()
             || self
                 .heap

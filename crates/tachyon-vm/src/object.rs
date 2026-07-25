@@ -682,6 +682,84 @@ impl Trace for DataViewObject {
     }
 }
 
+/// Number element formats supported by fixed TypedArray views.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+impl TypedArrayKind {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Int8,
+        Self::Uint8,
+        Self::Uint8Clamped,
+        Self::Int16,
+        Self::Uint16,
+        Self::Int32,
+        Self::Uint32,
+        Self::Float32,
+        Self::Float64,
+    ];
+
+    #[inline(always)]
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[inline(always)]
+    pub(crate) const fn byte_width(self) -> usize {
+        match self {
+            Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
+            Self::Int16 | Self::Uint16 => 2,
+            Self::Int32 | Self::Uint32 | Self::Float32 => 4,
+            Self::Float64 => 8,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Int8 => "Int8Array",
+            Self::Uint8 => "Uint8Array",
+            Self::Uint8Clamped => "Uint8ClampedArray",
+            Self::Int16 => "Int16Array",
+            Self::Uint16 => "Uint16Array",
+            Self::Int32 => "Int32Array",
+            Self::Uint32 => "Uint32Array",
+            Self::Float32 => "Float32Array",
+            Self::Float64 => "Float64Array",
+        }
+    }
+}
+
+/// Integer-indexed exotic object carrying a fixed view into an ArrayBuffer.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct TypedArrayObject {
+    pub(crate) buffer: Value,
+    pub(crate) byte_offset: u32,
+    pub(crate) length: u32,
+    pub(crate) kind: TypedArrayKind,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
+impl Trace for TypedArrayObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.buffer.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
 /// Function activation arguments with an ordinary property base and stable exotic identity.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -766,7 +844,7 @@ mod tests {
 
     use super::{
         DataViewObject, DateObject, OrdinaryObject, PropertyAttributes, PropertyKey, PropertyKind,
-        ShapeId, ShapeTable, SymbolId,
+        ShapeId, ShapeTable, SymbolId, TypedArrayObject,
     };
     use crate::AtomId;
 
@@ -879,5 +957,6 @@ mod tests {
         assert_eq!(size_of::<OrdinaryObject>(), 24);
         assert_eq!(size_of::<DateObject>(), 32);
         assert_eq!(size_of::<DataViewObject>(), 40);
+        assert_eq!(size_of::<TypedArrayObject>(), 48);
     }
 }

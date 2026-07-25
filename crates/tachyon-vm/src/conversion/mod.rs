@@ -7,7 +7,7 @@ mod numeric;
 mod property_key;
 
 use super::*;
-use numeric::parse_number_code_units;
+pub(crate) use numeric::parse_number_code_units;
 
 pub(crate) use numeric::{
     numeric_binary, numeric_binary_hot, numeric_binary_operation, numeric_bitwise_not,
@@ -22,6 +22,20 @@ pub(super) enum ConversionCallbackResult {
 pub(crate) use native_property_key::PendingNativePropertyKey;
 
 impl Isolate {
+    /// Implements ToIndex for builtin view offsets and lengths without host-width wrapping.
+    pub(crate) fn ecma_to_index(&mut self, value: Value) -> Result<usize, ExecutionError> {
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        if number.is_nan() || number == 0.0 {
+            return Ok(0);
+        }
+        let integer = number.trunc();
+        if !integer.is_finite() || integer < 0.0 || integer > MAX_SAFE_INTEGER as f64 {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        usize::try_from(integer as u64).map_err(|_| ExecutionError::InvalidArrayLength)
+    }
+
     /// Executes one primitive constructor using the exact call argument window.
     pub(crate) fn primitive_constructor_value(
         &mut self,

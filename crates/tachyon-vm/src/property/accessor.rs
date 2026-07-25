@@ -302,6 +302,12 @@ impl Isolate {
         target: Value,
         key: PropertyKey,
     ) -> Result<PropertyReadResolution, ExecutionError> {
+        if let Some(indexed) = self.typed_array_index_get(target, key)? {
+            return Ok(PropertyReadResolution::Read(match indexed {
+                Some(value) => PropertyRead::Data(value),
+                None => PropertyRead::Missing,
+            }));
+        }
         if self.is_strict_arguments_restricted_property(target, key)? {
             return Err(ExecutionError::ReadOnlyProperty(target));
         }
@@ -475,6 +481,11 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
+        if let Some(written) = self.typed_array_index_set(receiver, key, value)? {
+            return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                written,
+            )));
+        }
         if self.is_strict_arguments_restricted_property(receiver, key)? {
             return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
                 false,

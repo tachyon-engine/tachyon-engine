@@ -63,6 +63,13 @@ impl Isolate {
             .is_string_wrapper(receiver)
             .then(|| self.string_value_length(receiver))
             .transpose()?;
+        let typed_array_length = self
+            .is_typed_array_value(receiver)
+            .then(|| {
+                self.typed_array_snapshot(receiver)
+                    .map(|array| array.length)
+            })
+            .transpose()?;
         let structural = self
             .shapes
             .own_keys(snapshot.shape)
@@ -79,6 +86,7 @@ impl Isolate {
             .len()
             .checked_add(missing_virtuals)
             .and_then(|capacity| capacity.checked_add(string_virtual_count))
+            .and_then(|capacity| capacity.checked_add(typed_array_length.unwrap_or(0)))
             .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
         let mut keys = Vec::new();
         keys.try_reserve_exact(capacity)
@@ -106,6 +114,16 @@ impl Isolate {
                 property: None,
                 rank: STRING_KEY_RANK | (1_u64 << 32),
             });
+        }
+        if let Some(length) = typed_array_length {
+            for index in 0..length {
+                let atom = self.safe_integer_property_atom(index as u64)?;
+                keys.push(RankedPropertyKey {
+                    key: PropertyKey::Atom(atom),
+                    property: None,
+                    rank: index as u64,
+                });
+            }
         }
         let mut structural = structural;
         let mut order = 0_usize;
