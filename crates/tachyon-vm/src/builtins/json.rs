@@ -3,6 +3,45 @@
 use super::super::*;
 
 const MAX_JSON_DEPTH: u32 = 256;
+const MAX_JSON_GAP_UNITS: usize = 10;
+
+#[derive(Clone, Copy, Debug)]
+struct JsonIndentation {
+    gap: [u16; MAX_JSON_GAP_UNITS],
+    gap_length: usize,
+}
+
+impl JsonIndentation {
+    #[inline(always)]
+    const fn compact() -> Self {
+        Self {
+            gap: [0; MAX_JSON_GAP_UNITS],
+            gap_length: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn is_compact(self) -> bool {
+        self.gap_length == 0
+    }
+
+    /// Appends one newline followed by the gap repeated for the requested nesting depth.
+    fn append_line_indent(self, depth: usize, output: &mut Vec<u16>) -> Result<(), ExecutionError> {
+        let indentation_length = self
+            .gap_length
+            .checked_mul(depth)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(ExecutionError::StringBufferAllocationFailed)?;
+        output
+            .try_reserve(indentation_length)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        output.push(u16::from(b'\n'));
+        for _ in 0..depth {
+            output.extend_from_slice(&self.gap[..self.gap_length]);
+        }
+        Ok(())
+    }
+}
 
 impl Isolate {
     /// Parses JSON text into ordinary engine values without accepting JavaScript syntax extensions.
@@ -31,9 +70,14 @@ impl Isolate {
         let value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let space = self
+            .call_argument(site, 2)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let indentation = self.json_primitive_indentation(space)?;
         let mut output = Vec::new();
         let mut stack = Vec::new();
-        let serialized = self.json_serialize_value(value, &mut stack, &mut output)?;
+        let serialized =
+            self.json_serialize_value(value, &mut stack, indentation, 0, &mut output)?;
         if !serialized {
             return Ok(Value::from_immediate(Immediate::Undefined));
         }
@@ -42,11 +86,29 @@ impl Isolate {
         self.allocate_runtime_string(string)
     }
 
+    /// Computes the JSON gap for a primitive String without invoking JavaScript.
+    fn json_primitive_indentation(
+        &mut self,
+        space: Value,
+    ) -> Result<JsonIndentation, ExecutionError> {
+        let mut indentation = JsonIndentation::compact();
+        if self.json_is_string(space) {
+            let mut units = Vec::new();
+            self.append_primitive_string_units(space, &mut units)?;
+            let length = units.len().min(MAX_JSON_GAP_UNITS);
+            indentation.gap[..length].copy_from_slice(&units[..length]);
+            indentation.gap_length = length;
+        }
+        Ok(indentation)
+    }
+
     /// Serializes one value, returning false only for top-level values represented by JSON undefined.
     fn json_serialize_value(
         &mut self,
         value: Value,
         stack: &mut Vec<Value>,
+        indentation: JsonIndentation,
+        depth: usize,
         output: &mut Vec<u16>,
     ) -> Result<bool, ExecutionError> {
         if let Some(immediate) = value.as_immediate() {
@@ -87,9 +149,9 @@ impl Isolate {
             .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
         stack.push(value);
         let result = if self.is_array_value(value)? {
-            self.json_serialize_array(value, stack, output)
+            self.json_serialize_array(value, stack, indentation, depth, output)
         } else {
-            self.json_serialize_object(value, stack, output)
+            self.json_serialize_object(value, stack, indentation, depth, output)
         };
         stack.pop();
         result.map(|()| true)
@@ -100,6 +162,8 @@ impl Isolate {
         &mut self,
         array: Value,
         stack: &mut Vec<Value>,
+        indentation: JsonIndentation,
+        depth: usize,
         output: &mut Vec<u16>,
     ) -> Result<(), ExecutionError> {
         output.push(u16::from(b'['));
@@ -112,13 +176,19 @@ impl Isolate {
             if index != 0 {
                 output.push(u16::from(b','));
             }
+            if !indentation.is_compact() {
+                indentation.append_line_indent(depth + 1, output)?;
+            }
             let key = self.property_key_atom(Value::from_i32(index))?;
             let value = self
                 .get_data_property(array, key)?
                 .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            if !self.json_serialize_value(value, stack, output)? {
+            if !self.json_serialize_value(value, stack, indentation, depth + 1, output)? {
                 output.extend(b"null".iter().copied().map(u16::from));
             }
+        }
+        if length != 0 && !indentation.is_compact() {
+            indentation.append_line_indent(depth, output)?;
         }
         output.push(u16::from(b']'));
         Ok(())
@@ -129,6 +199,8 @@ impl Isolate {
         &mut self,
         object: Value,
         stack: &mut Vec<Value>,
+        indentation: JsonIndentation,
+        depth: usize,
         output: &mut Vec<u16>,
     ) -> Result<(), ExecutionError> {
         output.push(u16::from(b'{'));
@@ -149,16 +221,31 @@ impl Isolate {
                 continue;
             };
             let mut property_output = Vec::new();
-            if !self.json_serialize_value(value, stack, &mut property_output)? {
+            if !self.json_serialize_value(
+                value,
+                stack,
+                indentation,
+                depth + 1,
+                &mut property_output,
+            )? {
                 continue;
             }
             if wrote_property {
                 output.push(u16::from(b','));
             }
+            if !indentation.is_compact() {
+                indentation.append_line_indent(depth + 1, output)?;
+            }
             self.json_quote_atom(key, output)?;
             output.push(u16::from(b':'));
+            if !indentation.is_compact() {
+                output.push(u16::from(b' '));
+            }
             output.extend_from_slice(&property_output);
             wrote_property = true;
+        }
+        if wrote_property && !indentation.is_compact() {
+            indentation.append_line_indent(depth, output)?;
         }
         output.push(u16::from(b'}'));
         Ok(())
@@ -496,13 +583,4 @@ const fn hex_value(unit: u16) -> Option<u16> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::hex_value;
-
-    #[test]
-    fn hex_escape_digits_are_ascii_only() {
-        assert_eq!(hex_value(u16::from(b'0')), Some(0));
-        assert_eq!(hex_value(u16::from(b'f')), Some(15));
-        assert_eq!(hex_value(u16::from(b'G')), None);
-    }
-}
+mod tests;
