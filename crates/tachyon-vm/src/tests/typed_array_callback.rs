@@ -170,6 +170,72 @@ var result = array.reduce(function(accumulator, value, index, receiver) {
 result === length && calls === length;
 "#;
 
+const BIGINT_TYPED_ARRAY_CALLBACK_SOURCE: &str = r#"
+function verify(TA, input, expected) {
+  var array = new TA(input);
+  var receiverOkay = true;
+  var types = "";
+  var thisArg = { marker: 17 };
+  var forEachResult = array.forEach(function(value, index, receiver) {
+    receiverOkay = receiverOkay && receiver === array && this === thisArg && value === expected[index];
+    types += typeof value;
+  }, thisArg);
+
+  var leftIndexes = "";
+  var leftAccumulator = array.reduce(function(accumulator, value, index, receiver) {
+    "use strict";
+    receiverOkay = receiverOkay && receiver === array && this === undefined &&
+      typeof accumulator === "bigint" && typeof value === "bigint" && value === expected[index];
+    leftIndexes += index;
+    return value;
+  });
+
+  var rightIndexes = "";
+  var rightAccumulator = array.reduceRight(function(accumulator, value, index, receiver) {
+    "use strict";
+    receiverOkay = receiverOkay && receiver === array && this === undefined &&
+      accumulator === thisArg && typeof value === "bigint" && value === expected[index];
+    rightIndexes += index;
+    return accumulator;
+  }, thisArg);
+
+  return receiverOkay && forEachResult === undefined &&
+    types === "bigintbigintbigint" && leftIndexes === "12" &&
+    leftAccumulator === expected[2] && rightIndexes === "210" && rightAccumulator === thisArg;
+}
+
+var signed = verify(
+  BigInt64Array,
+  [9223372036854775807n, 9223372036854775808n, 18446744073709551615n],
+  [9223372036854775807n, -9223372036854775808n, -1n]
+);
+var unsigned = verify(
+  BigUint64Array,
+  [-1n, 9223372036854775808n, 18446744073709551615n],
+  [18446744073709551615n, 9223372036854775808n, 18446744073709551615n]
+);
+var explicitUndefinedCalls = 0;
+var explicitUndefined = new BigInt64Array([7n]).reduce(function(accumulator, value) {
+  explicitUndefinedCalls++;
+  return accumulator === undefined && typeof value === "bigint" ? value : 99n;
+}, undefined);
+var live = new BigInt64Array([1n, 2n]);
+var liveOkay = true;
+live.forEach(function(value, index, receiver) {
+  if (index === 0) receiver[1] = 9n;
+  else liveOkay = typeof value === "bigint" && value === 9n;
+});
+var detached = new BigUint64Array([5n, 6n]);
+var detachedOkay = true;
+detached.reduce(function(accumulator, value, index, receiver) {
+  if (index === 0) $262.detachArrayBuffer(receiver.buffer);
+  else detachedOkay = value === undefined;
+  return accumulator;
+}, this);
+signed && unsigned && explicitUndefined === 7n && explicitUndefinedCalls === 1 &&
+  liveOkay && detachedOkay;
+"#;
+
 #[test]
 fn typed_array_callbacks_work_for_every_dispatch_batch() {
     assert_typed_array_callbacks::<1>(false);
@@ -203,6 +269,24 @@ fn typed_array_callback_loop_does_not_grow_rust_stack() {
     );
 }
 
+#[test]
+fn bigint_typed_array_callbacks_preserve_primitive_values() {
+    assert_bigint_typed_array_callbacks::<1>(false);
+    assert_bigint_typed_array_callbacks::<2>(false);
+    assert_bigint_typed_array_callbacks::<4>(false);
+    assert_bigint_typed_array_callbacks::<8>(false);
+    assert_bigint_typed_array_callbacks::<16>(false);
+}
+
+#[test]
+fn bigint_typed_array_callback_values_survive_forced_major_collection() {
+    assert_bigint_typed_array_callbacks::<1>(true);
+    assert_bigint_typed_array_callbacks::<2>(true);
+    assert_bigint_typed_array_callbacks::<4>(true);
+    assert_bigint_typed_array_callbacks::<8>(true);
+    assert_bigint_typed_array_callbacks::<16>(true);
+}
+
 /// Executes all callback modes, metadata, branding, and rooting under one policy.
 fn assert_typed_array_callbacks<const N: usize>(forced_major: bool) {
     let source = if forced_major {
@@ -229,6 +313,37 @@ fn assert_typed_array_callbacks<const N: usize>(forced_major: bool) {
             },
         )
         .expect("TypedArray callback fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        _ => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Exercises Number-free BigInt callback transport under one dispatch and GC policy.
+fn assert_bigint_typed_array_callbacks<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_callback_fixture(BIGINT_TYPED_ARRAY_CALLBACK_SOURCE);
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
+        .expect("detach host hook installs");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("BigInt TypedArray callback fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
         _ => None,
