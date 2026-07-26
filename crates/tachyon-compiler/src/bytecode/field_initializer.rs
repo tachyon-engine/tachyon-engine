@@ -208,7 +208,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
         | HirExpressionKind::Unary {
             argument: property, ..
         } => collect_expression(property, bindings),
-        HirExpressionKind::Yield(argument) => {
+        HirExpressionKind::Yield { argument, .. } => {
             if let Some(argument) = argument {
                 collect_expression(argument, bindings);
             }
@@ -263,6 +263,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
             }
         }
         HirExpressionKind::Number(_)
+        | HirExpressionKind::BigInt(_)
         | HirExpressionKind::String(_)
         | HirExpressionKind::RegExp { .. }
         | HirExpressionKind::Boolean(_)

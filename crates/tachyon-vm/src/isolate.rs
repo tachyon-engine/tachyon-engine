@@ -341,6 +341,9 @@ impl Isolate {
     ) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
+            bigint: registry
+                .try_register("BigIntValue")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             accessor_pair: registry
                 .try_register("AccessorPair")
                 .map_err(IsolateCreationError::TypeRegistration)?,

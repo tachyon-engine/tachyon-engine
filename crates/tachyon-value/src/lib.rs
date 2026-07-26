@@ -22,6 +22,9 @@ const TAG_MASK: u64 = 0x0007_0000_0000_0000;
 const PAYLOAD_MASK: u64 = 0x0000_ffff_ffff_ffff;
 const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 const LOW_U32_MASK: u64 = u32::MAX as u64;
+const SMALL_BIGINT_SIGN_BIT: u64 = 1_u64 << 47;
+const SMALL_BIGINT_MIN: i64 = -(1_i64 << 47);
+const SMALL_BIGINT_MAX: i64 = (1_i64 << 47) - 1;
 
 const _: [(); 8] = [(); core::mem::size_of::<Value>()];
 const _: [(); 4] = [(); core::mem::size_of::<RawHeapRef>()];
@@ -156,6 +159,7 @@ enum Tag {
     HeapRef = 0,
     Int32 = 1,
     Immediate = 2,
+    SmallBigInt = 3,
 }
 
 impl Tag {
@@ -164,6 +168,7 @@ impl Tag {
             0 => Some(Self::HeapRef),
             1 => Some(Self::Int32),
             2 => Some(Self::Immediate),
+            3 => Some(Self::SmallBigInt),
             _ => None,
         }
     }
@@ -176,6 +181,7 @@ pub enum ValueKind {
     HeapRef(RawHeapRef),
     Int32(i32),
     Immediate(Immediate),
+    SmallBigInt(i64),
 }
 
 /// A malformed raw bit pattern in the tagged NaN domain.
@@ -226,6 +232,19 @@ impl Value {
     #[must_use]
     pub const fn from_immediate(immediate: Immediate) -> Self {
         Self::from_tagged(Tag::Immediate, immediate as u8 as u64)
+    }
+
+    /// Encodes a signed 48-bit BigInt without allocating.
+    #[must_use]
+    #[inline(always)]
+    pub const fn from_small_bigint(value: i64) -> Option<Self> {
+        if value < SMALL_BIGINT_MIN || value > SMALL_BIGINT_MAX {
+            return None;
+        }
+        Some(Self::from_tagged(
+            Tag::SmallBigInt,
+            (value as u64) & PAYLOAD_MASK,
+        ))
     }
 
     /// Preserves raw bits for verifier/fuzzing boundaries; callers must use `decode` before trusting tags.
@@ -295,6 +314,22 @@ impl Value {
         }
     }
 
+    /// Returns the signed 48-bit BigInt payload without consulting the heap.
+    #[must_use]
+    #[inline(always)]
+    pub const fn as_small_bigint(self) -> Option<i64> {
+        if !self.is_tagged() || self.tag_bits() != Tag::SmallBigInt as u8 {
+            return None;
+        }
+        let payload = self.payload();
+        let extended = if payload & SMALL_BIGINT_SIGN_BIT == 0 {
+            payload
+        } else {
+            payload | !PAYLOAD_MASK
+        };
+        Some(extended as i64)
+    }
+
     /// Validates and classifies a value without dereferencing a heap reference.
     pub fn decode(self) -> Result<ValueKind, DecodeError> {
         if let Some(number) = self.as_f64() {
@@ -306,6 +341,10 @@ impl Value {
             Some(Tag::HeapRef) => Self::decode_heap_ref(payload),
             Some(Tag::Int32) => Self::decode_int32(payload),
             Some(Tag::Immediate) => Self::decode_immediate(payload),
+            Some(Tag::SmallBigInt) => Ok(ValueKind::SmallBigInt(
+                self.as_small_bigint()
+                    .expect("SmallBigInt tags accept every 48-bit payload"),
+            )),
             None => Err(DecodeError::ReservedTag(
                 ((self.0 & TAG_MASK) >> TAG_SHIFT) as u8,
             )),
@@ -369,8 +408,9 @@ impl fmt::Debug for Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        CANONICAL_NAN_BITS, DecodeError, Immediate, LOW_U32_MASK, PAYLOAD_MASK, RawHeapRef, SpanId,
-        SpanOffset, TAG_MASK, TAG_SHIFT, TAGGED_MASK, TAGGED_PREFIX, Value, ValueKind,
+        CANONICAL_NAN_BITS, DecodeError, Immediate, LOW_U32_MASK, PAYLOAD_MASK, RawHeapRef,
+        SMALL_BIGINT_MAX, SMALL_BIGINT_MIN, SpanId, SpanOffset, TAG_MASK, TAG_SHIFT, TAGGED_MASK,
+        TAGGED_PREFIX, Value, ValueKind,
     };
     use proptest::prelude::*;
 
@@ -406,6 +446,10 @@ mod tests {
             Some(Immediate::Null)
         );
         assert_eq!(Value::from_bits(0xfff9_0001_0000_0000).as_i32(), None);
+        assert_eq!(
+            Value::from_small_bigint(-42).unwrap().as_small_bigint(),
+            Some(-42)
+        );
     }
 
     #[test]
@@ -427,9 +471,30 @@ mod tests {
             Err(DecodeError::InvalidImmediatePayload(0x42))
         );
         assert_eq!(
-            Value::from_bits(0xfffb_0000_0000_0000).decode(),
-            Err(DecodeError::ReservedTag(3))
+            Value::from_bits(0xfffc_0000_0000_0000).decode(),
+            Err(DecodeError::ReservedTag(4))
         );
+    }
+
+    #[test]
+    fn small_bigint_boundaries_roundtrip_without_aliasing_other_tags() {
+        for integer in [
+            SMALL_BIGINT_MIN,
+            SMALL_BIGINT_MIN + 1,
+            -1,
+            0,
+            1,
+            SMALL_BIGINT_MAX,
+        ] {
+            let value = Value::from_small_bigint(integer).expect("boundary fits signed 48 bits");
+            assert_eq!(value.as_small_bigint(), Some(integer));
+            assert_eq!(value.decode(), Ok(ValueKind::SmallBigInt(integer)));
+            assert_eq!(value.as_i32(), None);
+            assert_eq!(value.as_heap_ref(), None);
+            assert_eq!(value.as_immediate(), None);
+        }
+        assert_eq!(Value::from_small_bigint(SMALL_BIGINT_MIN - 1), None);
+        assert_eq!(Value::from_small_bigint(SMALL_BIGINT_MAX + 1), None);
     }
 
     #[test]
@@ -545,6 +610,13 @@ mod tests {
         }
 
         #[test]
+        fn small_bigint_roundtrip(integer in SMALL_BIGINT_MIN..=SMALL_BIGINT_MAX) {
+            let value = Value::from_small_bigint(integer).expect("strategy stays within 48 bits");
+            prop_assert_eq!(value.as_small_bigint(), Some(integer));
+            prop_assert_eq!(value.decode(), Ok(ValueKind::SmallBigInt(integer)));
+        }
+
+        #[test]
         fn arbitrary_bits_match_independent_classification_oracle(bits in any::<u64>()) {
             assert_decode_matches_bits(bits);
         }
@@ -582,6 +654,14 @@ mod tests {
                 5 => assert_eq!(decoded, Ok(ValueKind::Immediate(Immediate::Uninitialized))),
                 _ => assert_eq!(decoded, Err(DecodeError::InvalidImmediatePayload(payload))),
             },
+            3 => {
+                let extended = if payload & (1_u64 << 47) == 0 {
+                    payload
+                } else {
+                    payload | !PAYLOAD_MASK
+                };
+                assert_eq!(decoded, Ok(ValueKind::SmallBigInt(extended as i64)));
+            }
             reserved => assert_eq!(decoded, Err(DecodeError::ReservedTag(reserved))),
         }
     }

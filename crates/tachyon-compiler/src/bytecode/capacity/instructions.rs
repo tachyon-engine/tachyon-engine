@@ -329,6 +329,18 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             3,
             "bytecode instructions",
         ),
+        HirExpressionKind::Yield { argument, delegate } => {
+            let argument = argument
+                .as_deref()
+                .map(expression_instruction_count)
+                .transpose()?
+                .unwrap_or(0);
+            checked_count_add(
+                argument,
+                if *delegate { 53 } else { 1 },
+                "bytecode instructions",
+            )
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

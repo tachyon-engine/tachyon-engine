@@ -12,6 +12,29 @@ fn string_constants(module: &tachyon_bytecode::CompiledModule) -> Vec<&[u16]> {
 }
 
 #[test]
+fn compiler_preserves_bigint_literals_as_exact_decimal_constants() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "0x10n; 1_000_000_000_000_000_000_000n;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let constants: Vec<_> = module
+        .constants()
+        .iter()
+        .filter_map(|constant| match constant {
+            tachyon_bytecode::BytecodeConstant::BigInt(value) => Some(value.as_ref()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(constants, ["16", "1000000000000000000000"]);
+}
+
+#[test]
 fn compiler_preserves_string_literal_utf16_code_units() {
     let module = Compiler
         .compile(

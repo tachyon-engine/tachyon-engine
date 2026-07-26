@@ -699,8 +699,10 @@ pub(super) fn validate_suspend_points(
                     offset: suspend_point.instruction,
                 },
             )?;
-        if !matches!(instruction.opcode, Opcode::Await | Opcode::Yield)
-            || instruction.operands[1] != suspend_point.destination.index()
+        if !matches!(
+            instruction.opcode,
+            Opcode::Await | Opcode::Yield | Opcode::YieldDelegate
+        ) || instruction.operands[1] != suspend_point.destination.index()
             || instruction.operands[2] != suspend_point.id.index()
             || suspend_point.resume_offset.index()
                 != suspend_point.instruction.index() + u32::from(instruction.word_len)
@@ -731,7 +733,10 @@ fn validate_suspend_opcodes(
                 offset: word_offset,
             }
         })?;
-        if matches!(decoded.opcode, Opcode::Await | Opcode::Yield) {
+        if matches!(
+            decoded.opcode,
+            Opcode::Await | Opcode::Yield | Opcode::YieldDelegate
+        ) {
             let is_compatible = match decoded.opcode {
                 Opcode::Await => matches!(
                     kind,
@@ -740,6 +745,7 @@ fn validate_suspend_opcodes(
                 Opcode::Yield => {
                     matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
                 }
+                Opcode::YieldDelegate => matches!(kind, FunctionKind::Generator),
                 _ => false,
             };
             if !is_compatible {
@@ -1023,6 +1029,19 @@ fn verify_instruction(
         Opcode::Await | Opcode::Yield => {
             check_register(operands[0])?;
             check_register(operands[1])?;
+        }
+        Opcode::YieldDelegate => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            check_register(
+                operands[1]
+                    .checked_add(1)
+                    .ok_or(VerifyError::RegisterOutOfRange {
+                        offset,
+                        register: u32::MAX,
+                        register_count: context.register_count,
+                    })?,
+            )?;
         }
         Opcode::JumpIfFalse | Opcode::JumpIfTrue | Opcode::JumpIfNotNullish => {
             check_register(operands[0])?

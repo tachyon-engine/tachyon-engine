@@ -42,6 +42,284 @@ struct PendingInstanceElement {
 }
 
 impl Lowerer<'_> {
+    /// Emits one suspend instruction and its immutable resume metadata side-table entry.
+    fn emit_suspend(
+        &mut self,
+        opcode: Opcode,
+        source: RegisterId,
+        destination: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let id = SuspendPointId::new(
+            u32::try_from(self.suspend_points.len()).map_err(|_| CompileError::RegisterOverflow)?,
+        );
+        let instruction = self
+            .builder
+            .emit(
+                opcode,
+                &[source.index(), destination.index(), id.index()],
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let resume_offset = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.suspend_points.push(SuspendPoint {
+            id,
+            instruction,
+            resume_offset,
+            destination,
+            completion_depth: self.finally_depth,
+        });
+        Ok(())
+    }
+
+    /// Expands `yield*` into a non-recursive delegated-iterator protocol loop.
+    fn yield_delegate(
+        &mut self,
+        source: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        const RESUME_NORMAL: u32 = 0;
+        const RESUME_RETURN: u32 = 1;
+        const RESUME_THROW: u32 = 2;
+
+        let iterator = self.get_sync_iterator(source, span)?;
+        let destination = self.register()?;
+        let received_value = self.register()?;
+        let received_kind = self.register()?;
+        let call_receiver = self.register()?;
+        let call_method = self.register()?;
+        let call_argument = self.register()?;
+        debug_assert_eq!(call_method.index(), call_receiver.index() + 1);
+        debug_assert_eq!(call_argument.index(), call_receiver.index() + 2);
+        let inner_result = self.register()?;
+        let undefined = self.register()?;
+        self.emit(Opcode::LoadUndefined, &[received_value.index()], span)?;
+        self.emit(
+            Opcode::LoadImmediate,
+            &[received_kind.index(), RESUME_NORMAL],
+            span,
+        )?;
+        self.emit(Opcode::LoadUndefined, &[undefined.index()], span)?;
+        self.emit(
+            Opcode::Move,
+            &[call_receiver.index(), iterator.iterator.index()],
+            span,
+        )?;
+
+        let loop_start = self.new_label()?;
+        let normal = self.new_label()?;
+        let throwing = self.new_label()?;
+        let returning = self.new_label()?;
+        let have_throw = self.new_label()?;
+        let have_close = self.new_label()?;
+        let have_return = self.new_label()?;
+        let process_result = self.new_label()?;
+        let yield_result = self.new_label()?;
+        let return_completed = self.new_label()?;
+        let end = self.new_label()?;
+
+        self.bind_label(loop_start)?;
+        self.branch_resume_kind(received_kind, RESUME_NORMAL, normal, span)?;
+        self.branch_resume_kind(received_kind, RESUME_THROW, throwing, span)?;
+        self.emit_jump(returning, span)?;
+
+        self.bind_label(normal)?;
+        self.prepare_delegate_call(
+            iterator.iterator,
+            iterator.next,
+            received_value,
+            call_receiver,
+            span,
+        )?;
+        self.call_delegate(inner_result, call_receiver, 1, span)?;
+        self.emit_jump(process_result, span)?;
+
+        self.bind_label(throwing)?;
+        self.load_delegate_method(iterator.iterator, "throw", call_method, span)?;
+        self.jump_if_not_nullish(call_method, have_throw, span)?;
+        self.load_delegate_method(iterator.iterator, "return", call_method, span)?;
+        self.jump_if_not_nullish(call_method, have_close, span)?;
+        self.emit(Opcode::CheckObject, &[undefined.index()], span)?;
+
+        self.bind_label(have_close)?;
+        let close_result = self.register()?;
+        self.call_delegate(close_result, call_receiver, 0, span)?;
+        self.emit(Opcode::CheckObject, &[close_result.index()], span)?;
+        self.emit(Opcode::CheckObject, &[undefined.index()], span)?;
+
+        self.bind_label(have_throw)?;
+        self.prepare_delegate_argument(received_value, call_receiver, span)?;
+        self.call_delegate(inner_result, call_receiver, 1, span)?;
+        self.emit_jump(process_result, span)?;
+
+        self.bind_label(returning)?;
+        self.load_delegate_method(iterator.iterator, "return", call_method, span)?;
+        self.jump_if_not_nullish(call_method, have_return, span)?;
+        self.emit(Opcode::Return, &[received_value.index()], span)?;
+
+        self.bind_label(have_return)?;
+        self.prepare_delegate_argument(received_value, call_receiver, span)?;
+        self.call_delegate(inner_result, call_receiver, 1, span)?;
+
+        self.bind_label(process_result)?;
+        self.emit(Opcode::CheckObject, &[inner_result.index()], span)?;
+        let done = self.load_delegate_property(inner_result, "done", span)?;
+        self.builder
+            .emit_jump_if_false(done, yield_result, self.bytecode_span(span))
+            .map_err(CompileError::Builder)?;
+        let value = self.load_delegate_property(inner_result, "value", span)?;
+        self.branch_resume_kind(received_kind, RESUME_RETURN, return_completed, span)?;
+        self.emit(Opcode::Move, &[destination.index(), value.index()], span)?;
+        self.emit_jump(end, span)?;
+
+        self.bind_label(return_completed)?;
+        self.emit(Opcode::Return, &[value.index()], span)?;
+
+        self.bind_label(yield_result)?;
+        self.emit_suspend(Opcode::YieldDelegate, inner_result, received_value, span)?;
+        self.emit_jump(loop_start, span)?;
+        self.bind_label(end)?;
+        Ok(destination)
+    }
+
+    /// Allocates one bytecode label while preserving compiler error ownership.
+    fn new_label(&mut self) -> Result<Label, CompileError> {
+        self.builder.new_label().map_err(CompileError::Builder)
+    }
+
+    /// Binds one bytecode label while preserving compiler error ownership.
+    fn bind_label(&mut self, label: Label) -> Result<(), CompileError> {
+        self.builder
+            .bind_label(label)
+            .map_err(CompileError::Builder)
+    }
+
+    /// Converts a HIR source span for direct builder branch emission.
+    fn bytecode_span(&self, span: SourceSpan) -> BytecodeSourceSpan {
+        BytecodeSourceSpan {
+            start: span.start,
+            end: span.end,
+        }
+    }
+
+    /// Branches when a delegated-resume discriminator equals the requested kind.
+    fn branch_resume_kind(
+        &mut self,
+        received_kind: RegisterId,
+        expected: u32,
+        target: Label,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let expected = self.load_immediate(expected, span)?;
+        let matches = self.emit_binary(
+            HirBinaryOperator::StrictEqual,
+            received_kind,
+            expected,
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(matches, target, self.bytecode_span(span))
+            .map(|_| ())
+            .map_err(CompileError::Builder)
+    }
+
+    /// Loads one delegated iterator method into the fixed receiver call window.
+    fn load_delegate_method(
+        &mut self,
+        iterator: RegisterId,
+        name: &str,
+        method: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let atom = self.scope_name(&std::sync::Arc::from(name))?;
+        self.emit(
+            Opcode::GetById,
+            &[method.index(), iterator.index(), atom],
+            span,
+        )
+    }
+
+    /// Branches when a delegated iterator method is neither null nor undefined.
+    fn jump_if_not_nullish(
+        &mut self,
+        method: RegisterId,
+        target: Label,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.builder
+            .emit_jump_if_not_nullish(method, target, self.bytecode_span(span))
+            .map(|_| ())
+            .map_err(CompileError::Builder)
+    }
+
+    /// Copies the normal delegation call into a contiguous receiver/callee/argument window.
+    fn prepare_delegate_call(
+        &mut self,
+        iterator: RegisterId,
+        method: RegisterId,
+        argument: RegisterId,
+        receiver: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.emit(Opcode::Move, &[receiver.index(), iterator.index()], span)?;
+        let callee = RegisterId::new(receiver.index() + 1);
+        self.emit(Opcode::Move, &[callee.index(), method.index()], span)?;
+        self.prepare_delegate_argument(argument, receiver, span)
+    }
+
+    /// Copies one delegated resume value into the fixed argument register.
+    fn prepare_delegate_argument(
+        &mut self,
+        argument: RegisterId,
+        receiver: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let argument_slot = RegisterId::new(receiver.index() + 2);
+        self.emit(
+            Opcode::Move,
+            &[argument_slot.index(), argument.index()],
+            span,
+        )
+    }
+
+    /// Invokes a method from the fixed delegated receiver window.
+    fn call_delegate(
+        &mut self,
+        destination: RegisterId,
+        receiver: RegisterId,
+        argument_count: u32,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        self.emit(
+            Opcode::CallWithReceiver,
+            &[destination.index(), receiver.index(), argument_count],
+            span,
+        )
+    }
+
+    /// Loads an observable property from one validated delegated iterator result.
+    fn load_delegate_property(
+        &mut self,
+        object: RegisterId,
+        name: &str,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let destination = self.register()?;
+        let atom = self.scope_name(&std::sync::Arc::from(name))?;
+        self.emit(
+            Opcode::GetById,
+            &[destination.index(), object.index(), atom],
+            span,
+        )?;
+        Ok(destination)
+    }
+
     /// Emits a strict return expression while propagating tail position through spec forms.
     pub(in crate::bytecode) fn tail_expression(
         &mut self,
@@ -155,6 +433,18 @@ impl Lowerer<'_> {
                     )?;
                     Ok(register)
                 }
+            }
+            HirExpressionKind::BigInt(value) => {
+                let constant = u32::try_from(self.constants.len())
+                    .map_err(|_| CompileError::ConstantOverflow)?;
+                self.constants.push(BytecodeConstant::BigInt(value.clone()));
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::LoadConstant,
+                    &[destination.index(), constant],
+                    expression.span,
+                )?;
+                Ok(destination)
             }
             HirExpressionKind::String(value) => {
                 let mut code_units = Vec::new();
@@ -390,39 +680,18 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
-            HirExpressionKind::Yield(argument) => {
+            HirExpressionKind::Yield { argument, delegate } => {
                 let source = match argument {
                     Some(argument) => self.expression(argument)?,
                     None => self.load_undefined(expression.span)?,
                 };
-                let destination = self.register()?;
-                let id = SuspendPointId::new(
-                    u32::try_from(self.suspend_points.len())
-                        .map_err(|_| CompileError::RegisterOverflow)?,
-                );
-                let instruction = self
-                    .builder
-                    .emit(
-                        Opcode::Yield,
-                        &[source.index(), destination.index(), id.index()],
-                        tachyon_bytecode::SourceSpan {
-                            start: expression.span.start,
-                            end: expression.span.end,
-                        },
-                    )
-                    .map_err(CompileError::Builder)?;
-                let resume_offset = self
-                    .builder
-                    .current_offset()
-                    .map_err(CompileError::Builder)?;
-                self.suspend_points.push(SuspendPoint {
-                    id,
-                    instruction,
-                    resume_offset,
-                    destination,
-                    completion_depth: self.finally_depth,
-                });
-                Ok(destination)
+                if *delegate {
+                    self.yield_delegate(source, expression.span)
+                } else {
+                    let destination = self.register()?;
+                    self.emit_suspend(Opcode::Yield, source, destination, expression.span)?;
+                    Ok(destination)
+                }
             }
             HirExpressionKind::Sequence(expressions) => {
                 let mut result = None;

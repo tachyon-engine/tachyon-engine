@@ -27,6 +27,7 @@ mod array_splice;
 mod array_static;
 mod array_to_sorted;
 mod atom;
+mod bigint;
 mod bound_function;
 mod builtins;
 mod collection;
@@ -159,6 +160,7 @@ use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
 use array_static::PendingArrayStatic;
 use array_to_sorted::PendingArrayToSorted;
+use bigint::BigIntValue;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
@@ -464,6 +466,9 @@ pub enum ExecutionError {
     SymbolRegistryAllocationFailed,
     ArrayLengthOverflow,
     InvalidArrayLength,
+    InvalidBigIntLiteral,
+    InvalidBigIntValue(Value),
+    BigIntAllocationFailed,
     TypedArraySpeciesResultTooShort,
     DetachedArrayBuffer,
     TypedArraySetAllocationFailed,

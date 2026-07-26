@@ -269,11 +269,14 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         }
         HirExpressionKind::SuperStaticMember(_) => Ok(1),
         HirExpressionKind::SuperComputedMember(property) => expression_scope_name_count(property),
-        HirExpressionKind::Yield(argument) => argument
-            .as_deref()
-            .map(expression_scope_name_count)
-            .transpose()
-            .map(|count| count.unwrap_or(0)),
+        HirExpressionKind::Yield { argument, delegate } => {
+            let argument = argument
+                .as_deref()
+                .map(expression_scope_name_count)
+                .transpose()?
+                .unwrap_or(0);
+            checked_count_add(argument, if *delegate { 5 } else { 0 }, "scope names")
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -441,6 +444,7 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             Ok(count)
         }
         HirExpressionKind::Number(_)
+        | HirExpressionKind::BigInt(_)
         | HirExpressionKind::String(_)
         | HirExpressionKind::RegExp { .. }
         | HirExpressionKind::Boolean(_)
@@ -752,7 +756,7 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             }
             Ok(count)
         }
-        HirExpressionKind::Number(_) => Ok(1),
+        HirExpressionKind::Number(_) | HirExpressionKind::BigInt(_) => Ok(1),
         HirExpressionKind::Binary { left, right, .. } => checked_count_add(
             expression_literal_count(left)?,
             expression_literal_count(right)?,

@@ -1329,6 +1329,14 @@ impl Isolate {
             output.extend(printed.bytes().map(u16::from));
             return Ok(());
         }
+        if self.is_bigint_value(value) {
+            let decimal = self.bigint_decimal_bytes(value)?;
+            output
+                .try_reserve(decimal.len())
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            output.extend(decimal.into_iter().map(u16::from));
+            return Ok(());
+        }
         if self.is_symbol_value(value) {
             return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
         }
@@ -1420,6 +1428,11 @@ impl Isolate {
             } else {
                 buffer.format(number).len()
             });
+        }
+        if self.is_bigint_value(value) {
+            return self
+                .bigint_decimal_bytes(value)
+                .map(|decimal| decimal.len());
         }
         if self.is_string_value(value) {
             return self.string_value_length(value);
@@ -1639,6 +1652,9 @@ impl Isolate {
         if value.as_i32().is_some() || value.as_f64().is_some() {
             return Ok(strings.number);
         }
+        if self.is_bigint_value(value) {
+            return Ok(strings.bigint);
+        }
         if let Some(immediate) = value.as_immediate() {
             return match immediate {
                 Immediate::Undefined => Ok(strings.undefined),
@@ -1721,6 +1737,15 @@ impl Isolate {
             (Some(_), None) | (None, Some(_)) => return Ok(false),
             (None, None) => {}
         }
+        let left_bigint = self.is_bigint_value(left);
+        let right_bigint = self.is_bigint_value(right);
+        if left_bigint || right_bigint {
+            return if left_bigint && right_bigint {
+                self.bigint_equal(left, right)
+            } else {
+                Ok(false)
+            };
+        }
         if left == right {
             return Ok(true);
         }
@@ -1775,6 +1800,11 @@ pub(crate) fn strict_equal_hot(left: Value, right: Value) -> Option<bool> {
         (Some(_), None) | (None, Some(_)) => return Some(false),
         (None, None) => {}
     }
+    match (left.as_small_bigint(), right.as_small_bigint()) {
+        (Some(left), Some(right)) => return Some(left == right),
+        (Some(_), None) | (None, Some(_)) => return Some(false),
+        (None, None) => {}
+    }
     if left == right {
         return Some(true);
     }
@@ -1800,6 +1830,9 @@ pub(crate) fn is_non_string_truthy(value: Value) -> bool {
     }
     if let Some(number) = value.as_f64() {
         return number != 0.0 && !number.is_nan();
+    }
+    if let Some(bigint) = value.as_small_bigint() {
+        return bigint != 0;
     }
     !matches!(
         value.as_immediate(),

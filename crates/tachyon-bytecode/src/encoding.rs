@@ -297,9 +297,11 @@ pub enum Opcode {
     LoadIteratorSymbol = 125,
     /// Throws a language-level TypeError unless the selected register contains an Object.
     CheckObject = 126,
+    /// Forwards a delegated iterator result and resumes into adjacent value/kind registers.
+    YieldDelegate = 127,
 }
 
-pub(super) const OPCODE_COUNT: usize = 127;
+pub(super) const OPCODE_COUNT: usize = 128;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -428,10 +430,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // CreateDataPropertyByValue
     1, // LoadIteratorSymbol
     1, // CheckObject
+    3, // YieldDelegate
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CheckObject as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::YieldDelegate as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -604,6 +607,7 @@ impl Opcode {
             60 => Some(Self::CreateDataPropertyByValue),
             61 => Some(Self::LoadIteratorSymbol),
             62 => Some(Self::CheckObject),
+            63 => Some(Self::YieldDelegate),
             _ => None,
         }
     }

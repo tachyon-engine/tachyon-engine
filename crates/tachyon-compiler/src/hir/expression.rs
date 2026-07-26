@@ -182,6 +182,7 @@ pub enum HirAssignmentOperator {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirExpressionKind {
     Number(u64),
+    BigInt(Arc<str>),
     String(Arc<[u16]>),
     RegExp {
         pattern: Arc<str>,
@@ -194,7 +195,10 @@ pub enum HirExpressionKind {
     Class(HirClass),
     This,
     NewTarget,
-    Yield(Option<Box<HirExpression>>),
+    Yield {
+        argument: Option<Box<HirExpression>>,
+        delegate: bool,
+    },
     Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
     ObjectSpread(Arc<[HirObjectExpressionPart]>),
@@ -318,6 +322,9 @@ pub(super) fn lower_expression(
     let span = source_span(expression.span());
     let kind = match expression {
         Expression::NumericLiteral(literal) => HirExpressionKind::Number(literal.value.to_bits()),
+        Expression::BigIntLiteral(literal) => {
+            HirExpressionKind::BigInt(Arc::from(literal.value.as_str()))
+        }
         Expression::StringLiteral(literal) => {
             HirExpressionKind::String(super::copy_string_literal(literal, source)?)
         }
@@ -410,19 +417,15 @@ pub(super) fn lower_expression(
         {
             HirExpressionKind::NewTarget
         }
-        Expression::YieldExpression(expression) => {
-            if expression.delegate {
-                return Err(unsupported(source.name(), span, "delegated yield"));
-            }
-            HirExpressionKind::Yield(
-                expression
-                    .argument
-                    .as_ref()
-                    .map(|argument| lower_expression(argument, source, semantic, functions))
-                    .transpose()?
-                    .map(Box::new),
-            )
-        }
+        Expression::YieldExpression(expression) => HirExpressionKind::Yield {
+            argument: expression
+                .argument
+                .as_ref()
+                .map(|argument| lower_expression(argument, source, semantic, functions))
+                .transpose()?
+                .map(Box::new),
+            delegate: expression.delegate,
+        },
         Expression::SequenceExpression(sequence) => {
             let mut expressions = Vec::with_capacity(sequence.expressions.len());
             for expression in &sequence.expressions {

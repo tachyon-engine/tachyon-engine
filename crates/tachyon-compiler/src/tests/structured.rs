@@ -586,7 +586,7 @@ fn compiler_freezes_generator_function_kind() {
 }
 
 #[test]
-/// Owns ordinary yield HIR and publishes contiguous verified resume metadata without yield*.
+/// Publishes verified resume metadata for ordinary and delegated generator suspension.
 fn compiler_emits_generator_yield_suspend_points() {
     let module_source = source(
         MediaType::JavaScript,
@@ -625,22 +625,33 @@ fn compiler_emits_generator_yield_suspend_points() {
     let disassembly = tachyon_bytecode::disassemble(function).unwrap();
     assert!(disassembly.contains("Yield"));
 
-    let error = Compiler
-        .lower_to_hir(
+    let delegated = Compiler
+        .compile(
             source(
                 MediaType::JavaScript,
-                "function* delegated(values) { yield* values; }",
+                "function* delegated(values) { return yield* values; } delegated;",
             ),
             CompileOptions::default(),
         )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        CompileError::UnsupportedSyntax {
-            syntax: "delegated yield",
-            ..
-        }
-    ));
+        .unwrap();
+    let function = &delegated.functions()[1];
+    let [point] = function.suspend_points() else {
+        panic!("expected one delegated suspend point");
+    };
+    let instruction = tachyon_bytecode::decode_instruction(
+        function.bytecode().bytecode().words(),
+        point.instruction,
+    )
+    .unwrap();
+    assert_eq!(instruction.opcode, tachyon_bytecode::Opcode::YieldDelegate);
+    assert_eq!(instruction.operands[1], point.destination.index());
+    assert!(instruction.operands[1] + 1 < function.layout().register_count);
+    assert_eq!(instruction.operands[2], point.id.index());
+    assert!(
+        tachyon_bytecode::disassemble(function)
+            .unwrap()
+            .contains("YieldDelegate")
+    );
 }
 
 #[test]

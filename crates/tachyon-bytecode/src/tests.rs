@@ -182,6 +182,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::InitializeEnvironment,
             ],
         ),
+        (3, &[Opcode::YieldDelegate]),
         (
             2,
             &[
@@ -1280,6 +1281,57 @@ fn compiled_module_rejects_invalid_pool_and_suspend_references() {
     assert!(matches!(
         error,
         ModuleBuildError::SuspendPointMissing { .. }
+    ));
+}
+
+#[test]
+fn yield_delegate_requires_generator_and_adjacent_resume_registers() {
+    let build = |kind, register_count| {
+        let mut words = encode_instruction(Opcode::YieldDelegate, &[0, 1, 0]).unwrap();
+        let instruction = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let mut metadata = FunctionMetadata::new(
+            kind,
+            FunctionLayout {
+                register_count,
+                ..FunctionLayout::default()
+            },
+        );
+        metadata.suspend_points = vec![SuspendPoint {
+            id: SuspendPointId::new(0),
+            instruction: WordOffset::new(0),
+            resume_offset: WordOffset::new(u32::from(instruction.word_len)),
+            destination: RegisterId::new(1),
+            completion_depth: 0,
+        }]
+        .into();
+        CompiledModule::new(
+            Arc::from("yield-delegate"),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                metadata,
+            )],
+            FunctionId::new(0),
+        )
+    };
+
+    build(FunctionKind::Generator, 3).expect("generator delegation verifies");
+    assert!(matches!(
+        build(FunctionKind::Script, 3),
+        Err(ModuleBuildError::SuspendInIncompatibleFunction {
+            opcode: Opcode::YieldDelegate,
+            ..
+        })
+    ));
+    assert!(matches!(
+        build(FunctionKind::Generator, 2),
+        Err(ModuleBuildError::VerifyFunction {
+            error: VerifyError::RegisterOutOfRange { register: 2, .. },
+            ..
+        })
     ));
 }
 

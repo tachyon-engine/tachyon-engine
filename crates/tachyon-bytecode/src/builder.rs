@@ -407,6 +407,19 @@ impl BytecodeBuilder {
                 )?;
                 return Ok(());
             }
+            Opcode::YieldDelegate => {
+                for &index in &[0, 1] {
+                    if let Some(&register) = operands.get(index) {
+                        self.note_register(register)?;
+                    }
+                }
+                self.note_register(
+                    operands[1]
+                        .checked_add(1)
+                        .ok_or(BuilderError::RegisterCountOverflow)?,
+                )?;
+                return Ok(());
+            }
             Opcode::Await | Opcode::Yield => &[0, 1],
         };
         for &index in indexes {

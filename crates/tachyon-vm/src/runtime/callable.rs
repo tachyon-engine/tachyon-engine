@@ -2026,6 +2026,7 @@ impl Trace for FunctionObject {
 
 #[derive(Clone, Copy)]
 pub(crate) struct VmTypes {
+    pub(crate) bigint: GcType<BigIntValue>,
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array_buffer_data: GcType<ArrayBufferData>,
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,

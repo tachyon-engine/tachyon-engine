@@ -268,6 +268,14 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, r{}, suspend={}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::YieldDelegate => write!(
+            output,
+            " result=r{}, resume=r{}..r{}, suspend={}",
+            operands[0],
+            operands[1],
+            operands[1] + 1,
+            operands[2]
+        )?,
     }
     Ok(())
 }

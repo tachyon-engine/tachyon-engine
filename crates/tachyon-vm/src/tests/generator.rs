@@ -204,6 +204,238 @@ startReturnOk && startThrowOk && completedOk && caughtOk && returnFinallyOk &&
     executingThrowOk && metadataOk && returnBrandOk && throwBrandOk;
 "#;
 
+const GENERATOR_DELEGATE_SOURCE: &str = r#"
+function iterable(iterator) {
+    var value = {};
+    value[Symbol.iterator] = function() { return iterator; };
+    return value;
+}
+
+var firstResult = { value: 1, done: false };
+var nextCalls = 0;
+var firstArgumentOk = false;
+var nextIterator = {};
+nextIterator.next = function(value) {
+    nextCalls = nextCalls + 1;
+    if (nextCalls === 1) {
+        firstArgumentOk = value === undefined;
+        return firstResult;
+    }
+    return { value: value + 1, done: true };
+};
+function* nextDelegate() { return yield* iterable(nextIterator); }
+var nextGenerator = nextDelegate();
+var nextFirst = nextGenerator.next(999);
+var nextSecond = nextGenerator.next(7);
+var nextOk = nextFirst === firstResult && firstArgumentOk && nextCalls === 2 &&
+    nextSecond.value === 8 && nextSecond.done;
+
+var returnResult = { value: 2, done: false };
+var returnCalls = 0;
+var returnNextCalls = 0;
+var returnIterator = {};
+returnIterator.next = function(value) {
+    returnNextCalls = returnNextCalls + 1;
+    if (returnNextCalls === 1) return { value: 1, done: false };
+    return { value: value + 10, done: true };
+};
+returnIterator.return = function(value) {
+    returnCalls = returnCalls + 1;
+    return value === 5 ? returnResult : { value: 99, done: true };
+};
+function* returnDelegate() { return yield* iterable(returnIterator); }
+var returnGenerator = returnDelegate();
+returnGenerator.next();
+var returnFirst = returnGenerator.return(5);
+var returnSecond = returnGenerator.next(6);
+var returnOk = returnFirst === returnResult && returnCalls === 1 &&
+    returnNextCalls === 2 && returnSecond.value === 16 && returnSecond.done;
+
+var throwResult = { value: 3, done: false };
+var throwCalls = 0;
+var throwNextCalls = 0;
+var throwMarker = {};
+var throwIterator = {};
+throwIterator.next = function(value) {
+    throwNextCalls = throwNextCalls + 1;
+    if (throwNextCalls === 1) return { value: 1, done: false };
+    return { value: value, done: true };
+};
+throwIterator.throw = function(value) {
+    throwCalls = throwCalls + 1;
+    return value === throwMarker ? throwResult : { value: 100, done: true };
+};
+function* throwDelegate() { return yield* iterable(throwIterator); }
+var throwGenerator = throwDelegate();
+throwGenerator.next();
+var throwFirst = throwGenerator.throw(throwMarker);
+var throwSecond = throwGenerator.next(9);
+var throwOk = throwFirst === throwResult && throwCalls === 1 && throwNextCalls === 2 &&
+    throwSecond.value === 9 && throwSecond.done;
+
+var completedReturnIterator = {};
+completedReturnIterator.next = function() { return { value: 1, done: false }; };
+completedReturnIterator.return = function(value) { return { value: value + 1, done: true }; };
+function* completedReturnDelegate() { return yield* iterable(completedReturnIterator); }
+var completedReturnGenerator = completedReturnDelegate();
+completedReturnGenerator.next();
+var completedReturn = completedReturnGenerator.return(20);
+var completedReturnOk = completedReturn.value === 21 && completedReturn.done;
+
+var completedThrowIterator = {};
+completedThrowIterator.next = function() { return { value: 1, done: false }; };
+completedThrowIterator.throw = function(value) { return { value: value, done: true }; };
+function* completedThrowDelegate() { return yield* iterable(completedThrowIterator); }
+var completedThrowGenerator = completedThrowDelegate();
+completedThrowGenerator.next();
+var completedThrow = completedThrowGenerator.throw(throwMarker);
+var completedThrowOk = completedThrow.value === throwMarker && completedThrow.done;
+
+var missingReturnIterator = {};
+missingReturnIterator.next = function() { return { value: 1, done: false }; };
+function* missingReturnDelegate() { return yield* iterable(missingReturnIterator); }
+var missingReturnGenerator = missingReturnDelegate();
+missingReturnGenerator.next();
+var missingReturn = missingReturnGenerator.return(22);
+var missingReturnOk = missingReturn.value === 22 && missingReturn.done;
+
+var closeCalls = 0;
+var missingThrowIterator = {};
+missingThrowIterator.next = function() { return { value: 1, done: false }; };
+missingThrowIterator.return = function() { closeCalls = closeCalls + 1; return {}; };
+function* missingThrowDelegate() { return yield* iterable(missingThrowIterator); }
+var missingThrowGenerator = missingThrowDelegate();
+missingThrowGenerator.next();
+var missingThrowOk = false;
+try { missingThrowGenerator.throw(throwMarker); }
+catch (error) { missingThrowOk = error instanceof TypeError && closeCalls === 1; }
+
+var primitiveIterator = {};
+primitiveIterator.next = function() { return 1; };
+function* primitiveDelegate() { return yield* iterable(primitiveIterator); }
+var primitiveOk = false;
+try { primitiveDelegate().next(); }
+catch (error) { primitiveOk = error instanceof TypeError; }
+
+var finallyCount = 0;
+var protectedIterator = {};
+protectedIterator.next = function() { return { value: 1, done: false }; };
+protectedIterator.return = function(value) { return { value: value, done: true }; };
+function* protectedDelegate() {
+    try { return yield* iterable(protectedIterator); }
+    finally { finallyCount = finallyCount + 1; }
+}
+var protectedGenerator = protectedDelegate();
+protectedGenerator.next();
+var protectedResult = protectedGenerator.return(23);
+var protectedOk = protectedResult.value === 23 && protectedResult.done && finallyCount === 1;
+
+function* innerDelegate() { yield 30; return 31; }
+function* outerDelegate() { return yield* innerDelegate(); }
+var nestedGenerator = outerDelegate();
+var nestedFirst = nestedGenerator.next();
+var nestedSecond = nestedGenerator.next();
+var nestedOk = nestedFirst.value === 30 && !nestedFirst.done &&
+    nestedSecond.value === 31 && nestedSecond.done;
+
+nextOk && returnOk && throwOk && completedReturnOk && completedThrowOk &&
+    missingReturnOk && missingThrowOk && primitiveOk && protectedOk && nestedOk;
+"#;
+
+const GENERATOR_DELEGATE_ERRORS_SOURCE: &str = r#"
+function iterable(iterator) {
+    var value = {};
+    value[Symbol.iterator] = function() { return iterator; };
+    return value;
+}
+function start(iterator) {
+    function* delegate() { return yield* iterable(iterator); }
+    var generator = delegate();
+    generator.next();
+    return generator;
+}
+
+var marker = {};
+var absentIterator = {};
+absentIterator.next = function() { return { value: 1, done: false }; };
+var absentOk = false;
+try { start(absentIterator).throw(marker); }
+catch (error) { absentOk = error instanceof TypeError; }
+
+var primitiveCloseCalls = 0;
+var primitiveCloseIterator = {};
+primitiveCloseIterator.next = function() { return { value: 1, done: false }; };
+primitiveCloseIterator.return = function() { primitiveCloseCalls = primitiveCloseCalls + 1; return 1; };
+var primitiveCloseOk = false;
+try { start(primitiveCloseIterator).throw(marker); }
+catch (error) { primitiveCloseOk = error instanceof TypeError && primitiveCloseCalls === 1; }
+
+var closeGetterMarker = {};
+var closeGetterIterator = {
+    get return() { throw closeGetterMarker; }
+};
+closeGetterIterator.next = function() { return { value: 1, done: false }; };
+var closeGetterOk = false;
+try { start(closeGetterIterator).throw(marker); }
+catch (error) { closeGetterOk = error === closeGetterMarker; }
+
+var closeCallMarker = {};
+var closeCallIterator = {};
+closeCallIterator.next = function() { return { value: 1, done: false }; };
+closeCallIterator.return = function() { throw closeCallMarker; };
+var closeCallOk = false;
+try { start(closeCallIterator).throw(marker); }
+catch (error) { closeCallOk = error === closeCallMarker; }
+
+var unexpectedCloseCalls = 0;
+var throwGetterMarker = {};
+var throwGetterIterator = {
+    get throw() { throw throwGetterMarker; }
+};
+throwGetterIterator.next = function() { return { value: 1, done: false }; };
+throwGetterIterator.return = function() { unexpectedCloseCalls = unexpectedCloseCalls + 1; return {}; };
+var throwGetterOk = false;
+try { start(throwGetterIterator).throw(marker); }
+catch (error) { throwGetterOk = error === throwGetterMarker && unexpectedCloseCalls === 0; }
+
+var throwCallMarker = {};
+var throwCallIterator = {};
+throwCallIterator.next = function() { return { value: 1, done: false }; };
+throwCallIterator.throw = function() { throw throwCallMarker; };
+throwCallIterator.return = function() { unexpectedCloseCalls = unexpectedCloseCalls + 1; return {}; };
+var throwCallOk = false;
+try { start(throwCallIterator).throw(marker); }
+catch (error) { throwCallOk = error === throwCallMarker && unexpectedCloseCalls === 0; }
+
+var primitiveThrowIterator = {};
+primitiveThrowIterator.next = function() { return { value: 1, done: false }; };
+primitiveThrowIterator.throw = function() { return 1; };
+var primitiveThrowOk = false;
+try { start(primitiveThrowIterator).throw(marker); }
+catch (error) { primitiveThrowOk = error instanceof TypeError; }
+
+var primitiveReturnIterator = {};
+primitiveReturnIterator.next = function() { return { value: 1, done: false }; };
+primitiveReturnIterator.return = function() { return 1; };
+var primitiveReturnOk = false;
+try { start(primitiveReturnIterator).return(marker); }
+catch (error) { primitiveReturnOk = error instanceof TypeError; }
+
+var caughtFinally = 0;
+function* caughtDelegate() {
+    try { return yield* iterable(absentIterator); }
+    catch (error) { return error instanceof TypeError; }
+    finally { caughtFinally = caughtFinally + 1; }
+}
+var caughtGenerator = caughtDelegate();
+caughtGenerator.next();
+var caughtResult = caughtGenerator.throw(marker);
+var caughtOk = caughtResult.value === true && caughtResult.done && caughtFinally === 1;
+
+absentOk && primitiveCloseOk && closeGetterOk && closeCallOk && throwGetterOk &&
+    throwCallOk && primitiveThrowOk && primitiveReturnOk && caughtOk;
+"#;
+
 #[test]
 fn generator_return_slice_runs_for_every_dispatch_batch() {
     assert_generator_source::<1>(false);
@@ -246,6 +478,34 @@ fn generator_abrupt_completions_survive_forced_major_collection() {
     assert_generator_abrupt_source::<8>(true);
 }
 
+#[test]
+fn generator_delegate_protocol_runs_for_every_dispatch_batch() {
+    assert_generator_delegate_source::<1>(false);
+    assert_generator_delegate_source::<2>(false);
+    assert_generator_delegate_source::<4>(false);
+    assert_generator_delegate_source::<8>(false);
+    assert_generator_delegate_source::<16>(false);
+}
+
+#[test]
+fn generator_delegate_state_survives_forced_major_collection() {
+    assert_generator_delegate_source::<8>(true);
+}
+
+#[test]
+fn generator_delegate_error_precedence_runs_for_every_dispatch_batch() {
+    assert_generator_delegate_errors::<1>(false);
+    assert_generator_delegate_errors::<2>(false);
+    assert_generator_delegate_errors::<4>(false);
+    assert_generator_delegate_errors::<8>(false);
+    assert_generator_delegate_errors::<16>(false);
+}
+
+#[test]
+fn generator_delegate_error_roots_survive_forced_major_collection() {
+    assert_generator_delegate_errors::<8>(true);
+}
+
 /// Repeats both abrupt kinds without growing the native stack or retaining completed Fibers.
 #[test]
 fn generator_abrupt_large_loop_uses_constant_native_stack() {
@@ -268,6 +528,28 @@ while (index < 512) {
 valid;
 "#;
     let (_, outcome) = execute_generator_fixture_with_heap(2_503, source, 64);
+    assert_eq!(outcome.as_immediate(), Some(Immediate::True));
+}
+
+/// Repeats nested delegated Fibers without growing the native Rust call stack.
+#[test]
+fn generator_delegate_large_loop_uses_constant_native_stack() {
+    let source = r#"
+function* inner(value) { yield value; return value + 1; }
+function* outer(value) { return yield* inner(value); }
+var index = 0;
+var valid = true;
+while (index < 512) {
+    var generator = outer(index);
+    var first = generator.next();
+    var second = generator.next();
+    valid = valid && first.value === index && !first.done &&
+        second.value === index + 1 && second.done;
+    index = index + 1;
+}
+valid;
+"#;
+    let (_, outcome) = execute_generator_fixture_with_heap(2_504, source, 64);
     assert_eq!(outcome.as_immediate(), Some(Immediate::True));
 }
 
@@ -440,6 +722,74 @@ fn assert_generator_abrupt_source<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "abrupt dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Compiles and runs delegated next/return/throw forwarding under one dispatch policy.
+fn assert_generator_delegate_source<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_800 + N as u32),
+                SourceName::new("generator-delegate-slice"),
+                MediaType::JavaScript,
+                Arc::from(GENERATOR_DELEGATE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("generator delegate fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 500_000,
+                quantum: 500_000,
+            },
+        )
+        .expect("generator delegate fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "delegate dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Runs delegated close/error precedence and catch/finally routing under one dispatch policy.
+fn assert_generator_delegate_errors<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_900 + N as u32),
+                SourceName::new("generator-delegate-errors"),
+                MediaType::JavaScript,
+                Arc::from(GENERATOR_DELEGATE_ERRORS_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("generator delegate error fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 500_000,
+                quantum: 500_000,
+            },
+        )
+        .expect("generator delegate error fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "delegate error batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

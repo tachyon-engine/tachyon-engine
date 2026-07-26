@@ -35,6 +35,7 @@ mod array_splice;
 mod array_static;
 mod array_to_sorted;
 mod assign;
+mod bigint;
 mod calls;
 mod class;
 mod control;

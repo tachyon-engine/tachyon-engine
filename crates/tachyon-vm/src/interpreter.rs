@@ -153,6 +153,15 @@ impl Isolate {
                         }
                     }
                 }
+                BytecodeConstant::BigInt(decimal) => {
+                    match self.allocate_bigint_code_constant(decimal, &mut constant_values) {
+                        Ok(value) => Some(value),
+                        Err(error) => {
+                            self.atoms.rollback(checkpoint);
+                            return Err(error);
+                        }
+                    }
+                }
                 _ => None,
             };
             constant_values.push(value);
@@ -722,7 +731,7 @@ impl Isolate {
                     .ok_or(ExecutionError::UnsupportedConstant(operands[1]))?;
                 let value = match constant {
                     BytecodeConstant::NumberBits(bits) => Value::from_f64(f64::from_bits(bits)),
-                    BytecodeConstant::String(_) => self
+                    BytecodeConstant::String(_) | BytecodeConstant::BigInt(_) => self
                         .loaded_code(code)?
                         .constant_values
                         .get(constant_index)
@@ -732,7 +741,6 @@ impl Isolate {
                     BytecodeConstant::RegExp { pattern, flags } => {
                         self.create_regexp_literal(&pattern, flags)?
                     }
-                    _ => return Err(ExecutionError::UnsupportedConstant(operands[1])),
                 };
                 self.write(base, operands[0], value)?;
             }
@@ -750,7 +758,10 @@ impl Isolate {
             }
             Opcode::Negate => {
                 let input = self.read(base, operands[1])?;
-                if self.is_object_value(input) {
+                if self.is_bigint_value(input) {
+                    let value = self.negate_bigint(input)?;
+                    self.write(base, operands[0], value)?;
+                } else if self.is_object_value(input) {
                     self.dispatch_object_primitive_conversion(
                         ConversionConsumer::Negate,
                         base,
@@ -1752,14 +1763,27 @@ impl Isolate {
                 return self.throw_value(value, instruction_offset);
             }
             Opcode::Yield => {
-                self.suspend_generator_yield(
+                self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
                     code,
-                    instruction_offset,
-                    operands[0],
-                    operands[1],
-                    operands[2],
+                    instruction: instruction_offset,
+                    source: operands[0],
+                    destination: operands[1],
+                    kind_destination: None,
+                    suspend_id: operands[2],
                     base,
-                )?;
+                })?;
+                return Ok(None);
+            }
+            Opcode::YieldDelegate => {
+                self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
+                    code,
+                    instruction: instruction_offset,
+                    source: operands[0],
+                    destination: operands[1],
+                    kind_destination: operands[1].checked_add(1),
+                    suspend_id: operands[2],
+                    base,
+                })?;
                 return Ok(None);
             }
             Opcode::EnterFinally => {
@@ -8375,6 +8399,16 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
             }
             Opcode::Negate | Opcode::BitwiseNot | Opcode::ToNumber => {
                 let input = registers.read(operands[1]);
+                if instruction.opcode == Opcode::Negate
+                    && let Some(bigint) = input.as_small_bigint()
+                {
+                    let Some(value) = bigint.checked_neg().and_then(Value::from_small_bigint)
+                    else {
+                        return HotControl::Slow;
+                    };
+                    registers.write(operands[0], value);
+                    return HotControl::Continue;
+                }
                 if numeric_value(input).is_none() {
                     return HotControl::Slow;
                 }

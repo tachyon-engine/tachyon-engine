@@ -803,6 +803,14 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             Ok(count)
         }
         HirExpressionKind::SuperComputedMember(property) => expression_label_count(property),
+        HirExpressionKind::Yield { argument, delegate } => {
+            let argument = argument
+                .as_deref()
+                .map(expression_label_count)
+                .transpose()?
+                .unwrap_or(0);
+            checked_count_add(argument, if *delegate { 11 } else { 0 }, "bytecode labels")
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

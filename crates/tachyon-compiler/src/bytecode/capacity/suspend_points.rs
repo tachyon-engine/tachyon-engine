@@ -187,7 +187,7 @@ fn pattern_suspend_point_count(pattern: &HirPattern) -> Result<usize, CompileErr
 /// Counts one expression and every same-function child in evaluation order.
 fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, CompileError> {
     match &expression.kind {
-        HirExpressionKind::Yield(argument) => add(
+        HirExpressionKind::Yield { argument, .. } => add(
             1,
             argument
                 .as_deref()
@@ -308,6 +308,7 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
         ),
         HirExpressionKind::SuperCall(arguments) => expression_list_count(arguments),
         HirExpressionKind::Number(_)
+        | HirExpressionKind::BigInt(_)
         | HirExpressionKind::String(_)
         | HirExpressionKind::RegExp { .. }
         | HirExpressionKind::Boolean(_)

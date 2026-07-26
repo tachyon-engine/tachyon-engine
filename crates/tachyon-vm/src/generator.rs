@@ -41,6 +41,18 @@ struct PreparedGeneratorResume {
     abrupt: Option<InjectedGeneratorAbrupt>,
 }
 
+/// Complete bytecode location and register contract for one generator suspension.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GeneratorSuspendSite {
+    pub(crate) code: CodeId,
+    pub(crate) instruction: WordOffset,
+    pub(crate) source: u32,
+    pub(crate) destination: u32,
+    pub(crate) kind_destination: Option<u32>,
+    pub(crate) suspend_id: u32,
+    pub(crate) base: u32,
+}
+
 /// Spec-visible ordinary generator execution state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -85,6 +97,7 @@ pub(crate) struct GeneratorObject {
     caller: Option<Fiber>,
     paused: Option<Fiber>,
     resume_destination: Option<u32>,
+    resume_kind_destination: Option<u32>,
     resume_instruction: Option<WordOffset>,
     pub(crate) state: GeneratorState,
 }
@@ -105,6 +118,7 @@ impl GeneratorObject {
             caller: None,
             paused: None,
             resume_destination: None,
+            resume_kind_destination: None,
             resume_instruction: None,
             state: GeneratorState::SuspendedStart,
         }
@@ -494,12 +508,7 @@ impl Isolate {
     /// Suspends the active generator fiber and publishes one observable `{ value, done: false }`.
     pub(crate) fn suspend_generator_yield(
         &mut self,
-        code: CodeId,
-        instruction: tachyon_bytecode::WordOffset,
-        source: u32,
-        destination: u32,
-        suspend_id: u32,
-        base: u32,
+        site: GeneratorSuspendSite,
     ) -> Result<(), ExecutionError> {
         let frame = self
             .fiber
@@ -518,21 +527,35 @@ impl Isolate {
             .native_at(continuation_index)
             .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
         let generator = self.generator_reference(continuation.first())?;
-        let value = self.read(base, source)?;
+        let value = self.read(site.base, site.source)?;
         let point = self
-            .loaded_code(code)?
+            .loaded_code(site.code)?
             .module
             .function(frame.function)
-            .and_then(|function| function.suspend_points().get(suspend_id as usize).copied())
+            .and_then(|function| {
+                function
+                    .suspend_points()
+                    .get(site.suspend_id as usize)
+                    .copied()
+            })
             .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
-        if point.instruction != instruction
-            || point.destination.index() != destination
+        if point.instruction != site.instruction
+            || point.destination.index() != site.destination
             || point.resume_offset != frame.pc
+            || site
+                .kind_destination
+                .is_some_and(|kind| kind != site.destination.saturating_add(1))
         {
             return Err(ExecutionError::UnsupportedGeneratorYieldResume);
         }
         let paused = core::mem::take(&mut self.fiber);
-        let caller = match self.set_generator_paused(generator, paused, destination, instruction) {
+        let caller = match self.set_generator_paused(
+            generator,
+            paused,
+            site.destination,
+            site.kind_destination,
+            site.instruction,
+        ) {
             Ok(caller) => caller,
             Err(rollback) => {
                 self.fiber = rollback.fiber;
@@ -540,7 +563,11 @@ impl Isolate {
             }
         };
         self.fiber = caller;
-        let result = self.create_iterator_result(value, false)?;
+        let result = if site.kind_destination.is_some() {
+            value
+        } else {
+            self.create_iterator_result(value, false)?
+        };
         self.write(
             continuation.site().caller_base,
             continuation.site().destination,
@@ -576,6 +603,7 @@ impl Isolate {
                 let instruction = generator
                     .resume_instruction
                     .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let kind_destination = generator.resume_kind_destination;
                 let paused = generator
                     .paused
                     .as_mut()
@@ -591,8 +619,10 @@ impl Isolate {
                     .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
                     as usize;
                 let destination_index = frame.base as usize + destination as usize;
-                if matches!(resume, GeneratorResume::Next(_))
-                    && destination_index >= paused.registers.len()
+                let kind_destination_index =
+                    kind_destination.map(|kind| frame.base as usize + kind as usize);
+                if destination_index >= paused.registers.len()
+                    || kind_destination_index.is_some_and(|index| index >= paused.registers.len())
                 {
                     return Err(ExecutionError::InvalidRegister(
                         tachyon_bytecode::RegisterId::new(destination),
@@ -604,19 +634,38 @@ impl Isolate {
                 {
                     return Err(ExecutionError::UnsupportedGeneratorYieldResume);
                 }
-                let abrupt = match resume {
-                    GeneratorResume::Next(value) => {
+                let abrupt = match (resume, kind_destination_index) {
+                    (GeneratorResume::Next(value), None) => {
                         paused.registers[destination_index] = value;
                         None
                     }
-                    GeneratorResume::Abrupt(completion) => Some(InjectedGeneratorAbrupt {
+                    (GeneratorResume::Abrupt(completion), None) => Some(InjectedGeneratorAbrupt {
                         completion,
                         instruction,
                     }),
+                    (GeneratorResume::Next(value), Some(kind)) => {
+                        paused.registers[destination_index] = value;
+                        paused.registers[kind] = Value::from_i32(0);
+                        None
+                    }
+                    (GeneratorResume::Abrupt(completion), Some(kind)) => {
+                        let value = completion
+                            .value()
+                            .ok_or(ExecutionError::MissingCompletionRecord)?;
+                        let resume_kind = match completion.kind() {
+                            CompletionKind::Return => 1,
+                            CompletionKind::Throw => 2,
+                            _ => return Err(ExecutionError::MissingCompletionRecord),
+                        };
+                        paused.registers[destination_index] = value;
+                        paused.registers[kind] = Value::from_i32(resume_kind);
+                        None
+                    }
                 };
                 generator.state = GeneratorState::Executing;
                 generator.caller = caller.take();
                 generator.resume_destination = None;
+                generator.resume_kind_destination = None;
                 generator.resume_instruction = None;
                 Ok(PreparedGeneratorResume {
                     fiber: generator
@@ -643,6 +692,7 @@ impl Isolate {
         generator: GcRef<GeneratorObject>,
         paused: Fiber,
         destination: u32,
+        kind_destination: Option<u32>,
         instruction: WordOffset,
     ) -> Result<Fiber, FiberTransferError> {
         let mut paused = Some(paused);
@@ -655,6 +705,7 @@ impl Isolate {
                 if generator.caller.is_none()
                     || generator.paused.is_some()
                     || generator.resume_destination.is_some()
+                    || generator.resume_kind_destination.is_some()
                     || generator.resume_instruction.is_some()
                 {
                     return Err(ExecutionError::UnsupportedGeneratorYieldResume);
@@ -665,6 +716,7 @@ impl Isolate {
                     .expect("validated generator caller remains present");
                 generator.paused = paused.take();
                 generator.resume_destination = Some(destination);
+                generator.resume_kind_destination = kind_destination;
                 generator.resume_instruction = Some(instruction);
                 generator.state = GeneratorState::SuspendedYield;
                 Ok(caller)
@@ -741,9 +793,9 @@ impl Isolate {
             }
         };
         self.fiber = prepared.fiber;
-        let abrupt = prepared
-            .abrupt
-            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        let Some(abrupt) = prepared.abrupt else {
+            return Ok(());
+        };
         match self.dispatch_abrupt(abrupt.completion, abrupt.instruction) {
             Ok(None) => Ok(()),
             Ok(Some(crate::RunOutcome::Thrown(value))) => Err(ExecutionError::HostThrown(value)),
