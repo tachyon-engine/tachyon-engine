@@ -117,6 +117,9 @@ pub(crate) struct Realm {
     pub(crate) function_prototype: Option<Value>,
     pub(crate) function_prototype_call: Option<Value>,
     pub(crate) function_prototype_bind: Option<Value>,
+    pub(crate) generator_function_prototype: Option<Value>,
+    pub(crate) generator_prototype: Option<Value>,
+    pub(crate) generator_next: Option<Value>,
     pub(crate) array_constructor: Option<Value>,
     pub(crate) array_buffer_constructor: Option<Value>,
     pub(crate) array_buffer_prototype: Option<Value>,
@@ -158,6 +161,7 @@ pub(crate) struct Realm {
     pub(crate) array_values: Option<Value>,
     pub(crate) array_entries: Option<Value>,
     pub(crate) array_iterator_prototype: Option<Value>,
+    pub(crate) iterator_prototype: Option<Value>,
     pub(crate) array_iterator_next: Option<Value>,
     pub(crate) iterator_identity: Option<Value>,
     pub(crate) string_iterator_prototype: Option<Value>,
@@ -282,6 +286,9 @@ impl Realm {
             function_prototype: None,
             function_prototype_call: None,
             function_prototype_bind: None,
+            generator_function_prototype: None,
+            generator_prototype: None,
+            generator_next: None,
             array_constructor: None,
             array_buffer_constructor: None,
             array_buffer_prototype: None,
@@ -323,6 +330,7 @@ impl Realm {
             array_values: None,
             array_entries: None,
             array_iterator_prototype: None,
+            iterator_prototype: None,
             array_iterator_next: None,
             iterator_identity: None,
             string_iterator_prototype: None,
@@ -682,6 +690,9 @@ impl Trace for Realm {
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
         self.function_prototype_bind.trace(tracer);
+        self.generator_function_prototype.trace(tracer);
+        self.generator_prototype.trace(tracer);
+        self.generator_next.trace(tracer);
         self.array_constructor.trace(tracer);
         self.array_buffer_constructor.trace(tracer);
         self.array_buffer_prototype.trace(tracer);
@@ -723,6 +734,7 @@ impl Trace for Realm {
         self.array_values.trace(tracer);
         self.array_entries.trace(tracer);
         self.array_iterator_prototype.trace(tracer);
+        self.iterator_prototype.trace(tracer);
         self.array_iterator_next.trace(tracer);
         self.iterator_identity.trace(tracer);
         self.string_iterator_prototype.trace(tracer);

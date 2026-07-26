@@ -652,11 +652,11 @@ pub(super) fn lower_function_stencil(
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.generator || function.r#async {
+    if function.r#async {
         return Err(unsupported(
             source.name(),
             source_span(function.span),
-            "generator/async/rest function",
+            "async function",
         ));
     }
     let body = function.body.as_ref().ok_or_else(|| {
@@ -726,7 +726,11 @@ pub(super) fn lower_function_stencil(
                     .any(|directive| directive.expression.value.as_str() == "use strict")
             }),
         is_arrow: false,
-        kind: super::program::HirFunctionKind::Ordinary,
+        kind: if function.generator {
+            super::program::HirFunctionKind::Generator
+        } else {
+            super::program::HirFunctionKind::Ordinary
+        },
         initialize_instance_elements: false,
     });
     Ok(id)

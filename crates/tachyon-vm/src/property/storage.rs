@@ -1114,6 +1114,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::SignalWatcher(signal), ordinary));
         }
+        if let Ok(generator) = self
+            .heap
+            .checked_reference(raw, self.types.generator_object)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(generator, self.types.generator_object)
+                        .map(|generator| generator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Generator(generator), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -1372,6 +1387,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Generator(generator) => self.heap.with_running_scope(|scope| {
+                let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(generator, self.types.generator_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .extensible = extensible;
@@ -1669,6 +1695,17 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(function, self.types.function)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::Generator(generator) => self.heap.with_running_scope(|scope| {
+                let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(generator, self.types.generator_object)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -2010,6 +2047,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(function, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::Generator(generator) => self.heap.with_running_scope(|scope| {
+                let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let generator = no_gc
+                        .borrow_mut(generator, self.types.generator_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    generator.ordinary.shape = shape;
+                    generator.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(generator, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -2508,6 +2566,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.signal_watcher)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.generator_object)
                 .is_ok()
             || self
                 .heap

@@ -3,6 +3,7 @@
 use super::super::*;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
+use crate::generator::GeneratorObject;
 use crate::object::{
     ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
 };
@@ -388,6 +389,7 @@ pub(crate) enum NativeFunction {
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
+    GeneratorFunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
     FunctionPrototypeBind,
@@ -479,6 +481,7 @@ pub(crate) enum NativeFunction {
     ArrayValues,
     ArrayEntries,
     ArrayIteratorNext,
+    GeneratorNext,
     IteratorIdentity,
     MapConstructor,
     MapGet,
@@ -1172,6 +1175,7 @@ impl NativeFunction {
             | Self::DateLocalGetter(_)
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
+            | Self::GeneratorFunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
@@ -1194,6 +1198,7 @@ impl NativeFunction {
             | Self::ArrayValues
             | Self::ArrayEntries
             | Self::ArrayIteratorNext
+            | Self::GeneratorNext
             | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
@@ -1363,6 +1368,7 @@ impl NativeFunction {
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
+            Self::GeneratorFunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
@@ -1465,6 +1471,7 @@ impl NativeFunction {
             Self::ArrayValues => "values",
             Self::ArrayEntries => "entries",
             Self::ArrayIteratorNext => "next",
+            Self::GeneratorNext => "next",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",
             Self::MapGet => "get",
@@ -1778,6 +1785,7 @@ pub(crate) enum ObjectReceiver {
     SignalState(GcRef<StateSignal>),
     SignalComputed(GcRef<ComputedSignal>),
     SignalWatcher(GcRef<WatcherSignal>),
+    Generator(GcRef<GeneratorObject>),
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
@@ -1810,6 +1818,7 @@ impl ObjectReceiver {
             Self::SignalState(signal) => Value::from_heap_ref(signal.raw()),
             Self::SignalComputed(signal) => Value::from_heap_ref(signal.raw()),
             Self::SignalWatcher(signal) => Value::from_heap_ref(signal.raw()),
+            Self::Generator(generator) => Value::from_heap_ref(generator.raw()),
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
@@ -1998,6 +2007,7 @@ pub(crate) struct VmTypes {
     pub(crate) signal_state: GcType<StateSignal>,
     pub(crate) signal_computed: GcType<ComputedSignal>,
     pub(crate) signal_watcher: GcType<WatcherSignal>,
+    pub(crate) generator_object: GcType<GeneratorObject>,
     pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,
@@ -2139,6 +2149,9 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::SuperAlreadyCalled => Some(NativeErrorKind::Reference),
         ExecutionError::NonCallable(_)
         | ExecutionError::NonConstructor(_)
+        | ExecutionError::GeneratorBrand(_)
+        | ExecutionError::GeneratorExecuting
+        | ExecutionError::UnsupportedGeneratorYieldResume
         | ExecutionError::ArrayReduceEmpty
         | ExecutionError::ClassConstructorCalledWithoutNew(_)
         | ExecutionError::InvalidDerivedConstructorReturn(_)

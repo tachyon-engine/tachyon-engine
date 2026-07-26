@@ -556,6 +556,57 @@ fn compiler_owns_anonymous_and_nested_function_expression_stencils() {
 }
 
 #[test]
+/// Freezes generator identity before the VM gains resume and yield execution support.
+fn compiler_freezes_generator_function_kind() {
+    let source = source(
+        MediaType::JavaScript,
+        "function* values() { return 1; } values;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let [function] = hir.functions() else {
+        panic!("expected one generator function stencil");
+    };
+    assert_eq!(function.kind, HirFunctionKind::Generator);
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    assert_eq!(module.functions().len(), 2);
+    assert_eq!(
+        module.functions()[1].kind(),
+        tachyon_bytecode::FunctionKind::Generator
+    );
+    assert!(
+        tachyon_bytecode::disassemble(&module.functions()[1])
+            .unwrap()
+            .contains("Return")
+    );
+}
+
+#[test]
+/// Keeps unsupported async execution explicit instead of misclassifying it as synchronous.
+fn compiler_rejects_async_and_async_generator_functions() {
+    for source_text in [
+        "async function value() { return 1; }",
+        "async function* values() { return 1; }",
+    ] {
+        let error = Compiler
+            .lower_to_hir(
+                source(MediaType::JavaScript, source_text),
+                CompileOptions::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnsupportedSyntax {
+                syntax: "async function",
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn compiler_freezes_derived_class_and_super_call_contracts() {
     let hir = Compiler
         .lower_to_hir(

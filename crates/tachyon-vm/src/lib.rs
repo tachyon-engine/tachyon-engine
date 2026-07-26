@@ -38,6 +38,7 @@ mod execution_profile;
 mod finalization;
 mod finalization_registry;
 mod for_in;
+mod generator;
 mod host;
 mod interpreter;
 mod isolate;
@@ -372,6 +373,10 @@ pub enum ExecutionError {
     UnsupportedConstant(u32),
     InvalidRegister(RegisterId),
     NonCallable(Value),
+    GeneratorBrand(Value),
+    GeneratorExecuting,
+    UnsupportedGeneratorYieldResume,
+    GeneratorArgumentAllocationFailed,
     NonConstructor(Value),
     ArrayReduceEmpty,
     ClassConstructorCalledWithoutNew(Value),

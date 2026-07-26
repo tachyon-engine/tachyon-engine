@@ -385,12 +385,14 @@ impl Isolate {
             .kind();
         Ok(matches!(
             kind,
-            FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+            FunctionKind::DerivedClassConstructor
+                | FunctionKind::BaseClassConstructor
+                | FunctionKind::Generator
         ))
     }
 
     /// Materializes the spec-visible function prototype only on first observation or construction.
-    pub(super) fn ensure_function_prototype(
+    pub(crate) fn ensure_function_prototype(
         &mut self,
         function: Value,
     ) -> Result<Value, ExecutionError> {
@@ -418,6 +420,43 @@ impl Isolate {
 
     /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
     fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
+        if self.is_generator_function(function)? {
+            let generator_prototype = self
+                .realm
+                .generator_prototype
+                .expect("generator intrinsics initialize before generator closures");
+            let mut roots = PrototypeInitializationRoots {
+                vm: VmRoots {
+                    fiber: &mut self.fiber,
+                    finalization_jobs: &mut self.finalization_jobs,
+                    promise_jobs: &mut self.promise_jobs,
+                    realm: &mut self.realm,
+                    loaded_code: &mut self.loaded_code,
+                },
+                function,
+                object_prototype: generator_prototype,
+            };
+            let prototype = self
+                .heap
+                .try_allocate_with_gc(
+                    self.types.ordinary_object,
+                    0,
+                    0,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.object_prototype,
+                    },
+                    AllocationSpace::Young,
+                    &mut roots,
+                )
+                .map_err(ExecutionError::HeapAllocation)?;
+            let prototype = Value::from_heap_ref(prototype.raw());
+            let function = roots.function;
+            self.set_function_prototype(function, prototype)?;
+            return Ok(prototype);
+        }
         let constructor_atom = self.constructor_atom()?;
         let object_prototype = self
             .realm
@@ -471,6 +510,24 @@ impl Isolate {
         let function = roots.function;
         self.set_function_prototype(function, Value::from_heap_ref(prototype.raw()))?;
         Ok(Value::from_heap_ref(prototype.raw()))
+    }
+
+    /// Identifies generator bytecode without enlarging the hot function payload.
+    pub(crate) fn is_generator_function(
+        &mut self,
+        function: Value,
+    ) -> Result<bool, ExecutionError> {
+        let function = self.resolve_function_object(function)?;
+        let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
+            return Ok(false);
+        };
+        let kind = self
+            .loaded_code(code)?
+            .module
+            .function(function)
+            .ok_or(ExecutionError::MissingEntryFunction(function))?
+            .kind();
+        Ok(kind == FunctionKind::Generator)
     }
 
     /// Replaces the inline function prototype slot and records its possible young edge.

@@ -49,6 +49,7 @@ mod eval;
 mod finalization_registry;
 mod finally;
 mod fixtures;
+mod generator;
 mod grouping;
 mod object_prototype;
 mod promise;

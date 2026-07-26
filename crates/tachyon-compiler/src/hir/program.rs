@@ -148,6 +148,7 @@ pub struct HirFunction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirFunctionKind {
     Ordinary,
+    Generator,
     DerivedClassConstructor,
     DefaultDerivedConstructor,
     BaseClassConstructor,

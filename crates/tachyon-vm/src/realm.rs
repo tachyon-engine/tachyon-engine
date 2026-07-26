@@ -32,6 +32,7 @@ impl Isolate {
         let atoms = self.intern_realm_intrinsic_atoms()?;
         self.initialize_error_intrinsics()?;
         self.initialize_array_intrinsics()?;
+        self.initialize_generator_intrinsics()?;
         self.initialize_array_buffer_intrinsics()?;
         self.initialize_data_view_intrinsics()?;
         self.initialize_typed_array_intrinsics()?;
@@ -2156,6 +2157,7 @@ impl Isolate {
             storage: None,
             prototype: object_prototype,
         })?;
+        self.realm.iterator_prototype = Some(iterator_prototype);
         let identity = self.allocate_native_function(
             NativeFunction::IteratorIdentity,
             OrdinaryObject {
@@ -2251,6 +2253,61 @@ impl Isolate {
             iterator_prototype,
             function_prototype,
             iterator_key,
+        )
+    }
+
+    /// Builds `%GeneratorFunction.prototype%` and `%GeneratorPrototype%` above IteratorPrototype.
+    fn initialize_generator_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before generator intrinsics");
+        let iterator_prototype = self
+            .realm
+            .iterator_prototype
+            .expect("Iterator prototype initializes before generator intrinsics");
+        let generator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        let generator_function_prototype = self.allocate_native_function(
+            NativeFunction::GeneratorFunctionPrototype,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let next = self.allocate_native_function(
+            NativeFunction::GeneratorNext,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.generator_function_prototype = Some(generator_function_prototype);
+        self.realm.generator_prototype = Some(generator_prototype);
+        self.realm.generator_next = Some(next);
+        let next_atom = self.intern_intrinsic_name(b"next")?;
+        self.set_intrinsic_data_property(generator_prototype, next_atom, next, true)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(
+            generator_prototype,
+            constructor_atom,
+            generator_function_prototype,
+            true,
+        )?;
+        let prototype_atom = self.intern_intrinsic_name(b"prototype")?;
+        self.set_intrinsic_data_property(
+            generator_function_prototype,
+            prototype_atom,
+            generator_prototype,
+            false,
         )
     }
 

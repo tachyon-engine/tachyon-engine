@@ -2259,6 +2259,9 @@ impl Isolate {
             NativeContinuationKind::ConversionCallRoot => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::GeneratorResume => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
         };
         // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
         // reachable through the receiver's accessor pair (or descriptor state -> source chain).
@@ -3460,15 +3463,22 @@ impl Isolate {
         destination: u32,
         function: FunctionId,
     ) -> Result<(), ExecutionError> {
-        self.loaded_code(code)?
+        let kind = self
+            .loaded_code(code)?
             .module
             .function(function)
-            .ok_or(ExecutionError::MissingEntryFunction(function))?;
+            .ok_or(ExecutionError::MissingEntryFunction(function))?
+            .kind();
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
-        let internal_prototype = self
-            .realm
-            .function_prototype
-            .expect("function intrinsics initialize before bytecode execution");
+        let internal_prototype = if kind == FunctionKind::Generator {
+            self.realm
+                .generator_function_prototype
+                .expect("generator intrinsics initialize before bytecode execution")
+        } else {
+            self.realm
+                .function_prototype
+                .expect("function intrinsics initialize before bytecode execution")
+        };
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -4499,7 +4509,9 @@ impl Isolate {
                         .kind();
                     if matches!(
                         kind,
-                        FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
+                        FunctionKind::ClassMethod
+                            | FunctionKind::ClassFieldInitializer
+                            | FunctionKind::Generator
                     ) {
                         return Err(ExecutionError::NonConstructor(site.callee));
                     }
@@ -5051,6 +5063,23 @@ impl Isolate {
                         return Err(ExecutionError::ClassConstructorCalledWithoutNew(
                             site.callee,
                         ));
+                    }
+                    if kind == FunctionKind::Generator {
+                        if site.new_target.as_immediate() != Some(Immediate::Undefined) {
+                            return Err(ExecutionError::NonConstructor(site.callee));
+                        }
+                        let generator = self.create_generator_from_site(
+                            &site,
+                            ResolvedCallTarget {
+                                code,
+                                function,
+                                environment,
+                                kind,
+                                layout,
+                                strictness,
+                            },
+                        )?;
+                        return self.write(site.caller_base, site.destination, generator);
                     }
                     return self.push_call_frame(
                         ResolvedCallTarget {
@@ -6052,6 +6081,16 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::SignalUntrack) => {
                     return self.begin_signal_untrack(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::GeneratorNext) => {
+                    return self.begin_generator_next(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::GeneratorFunctionPrototype) => {
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
                 FunctionExecutable::Native(NativeFunction::SignalCurrentComputed) => {
                     let result = self.signal_current_computed();
                     return self.write(site.caller_base, site.destination, result);
@@ -6930,7 +6969,7 @@ impl Isolate {
     }
 
     /// Reserves the callee state before mutation, then copies the supplied positional arguments.
-    fn push_call_frame(
+    pub(crate) fn push_call_frame(
         &mut self,
         target: ResolvedCallTarget,
         site: CallSite,
@@ -7098,7 +7137,11 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn bind_ordinary_this(&self, strictness: FunctionStrictness, this_argument: Value) -> Value {
+    pub(crate) fn bind_ordinary_this(
+        &self,
+        strictness: FunctionStrictness,
+        this_argument: Value,
+    ) -> Value {
         if strictness == FunctionStrictness::Strict
             || !matches!(
                 this_argument.as_immediate(),
@@ -7481,6 +7524,9 @@ impl Isolate {
                 NativeContinuationKind::SignalUntrack => {
                     self.resume_signal_untrack(continuation, value)
                 }
+                NativeContinuationKind::GeneratorResume => {
+                    self.finish_generator_return(continuation, value)
+                }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
@@ -7755,6 +7801,11 @@ impl Isolate {
                     let site = continuation.site();
                     self.continue_signal_untrack_abrupt(continuation);
                     instruction_offset = site.call_site;
+                    continue;
+                }
+                if continuation.kind() == NativeContinuationKind::GeneratorResume {
+                    self.finish_generator_throw(continuation)?;
+                    instruction_offset = continuation.site().call_site;
                     continue;
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {

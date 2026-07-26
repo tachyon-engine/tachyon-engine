@@ -1209,6 +1209,7 @@ pub(crate) enum NativeContinuationKind {
     SignalWatcherHook,
     SignalComputed,
     SignalUntrack,
+    GeneratorResume,
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1237,6 +1238,17 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots the generator instance while its explicit bytecode frame executes.
+    #[inline]
+    pub(crate) const fn generator_resume(site: NativeContinuationSite, generator: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::GeneratorResume,
+            first: generator,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     /// Roots State construction/mutation state across one observable getter or callback.
     #[inline]
     pub(crate) const fn signal_state(

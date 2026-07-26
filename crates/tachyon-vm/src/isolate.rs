@@ -365,6 +365,9 @@ impl Isolate {
             signal_watcher: registry
                 .try_register("WatcherSignal")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            generator_object: registry
+                .try_register("GeneratorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_signal_watcher_operation: registry
                 .try_register("PendingSignalWatcherOperation")
                 .map_err(IsolateCreationError::TypeRegistration)?,
