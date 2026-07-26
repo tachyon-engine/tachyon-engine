@@ -417,6 +417,7 @@ pub enum ExecutionError {
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
+    TypedArrayContentTypeMismatch,
     InvalidNumberRadix(Value),
     InvalidNumberPrecision(Value),
     InvalidDateValue,

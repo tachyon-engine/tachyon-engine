@@ -687,7 +687,15 @@ impl Trace for DataViewObject {
     }
 }
 
-/// Number element formats supported by fixed TypedArray views.
+/// ECMAScript numeric domains accepted by one TypedArray element kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ContentType {
+    Number,
+    BigInt,
+}
+
+/// Element formats supported by fixed TypedArray views.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum TypedArrayKind {
@@ -700,10 +708,12 @@ pub(crate) enum TypedArrayKind {
     Uint32,
     Float32,
     Float64,
+    BigInt64,
+    BigUint64,
 }
 
 impl TypedArrayKind {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Int8,
         Self::Uint8,
         Self::Uint8Clamped,
@@ -713,6 +723,8 @@ impl TypedArrayKind {
         Self::Uint32,
         Self::Float32,
         Self::Float64,
+        Self::BigInt64,
+        Self::BigUint64,
     ];
 
     #[inline(always)]
@@ -726,7 +738,15 @@ impl TypedArrayKind {
             Self::Int8 | Self::Uint8 | Self::Uint8Clamped => 1,
             Self::Int16 | Self::Uint16 => 2,
             Self::Int32 | Self::Uint32 | Self::Float32 => 4,
-            Self::Float64 => 8,
+            Self::Float64 | Self::BigInt64 | Self::BigUint64 => 8,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn content_type(self) -> ContentType {
+        match self {
+            Self::BigInt64 | Self::BigUint64 => ContentType::BigInt,
+            _ => ContentType::Number,
         }
     }
 
@@ -742,6 +762,8 @@ impl TypedArrayKind {
             Self::Uint32 => "Uint32Array",
             Self::Float32 => "Float32Array",
             Self::Float64 => "Float64Array",
+            Self::BigInt64 => "BigInt64Array",
+            Self::BigUint64 => "BigUint64Array",
         }
     }
 }

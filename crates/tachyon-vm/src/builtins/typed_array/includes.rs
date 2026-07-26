@@ -194,9 +194,12 @@ impl Isolate {
                     let start = snapshot.byte_offset + index * width;
                     let mut bytes = [0_u8; 8];
                     bytes[..width].copy_from_slice(&data.bytes[start..start + width]);
-                    let element =
-                        numeric_value(data_view_decode(data_view_kind(snapshot.kind), bytes, true))
-                            .expect("Number TypedArray decoding always returns Number");
+                    let element = numeric_value(data_view_decode(
+                        data_view_kind(snapshot.kind)?,
+                        bytes,
+                        true,
+                    ))
+                    .expect("Number TypedArray decoding always returns Number");
                     if (search.is_nan() && element.is_nan()) || search == element {
                         return Ok(true);
                     }

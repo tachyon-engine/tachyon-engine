@@ -1261,6 +1261,8 @@ impl Isolate {
                 TypedArrayKind::Uint32 => "[object Uint32Array]",
                 TypedArrayKind::Float32 => "[object Float32Array]",
                 TypedArrayKind::Float64 => "[object Float64Array]",
+                TypedArrayKind::BigInt64 => "[object BigInt64Array]",
+                TypedArrayKind::BigUint64 => "[object BigUint64Array]",
             }
         } else if value.as_heap_ref().is_some_and(|raw| {
             self.heap

@@ -556,9 +556,9 @@ fn convert_typed_array_set_bytes(
         let mut raw = [0_u8; 8];
         raw[..source.kind.byte_width()]
             .copy_from_slice(&source_bytes[source_start..source_start + source.kind.byte_width()]);
-        let value = data_view_decode(data_view_kind(source.kind), raw, true);
+        let value = data_view_decode(data_view_kind(source.kind)?, raw, true);
         let number = numeric_value(value).ok_or(ExecutionError::InvalidArrayLength)?;
-        let encoded = typed_array_set_encode(target_kind, number);
+        let encoded = typed_array_set_encode(target_kind, number)?;
         let target_start = index * target_kind.byte_width();
         target[target_start..target_start + target_kind.byte_width()]
             .copy_from_slice(&encoded[..target_kind.byte_width()]);
@@ -567,12 +567,12 @@ fn convert_typed_array_set_bytes(
 }
 
 #[inline(always)]
-fn typed_array_set_encode(kind: TypedArrayKind, number: f64) -> [u8; 8] {
+fn typed_array_set_encode(kind: TypedArrayKind, number: f64) -> Result<[u8; 8], ExecutionError> {
     if kind == TypedArrayKind::Uint8Clamped {
         let mut bytes = [0_u8; 8];
         bytes[0] = to_uint8_clamp(number);
-        bytes
+        Ok(bytes)
     } else {
-        data_view_encode(data_view_kind(kind), number, true)
+        Ok(data_view_encode(data_view_kind(kind)?, number, true))
     }
 }

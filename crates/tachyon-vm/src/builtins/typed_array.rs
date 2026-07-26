@@ -15,7 +15,7 @@ mod subarray;
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
-use crate::object::{ArrayBufferData, TypedArrayKind, TypedArrayObject};
+use crate::object::{ArrayBufferData, ContentType, TypedArrayKind, TypedArrayObject};
 use crate::property::array_index;
 use crate::runtime::callable::{
     DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
@@ -600,6 +600,9 @@ impl Isolate {
         }
         if snapshot.mode == TypedArrayConstructionMode::TypedArray {
             let source = self.typed_array_snapshot(snapshot.source)?;
+            if source.kind.content_type() != snapshot.kind.content_type() {
+                return Err(ExecutionError::TypedArrayContentTypeMismatch);
+            }
             if source.kind == snapshot.kind {
                 self.copy_same_kind_typed_array(snapshot.source, snapshot.target)?;
                 return self.write(site.caller_base, site.destination, snapshot.target);
@@ -680,7 +683,7 @@ impl Isolate {
         self.finish_typed_array_element_conversion(site, state, value)
     }
 
-    /// Writes one converted Number element and advances only after the backing write succeeds.
+    /// Writes one converted element and advances only after the backing write succeeds.
     fn finish_typed_array_element_conversion(
         &mut self,
         site: NativeContinuationSite,
@@ -697,13 +700,11 @@ impl Isolate {
         state: GcRef<PendingTypedArrayConstruction>,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        let converted = numeric_value(self.convert_to_number(value)?)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
         let snapshot = self.typed_array_construction_snapshot(state)?;
         let target = self.typed_array_snapshot(snapshot.target)?;
         let index =
             usize::try_from(snapshot.index).map_err(|_| ExecutionError::InvalidArrayLength)?;
-        self.typed_array_write_element(target, index, converted)?;
+        self.typed_array_write_value(target, index, value)?;
         let next_index = snapshot
             .index
             .checked_add(1)
@@ -1080,9 +1081,7 @@ impl Isolate {
         if index >= snapshot.length {
             return Ok(Some(false));
         }
-        let converted = numeric_value(self.convert_to_number(value)?)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-        match self.typed_array_write_element(snapshot, index, converted) {
+        match self.typed_array_write_value(snapshot, index, value) {
             Ok(()) => Ok(Some(true)),
             Err(ExecutionError::DetachedArrayBuffer) => Ok(Some(false)),
             Err(error) => Err(error),
@@ -1204,7 +1203,39 @@ impl Isolate {
                 Ok(bytes)
             })
         })?;
-        Ok(data_view_decode(data_view_kind(array.kind), bytes, true))
+        match array.kind.content_type() {
+            ContentType::Number => Ok(data_view_decode(data_view_kind(array.kind)?, bytes, true)),
+            ContentType::BigInt => self.allocate_bigint_bits(
+                u64::from_le_bytes(bytes),
+                array.kind == TypedArrayKind::BigInt64,
+            ),
+        }
+    }
+
+    /// Converts according to the target content type before committing one element.
+    fn typed_array_write_value(
+        &mut self,
+        array: TypedArraySnapshot,
+        index: usize,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match array.kind.content_type() {
+            ContentType::Number => {
+                if self.is_bigint_value(value) {
+                    return Err(ExecutionError::TypedArrayContentTypeMismatch);
+                }
+                let number = numeric_value(self.convert_to_number(value)?)
+                    .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+                self.typed_array_write_element(array, index, number)
+            }
+            ContentType::BigInt => {
+                if !self.is_bigint_value(value) {
+                    return Err(ExecutionError::TypedArrayContentTypeMismatch);
+                }
+                let bits = self.bigint_modulo_u64(value)?;
+                self.typed_array_write_bigint_element(array, index, bits)
+            }
+        }
     }
 
     /// Encodes and writes one checked element without publishing a per-index property slot.
@@ -1231,7 +1262,7 @@ impl Isolate {
             bytes[0] = to_uint8_clamp(number);
             bytes
         } else {
-            data_view_encode(data_view_kind(array.kind), number, true)
+            data_view_encode(data_view_kind(array.kind)?, number, true)
         };
         let data = self.typed_array_backing(array.buffer)?;
         self.heap.with_running_scope(|scope| {
@@ -1242,6 +1273,38 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)?
                     .bytes[start..end]
                     .copy_from_slice(&bytes[..width]);
+                Ok(())
+            })
+        })
+    }
+
+    /// Stores one modulo-2^64 BigInt encoding as explicit little-endian two's complement bytes.
+    fn typed_array_write_bigint_element(
+        &mut self,
+        array: TypedArraySnapshot,
+        index: usize,
+        bits: u64,
+    ) -> Result<(), ExecutionError> {
+        let start = array
+            .byte_offset
+            .checked_add(
+                index
+                    .checked_mul(8)
+                    .ok_or(ExecutionError::InvalidArrayLength)?,
+            )
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let end = start
+            .checked_add(8)
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let data = self.typed_array_backing(array.buffer)?;
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(data, self.types.array_buffer_data)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .bytes[start..end]
+                    .copy_from_slice(&bits.to_le_bytes());
                 Ok(())
             })
         })
@@ -1261,8 +1324,8 @@ fn typed_array_to_length(value: Value) -> Result<u64, ExecutionError> {
 }
 
 #[inline(always)]
-fn data_view_kind(kind: TypedArrayKind) -> DataViewElement {
-    match kind {
+fn data_view_kind(kind: TypedArrayKind) -> Result<DataViewElement, ExecutionError> {
+    Ok(match kind {
         TypedArrayKind::Int8 => DataViewElement::Int8,
         TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => DataViewElement::Uint8,
         TypedArrayKind::Int16 => DataViewElement::Int16,
@@ -1271,7 +1334,10 @@ fn data_view_kind(kind: TypedArrayKind) -> DataViewElement {
         TypedArrayKind::Uint32 => DataViewElement::Uint32,
         TypedArrayKind::Float32 => DataViewElement::Float32,
         TypedArrayKind::Float64 => DataViewElement::Float64,
-    }
+        TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => {
+            return Err(ExecutionError::TypedArrayContentTypeMismatch);
+        }
+    })
 }
 
 /// Implements ToUint8Clamp including ties-to-even at exact half integers.

@@ -1663,6 +1663,8 @@ impl Isolate {
                 self.intern_intrinsic_name(b"Uint32Array")?,
                 self.intern_intrinsic_name(b"Float32Array")?,
                 self.intern_intrinsic_name(b"Float64Array")?,
+                self.intern_intrinsic_name(b"BigInt64Array")?,
+                self.intern_intrinsic_name(b"BigUint64Array")?,
             ],
             object: self.intern_intrinsic_name(b"Object")?,
             string: self.intern_intrinsic_name(b"String")?,

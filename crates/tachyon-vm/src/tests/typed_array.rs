@@ -125,6 +125,74 @@ arrayLikeResult.length === 10000 && arrayLikeResult[9999] === 7 &&
 iterableResult.length === 10000 && iterableResult[0] === 7 && iterableResult[9999] === 7;
 "#;
 
+const BIGINT_TYPED_ARRAY_SOURCE: &str = r#"
+function throwsTypeError(callback) {
+  try {
+    callback();
+    return false;
+  } catch (error) {
+    return error instanceof TypeError;
+  }
+}
+
+var signed = new BigInt64Array(5);
+signed[0] = -1n;
+signed[1] = 9223372036854775807n;
+signed[2] = 9223372036854775808n;
+signed[3] = -9223372036854775808n;
+signed[4] = 18446744073709551616n;
+
+var unsigned = new BigUint64Array([-1n, 18446744073709551616n, 9223372036854775808n]);
+var signedCopy = new BigInt64Array(unsigned);
+var unsignedCopy = new BigUint64Array(signed);
+var bytes = new Uint8Array(signed.buffer);
+var explicitBuffer = new ArrayBuffer(24);
+var explicitView = new BigUint64Array(explicitBuffer, 8, 2);
+explicitView[1] = 42n;
+
+var constructorNumberMismatch = throwsTypeError(function() {
+  new BigInt64Array([1]);
+});
+var constructorBigIntMismatch = throwsTypeError(function() {
+  new Int32Array([1n]);
+});
+var typedSourceNumberMismatch = throwsTypeError(function() {
+  new BigUint64Array(new Uint32Array(1));
+});
+var typedSourceBigIntMismatch = throwsTypeError(function() {
+  new Uint32Array(new BigInt64Array(1));
+});
+var indexedNumberMismatch = throwsTypeError(function() {
+  signed[0] = 1;
+});
+var numberIndexedBigIntMismatch = throwsTypeError(function() {
+  new Uint32Array(1)[0] = 1n;
+});
+
+signed[0] === -1n &&
+signed[1] === 9223372036854775807n &&
+signed[2] === -9223372036854775808n &&
+signed[3] === -9223372036854775808n &&
+signed[4] === 0n &&
+unsigned[0] === 18446744073709551615n &&
+unsigned[1] === 0n &&
+unsigned[2] === 9223372036854775808n &&
+signedCopy[0] === -1n && signedCopy[1] === 0n &&
+unsignedCopy[0] === 18446744073709551615n &&
+explicitView.buffer === explicitBuffer && explicitView.byteOffset === 8 &&
+explicitView.byteLength === 16 && explicitView.length === 2 && explicitView[1] === 42n &&
+bytes[0] === 255 && bytes[1] === 255 && bytes[2] === 255 && bytes[3] === 255 &&
+bytes[4] === 255 && bytes[5] === 255 && bytes[6] === 255 && bytes[7] === 255 &&
+BigInt64Array.name === "BigInt64Array" && BigInt64Array.length === 3 &&
+BigInt64Array.BYTES_PER_ELEMENT === 8 && BigInt64Array.prototype.BYTES_PER_ELEMENT === 8 &&
+BigUint64Array.name === "BigUint64Array" && BigUint64Array.length === 3 &&
+Object.prototype.toString.call(signed) === "[object BigInt64Array]" &&
+Object.prototype.toString.call(unsigned) === "[object BigUint64Array]" &&
+constructorNumberMismatch && constructorBigIntMismatch &&
+typedSourceNumberMismatch && typedSourceBigIntMismatch &&
+indexedNumberMismatch && numberIndexedBigIntMismatch;
+"#;
+
 #[test]
 fn fixed_number_typed_arrays_work_for_every_dispatch_batch() {
     assert_typed_array_source::<1>(false);
@@ -137,6 +205,24 @@ fn fixed_number_typed_arrays_work_for_every_dispatch_batch() {
 #[test]
 fn typed_array_edges_survive_forced_major_collection() {
     assert_typed_array_source::<8>(true);
+}
+
+#[test]
+fn bigint_typed_arrays_work_for_every_dispatch_batch() {
+    assert_bigint_typed_array_source::<1>(false);
+    assert_bigint_typed_array_source::<2>(false);
+    assert_bigint_typed_array_source::<4>(false);
+    assert_bigint_typed_array_source::<8>(false);
+    assert_bigint_typed_array_source::<16>(false);
+}
+
+#[test]
+fn bigint_typed_array_edges_survive_forced_major_collection() {
+    assert_bigint_typed_array_source::<1>(true);
+    assert_bigint_typed_array_source::<2>(true);
+    assert_bigint_typed_array_source::<4>(true);
+    assert_bigint_typed_array_source::<8>(true);
+    assert_bigint_typed_array_source::<16>(true);
 }
 
 #[test]
@@ -183,6 +269,33 @@ fn assert_typed_array_source<const N: usize>(forced_major: bool) {
             },
         )
         .expect("TypedArray fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes BigInt content conversion, storage, and mismatch checks under one policy.
+fn assert_bigint_typed_array_source<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(
+        BIGINT_TYPED_ARRAY_SOURCE,
+        7_450 + N as u32 + u32::from(forced_major) * 32,
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("BigInt TypedArray fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

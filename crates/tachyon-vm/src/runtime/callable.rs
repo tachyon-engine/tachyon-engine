@@ -2202,6 +2202,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::IncompatibleFinalizationRegistryReceiver(_)
         | ExecutionError::InvalidFinalizationRegistration(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
+        | ExecutionError::TypedArrayContentTypeMismatch
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::TypedArraySpeciesResultTooShort

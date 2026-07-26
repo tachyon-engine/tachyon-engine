@@ -203,7 +203,7 @@ impl Isolate {
             bytes[0] = to_uint8_clamp(number);
             bytes
         } else {
-            data_view_encode(data_view_kind(snapshot.kind), number, true)
+            data_view_encode(data_view_kind(snapshot.kind)?, number, true)
         };
         self.heap.with_running_scope(|scope| {
             let data = scope.root(data).map_err(ExecutionError::Root)?;
