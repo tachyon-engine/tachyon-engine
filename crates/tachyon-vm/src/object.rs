@@ -29,6 +29,11 @@ impl SymbolId {
     }
 
     #[inline(always)]
+    pub(crate) const fn serial(self) -> u32 {
+        (self.0.get() >> 32) as u32
+    }
+
+    #[inline(always)]
     pub(crate) const fn value(self) -> Value {
         Value::from_heap_ref(self.reference())
     }

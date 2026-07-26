@@ -25,6 +25,7 @@ pub(crate) struct PendingProxyOwnKeys {
     index: u32,
     complete: bool,
     keys: Box<[PropertyKey]>,
+    key_membership: Box<[u64]>,
     target_keys: Box<[PropertyKey]>,
 }
 
@@ -47,6 +48,7 @@ impl GcExternalMemory for PendingProxyOwnKeys {
             .len()
             .saturating_add(self.target_keys.len())
             .saturating_mul(size_of::<PropertyKey>())
+            .saturating_add(self.key_membership.len().saturating_mul(size_of::<u64>()))
     }
 }
 
@@ -458,35 +460,54 @@ impl Isolate {
         self.advance_proxy_own_keys_length(site, state, Some(value))
     }
 
+    /// Drains synchronous trap-result elements iteratively and yields only for observable reads.
     fn advance_proxy_own_keys_elements(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<PendingProxyOwnKeys>,
-        returned: Option<Value>,
+        mut returned: Option<Value>,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        if let Some(value) = returned {
-            if !self.is_string_value(value) && !self.is_symbol_value(value) {
-                return Err(ExecutionError::ProxyInvariantViolation);
+        loop {
+            if let Some(value) = returned.take() {
+                if !self.is_string_value(value) && !self.is_symbol_value(value) {
+                    return Err(ExecutionError::ProxyInvariantViolation);
+                }
+                let key = self.property_key(value)?;
+                let pending = self.proxy_own_keys_snapshot(state)?;
+                if self.proxy_own_keys_contains(state, key)? {
+                    return Err(ExecutionError::ProxyInvariantViolation);
+                }
+                self.store_proxy_own_keys_key(state, pending.index, key)?;
             }
-            let key = self.property_key(value)?;
             let pending = self.proxy_own_keys_snapshot(state)?;
-            if self.proxy_own_keys_contains(state, key)? {
-                return Err(ExecutionError::ProxyInvariantViolation);
+            if pending.index == pending.length {
+                return self.begin_proxy_own_keys_target(site, state);
             }
-            self.store_proxy_own_keys_key(state, pending.index, key)?;
+            let key = PropertyKey::Atom(self.safe_integer_property_atom(u64::from(pending.index))?);
+            match self.resolve_property_read_until_proxy(pending.trap_result, key)? {
+                PropertyReadResolution::Read(PropertyRead::Data(value)) => {
+                    returned = Some(value);
+                }
+                PropertyReadResolution::Read(PropertyRead::Missing) => {
+                    returned = Some(Value::from_immediate(Immediate::Undefined));
+                }
+                PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                    if getter.as_immediate() == Some(Immediate::Undefined) =>
+                {
+                    returned = Some(Value::from_immediate(Immediate::Undefined));
+                }
+                PropertyReadResolution::Read(PropertyRead::Accessor(_))
+                | PropertyReadResolution::Proxy(_) => {
+                    return self.begin_proxy_own_keys_get(
+                        site,
+                        state,
+                        pending.trap_result,
+                        key,
+                        ProxyOwnKeysStage::ElementGet,
+                    );
+                }
+            }
         }
-        let pending = self.proxy_own_keys_snapshot(state)?;
-        if pending.index == pending.length {
-            return self.begin_proxy_own_keys_target(site, state);
-        }
-        let key = PropertyKey::Atom(self.safe_integer_property_atom(u64::from(pending.index))?);
-        self.begin_proxy_own_keys_get(
-            site,
-            state,
-            pending.trap_result,
-            key,
-            ProxyOwnKeysStage::ElementGet,
-        )
     }
 
     fn continue_proxy_own_keys_element(
@@ -507,11 +528,12 @@ impl Isolate {
         stage: ProxyOwnKeysStage,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         match self.resolve_property_read_until_proxy(source, key)? {
-            PropertyReadResolution::Proxy(proxy) => {
+            PropertyReadResolution::Proxy(_)
+            | PropertyReadResolution::Read(PropertyRead::Accessor(_)) => {
                 let depth = self.fiber.completions.len();
                 let frames = self.fiber.frames.len();
                 self.push_proxy_own_keys_continuation(site, state, stage, source)?;
-                let result = self.dispatch_proxy_aware_property_read(site, proxy, source, key);
+                let result = self.dispatch_proxy_aware_property_read(site, source, source, key);
                 let outcome = match result {
                     Ok(outcome) => outcome,
                     Err(error) => {
@@ -528,20 +550,18 @@ impl Isolate {
                 let value = self.read(site.caller_base, site.destination)?;
                 self.resume_proxy_own_keys(continuation, ProxyOwnKeysMode::Internal, stage, value)
             }
-            PropertyReadResolution::Read(PropertyRead::Missing)
-            | PropertyReadResolution::Read(PropertyRead::Accessor(_)) => self
-                .resume_proxy_own_keys(
-                    NativeContinuation::proxy_own_keys(
-                        site,
-                        ProxyOwnKeysMode::Internal,
-                        stage,
-                        Value::from_heap_ref(state.raw()),
-                        Value::from_immediate(Immediate::Undefined),
-                    ),
+            PropertyReadResolution::Read(PropertyRead::Missing) => self.resume_proxy_own_keys(
+                NativeContinuation::proxy_own_keys(
+                    site,
                     ProxyOwnKeysMode::Internal,
                     stage,
+                    Value::from_heap_ref(state.raw()),
                     Value::from_immediate(Immediate::Undefined),
                 ),
+                ProxyOwnKeysMode::Internal,
+                stage,
+                Value::from_immediate(Immediate::Undefined),
+            ),
             PropertyReadResolution::Read(PropertyRead::Data(value)) => self.resume_proxy_own_keys(
                 NativeContinuation::proxy_own_keys(
                     site,
@@ -903,6 +923,7 @@ impl Isolate {
                     index: 0,
                     complete: false,
                     keys: Box::new([]),
+                    key_membership: Box::new([]),
                     target_keys: Box::new([]),
                 },
                 AllocationSpace::Young,
@@ -992,6 +1013,7 @@ impl Isolate {
                 state.index = 0;
                 state.complete = false;
                 state.keys = Box::new([]);
+                state.key_membership = Box::new([]);
                 state.target_keys = Box::new([]);
                 Ok::<(), ExecutionError>(())
             })
@@ -1057,6 +1079,15 @@ impl Isolate {
         keys.try_reserve_exact(length)
             .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
         keys.resize(length, PropertyKey::Atom(self.length_atom()?));
+        let membership_length = length
+            .checked_mul(2)
+            .and_then(usize::checked_next_power_of_two)
+            .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        let mut membership = Vec::new();
+        membership
+            .try_reserve_exact(membership_length)
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        membership.resize(membership_length, 0);
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -1067,6 +1098,7 @@ impl Isolate {
                     u32::try_from(length).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
                 state.index = 0;
                 state.keys = keys.into_boxed_slice();
+                state.key_membership = membership.into_boxed_slice();
                 Ok::<(), ExecutionError>(())
             })
         })
@@ -1089,6 +1121,7 @@ impl Isolate {
                     .get_mut(index as usize)
                     .ok_or(ExecutionError::MissingNativeContinuation)?;
                 *slot = key;
+                proxy_own_keys_membership_insert(&mut state.key_membership, key)?;
                 state.index = index
                     .checked_add(1)
                     .ok_or(ExecutionError::ArrayLengthOverflow)?;
@@ -1114,7 +1147,10 @@ impl Isolate {
                 let state = no_gc
                     .borrow(state, self.types.pending_proxy_own_keys)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                Ok(state.keys[..state.index as usize].contains(&key))
+                Ok(proxy_own_keys_membership_contains(
+                    &state.key_membership,
+                    key,
+                ))
             })
         })
     }
@@ -1209,5 +1245,54 @@ impl Isolate {
             return Err(ExecutionError::ArrayLengthOverflow);
         }
         Ok(number.floor() as u32)
+    }
+}
+
+#[inline(always)]
+fn proxy_own_keys_membership_contains(table: &[u64], key: PropertyKey) -> bool {
+    let identity = proxy_own_keys_identity(key);
+    let mut slot = proxy_own_keys_membership_slot(identity, table.len());
+    loop {
+        match table[slot] {
+            0 => return false,
+            occupied if occupied == identity => return true,
+            _ => slot = (slot + 1) & (table.len() - 1),
+        }
+    }
+}
+
+#[inline(always)]
+fn proxy_own_keys_membership_insert(
+    table: &mut [u64],
+    key: PropertyKey,
+) -> Result<(), ExecutionError> {
+    let identity = proxy_own_keys_identity(key);
+    let mut slot = proxy_own_keys_membership_slot(identity, table.len());
+    loop {
+        match table[slot] {
+            0 => {
+                table[slot] = identity;
+                return Ok(());
+            }
+            occupied if occupied == identity => {
+                return Err(ExecutionError::ProxyInvariantViolation);
+            }
+            _ => slot = (slot + 1) & (table.len() - 1),
+        }
+    }
+}
+
+#[inline(always)]
+const fn proxy_own_keys_membership_slot(identity: u64, length: usize) -> usize {
+    let mixed = identity.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    (mixed as usize) & (length - 1)
+}
+
+#[inline(always)]
+const fn proxy_own_keys_identity(key: PropertyKey) -> u64 {
+    match key {
+        PropertyKey::Atom(atom) => ((atom.index() as u64 + 1) << 2) | 1,
+        PropertyKey::Symbol(symbol) => ((symbol.serial() as u64) << 2) | 2,
+        PropertyKey::Private(symbol) => ((symbol.serial() as u64) << 2) | 3,
     }
 }

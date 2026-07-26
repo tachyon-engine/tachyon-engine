@@ -4,6 +4,7 @@ mod define;
 mod delete;
 mod get;
 mod get_own;
+mod own_keys;
 
 fn proxy_call_site(isolate: &Isolate, argument_count: u32) -> CallSite {
     CallSite {
