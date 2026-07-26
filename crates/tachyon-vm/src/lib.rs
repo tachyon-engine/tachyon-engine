@@ -238,7 +238,8 @@ use runtime::{
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
         ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, StringSplitStage,
-        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage, VmRoots,
+        next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

@@ -293,6 +293,9 @@ pub(crate) enum ConversionConsumer {
     StringSplitReceiver,
     StringSplitLimit,
     StringSplitSeparator,
+    TypedArrayByteOffset,
+    TypedArrayLength,
+    TypedArrayElement,
 }
 
 impl ConversionConsumer {
@@ -358,7 +361,10 @@ impl ConversionConsumer {
             | Self::ArrayFillEnd
             | Self::StringSplitReceiver
             | Self::StringSplitLimit
-            | Self::StringSplitSeparator => None,
+            | Self::StringSplitSeparator
+            | Self::TypedArrayByteOffset
+            | Self::TypedArrayLength
+            | Self::TypedArrayElement => None,
         }
     }
 
@@ -457,6 +463,9 @@ impl ConversionConsumer {
                 | Self::StringSplitReceiver
                 | Self::StringSplitLimit
                 | Self::StringSplitSeparator
+                | Self::TypedArrayByteOffset
+                | Self::TypedArrayLength
+                | Self::TypedArrayElement
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -1032,6 +1041,17 @@ pub(crate) enum StringSplitStage {
     SplitterCall,
 }
 
+/// Observable callback boundaries in source-based TypedArray construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayConstructionStage {
+    Prototype,
+    IteratorMethod,
+    SourceList,
+    ArrayLikeLength,
+    ArrayLikeElement,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -1109,6 +1129,7 @@ pub(crate) enum NativeContinuationKind {
     ObjectToLocaleString(ObjectToLocaleStringStage),
     DateToJson(DateToJsonStage),
     StringSplit(StringSplitStage),
+    TypedArrayConstruction(TypedArrayConstructionStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1206,6 +1227,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::StringSplit(stage),
             first: state,
             second: separator,
+        }
+    }
+
+    /// Roots one TypedArray construction state across a nested observable operation.
+    #[inline]
+    pub(crate) const fn typed_array_construction(
+        site: NativeContinuationSite,
+        stage: TypedArrayConstructionStage,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArrayConstruction(stage),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

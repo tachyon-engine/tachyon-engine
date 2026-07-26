@@ -341,6 +341,9 @@ impl Isolate {
             typed_array_object: registry
                 .try_register("TypedArrayObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_typed_array_construction: registry
+                .try_register("PendingTypedArrayConstruction")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             arguments_object: registry
                 .try_register("ArgumentsObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

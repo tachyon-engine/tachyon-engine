@@ -450,6 +450,21 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::TypedArrayByteOffset
+                            | ConversionConsumer::TypedArrayLength
+                            | ConversionConsumer::TypedArrayElement
+                    ) {
+                        let state =
+                            self.pending_typed_array_construction_reference(continuation.receiver)?;
+                        return self.resume_typed_array_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::ArrayInsertLength {
                         let state = self.pending_array_insert_reference(continuation.receiver)?;
                         return self.resume_array_insert_conversion(
@@ -1041,6 +1056,11 @@ impl Isolate {
                 | ConversionConsumer::StringSplitLimit
                 | ConversionConsumer::StringSplitSeparator => {
                     unreachable!("String split conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayByteOffset
+                | ConversionConsumer::TypedArrayLength
+                | ConversionConsumer::TypedArrayElement => {
+                    unreachable!("TypedArray conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

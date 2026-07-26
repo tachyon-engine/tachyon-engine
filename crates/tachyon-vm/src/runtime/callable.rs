@@ -1,6 +1,7 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
+use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::object::{
     ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
 };
@@ -1856,6 +1857,7 @@ pub(crate) struct VmTypes {
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
     pub(crate) data_view_object: GcType<DataViewObject>,
     pub(crate) typed_array_object: GcType<TypedArrayObject>,
+    pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,

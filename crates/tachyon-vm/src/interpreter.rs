@@ -2194,6 +2194,9 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
             }
+            NativeContinuationKind::TypedArrayConstruction(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4428,8 +4431,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, view);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayConstructor(kind)) => {
-                    let array = self.create_typed_array_from_site(&site, kind)?;
-                    return self.write(site.caller_base, site.destination, array);
+                    return self.begin_typed_array_from_site(&site, kind);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
@@ -7328,6 +7330,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)
+                }
+                NativeContinuationKind::TypedArrayConstruction(stage) => {
+                    self.resume_typed_array_construction(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())

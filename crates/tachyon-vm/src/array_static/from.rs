@@ -88,6 +88,46 @@ impl Isolate {
         site: NativeContinuationSite,
         source: Value,
     ) -> Result<(), ExecutionError> {
+        self.begin_source_to_list(site, source, true)
+    }
+
+    /// Collects a source with an already resolved iterator method into an intrinsic Array.
+    pub(crate) fn begin_iterator_method_to_list(
+        &mut self,
+        site: NativeContinuationSite,
+        source: Value,
+        method: Value,
+    ) -> Result<(), ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_array_static_state(PendingArrayStatic {
+            result: undefined,
+            constructor: undefined,
+            retained: undefined,
+            source,
+            mapper: undefined,
+            this_argument: undefined,
+            iterator: undefined,
+            next_method: method,
+            iterator_result: undefined,
+            arguments: Box::new([]),
+            kind: ArrayStaticKind::FromIterable,
+            cursor: 0,
+            length: 0,
+            mapping: false,
+            close_on_abrupt: false,
+            require_iterable: true,
+        })?;
+        self.root_array_static_state(site, state)?;
+        self.create_or_construct_array_from_result(site, state)
+    }
+
+    /// Starts the shared source-to-list protocol with an explicit iterable requirement.
+    fn begin_source_to_list(
+        &mut self,
+        site: NativeContinuationSite,
+        source: Value,
+        require_iterable: bool,
+    ) -> Result<(), ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
         let state = self.allocate_array_static_state(PendingArrayStatic {
             result: undefined,
@@ -105,7 +145,7 @@ impl Isolate {
             length: 0,
             mapping: false,
             close_on_abrupt: false,
-            require_iterable: true,
+            require_iterable,
         })?;
         self.root_array_static_state(site, state)?;
         if is_nullish(source) {
