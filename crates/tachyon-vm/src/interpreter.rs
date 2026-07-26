@@ -2109,6 +2109,9 @@ impl Isolate {
             NativeContinuationKind::ArrayForEach(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::TypedArrayCallback(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArrayConcat(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5382,6 +5385,10 @@ impl Isolate {
                     let result = self.regexp_split(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
+                    let result = self.regexp_escape(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     let value = self.date_function_call()?;
                     return self.write(site.caller_base, site.destination, value);
@@ -6094,6 +6101,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayCallback(kind)) => {
+                    return self.begin_typed_array_callback(&site, kind);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
@@ -7316,6 +7326,16 @@ impl Isolate {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_array_for_each(site, state, stage, value, continuation.second())
                 }
+                NativeContinuationKind::TypedArrayCallback(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_typed_array_callback(
+                        site,
+                        state,
+                        stage,
+                        value,
+                        continuation.second(),
+                    )
+                }
                 NativeContinuationKind::ArrayConcat(stage) => {
                     let state = self.pending_array_concat_reference(continuation.first())?;
                     self.resume_array_concat(site, state, stage, value)
@@ -7470,6 +7490,11 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if continuation.kind() == NativeContinuationKind::SignalWatcherHook
+                    && let ExecutionError::HostThrown(thrown) = &error
+                {
+                    return self.throw_value(*thrown, site.call_site);
+                }
                 if matches!(
                     continuation.kind(),
                     NativeContinuationKind::PromiseCombinator(stage)
@@ -7657,6 +7682,17 @@ impl Isolate {
                 }
                 if let Some(iterator) = self.array_static_close_iterator(continuation)? {
                     return self.begin_iterator_close(continuation.site(), iterator, value);
+                }
+                if continuation.kind() == NativeContinuationKind::SignalWatcherHook {
+                    let site = continuation.site();
+                    match self.continue_signal_watcher_hook_abrupt(continuation, value)? {
+                        None => return Ok(None),
+                        Some(replacement) => {
+                            completion = CompletionRecord::throw(replacement);
+                            instruction_offset = site.call_site;
+                            continue;
+                        }
+                    }
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;

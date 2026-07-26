@@ -4,7 +4,9 @@ mod string_iterator;
 
 use super::*;
 use crate::object::TypedArrayKind;
-use crate::runtime::callable::{DataViewElement, TypedArrayGetter, TypedArraySearchDirection};
+use crate::runtime::callable::{
+    DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
+};
 
 impl Isolate {
     /// Builds the object/function prototype graph and intrinsic constructors before publication.
@@ -168,6 +170,7 @@ impl Isolate {
             DataViewElement::Uint16,
             DataViewElement::Int32,
             DataViewElement::Uint32,
+            DataViewElement::Float16,
             DataViewElement::Float32,
             DataViewElement::Float64,
         ] {
@@ -317,6 +320,26 @@ impl Isolate {
             )?;
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(base_prototype, atom, search, true)?;
+        }
+        for kind in [
+            TypedArrayCallbackKind::Every,
+            TypedArrayCallbackKind::Some,
+            TypedArrayCallbackKind::Find,
+            TypedArrayCallbackKind::FindIndex,
+            TypedArrayCallbackKind::FindLast,
+            TypedArrayCallbackKind::FindLastIndex,
+        ] {
+            let callback = self.allocate_native_function(
+                NativeFunction::TypedArrayCallback(kind),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(kind.name().as_bytes())?;
+            self.set_intrinsic_data_property(base_prototype, atom, callback, true)?;
         }
         let bytes_per_element = self.intern_intrinsic_name(b"BYTES_PER_ELEMENT")?;
         for kind in TypedArrayKind::ALL {
@@ -911,6 +934,9 @@ impl Isolate {
         }
         let regexp_constructor = allocate(self, NativeFunction::RegExpConstructor)?;
         self.realm.regexp_constructor = Some(regexp_constructor);
+        let regexp_escape = allocate(self, NativeFunction::RegExpEscape)?;
+        let escape_atom = self.intern_intrinsic_name(b"escape")?;
+        self.set_intrinsic_data_property(regexp_constructor, escape_atom, regexp_escape, true)?;
         let regexp_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,

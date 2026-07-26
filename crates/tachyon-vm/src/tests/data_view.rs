@@ -4,6 +4,9 @@ use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName
 
 use super::{fixtures::test_isolate, *};
 
+#[path = "data_view_float16_surface.rs"]
+mod float16_surface;
+
 const DATA_VIEW_SOURCE: &str = r#"
 var buffer = new ArrayBuffer(16);
 var view = new DataView(buffer, 0, 16);

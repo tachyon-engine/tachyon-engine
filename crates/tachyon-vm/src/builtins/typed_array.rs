@@ -1,6 +1,7 @@
 //! Fixed-buffer Number TypedArray construction and integer-indexed element access.
 
 mod at;
+mod callback;
 mod includes;
 mod search;
 
@@ -9,7 +10,9 @@ use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
 use crate::object::{ArrayBufferData, TypedArrayKind, TypedArrayObject};
 use crate::property::array_index;
-use crate::runtime::callable::{DataViewElement, TypedArrayGetter, TypedArraySearchDirection};
+use crate::runtime::callable::{
+    DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct TypedArraySnapshot {

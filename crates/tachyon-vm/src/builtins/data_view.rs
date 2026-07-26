@@ -1,5 +1,8 @@
 //! Fixed ArrayBuffer-backed DataView construction and numeric access.
 
+mod float16;
+
+use self::float16::{decode_float16, encode_float16};
 use super::super::*;
 use crate::object::{ArrayBufferData, DataViewObject};
 use crate::runtime::callable::DataViewElement;
@@ -318,6 +321,7 @@ pub(super) fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little:
         DataViewElement::Uint8 => Value::from_i32(bytes[0] as i32),
         DataViewElement::Int16 => Value::from_i32(order2([bytes[0], bytes[1]]) as i16 as i32),
         DataViewElement::Uint16 => Value::from_i32(order2([bytes[0], bytes[1]]) as i32),
+        DataViewElement::Float16 => Value::from_f64(decode_float16(order2([bytes[0], bytes[1]]))),
         DataViewElement::Int32 => {
             Value::from_i32(order4([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32)
         }
@@ -336,6 +340,7 @@ pub(super) fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little:
 pub(super) fn data_view_encode(element: DataViewElement, number: f64, little: bool) -> [u8; 8] {
     let mut output = [0_u8; 8];
     let bits = match element {
+        DataViewElement::Float16 => u64::from(encode_float16(number)),
         DataViewElement::Float32 => (number as f32).to_bits() as u64,
         DataViewElement::Float64 => number.to_bits(),
         _ => to_uint32(number) as u64,

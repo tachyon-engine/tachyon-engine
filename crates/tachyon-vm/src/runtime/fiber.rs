@@ -672,6 +672,13 @@ pub(crate) enum ArrayForEachStage {
     FindCallback,
 }
 
+/// Observable callback boundary in fixed TypedArray predicate and search methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayCallbackStage {
+    Callback,
+}
+
 /// One observable boundary in the resumable Array.prototype.concat algorithm.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1124,6 +1131,7 @@ pub(crate) enum NativeContinuationKind {
     GetOwnPropertyDescriptors(GetOwnPropertyDescriptorsStage),
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
+    TypedArrayCallback(TypedArrayCallbackStage),
     ArrayConcat(ArrayConcatStage),
     ArrayFlat(ArrayFlatStage),
     ArrayFlatMap(ArrayFlatMapStage),
@@ -1916,6 +1924,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::ArrayForEach(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Roots one TypedArray callback state and the current element across a JS frame.
+    #[inline]
+    pub(crate) const fn typed_array_callback(
+        site: NativeContinuationSite,
+        stage: TypedArrayCallbackStage,
+        state: Value,
+        element: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArrayCallback(stage),
+            first: state,
+            second: element,
         }
     }
 

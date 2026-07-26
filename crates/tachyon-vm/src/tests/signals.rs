@@ -219,6 +219,81 @@ getterThrow && getterTrace === "e" && equalsThrow && equalsThis && state.get() =
 nullOptions.get() === 6;
 "#;
 
+const SIGNAL_NOTIFY_SOURCE: &str = r#"
+var state = new Signal.State(1);
+var computed = new Signal.Computed(function() { return state.get() * 2; });
+computed.get();
+var trace = "";
+var frozen = 0;
+var watcher;
+watcher = new Signal.subtle.Watcher(function() {
+    trace = trace + "n";
+    if (this !== watcher) frozen = -100;
+    try { state.get(); } catch (error) { if (error instanceof TypeError) frozen++; }
+    try { state.set(9); } catch (error) { if (error instanceof TypeError) frozen++; }
+    try { watcher.watch(); } catch (error) { if (error instanceof TypeError) frozen++; }
+});
+watcher.watch(computed);
+trace = trace + "b";
+state.set(2);
+trace = trace + "a";
+var first = computed.get() === 4 && watcher.getPending()[0] === computed;
+watcher.watch();
+state.set(3);
+var second = computed.get() === 6;
+trace === "bnan" && frozen === 6 && first && second;
+"#;
+
+const SIGNAL_NOTIFY_ERRORS_SOURCE: &str = r#"
+var state = new Signal.State(1);
+var computed = new Signal.Computed(function() { return state.get(); });
+computed.get();
+var trace = "";
+var first = new Signal.subtle.Watcher(function() { trace += "a"; throw 11; });
+var second = new Signal.subtle.Watcher(function() { trace += "b"; throw 13; });
+var third = new Signal.subtle.Watcher(function() { trace += "c"; });
+first.watch(computed);
+second.watch(computed);
+third.watch(computed);
+var aggregate = false;
+try { state.set(2); } catch (error) {
+    aggregate = error instanceof AggregateError && error.errors.length === 2 &&
+        error.errors[0] === 11 && error.errors[1] === 13;
+}
+var other = new Signal.State(1);
+var otherComputed = new Signal.Computed(function() { return other.get(); });
+otherComputed.get();
+var marker = {};
+var single = new Signal.subtle.Watcher(function() { throw marker; });
+single.watch(otherComputed);
+var identity = false;
+try { other.set(2); } catch (error) { identity = error === marker; }
+trace === "abc" && aggregate && identity;
+"#;
+
+const SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE: &str = r#"
+var trace = "";
+var selector = new Signal.State(true, {
+    [Signal.subtle.watched]: function() { trace += "S"; }
+});
+var left = new Signal.State(1, {
+    [Signal.subtle.watched]: function() { trace += "L"; },
+    [Signal.subtle.unwatched]: function() { trace += "l"; }
+});
+var right = new Signal.State(2, {
+    [Signal.subtle.watched]: function() { trace += "R"; }
+});
+var selected = new Signal.Computed(function() {
+    return selector.get() ? left.get() : right.get();
+});
+selected.get();
+var watcher = new Signal.subtle.Watcher(function() { trace += "N"; });
+watcher.watch(selected);
+selector.set(false);
+var value = selected.get();
+trace === "SLNlR" && value === 2;
+"#;
+
 #[test]
 fn signal_namespace_is_installed_in_every_realm() {
     let mut isolate = test_isolate();
@@ -322,6 +397,89 @@ fn signal_state_option_and_equals_abrupt_completion_restore_state() {
         .expect("Signal options abrupt fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+}
+
+#[test]
+fn signal_notify_is_synchronous_and_frozen_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(SIGNAL_NOTIFY_SOURCE, 8_700, "signals-notify", false);
+    assert_signal_behavior::<2>(SIGNAL_NOTIFY_SOURCE, 8_701, "signals-notify", false);
+    assert_signal_behavior::<4>(SIGNAL_NOTIFY_SOURCE, 8_702, "signals-notify", false);
+    assert_signal_behavior::<8>(SIGNAL_NOTIFY_SOURCE, 8_703, "signals-notify", false);
+    assert_signal_behavior::<16>(SIGNAL_NOTIFY_SOURCE, 8_704, "signals-notify", false);
+    assert_signal_behavior::<8>(SIGNAL_NOTIFY_SOURCE, 8_705, "signals-notify", true);
+}
+
+#[test]
+fn signal_notify_runs_all_watchers_and_aggregates_errors() {
+    assert_signal_behavior::<4>(
+        SIGNAL_NOTIFY_ERRORS_SOURCE,
+        8_710,
+        "signals-notify-errors",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_NOTIFY_ERRORS_SOURCE,
+        8_711,
+        "signals-notify-errors",
+        true,
+    );
+}
+
+#[test]
+fn signal_dynamic_dependency_diff_runs_lifecycle_hooks() {
+    assert_signal_behavior::<1>(
+        SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+        8_720,
+        "signals-dynamic-dependencies",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+        8_721,
+        "signals-dynamic-dependencies",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+        8_722,
+        "signals-dynamic-dependencies",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+        8_723,
+        "signals-dynamic-dependencies",
+        true,
+    );
+}
+
+/// Executes one Signals semantic fixture under a selected dispatch and collection policy.
+fn assert_signal_behavior<const N: usize>(
+    source: &'static str,
+    source_id: u32,
+    name: &'static str,
+    forced_major: bool,
+) {
+    let module = compile_signal_source(source, source_id, name);
+    let mut isolate = signal_api_test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Signal semantic fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Signal fixture {name}, dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

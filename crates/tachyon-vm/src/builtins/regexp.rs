@@ -4,6 +4,47 @@ use super::super::*;
 use crate::regexp::backend::CompiledRegExp;
 
 impl Isolate {
+    /// Implements `RegExp.escape` over code points while preserving exact UTF-16 output.
+    pub(crate) fn regexp_escape(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let input = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let units = self
+            .regexp_string_units(input)
+            .map_err(|error| match error {
+                ExecutionError::UnsupportedStringValue(_) => {
+                    ExecutionError::UnsupportedPrimitiveStringConversion(input)
+                }
+                error => error,
+            })?;
+        let output_length = regexp_escape_output_length(&units)?;
+        let mut escaped = Vec::new();
+        escaped
+            .try_reserve_exact(output_length)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+
+        let mut index = 0;
+        while index < units.len() {
+            let first = units[index];
+            if (0xd800..=0xdbff).contains(&first)
+                && units
+                    .get(index + 1)
+                    .is_some_and(|second| (0xdc00..=0xdfff).contains(second))
+            {
+                escaped.extend_from_slice(&units[index..index + 2]);
+                index += 2;
+                continue;
+            }
+            let first_output = escaped.is_empty();
+            append_regexp_escape_unit(&mut escaped, first, first_output);
+            index += 1;
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(escaped)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Recognizes RegExp's virtual own/prototype accessors for internal `HasProperty`.
     pub(crate) fn is_regexp_value(&self, value: Value) -> bool {
         value.as_heap_ref().is_some_and(|raw| {
@@ -533,6 +574,129 @@ impl Isolate {
     fn validate_regexp_flags(&mut self, value: Value) -> Result<(), ExecutionError> {
         self.regexp_flags(value).map(|_| ())
     }
+}
+
+/// Computes the exact output capacity using the same code-point boundaries as emission.
+fn regexp_escape_output_length(units: &[u16]) -> Result<usize, ExecutionError> {
+    let mut length = 0_usize;
+    let mut index = 0_usize;
+    while index < units.len() {
+        let unit = units[index];
+        let paired = (0xd800..=0xdbff).contains(&unit)
+            && units
+                .get(index + 1)
+                .is_some_and(|second| (0xdc00..=0xdfff).contains(second));
+        let encoded = if paired {
+            index += 2;
+            2
+        } else {
+            index += 1;
+            regexp_escape_unit_length(unit, length == 0)
+        };
+        length = length
+            .checked_add(encoded)
+            .ok_or(ExecutionError::InvalidStringLength)?;
+    }
+    Ok(length)
+}
+
+#[inline(always)]
+const fn regexp_escape_unit_length(unit: u16, first: bool) -> usize {
+    if (first && is_ascii_alphanumeric_unit(unit))
+        || ((is_regexp_other_punctuator(unit) || is_regexp_escape_whitespace(unit)) && unit <= 0xff)
+    {
+        4
+    } else if is_surrogate(unit)
+        || is_regexp_other_punctuator(unit)
+        || is_regexp_escape_whitespace(unit)
+    {
+        6
+    } else if is_regexp_syntax_unit(unit) || regexp_control_escape(unit).is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+/// Appends the canonical escape for one non-paired UTF-16 code unit.
+fn append_regexp_escape_unit(output: &mut Vec<u16>, unit: u16, first: bool) {
+    if first && is_ascii_alphanumeric_unit(unit) {
+        append_hex_escape(output, b'x', unit, 2);
+        return;
+    }
+    if is_regexp_syntax_unit(unit) {
+        output.extend_from_slice(&[u16::from(b'\\'), unit]);
+        return;
+    }
+    if let Some(control) = regexp_control_escape(unit) {
+        output.extend_from_slice(&[u16::from(b'\\'), control]);
+        return;
+    }
+    if is_regexp_other_punctuator(unit) || is_regexp_escape_whitespace(unit) || is_surrogate(unit) {
+        if unit <= 0xff {
+            append_hex_escape(output, b'x', unit, 2);
+        } else {
+            append_hex_escape(output, b'u', unit, 4);
+        }
+        return;
+    }
+    output.push(unit);
+}
+
+#[inline(always)]
+fn append_hex_escape(output: &mut Vec<u16>, marker: u8, unit: u16, digits: u32) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    output.extend_from_slice(&[u16::from(b'\\'), u16::from(marker)]);
+    for shift in (0..digits).rev() {
+        output.push(u16::from(HEX[usize::from((unit >> (shift * 4)) & 0xf)]));
+    }
+}
+
+#[inline(always)]
+const fn is_regexp_syntax_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        94 | 36 | 92 | 46 | 42 | 43 | 63 | 40 | 41 | 91 | 93 | 123 | 125 | 124 | 47
+    )
+}
+
+#[inline(always)]
+const fn is_regexp_other_punctuator(unit: u16) -> bool {
+    matches!(
+        unit,
+        44 | 45 | 61 | 60 | 62 | 35 | 38 | 33 | 37 | 58 | 59 | 64 | 126 | 39 | 96 | 34
+    )
+}
+
+#[inline(always)]
+const fn regexp_control_escape(unit: u16) -> Option<u16> {
+    match unit {
+        0x0009 => Some(b't' as u16),
+        0x000a => Some(b'n' as u16),
+        0x000b => Some(b'v' as u16),
+        0x000c => Some(b'f' as u16),
+        0x000d => Some(b'r' as u16),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+const fn is_regexp_escape_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0020 | 0x00a0 | 0x1680 | 0x2000
+            ..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+    )
+}
+
+#[inline(always)]
+const fn is_surrogate(unit: u16) -> bool {
+    matches!(unit, 0xd800..=0xdfff)
+}
+
+#[inline(always)]
+const fn is_ascii_alphanumeric_unit(unit: u16) -> bool {
+    matches!(unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
 }
 
 struct RegExpFlags {

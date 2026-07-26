@@ -36,6 +36,32 @@ impl TypedArraySearchDirection {
     }
 }
 
+/// Callback algorithm selected by the shared fixed TypedArray iteration state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayCallbackKind {
+    Every,
+    Some,
+    Find,
+    FindIndex,
+    FindLast,
+    FindLastIndex,
+}
+
+impl TypedArrayCallbackKind {
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Every => "every",
+            Self::Some => "some",
+            Self::Find => "find",
+            Self::FindIndex => "findIndex",
+            Self::FindLast => "findLast",
+            Self::FindLastIndex => "findLastIndex",
+        }
+    }
+}
+
 /// Number-backed element formats exposed by the fixed DataView implementation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -44,6 +70,7 @@ pub(crate) enum DataViewElement {
     Uint8,
     Int16,
     Uint16,
+    Float16,
     Int32,
     Uint32,
     Float32,
@@ -55,7 +82,7 @@ impl DataViewElement {
     pub(crate) const fn byte_width(self) -> usize {
         match self {
             Self::Int8 | Self::Uint8 => 1,
-            Self::Int16 | Self::Uint16 => 2,
+            Self::Int16 | Self::Uint16 | Self::Float16 => 2,
             Self::Int32 | Self::Uint32 | Self::Float32 => 4,
             Self::Float64 => 8,
         }
@@ -68,6 +95,7 @@ impl DataViewElement {
             (false, Self::Uint8) => "getUint8",
             (false, Self::Int16) => "getInt16",
             (false, Self::Uint16) => "getUint16",
+            (false, Self::Float16) => "getFloat16",
             (false, Self::Int32) => "getInt32",
             (false, Self::Uint32) => "getUint32",
             (false, Self::Float32) => "getFloat32",
@@ -76,6 +104,7 @@ impl DataViewElement {
             (true, Self::Uint8) => "setUint8",
             (true, Self::Int16) => "setInt16",
             (true, Self::Uint16) => "setUint16",
+            (true, Self::Float16) => "setFloat16",
             (true, Self::Int32) => "setInt32",
             (true, Self::Uint32) => "setUint32",
             (true, Self::Float32) => "setFloat32",
@@ -302,6 +331,7 @@ pub(crate) enum NativeFunction {
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
+    RegExpEscape,
     RegExpExec,
     RegExpTest,
     RegExpToString,
@@ -391,6 +421,7 @@ pub(crate) enum NativeFunction {
     TypedArrayAt,
     TypedArrayIncludes,
     TypedArraySearch(TypedArraySearchDirection),
+    TypedArrayCallback(TypedArrayCallbackKind),
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -938,6 +969,7 @@ impl NativeFunction {
             | Self::ReflectPreventExtensions
             | Self::StringConstructor
             | Self::RegExpConstructor
+            | Self::RegExpEscape
             | Self::RegExpExec
             | Self::RegExpTest
             | Self::RegExpToString
@@ -982,6 +1014,7 @@ impl NativeFunction {
             | Self::TypedArrayAt
             | Self::TypedArrayIncludes
             | Self::TypedArraySearch(_)
+            | Self::TypedArrayCallback(_)
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1224,6 +1257,7 @@ impl NativeFunction {
             Self::ReflectPreventExtensions => "preventExtensions",
             Self::StringConstructor => "String",
             Self::RegExpConstructor => "RegExp",
+            Self::RegExpEscape => "escape",
             Self::RegExpExec => "exec",
             Self::RegExpTest => "test",
             Self::RegExpToString => "toString",
@@ -1355,6 +1389,7 @@ impl NativeFunction {
             Self::TypedArrayAt => "at",
             Self::TypedArrayIncludes => "includes",
             Self::TypedArraySearch(direction) => direction.name(),
+            Self::TypedArrayCallback(kind) => kind.name(),
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
