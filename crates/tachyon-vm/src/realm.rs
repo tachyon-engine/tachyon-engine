@@ -366,6 +366,17 @@ impl Isolate {
         )?;
         let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
         self.set_intrinsic_data_property(base_prototype, reverse_atom, reverse, true)?;
+        let set = self.allocate_native_function(
+            NativeFunction::TypedArraySet,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let set_atom = self.intern_intrinsic_name(b"set")?;
+        self.set_intrinsic_data_property(base_prototype, set_atom, set, true)?;
         for (direction, name) in [
             (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
             (

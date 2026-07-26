@@ -244,7 +244,7 @@ use runtime::{
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
         ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, SignalStateStage,
         StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
-        VmRoots, next_to_primitive_stage,
+        TypedArraySetStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
@@ -459,6 +459,7 @@ pub enum ExecutionError {
     ArrayLengthOverflow,
     InvalidArrayLength,
     DetachedArrayBuffer,
+    TypedArraySetAllocationFailed,
     OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),

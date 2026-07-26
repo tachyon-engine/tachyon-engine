@@ -307,6 +307,9 @@ pub(crate) enum ConversionConsumer {
     TypedArrayCopyWithinTarget,
     TypedArrayCopyWithinStart,
     TypedArrayCopyWithinEnd,
+    TypedArraySetOffset,
+    TypedArraySetLength,
+    TypedArraySetElement,
     TypedArraySearchFromIndex,
 }
 
@@ -388,6 +391,9 @@ impl ConversionConsumer {
             | Self::TypedArrayCopyWithinTarget
             | Self::TypedArrayCopyWithinStart
             | Self::TypedArrayCopyWithinEnd
+            | Self::TypedArraySetOffset
+            | Self::TypedArraySetLength
+            | Self::TypedArraySetElement
             | Self::TypedArraySearchFromIndex => None,
         }
     }
@@ -1099,6 +1105,14 @@ pub(crate) enum TypedArrayConstructionStage {
     ArrayLikeElement,
 }
 
+/// Observable property-read boundaries in `%TypedArray.prototype.set%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArraySetStage {
+    Length,
+    Element,
+}
+
 /// Observable callback boundaries in `Signal.State` construction and mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1190,6 +1204,7 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
+    TypedArraySet(TypedArraySetStage),
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
@@ -1362,6 +1377,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::TypedArrayConstruction(stage),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots one set state and its property receiver across an observable getter.
+    #[inline]
+    pub(crate) const fn typed_array_set(
+        site: NativeContinuationSite,
+        stage: TypedArraySetStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArraySet(stage),
+            first: state,
+            second: receiver,
         }
     }
 

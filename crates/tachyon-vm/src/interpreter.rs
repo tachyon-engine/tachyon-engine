@@ -2203,6 +2203,9 @@ impl Isolate {
             NativeContinuationKind::TypedArrayConstruction(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::TypedArraySet(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
@@ -6129,6 +6132,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayReverse) => {
                     return self.begin_typed_array_reverse(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
+                    return self.begin_typed_array_set(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);
                 }
@@ -7459,6 +7465,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::TypedArrayConstruction(stage) => {
                     self.resume_typed_array_construction(continuation, stage, value)
+                }
+                NativeContinuationKind::TypedArraySet(stage) => {
+                    self.resume_typed_array_set(continuation, stage, value)
                 }
                 NativeContinuationKind::SignalState(stage) => {
                     self.resume_signal_state(continuation, stage, value)
