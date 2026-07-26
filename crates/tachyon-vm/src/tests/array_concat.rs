@@ -55,6 +55,13 @@ result.length === 4 && result[0] === "y" && result[1] === "u" &&
   result[2] === "c" && result[3] === "k";
 "#;
 
+const ARRAY_CONCAT_LONG_SYNCHRONOUS_SOURCE: &str = r#"
+var source = new Uint8Array(12000);
+source[Symbol.isConcatSpreadable] = true;
+var result = [].concat(source);
+result.length === 12000 && result[0] === 0 && result[11999] === 0;
+"#;
+
 const ARRAY_STRING_ITERATOR_SOURCE: &str = r#"
 [...'ab'][1] === 'b';
 "#;
@@ -129,6 +136,32 @@ fn array_concat_string_exotic_indices_are_spreadable() {
 }
 
 #[test]
+/// Uses a larger atom quota because generic indexed copies materialize property keys.
+fn array_concat_long_synchronous_copy_does_not_grow_the_rust_stack() {
+    let module = compile_array_concat_source(ARRAY_CONCAT_LONG_SYNCHRONOUS_SOURCE, 1_844);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(32_768, 4 * 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(32 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 32_768).with_max_shapes(32_768),
+    ))
+    .expect("large-atom concat isolate initializes");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("long synchronous concat executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "long synchronous concat returned {outcome:?}"
+    );
+}
+
+#[test]
 fn array_concat_state_survives_forced_major_collections() {
     assert_array_concat_source::<8>(ARRAY_CONCAT_SOURCE, 1_841, true);
     assert_array_concat_source::<8>(ARRAY_CONCAT_PROXY_SOURCE, 1_842, true);
@@ -150,17 +183,7 @@ fn array_accumulation_iterator_state_survives_forced_major_collections() {
 
 /// Compiles and executes one concat fixture under a selected dispatch and GC policy.
 fn assert_array_concat_source<const N: usize>(source: &str, source_id: u32, forced_major: bool) {
-    let module = Compiler
-        .compile(
-            SourceText::new(
-                SourceId::new(source_id),
-                SourceName::new("array-concat-fixture"),
-                MediaType::JavaScript,
-                Arc::from(source),
-            ),
-            CompileOptions::default(),
-        )
-        .expect("Array concat fixture compiles");
+    let module = compile_array_concat_source(source, source_id);
     let mut isolate = test_isolate();
     if forced_major {
         isolate
@@ -184,4 +207,19 @@ fn assert_array_concat_source<const N: usize>(source: &str, source_id: u32, forc
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}, i32={completed_i32:?}"
     );
+}
+
+/// Compiles one concat fixture independently of dispatch and heap policy.
+fn compile_array_concat_source(source: &str, source_id: u32) -> CompiledModule {
+    Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id),
+                SourceName::new("array-concat-fixture"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("Array concat fixture compiles")
 }

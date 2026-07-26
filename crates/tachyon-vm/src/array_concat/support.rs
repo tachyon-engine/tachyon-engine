@@ -72,7 +72,7 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
         descriptor: PropertyDescriptor,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Option<GcRef<PendingArrayConcat>>, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
         self.push_array_concat_parent(site, state, stage, receiver)?;
@@ -87,15 +87,11 @@ impl Isolate {
         if self.fiber.frames.len() != frame_depth
             || self.fiber.completions.len() <= completion_depth
         {
-            return Ok(());
+            return Ok(None);
         }
         let rooted = self.pop_native_continuation()?;
         let state = self.pending_array_concat_reference(rooted.first())?;
-        match stage {
-            ArrayConcatStage::ElementDefine => self.finish_array_concat_element(site, state),
-            ArrayConcatStage::ValueDefine => self.finish_array_concat_source(site, state),
-            _ => Err(ExecutionError::MissingNativeContinuation),
-        }
+        Ok(Some(state))
     }
 
     /// Performs Set(..., true), preserving setters and Proxy traps.

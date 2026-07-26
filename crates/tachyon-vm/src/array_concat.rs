@@ -452,10 +452,41 @@ impl Isolate {
                 return Ok(());
             };
             if self.is_truthy_value(has)? {
-                return self.dispatch_array_concat_element_get(site, state);
+                let Some(state) = self.copy_synchronous_array_concat_element(site, state)? else {
+                    return Ok(());
+                };
+                self.update_array_concat_scalars(state, |pending| pending.element_index += 1)?;
+                continue;
             }
             self.skip_array_concat_holes(state)?;
         }
+    }
+
+    /// Copies one present element without recursively re-entering the concat driver.
+    fn copy_synchronous_array_concat_element(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayConcat>,
+    ) -> Result<Option<GcRef<PendingArrayConcat>>, ExecutionError> {
+        let snapshot = self.array_concat_snapshot(state)?;
+        let key = self.safe_integer_property_atom(snapshot.element_index)?;
+        let Some((state, value)) = self.dispatch_array_concat_get(
+            site,
+            state,
+            ArrayConcatStage::ElementGet,
+            snapshot.current,
+            key.into(),
+        )?
+        else {
+            return Ok(None);
+        };
+        self.prepare_array_concat_define(
+            site,
+            state,
+            ArrayConcatStage::ElementDefine,
+            snapshot.next_index + snapshot.element_index,
+            value,
+        )
     }
 
     /// Branches the completed HasProperty operation without materializing holes.
@@ -543,6 +574,26 @@ impl Isolate {
         index: u64,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        let Some(state) = self.prepare_array_concat_define(site, state, stage, index, value)?
+        else {
+            return Ok(());
+        };
+        match stage {
+            ArrayConcatStage::ElementDefine => self.finish_array_concat_element(site, state),
+            ArrayConcatStage::ValueDefine => self.finish_array_concat_source(site, state),
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
+    /// Performs one define operation and reports synchronous completion to the caller's loop.
+    fn prepare_array_concat_define(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayConcat>,
+        stage: ArrayConcatStage,
+        index: u64,
+        value: Value,
+    ) -> Result<Option<GcRef<PendingArrayConcat>>, ExecutionError> {
         self.root_array_concat_state(site, state)?;
         self.set_array_concat_value(state, |pending| &mut pending.retained, value)?;
         let snapshot = self.array_concat_snapshot(state)?;
@@ -566,11 +617,7 @@ impl Isolate {
         self.define_data_property(snapshot.result, key, descriptor)?;
         let state =
             self.pending_array_concat_reference(self.read(site.caller_base, site.destination)?)?;
-        match stage {
-            ArrayConcatStage::ElementDefine => self.finish_array_concat_element(site, state),
-            ArrayConcatStage::ValueDefine => self.finish_array_concat_source(site, state),
-            _ => Err(ExecutionError::MissingNativeContinuation),
-        }
+        Ok(Some(state))
     }
 
     /// Advances to the next captured source after defining one scalar value.
