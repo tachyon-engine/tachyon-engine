@@ -633,6 +633,20 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::RegExpTestInput {
+                        return self.resume_regexp_test_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::RegExpExecInput {
+                        return self.resume_regexp_exec_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::ArrayCopyWithinLength
@@ -1186,6 +1200,12 @@ impl Isolate {
                 | ConversionConsumer::StringSplitLimit
                 | ConversionConsumer::StringSplitSeparator => {
                     unreachable!("String split conversion resumes inside its state machine")
+                }
+                ConversionConsumer::RegExpTestInput => {
+                    unreachable!("RegExp test conversion resumes inside its state machine")
+                }
+                ConversionConsumer::RegExpExecInput => {
+                    unreachable!("RegExp exec conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayByteOffset
                 | ConversionConsumer::TypedArrayLength

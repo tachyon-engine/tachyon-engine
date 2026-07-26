@@ -2240,6 +2240,13 @@ impl Isolate {
                 }
                 (continuation.first(), 0, None, 0)
             }
+            NativeContinuationKind::RegExpTest(stage) => {
+                if stage != RegExpTestStage::ExecCall {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 1)
+            }
             NativeContinuationKind::StringSplit(stage) => {
                 if stage != StringSplitStage::SplitterCall {
                     return Err(ExecutionError::MissingNativeContinuation);
@@ -5550,12 +5557,10 @@ impl Isolate {
                     return self.begin_date_local_setter(&site, setter);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpExec) => {
-                    let result = self.regexp_exec(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_regexp_exec(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpTest) => {
-                    let result = self.regexp_test(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_regexp_test(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpToString) => {
                     let result = self.regexp_to_string(site.this_value)?;
@@ -7594,6 +7599,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::DateToJson(stage) => {
                     self.resume_date_to_json(continuation, stage, value)
+                }
+                NativeContinuationKind::RegExpTest(stage) => {
+                    self.resume_regexp_test(continuation, stage, value)
                 }
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)

@@ -254,6 +254,8 @@ pub(crate) enum ConversionConsumer {
     DateToPrimitiveString,
     DateToPrimitiveNumber,
     DateToJson,
+    RegExpExecInput,
+    RegExpTestInput,
     ArrayLength,
     ArraySearchIndex,
     ArrayJoinLength,
@@ -343,6 +345,8 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
+            | Self::RegExpExecInput
+            | Self::RegExpTestInput
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayJoinLength
@@ -431,6 +435,8 @@ impl ConversionConsumer {
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
                 | Self::DateToPrimitiveString
+                | Self::RegExpExecInput
+                | Self::RegExpTestInput
                 | Self::ArrayToSortedLeftString
                 | Self::ArrayToSortedRightString
                 | Self::ArrayJoinSeparator
@@ -479,6 +485,8 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
+                | Self::RegExpExecInput
+                | Self::RegExpTestInput
                 | Self::ArrayLength
                 | Self::ArrayJoinLength
                 | Self::ArrayJoinSeparator
@@ -1110,6 +1118,14 @@ pub(crate) enum StringSplitStage {
     SplitterCall,
 }
 
+/// Observable callback boundaries in `RegExp.prototype.test`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum RegExpTestStage {
+    ExecGet,
+    ExecCall,
+}
+
 /// Observable callback boundaries in source-based TypedArray construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1236,6 +1252,7 @@ pub(crate) enum NativeContinuationKind {
     },
     ObjectToLocaleString(ObjectToLocaleStringStage),
     DateToJson(DateToJsonStage),
+    RegExpTest(RegExpTestStage),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
@@ -1395,6 +1412,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::DateToJson(stage),
             first: receiver,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots the RegExp receiver and converted input across `exec` lookup and invocation.
+    #[inline]
+    pub(crate) const fn regexp_test(
+        site: NativeContinuationSite,
+        stage: RegExpTestStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::RegExpTest(stage),
+            first: state,
+            second: receiver,
         }
     }
 

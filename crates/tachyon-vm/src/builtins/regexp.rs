@@ -2,6 +2,7 @@
 
 use super::super::*;
 use crate::regexp::backend::CompiledRegExp;
+use crate::regexp_exec::{REGEXP_EXEC_GROUPS, REGEXP_EXEC_RESULT, REGEXP_EXEC_TEMPORARY};
 
 impl Isolate {
     /// Implements `RegExp.escape` over code points while preserving exact UTF-16 output.
@@ -202,11 +203,14 @@ impl Isolate {
         Ok(regexp)
     }
 
-    /// Executes the backend and materializes the match plus every positional capture.
-    pub(crate) fn regexp_exec(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let (source, flags) = self.regexp_data(site.this_value)?;
-        let input_argument = self.call_argument(site, 0)?;
-        let input = self.regexp_string_argument(input_argument)?;
+    /// Executes RegExpBuiltinExec after the caller has completed observable input conversion.
+    pub(crate) fn regexp_builtin_exec(
+        &mut self,
+        receiver: Value,
+        input: Value,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Value, ExecutionError> {
+        let (source, flags) = self.regexp_data(receiver)?;
         let source = String::from_utf16(&self.regexp_string_units(source)?)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let flags = self.regexp_flags(flags)?;
@@ -215,7 +219,7 @@ impl Isolate {
         let input_units = self.regexp_string_units(input)?;
         let last_index_atom = self.intern_intrinsic_name(b"lastIndex")?;
         let start = if flags.global || flags.sticky {
-            self.get_data_property(site.this_value, last_index_atom)?
+            self.get_data_property(receiver, last_index_atom)?
                 .and_then(numeric_value)
                 .filter(|value| value.is_finite() && *value >= 0.0)
                 .map_or(0, |value| value.trunc() as usize)
@@ -229,20 +233,21 @@ impl Isolate {
             .filter(|matched| !flags.sticky || matched.start == start);
         let Some(matched) = matched else {
             if flags.global || flags.sticky {
-                self.set_own_data_property(site.this_value, last_index_atom, Value::from_i32(0))?;
+                self.set_own_data_property(receiver, last_index_atom, Value::from_i32(0))?;
             }
             return Ok(Value::from_immediate(Immediate::Null));
         };
         if flags.global || flags.sticky {
             let end =
                 i32::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?;
-            self.set_own_data_property(site.this_value, last_index_atom, Value::from_i32(end))?;
+            self.set_own_data_property(receiver, last_index_atom, Value::from_i32(end))?;
         }
         let prototype = self
             .realm
             .array_prototype
             .expect("Array prototype initializes before RegExp result construction");
         let result = self.create_array_object_with_prototype(prototype)?;
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_RESULT, result)?;
         let capture_count = matched.captures.len();
         let mut ranges = Vec::new();
         ranges
@@ -251,6 +256,9 @@ impl Isolate {
         ranges.push(Some(matched.start..matched.end));
         ranges.extend(matched.captures.iter().cloned());
         for (index, range) in ranges.into_iter().enumerate() {
+            let key = self.property_key_atom(Value::from_i32(
+                i32::try_from(index).map_err(|_| ExecutionError::InvalidStringLength)?,
+            ))?;
             let value = match range {
                 Some(range) => self.allocate_runtime_string(
                     JsString::try_from_utf16(&input_units[range])
@@ -258,9 +266,7 @@ impl Isolate {
                 )?,
                 None => Value::from_immediate(Immediate::Undefined),
             };
-            let key = self.property_key_atom(Value::from_i32(
-                i32::try_from(index).map_err(|_| ExecutionError::InvalidStringLength)?,
-            ))?;
+            self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
             self.set_own_data_property(result, key, value)?;
         }
         let length = self.intern_intrinsic_name(b"length")?;
@@ -284,6 +290,9 @@ impl Isolate {
         self.set_own_data_property(result, input_atom, input)?;
         if !matched.named_captures.is_empty() {
             let groups = self.create_ordinary_object()?;
+            self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
+            let groups_atom = self.intern_intrinsic_name(b"groups")?;
+            self.set_own_data_property(result, groups_atom, groups)?;
             for (name, range) in matched.named_captures {
                 let atom = self.intern_intrinsic_name(name.as_bytes())?;
                 let value = match range {
@@ -293,23 +302,52 @@ impl Isolate {
                     )?,
                     None => Value::from_immediate(Immediate::Undefined),
                 };
+                self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
                 self.set_own_data_property(groups, atom, value)?;
             }
-            let groups_atom = self.intern_intrinsic_name(b"groups")?;
-            self.set_own_data_property(result, groups_atom, groups)?;
         }
         Ok(result)
     }
 
-    /// Implements `RegExp.prototype.test` via the same builtin execution and `lastIndex` path.
-    pub(crate) fn regexp_test(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        Ok(Value::from_immediate(
-            if self.regexp_exec(site)?.as_immediate() == Some(Immediate::Null) {
-                Immediate::False
-            } else {
-                Immediate::True
-            },
-        ))
+    /// Executes the branded test-only path without allocating a match result or capture strings.
+    pub(crate) fn regexp_builtin_test(
+        &mut self,
+        receiver: Value,
+        input: Value,
+    ) -> Result<bool, ExecutionError> {
+        let (source, flags) = self.regexp_data(receiver)?;
+        let source = String::from_utf16(&self.regexp_string_units(source)?)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let flags = self.regexp_flags(flags)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        let input_units = self.regexp_string_units(input)?;
+        let last_index_atom = self.intern_intrinsic_name(b"lastIndex")?;
+        let start = if flags.global || flags.sticky {
+            self.get_data_property(receiver, last_index_atom)?
+                .and_then(numeric_value)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map_or(0, |value| value.trunc() as usize)
+        } else {
+            0
+        };
+        let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let matched = program
+            .find_ucs2(&input_units, start)
+            .filter(|matched| !flags.sticky || matched.start == start);
+        let Some(matched) = matched else {
+            if flags.global || flags.sticky {
+                self.set_own_data_property(receiver, last_index_atom, Value::from_i32(0))?;
+            }
+            return Ok(false);
+        };
+        if flags.global || flags.sticky {
+            let end =
+                i32::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?;
+            self.set_own_data_property(receiver, last_index_atom, Value::from_i32(end))?;
+        }
+        Ok(true)
     }
 
     /// Splits one primitive-coercible input through a genuine RegExp backend fast path.
@@ -477,7 +515,10 @@ impl Isolate {
     }
 
     /// Converts the currently supported primitive inputs while rejecting observable object conversion.
-    fn regexp_string_argument(&mut self, value: Option<Value>) -> Result<Value, ExecutionError> {
+    pub(crate) fn regexp_string_argument(
+        &mut self,
+        value: Option<Value>,
+    ) -> Result<Value, ExecutionError> {
         let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
         if self.is_string_wrapper(value) {
             return self.string_primitive_value(value);

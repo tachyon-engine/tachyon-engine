@@ -59,6 +59,7 @@ mod property_keys;
 mod proxy;
 mod realm_gc;
 mod regexp_escape;
+mod regexp_exec;
 mod signals;
 mod string_case;
 mod string_split;
