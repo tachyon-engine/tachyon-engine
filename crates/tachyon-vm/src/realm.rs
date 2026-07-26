@@ -3221,6 +3221,12 @@ impl Isolate {
             NativeFunction::SignalUntrack,
             function_prototype,
         )?;
+        self.install_signal_method(
+            subtle,
+            b"currentComputed",
+            NativeFunction::SignalCurrentComputed,
+            function_prototype,
+        )?;
         for (name, description, watched) in [
             (
                 b"watched".as_slice(),

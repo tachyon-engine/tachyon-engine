@@ -6049,6 +6049,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::SignalUntrack) => {
                     return self.begin_signal_untrack(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::SignalCurrentComputed) => {
+                    let result = self.signal_current_computed();
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);

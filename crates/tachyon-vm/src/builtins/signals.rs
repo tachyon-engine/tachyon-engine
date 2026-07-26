@@ -257,6 +257,14 @@ pub(crate) struct SignalRuntime {
 }
 
 impl Isolate {
+    /// Returns the current dependency owner without exposing its graph payload.
+    #[inline(always)]
+    pub(crate) fn signal_current_computed(&self) -> Value {
+        self.signal_runtime
+            .computing
+            .unwrap_or(Value::from_immediate(Immediate::Undefined))
+    }
+
     /// Calls one callback with dependency ownership suspended until normal or abrupt completion.
     pub(crate) fn begin_signal_untrack(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.ensure_signal_runtime_unfrozen(site.this_value)?;

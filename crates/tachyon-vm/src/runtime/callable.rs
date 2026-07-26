@@ -256,6 +256,7 @@ pub(crate) enum NativeFunction {
     SignalWatcherUnwatch,
     SignalWatcherGetPending,
     SignalUntrack,
+    SignalCurrentComputed,
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -901,7 +902,8 @@ impl NativeFunction {
             | Self::SignalComputedGet
             | Self::SignalWatcherWatch
             | Self::SignalWatcherUnwatch
-            | Self::SignalWatcherGetPending => 0,
+            | Self::SignalWatcherGetPending
+            | Self::SignalCurrentComputed => 0,
             Self::DateConstructor | Self::DateUtc => 7,
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
             Self::DateNow => 0,
@@ -1227,6 +1229,7 @@ impl NativeFunction {
             Self::SignalWatcherUnwatch => "unwatch",
             Self::SignalWatcherGetPending => "getPending",
             Self::SignalUntrack => "untrack",
+            Self::SignalCurrentComputed => "currentComputed",
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",

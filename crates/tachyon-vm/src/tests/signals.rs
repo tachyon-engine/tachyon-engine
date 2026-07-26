@@ -42,6 +42,7 @@ var namespaceDescriptors = builtinDescriptor(Signal, "State", true, true) &&
     builtinDescriptor(Signal, "subtle", true, true) &&
     builtinDescriptor(Signal.subtle, "Watcher", true, true) &&
     builtinDescriptor(Signal.subtle, "untrack", true, true) &&
+    builtinDescriptor(Signal.subtle, "currentComputed", true, true) &&
     builtinDescriptor(Signal.subtle, "watched", true, true) &&
     builtinDescriptor(Signal.subtle, "unwatched", true, true) &&
     typeof Signal.subtle.watched === "symbol" && typeof Signal.subtle.unwatched === "symbol" &&
@@ -64,7 +65,9 @@ var metadata = Signal.State.name === "State" && Signal.State.length === 1 &&
     Signal.subtle.Watcher.prototype.watch.length === 0 &&
     Signal.subtle.Watcher.prototype.unwatch.length === 0 &&
     Signal.subtle.Watcher.prototype.getPending.length === 0 &&
-    Signal.subtle.untrack.name === "untrack" && Signal.subtle.untrack.length === 1;
+    Signal.subtle.untrack.name === "untrack" && Signal.subtle.untrack.length === 1 &&
+    Signal.subtle.currentComputed.name === "currentComputed" &&
+    Signal.subtle.currentComputed.length === 0;
 var newOnly = false;
 try { Signal.State(1); } catch (error) { newOnly = error instanceof TypeError; }
 try { Signal.Computed(function() {}); newOnly = false; } catch (error) {
@@ -74,6 +77,9 @@ try { Signal.subtle.Watcher(function() {}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 try { new Signal.subtle.untrack(function() {}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.currentComputed(); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 var state = new Signal.State(1);
@@ -112,6 +118,97 @@ var newTarget = Object.getPrototypeOf(redirected) === StateTarget.prototype &&
 globalDescriptor && namespaceDescriptors && prototypeDescriptors && metadata && newOnly && brands &&
 callbackReceiver && subclasses && newTarget && Object.getPrototypeOf(Signal) === Object.prototype &&
 Object.getPrototypeOf(Signal.subtle) === Object.prototype;
+"#;
+
+const SIGNAL_CURRENT_COMPUTED_SOURCE: &str = r#"
+var topLevel = Signal.subtle.currentComputed() === undefined;
+var tracked = new Signal.State(1);
+var hidden = new Signal.State(10);
+var innerSeen = false;
+var inner;
+inner = new Signal.Computed(function() {
+    innerSeen = Signal.subtle.currentComputed() === inner;
+    return tracked.get() * 2;
+});
+var detachedSeen = false;
+var detached;
+detached = new Signal.Computed(function() {
+    detachedSeen = Signal.subtle.currentComputed() === detached;
+    return hidden.get();
+});
+var outerStart = false;
+var outerAfterInner = false;
+var untrackNone = false;
+var untrackAfterNested = false;
+var outerAfterUntrack = false;
+var outerAfterThrow = false;
+var marker = {};
+var outer;
+outer = new Signal.Computed(function() {
+    outerStart = Signal.subtle.currentComputed() === outer;
+    var value = inner.get();
+    outerAfterInner = Signal.subtle.currentComputed() === outer;
+    Signal.subtle.untrack(function() {
+        untrackNone = Signal.subtle.currentComputed() === undefined;
+        detached.get();
+        untrackAfterNested = Signal.subtle.currentComputed() === undefined;
+    });
+    outerAfterUntrack = Signal.subtle.currentComputed() === outer;
+    try { Signal.subtle.untrack(function() { throw marker; }); } catch (error) {}
+    outerAfterThrow = Signal.subtle.currentComputed() === outer;
+    return value + tracked.get();
+});
+var nested = outer.get() === 3 && innerSeen && detachedSeen && outerStart && outerAfterInner &&
+    untrackNone && untrackAfterNested && outerAfterUntrack && outerAfterThrow &&
+    Signal.subtle.currentComputed() === undefined;
+
+var equalsSource = new Signal.State(1);
+var equalsComputeSeen = false;
+var equalsSeen = false;
+var equalComputed;
+equalComputed = new Signal.Computed(function() {
+    equalsComputeSeen = Signal.subtle.currentComputed() === equalComputed;
+    return equalsSource.get();
+}, { equals: function() {
+    equalsSeen = Signal.subtle.currentComputed() === equalComputed;
+    return false;
+} });
+equalComputed.get();
+equalsSource.set(2);
+var equalsOwner = equalComputed.get() === 2 && equalsComputeSeen && equalsSeen &&
+    Signal.subtle.currentComputed() === undefined;
+
+var hookOwner = {};
+var hookState = new Signal.State(1, {
+    [Signal.subtle.watched]: function() { hookOwner = Signal.subtle.currentComputed(); }
+});
+var hookComputed = new Signal.Computed(function() { return hookState.get(); });
+var hookWatcher = new Signal.subtle.Watcher(function() {});
+hookWatcher.watch(hookComputed);
+hookComputed.get();
+var hookNone = hookOwner === undefined;
+
+var notifyOwner = {};
+var notifyState = new Signal.State(0);
+var notifyWatcher = new Signal.subtle.Watcher(function() {
+    notifyOwner = Signal.subtle.currentComputed();
+});
+notifyWatcher.watch(notifyState);
+notifyState.set(1);
+var notifyNone = notifyOwner === undefined;
+
+var throwMarker = {};
+var throwSeen = false;
+var throwing;
+throwing = new Signal.Computed(function() {
+    throwSeen = Signal.subtle.currentComputed() === throwing;
+    throw throwMarker;
+});
+var throwIdentity = false;
+try { throwing.get(); } catch (error) { throwIdentity = error === throwMarker; }
+var throwRestored = throwIdentity && throwSeen && Signal.subtle.currentComputed() === undefined;
+
+topLevel && nested && equalsOwner && hookNone && notifyNone && throwRestored;
 "#;
 
 const SIGNAL_UNTRACK_SOURCE: &str = r#"
@@ -186,6 +283,7 @@ var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.Stat
     foreignSignal.Computed !== Signal.Computed &&
     foreignSignal.subtle.Watcher !== Signal.subtle.Watcher &&
     foreignSignal.subtle.untrack !== Signal.subtle.untrack &&
+    foreignSignal.subtle.currentComputed !== Signal.subtle.currentComputed &&
     foreignSignal.subtle.watched !== Signal.subtle.watched &&
     foreignSignal.subtle.unwatched !== Signal.subtle.unwatched;
 var local = new Signal.State(2);
@@ -200,8 +298,14 @@ var callbackReceiver;
 class ForeignComputedSubclass extends foreignSignal.Computed {}
 var computed = new ForeignComputedSubclass(function() { callbackReceiver = this; return foreign.get(); });
 var foreignUntrack = foreignSignal.subtle.untrack(function() { return local.get() + foreign.get(); }) === 5;
+var foreignCurrent = false;
+var localComputed;
+localComputed = new Signal.Computed(function() {
+    foreignCurrent = foreignSignal.subtle.currentComputed() === localComputed;
+    return local.get();
+});
 identities && crossBrand && subclassed && computed.get() === 3 && callbackReceiver === computed &&
-foreignUntrack;
+foreignUntrack && localComputed.get() === 2 && foreignCurrent;
 "#;
 
 const SIGNAL_OPTIONS_SOURCE: &str = r#"
@@ -771,6 +875,47 @@ fn signal_untrack_restores_dependency_ownership_for_every_dispatch_batch() {
     assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_749, "signals-untrack", false);
     assert_signal_behavior::<16>(SIGNAL_UNTRACK_SOURCE, 8_750, "signals-untrack", false);
     assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_751, "signals-untrack", true);
+}
+
+/// Covers agent-wide current owner visibility without exposing graph internals.
+#[test]
+fn signal_current_computed_tracks_nested_owners_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_752,
+        "signals-current-computed",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_753,
+        "signals-current-computed",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_754,
+        "signals-current-computed",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_755,
+        "signals-current-computed",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_756,
+        "signals-current-computed",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CURRENT_COMPUTED_SOURCE,
+        8_757,
+        "signals-current-computed",
+        true,
+    );
 }
 
 /// Covers the pinned Watcher state machine, pending ordering, and idempotent membership.
