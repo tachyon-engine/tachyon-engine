@@ -2197,6 +2197,9 @@ impl Isolate {
             NativeContinuationKind::TypedArrayConstruction(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::SignalComputed => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4418,6 +4421,18 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::PromiseConstructor) => {
                     return self.begin_promise_constructor(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::SignalStateConstructor) => {
+                    let state = self.create_signal_state_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, state);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalComputedConstructor) => {
+                    let computed = self.create_signal_computed_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, computed);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalWatcherConstructor) => {
+                    let watcher = self.create_signal_watcher_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, watcher);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -5943,6 +5958,9 @@ impl Isolate {
                     let promise = self.create_promise(PromiseState::Rejected, reason)?;
                     return self.write(site.caller_base, site.destination, promise);
                 }
+                FunctionExecutable::Native(NativeFunction::PromiseTry) => {
+                    return self.begin_promise_try(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::PromiseWithResolvers) => {
                     let result = self.promise_with_resolvers(site.this_value)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -5970,6 +5988,39 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::PromiseFinally) => {
                     return self.promise_finally(&site);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::SignalStateConstructor
+                    | NativeFunction::SignalComputedConstructor
+                    | NativeFunction::SignalWatcherConstructor,
+                ) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
+                FunctionExecutable::Native(NativeFunction::SignalStateGet) => {
+                    let value = self.signal_state_get(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalStateSet) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = self.signal_state_set(site.this_value, value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalComputedGet) => {
+                    return self.begin_signal_computed_get(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalWatcherWatch) => {
+                    let result = self.signal_watcher_watch(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalWatcherUnwatch) => {
+                    let result = self.signal_watcher_unwatch(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalWatcherGetPending) => {
+                    let result = self.signal_watcher_get_pending(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
@@ -6022,6 +6073,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayGetter(getter)) => {
                     let value = self.typed_array_getter(site.this_value, getter)?;
                     return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayAt) => {
+                    return self.begin_typed_array_at(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayIncludes) => {
+                    return self.begin_typed_array_includes(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
@@ -7334,6 +7391,9 @@ impl Isolate {
                 NativeContinuationKind::TypedArrayConstruction(stage) => {
                     self.resume_typed_array_construction(continuation, stage, value)
                 }
+                NativeContinuationKind::SignalComputed => {
+                    self.resume_signal_computed(continuation, value)
+                }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
@@ -7607,6 +7667,14 @@ impl Isolate {
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseThenable {
                     self.reject_promise_thenable(continuation, value)?;
+                    return Ok(None);
+                }
+                if continuation.kind()
+                    == NativeContinuationKind::PromiseStaticResolve(
+                        PromiseStaticResolveStage::TryCallback,
+                    )
+                {
+                    self.reject_promise_try_callback(continuation, value)?;
                     return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::FinalizationCleanup {

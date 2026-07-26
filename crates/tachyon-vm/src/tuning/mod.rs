@@ -6,4 +6,5 @@ pub(crate) mod dispatch;
 pub(crate) mod numbers;
 pub(crate) mod objects;
 pub(crate) mod promises;
+pub(crate) mod signals;
 pub(crate) mod strings;

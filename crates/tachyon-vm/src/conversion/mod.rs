@@ -465,6 +465,21 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::TypedArrayAtIndex {
+                        return self.resume_typed_array_at_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::TypedArrayIncludesFromIndex {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_includes_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::ArrayInsertLength {
                         let state = self.pending_array_insert_reference(continuation.receiver)?;
                         return self.resume_array_insert_conversion(
@@ -1061,6 +1076,12 @@ impl Isolate {
                 | ConversionConsumer::TypedArrayLength
                 | ConversionConsumer::TypedArrayElement => {
                     unreachable!("TypedArray conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayAtIndex => {
+                    unreachable!("TypedArray at conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayIncludesFromIndex => {
+                    unreachable!("TypedArray includes conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

@@ -1,5 +1,8 @@
 //! Fixed-buffer Number TypedArray construction and integer-indexed element access.
 
+mod at;
+mod includes;
+
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
@@ -600,24 +603,49 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<PendingTypedArrayConstruction>,
     ) -> Result<(), ExecutionError> {
-        let snapshot = self.typed_array_construction_snapshot(state)?;
-        if snapshot.index >= snapshot.length {
-            return self.write(site.caller_base, site.destination, snapshot.target);
+        loop {
+            let snapshot = self.typed_array_construction_snapshot(state)?;
+            if snapshot.index >= snapshot.length {
+                return self.write(site.caller_base, site.destination, snapshot.target);
+            }
+            let key = self.safe_integer_property_atom(snapshot.index)?;
+            if snapshot.mode == TypedArrayConstructionMode::ArrayLike {
+                let value =
+                    match self.resolve_property_read_until_proxy(snapshot.source, key.into())? {
+                        PropertyReadResolution::Read(PropertyRead::Data(value)) => value,
+                        PropertyReadResolution::Read(PropertyRead::Missing) => {
+                            Value::from_immediate(Immediate::Undefined)
+                        }
+                        PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                            if getter.as_immediate() == Some(Immediate::Undefined) =>
+                        {
+                            Value::from_immediate(Immediate::Undefined)
+                        }
+                        PropertyReadResolution::Read(PropertyRead::Accessor(_))
+                        | PropertyReadResolution::Proxy(_) => {
+                            return self.get_typed_array_property(
+                                site,
+                                state,
+                                TypedArrayConstructionStage::ArrayLikeElement,
+                                snapshot.source,
+                                key.into(),
+                            );
+                        }
+                    };
+                if self.is_object_value(value) {
+                    return self.begin_typed_array_element_conversion(site, state, value);
+                }
+                self.write_typed_array_construction_element(state, value)?;
+                continue;
+            }
+            let value = self
+                .get_data_property(snapshot.source, key)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            if self.is_object_value(value) {
+                return self.begin_typed_array_element_conversion(site, state, value);
+            }
+            self.write_typed_array_construction_element(state, value)?;
         }
-        let key = self.safe_integer_property_atom(snapshot.index)?;
-        if snapshot.mode == TypedArrayConstructionMode::ArrayLike {
-            return self.get_typed_array_property(
-                site,
-                state,
-                TypedArrayConstructionStage::ArrayLikeElement,
-                snapshot.source,
-                key.into(),
-            );
-        }
-        let value = self
-            .get_data_property(snapshot.source, key)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.begin_typed_array_element_conversion(site, state, value)
     }
 
     /// Converts one source value with Number hint while retaining it across callbacks.
@@ -648,6 +676,16 @@ impl Isolate {
         state: GcRef<PendingTypedArrayConstruction>,
         value: Value,
     ) -> Result<(), ExecutionError> {
+        self.write_typed_array_construction_element(state, value)?;
+        self.advance_typed_array_construction(site, state)
+    }
+
+    /// Converts and commits one element without recursively entering the next primitive element.
+    fn write_typed_array_construction_element(
+        &mut self,
+        state: GcRef<PendingTypedArrayConstruction>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
         let converted = numeric_value(self.convert_to_number(value)?)
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
         let snapshot = self.typed_array_construction_snapshot(state)?;
@@ -662,8 +700,7 @@ impl Isolate {
         self.update_typed_array_construction(state, |pending| {
             pending.index = next_index;
             pending.retained = Value::from_immediate(Immediate::Undefined);
-        })?;
-        self.advance_typed_array_construction(site, state)
+        })
     }
 
     /// Copies a same-kind source byte-for-byte so NaN payloads and signed zero survive.

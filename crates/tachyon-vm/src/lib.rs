@@ -49,6 +49,7 @@ mod promise_capability;
 mod promise_combinator_state;
 mod promise_state;
 mod promise_then;
+mod promise_try;
 mod property;
 mod proxy;
 mod realm;
@@ -135,6 +136,9 @@ pub(crate) enum IntrinsicPrototypeKind {
     Array,
     Boolean,
     Date,
+    SignalState,
+    SignalComputed,
+    SignalWatcher,
     String,
 }
 
@@ -157,6 +161,7 @@ use array_to_sorted::PendingArrayToSorted;
 use bound_function::BoundFunctionData;
 use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
+use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
     PendingCollectionInitializer, PendingMapGetOrInsertComputed, SetObject,

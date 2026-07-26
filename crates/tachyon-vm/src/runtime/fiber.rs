@@ -296,6 +296,8 @@ pub(crate) enum ConversionConsumer {
     TypedArrayByteOffset,
     TypedArrayLength,
     TypedArrayElement,
+    TypedArrayAtIndex,
+    TypedArrayIncludesFromIndex,
 }
 
 impl ConversionConsumer {
@@ -364,7 +366,9 @@ impl ConversionConsumer {
             | Self::StringSplitSeparator
             | Self::TypedArrayByteOffset
             | Self::TypedArrayLength
-            | Self::TypedArrayElement => None,
+            | Self::TypedArrayElement
+            | Self::TypedArrayAtIndex => None,
+            Self::TypedArrayIncludesFromIndex => None,
         }
     }
 
@@ -466,6 +470,8 @@ impl ConversionConsumer {
                 | Self::TypedArrayByteOffset
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
+                | Self::TypedArrayAtIndex
+                | Self::TypedArrayIncludesFromIndex
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -637,6 +643,10 @@ pub(crate) enum PromiseStaticResolveStage {
     ResolveCallback,
     RejectConstructor,
     RejectCallback,
+    TryConstructor,
+    TryCallback,
+    TryResolve,
+    TryReject,
 }
 
 /// One observable boundary in an Array.prototype.forEach iteration.
@@ -1130,6 +1140,7 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
+    SignalComputed,
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1158,6 +1169,20 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    #[inline]
+    pub(crate) const fn signal_computed(
+        site: NativeContinuationSite,
+        computed: Value,
+        previous: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SignalComputed,
+            first: computed,
+            second: previous,
+        }
+    }
+
     #[inline]
     pub(crate) const fn object_lookup_accessor(
         site: NativeContinuationSite,

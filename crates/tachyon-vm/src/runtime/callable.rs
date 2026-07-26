@@ -192,6 +192,15 @@ impl DateUtcSetter {
     )
 )]
 pub(crate) enum NativeFunction {
+    SignalStateConstructor,
+    SignalStateGet,
+    SignalStateSet,
+    SignalComputedConstructor,
+    SignalComputedGet,
+    SignalWatcherConstructor,
+    SignalWatcherWatch,
+    SignalWatcherUnwatch,
+    SignalWatcherGetPending,
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -334,6 +343,7 @@ pub(crate) enum NativeFunction {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    PromiseTry,
     PromiseWithResolvers,
     PromiseAll,
     PromiseAllSettled,
@@ -359,6 +369,8 @@ pub(crate) enum NativeFunction {
     TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayKind),
     TypedArrayGetter(TypedArrayGetter),
+    TypedArrayAt,
+    TypedArrayIncludes,
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -770,7 +782,10 @@ impl NativeFunction {
     pub(crate) const fn is_constructor(self) -> bool {
         matches!(
             self,
-            Self::ObjectConstructor
+            Self::SignalStateConstructor
+                | Self::SignalComputedConstructor
+                | Self::SignalWatcherConstructor
+                | Self::ObjectConstructor
                 | Self::StringConstructor
                 | Self::RegExpConstructor
                 | Self::NumberConstructor
@@ -812,6 +827,15 @@ impl NativeFunction {
             return 1;
         }
         match self {
+            Self::SignalStateSet => 1,
+            Self::SignalStateConstructor
+            | Self::SignalComputedConstructor
+            | Self::SignalWatcherConstructor => 1,
+            Self::SignalStateGet
+            | Self::SignalComputedGet
+            | Self::SignalWatcherWatch
+            | Self::SignalWatcherUnwatch
+            | Self::SignalWatcherGetPending => 0,
             Self::DateConstructor | Self::DateUtc => 7,
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
             Self::DateNow => 0,
@@ -851,6 +875,7 @@ impl NativeFunction {
             | Self::PromiseConstructor
             | Self::PromiseResolve
             | Self::PromiseReject
+            | Self::PromiseTry
             | Self::PromiseAll
             | Self::PromiseAllSettled
             | Self::PromiseAny
@@ -933,6 +958,8 @@ impl NativeFunction {
             | Self::ArrayBufferIsView
             | Self::DataViewConstructor
             | Self::DataViewGet(_)
+            | Self::TypedArrayAt
+            | Self::TypedArrayIncludes
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1114,6 +1141,15 @@ impl NativeFunction {
             return function.name();
         }
         match self {
+            Self::SignalStateConstructor => "State",
+            Self::SignalStateGet => "get",
+            Self::SignalStateSet => "set",
+            Self::SignalComputedConstructor => "Computed",
+            Self::SignalComputedGet => "get",
+            Self::SignalWatcherConstructor => "Watcher",
+            Self::SignalWatcherWatch => "watch",
+            Self::SignalWatcherUnwatch => "unwatch",
+            Self::SignalWatcherGetPending => "getPending",
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",
@@ -1263,6 +1299,7 @@ impl NativeFunction {
             Self::PromiseConstructor => "Promise",
             Self::PromiseResolve => "resolve",
             Self::PromiseReject => "reject",
+            Self::PromiseTry => "try",
             Self::PromiseAll => "all",
             Self::PromiseAllSettled => "allSettled",
             Self::PromiseAny => "any",
@@ -1292,6 +1329,8 @@ impl NativeFunction {
             Self::TypedArrayGetter(TypedArrayGetter::ByteLength) => "get byteLength",
             Self::TypedArrayGetter(TypedArrayGetter::ByteOffset) => "get byteOffset",
             Self::TypedArrayGetter(TypedArrayGetter::ToStringTag) => "get [Symbol.toStringTag]",
+            Self::TypedArrayAt => "at",
+            Self::TypedArrayIncludes => "includes",
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
@@ -1643,6 +1682,9 @@ pub(crate) enum ObjectReceiver {
     ArrayBuffer(GcRef<ArrayBufferObject>),
     DataView(GcRef<DataViewObject>),
     TypedArray(GcRef<TypedArrayObject>),
+    SignalState(GcRef<StateSignal>),
+    SignalComputed(GcRef<ComputedSignal>),
+    SignalWatcher(GcRef<WatcherSignal>),
     Arguments(GcRef<ArgumentsObject>),
     Array(GcRef<ArrayObject>),
     Function(GcRef<FunctionObject>),
@@ -1672,6 +1714,9 @@ impl ObjectReceiver {
             Self::ArrayBuffer(buffer) => Value::from_heap_ref(buffer.raw()),
             Self::DataView(view) => Value::from_heap_ref(view.raw()),
             Self::TypedArray(array) => Value::from_heap_ref(array.raw()),
+            Self::SignalState(signal) => Value::from_heap_ref(signal.raw()),
+            Self::SignalComputed(signal) => Value::from_heap_ref(signal.raw()),
+            Self::SignalWatcher(signal) => Value::from_heap_ref(signal.raw()),
             Self::Arguments(arguments) => Value::from_heap_ref(arguments.raw()),
             Self::Array(array) => Value::from_heap_ref(array.raw()),
             Self::Function(function) => Value::from_heap_ref(function.raw()),
@@ -1857,6 +1902,9 @@ pub(crate) struct VmTypes {
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
     pub(crate) data_view_object: GcType<DataViewObject>,
     pub(crate) typed_array_object: GcType<TypedArrayObject>,
+    pub(crate) signal_state: GcType<StateSignal>,
+    pub(crate) signal_computed: GcType<ComputedSignal>,
+    pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
@@ -1967,13 +2015,14 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) reflect: AtomId,
     pub(crate) proxy: AtomId,
     pub(crate) promise: AtomId,
+    pub(crate) signal: AtomId,
     #[allow(dead_code, reason = "reserved for global intrinsic resolution")]
     pub(crate) global_numbers: [AtomId; GlobalNumberFunction::ALL.len()],
     pub(crate) global_uris: [AtomId; GlobalUriFunction::ALL.len()],
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 26
+    pub(crate) const BINDING_COUNT: usize = 27
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()

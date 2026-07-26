@@ -331,6 +331,9 @@ impl Isolate {
         if snapshot.cursor >= MAX_SAFE_INTEGER {
             return Err(ExecutionError::ArrayLengthOverflow);
         }
+        if self.can_drain_intrinsic_array_iterator(snapshot)? {
+            return self.drain_intrinsic_array_iterator(site, state, None);
+        }
         self.call_array_static(
             site,
             state,
@@ -370,6 +373,10 @@ impl Isolate {
         if !self.is_object_value(result) {
             return Err(ExecutionError::NotObject(result));
         }
+        let snapshot = self.array_static_snapshot(state)?;
+        if self.can_drain_intrinsic_array_iterator(snapshot)? {
+            return self.drain_intrinsic_array_iterator(site, state, Some(result));
+        }
         self.set_array_static_value(state, |pending| &mut pending.iterator_result, result)?;
         self.get_array_static_named_property(
             site,
@@ -378,6 +385,101 @@ impl Isolate {
             result,
             b"done",
         )
+    }
+
+    /// Iteratively drains the internal IteratorToList Array path without growing the Rust stack.
+    fn drain_intrinsic_array_iterator(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+        mut result: Option<Value>,
+    ) -> Result<(), ExecutionError> {
+        let done_atom = self.intern_intrinsic_name(b"done")?;
+        let value_atom = self.intern_intrinsic_name(b"value")?;
+        loop {
+            let snapshot = self.array_static_snapshot(state)?;
+            if snapshot.cursor >= MAX_SAFE_INTEGER {
+                return Err(ExecutionError::ArrayLengthOverflow);
+            }
+            let iterator_result = if let Some(result) = result.take() {
+                result
+            } else {
+                match self.array_iterator_next_start(snapshot.iterator)? {
+                    ArrayIteratorNextAction::Done(result) => result,
+                    ArrayIteratorNextAction::Get {
+                        iterator,
+                        receiver,
+                        callee,
+                        mode,
+                    } => {
+                        self.push_array_static_parent(
+                            site,
+                            state,
+                            ArrayStaticStage::NextCall,
+                            snapshot.next_method,
+                        )?;
+                        return self
+                            .dispatch_property_callback(
+                                NativeContinuation::array_iterator_property_get(
+                                    site, mode, iterator, receiver,
+                                ),
+                                callee,
+                            )
+                            .map(|_| ());
+                    }
+                }
+            };
+            let done = self
+                .get_data_property(iterator_result, done_atom)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            if self.is_truthy_value(done)? {
+                let snapshot = self.array_static_snapshot(state)?;
+                self.set_array_length_value(snapshot.result, safe_integer_value(snapshot.cursor))?;
+                return self.write(site.caller_base, site.destination, snapshot.result);
+            }
+            let value = self
+                .get_data_property(iterator_result, value_atom)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined));
+            self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
+            let snapshot = self.array_static_snapshot(state)?;
+            let key = self.safe_integer_property_atom(snapshot.cursor)?;
+            self.define_data_property(
+                snapshot.result,
+                key,
+                DataPropertyDescriptor {
+                    value: Some(value),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                },
+            )?;
+            self.increment_array_static_cursor(state)?;
+        }
+    }
+
+    /// Restricts the iterative drain to the unobservable intrinsic staging-list contract.
+    fn can_drain_intrinsic_array_iterator(
+        &mut self,
+        snapshot: ArrayStaticSnapshot,
+    ) -> Result<bool, ExecutionError> {
+        if snapshot.mapping || snapshot.iterator.as_immediate() == Some(Immediate::Undefined) {
+            return Ok(false);
+        }
+        let intrinsic_result = if snapshot.constructor.as_immediate() == Some(Immediate::Undefined)
+        {
+            true
+        } else {
+            matches!(
+                self.resolve_function_object(snapshot.constructor)?
+                    .executable,
+                FunctionExecutable::Native(NativeFunction::ArrayConstructor)
+            )
+        };
+        Ok(matches!(
+            self.resolve_function_object(snapshot.next_method)?
+                .executable,
+            FunctionExecutable::Native(NativeFunction::ArrayIteratorNext)
+        ) && intrinsic_result)
     }
 
     /// Finishes iteration or reads the current iterator result's `value` property.

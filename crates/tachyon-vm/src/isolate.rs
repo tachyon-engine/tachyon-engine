@@ -56,6 +56,7 @@ pub struct Isolate {
     pub(crate) math_random_state: u64,
     pub(crate) host_providers: HostProviders,
     pub(crate) stack_limits: StackLimits,
+    pub(crate) signal_runtime: SignalRuntime,
     #[cfg(feature = "opcode-profile")]
     pub(crate) execution_profile: ExecutionProfile,
     pub(crate) _not_sync: Cell<()>,
@@ -73,6 +74,9 @@ impl Isolate {
             IntrinsicPrototypeKind::Array => realm.array_prototype,
             IntrinsicPrototypeKind::Boolean => realm.boolean_prototype,
             IntrinsicPrototypeKind::Date => realm.date_prototype,
+            IntrinsicPrototypeKind::SignalState => realm.signal_state_prototype,
+            IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
+            IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
             IntrinsicPrototypeKind::String => realm.string_prototype,
         };
         if realm == self.active_realm {
@@ -341,6 +345,15 @@ impl Isolate {
             typed_array_object: registry
                 .try_register("TypedArrayObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            signal_state: registry
+                .try_register("StateSignal")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            signal_computed: registry
+                .try_register("ComputedSignal")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            signal_watcher: registry
+                .try_register("WatcherSignal")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_typed_array_construction: registry
                 .try_register("PendingTypedArrayConstruction")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -572,6 +585,7 @@ impl Isolate {
             math_random_state: 0x6a09_e667_f3bc_c909,
             host_providers,
             stack_limits: config.stack_limits,
+            signal_runtime: SignalRuntime::default(),
             #[cfg(feature = "opcode-profile")]
             execution_profile: ExecutionProfile::default(),
             _not_sync: Cell::new(()),

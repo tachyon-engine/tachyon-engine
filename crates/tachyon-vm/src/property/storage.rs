@@ -750,6 +750,42 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::TypedArray(array), ordinary));
         }
+        if let Ok(signal) = self.heap.checked_reference(raw, self.types.signal_state) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(signal, self.types.signal_state)
+                        .map(|signal| signal.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::SignalState(signal), ordinary));
+        }
+        if let Ok(signal) = self.heap.checked_reference(raw, self.types.signal_computed) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(signal, self.types.signal_computed)
+                        .map(|signal| signal.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::SignalComputed(signal), ordinary));
+        }
+        if let Ok(signal) = self.heap.checked_reference(raw, self.types.signal_watcher) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(signal, self.types.signal_watcher)
+                        .map(|signal| signal.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::SignalWatcher(signal), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -1058,6 +1094,39 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::SignalState(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_state)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::SignalComputed(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_computed)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::SignalWatcher(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_watcher)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
             ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
                 let date = scope.root(date).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1316,6 +1385,39 @@ impl Isolate {
                 scope.with_no_gc_scope(|no_gc| {
                     no_gc
                         .borrow_mut(array, self.types.typed_array_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::SignalState(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_state)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::SignalComputed(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_computed)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::SignalWatcher(signal) => self.heap.with_running_scope(|scope| {
+                let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(signal, self.types.signal_watcher)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .ordinary
                         .shape = shape;
@@ -1668,6 +1770,27 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::SignalState(signal) => self.update_signal_storage(
+                signal,
+                self.types.signal_state,
+                shape,
+                storage,
+                |node| &mut node.ordinary,
+            ),
+            ObjectReceiver::SignalComputed(signal) => self.update_signal_storage(
+                signal,
+                self.types.signal_computed,
+                shape,
+                storage,
+                |node| &mut node.ordinary,
+            ),
+            ObjectReceiver::SignalWatcher(signal) => self.update_signal_storage(
+                signal,
+                self.types.signal_watcher,
+                shape,
+                storage,
+                |node| &mut node.ordinary,
+            ),
             ObjectReceiver::Date(date) => self.heap.with_running_scope(|scope| {
                 let date = scope.root(date).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -1988,6 +2111,39 @@ impl Isolate {
         }
     }
 
+    /// Updates a Signal payload's ordinary storage and publishes its generational edge.
+    fn update_signal_storage<T: Trace + 'static>(
+        &mut self,
+        signal: GcRef<T>,
+        signal_type: GcType<T>,
+        shape: ShapeId,
+        storage: Option<GcRef<PropertyStorage>>,
+        ordinary: fn(&mut T) -> &mut OrdinaryObject,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+            let storage_local = storage
+                .map(|storage| scope.root(storage))
+                .transpose()
+                .map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let signal = no_gc
+                    .borrow_mut(signal, signal_type)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let object = ordinary(signal);
+                object.shape = shape;
+                object.storage = storage;
+                Ok::<(), ExecutionError>(())
+            })?;
+            if let Some(storage) = storage_local {
+                scope
+                    .write_barrier(signal, storage)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            Ok(())
+        })
+    }
+
     #[inline(always)]
     pub(crate) fn is_object_value(&self, value: Value) -> bool {
         let Some(raw) = value.as_heap_ref() else {
@@ -2012,6 +2168,18 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.typed_array_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.signal_state)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.signal_computed)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.signal_watcher)
                 .is_ok()
             || self
                 .heap

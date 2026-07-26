@@ -241,6 +241,14 @@ pub(crate) struct Realm {
     pub(crate) promise_all: Option<Value>,
     pub(crate) promise_then: Option<Value>,
     pub(crate) promise_catch: Option<Value>,
+    pub(crate) signal_namespace: Option<Value>,
+    pub(crate) signal_subtle: Option<Value>,
+    pub(crate) signal_state_constructor: Option<Value>,
+    pub(crate) signal_state_prototype: Option<Value>,
+    pub(crate) signal_computed_constructor: Option<Value>,
+    pub(crate) signal_computed_prototype: Option<Value>,
+    pub(crate) signal_watcher_constructor: Option<Value>,
+    pub(crate) signal_watcher_prototype: Option<Value>,
     pub(crate) json_parse: Option<Value>,
     pub(crate) json_stringify: Option<Value>,
     pub(crate) math_pow: Option<Value>,
@@ -396,6 +404,14 @@ impl Realm {
             promise_all: None,
             promise_then: None,
             promise_catch: None,
+            signal_namespace: None,
+            signal_subtle: None,
+            signal_state_constructor: None,
+            signal_state_prototype: None,
+            signal_computed_constructor: None,
+            signal_computed_prototype: None,
+            signal_watcher_constructor: None,
+            signal_watcher_prototype: None,
             json_parse: None,
             json_stringify: None,
             math_pow: None,
@@ -785,6 +801,14 @@ impl Trace for Realm {
         self.promise_all.trace(tracer);
         self.promise_then.trace(tracer);
         self.promise_catch.trace(tracer);
+        self.signal_namespace.trace(tracer);
+        self.signal_subtle.trace(tracer);
+        self.signal_state_constructor.trace(tracer);
+        self.signal_state_prototype.trace(tracer);
+        self.signal_computed_constructor.trace(tracer);
+        self.signal_computed_prototype.trace(tracer);
+        self.signal_watcher_constructor.trace(tracer);
+        self.signal_watcher_prototype.trace(tracer);
         self.math_pow.trace(tracer);
         self.math_functions.trace(tracer);
         self.global_number_functions.trace(tracer);

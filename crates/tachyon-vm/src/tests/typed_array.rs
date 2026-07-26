@@ -112,6 +112,19 @@ descriptorTarget[0] === 0 && descriptorTarget["-0"] === undefined &&
 descriptorHarnessOkay;
 "#;
 
+const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
+var source = new Array(10000).fill(7);
+var copied = Array.from(source);
+var iterator = source[Symbol.iterator];
+source[Symbol.iterator] = undefined;
+var arrayLikeResult = new Uint8Array(source);
+source[Symbol.iterator] = iterator;
+var iterableResult = new Uint8Array(source);
+copied.length === 10000 && copied[9999] === 7 &&
+arrayLikeResult.length === 10000 && arrayLikeResult[9999] === 7 &&
+iterableResult.length === 10000 && iterableResult[0] === 7 && iterableResult[9999] === 7;
+"#;
+
 #[test]
 fn fixed_number_typed_arrays_work_for_every_dispatch_batch() {
     assert_typed_array_source::<1>(false);
@@ -124,6 +137,32 @@ fn fixed_number_typed_arrays_work_for_every_dispatch_batch() {
 #[test]
 fn typed_array_edges_survive_forced_major_collection() {
     assert_typed_array_source::<8>(true);
+}
+
+#[test]
+/// Uses larger atom and shape quotas because the source owns 10,000 indexed properties.
+fn intrinsic_iterable_collection_does_not_grow_the_rust_stack() {
+    let module = compile_typed_array_source(LARGE_TYPED_ARRAY_SOURCE, 7_422);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(32_768, 4 * 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(32 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 32_768).with_max_shapes(32_768),
+    ))
+    .expect("large TypedArray iterable isolate initializes");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_000_000,
+                quantum: 1_000_000,
+            },
+        )
+        .expect("large TypedArray iterable executes without Rust recursion");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "large TypedArray iterable returned {outcome:?}"
+    );
 }
 
 /// Executes construction, integer-indexed MOP, conversion, and metadata checks under one policy.
@@ -152,13 +191,18 @@ fn assert_typed_array_source<const N: usize>(forced_major: bool) {
 
 /// Compiles the shared fixture independently of dispatch and collection policy.
 fn compile_typed_array_fixture() -> CompiledModule {
+    compile_typed_array_source(TYPED_ARRAY_SOURCE, 7_421)
+}
+
+/// Compiles one TypedArray fixture independently of dispatch and collection policy.
+fn compile_typed_array_source(source: &str, source_id: u32) -> CompiledModule {
     Compiler
         .compile(
             SourceText::new(
-                SourceId::new(7_421),
+                SourceId::new(source_id),
                 SourceName::new("typed-array-fixture"),
                 MediaType::JavaScript,
-                Arc::from(TYPED_ARRAY_SOURCE),
+                Arc::from(source),
             ),
             CompileOptions::default(),
         )

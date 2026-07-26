@@ -201,6 +201,12 @@ impl Isolate {
             | PromiseStaticResolveStage::RejectCallback => {
                 self.finish_generic_promise_resolve(continuation)
             }
+            PromiseStaticResolveStage::TryConstructor
+            | PromiseStaticResolveStage::TryCallback
+            | PromiseStaticResolveStage::TryResolve
+            | PromiseStaticResolveStage::TryReject => {
+                self.resume_promise_try(continuation, stage, value)
+            }
         }
     }
 
@@ -303,7 +309,7 @@ impl Isolate {
     }
 
     /// Allocates one fixed generic resolve state under the complete VM root set.
-    fn allocate_promise_static_resolve_state(
+    pub(crate) fn allocate_promise_static_resolve_state(
         &mut self,
         pending: NativeCallState,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
@@ -639,7 +645,7 @@ impl Isolate {
     }
 
     /// Detects the generic record without penalizing direct Promise capability settlement.
-    fn generic_promise_capability_snapshot(
+    pub(crate) fn generic_promise_capability_snapshot(
         &mut self,
         capability: Value,
     ) -> Result<Option<PromiseCapability>, ExecutionError> {

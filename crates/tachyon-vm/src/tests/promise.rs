@@ -304,6 +304,89 @@ aggregateCause = aggregate.cause;
 aggregateErrorsEnumerable = Object.getOwnPropertyDescriptor(aggregate, "errors").enumerable;
 "#;
 
+const PROMISE_TRY_SETUP: &str = r#"
+var tryValue = 0;
+var tryReason = 0;
+var tryArguments = 0;
+var tryArgumentIdentity = false;
+var tryReturnIdentity = false;
+var tryThrowIdentity = false;
+var nestedTryReturnIdentity = false;
+var nestedTryArguments = false;
+var nestedTryThrowIdentity = false;
+var asyncStyleTryStatus = 0;
+var customTryValue = 0;
+var customTryReason = 0;
+var customConstructorCalls = 0;
+Promise.try(function(a, b, c) {
+  tryArguments = a * 100 + b * 10 + c;
+  return { then: function(resolve) { resolve(7); } };
+}, 1, 2, 3).then(function(value) { tryValue = value; });
+Promise.try(function() { throw 9; }).then(
+  function() { tryReason = -1; },
+  function(reason) { tryReason = reason; }
+);
+var trySentinel = { sentinel: true };
+Promise.try(function() { return trySentinel; }).then(function(value) {
+  tryReturnIdentity = value === trySentinel;
+});
+Promise.try(function() {
+  tryArgumentIdentity = arguments.length === 3 && arguments[0] === 1 &&
+    arguments[1] === trySentinel && arguments[2] === 3;
+}, 1, trySentinel, 3);
+Promise.try(function() { throw trySentinel; }).then(undefined, function(reason) {
+  tryThrowIdentity = reason === trySentinel;
+});
+function runNestedTryReturn() {
+  return Promise.try(function() { return trySentinel; }).then(function(value) {
+    nestedTryReturnIdentity = value === trySentinel;
+  });
+}
+function runNestedTryArguments() {
+  return Promise.try(function() {
+    nestedTryArguments = arguments.length === 3 && arguments[0] === 1 &&
+      arguments[1] === trySentinel && arguments[2] === 3;
+  }, 1, trySentinel, 3);
+}
+function runNestedTryThrow() {
+  return Promise.try(function() { throw trySentinel; }).then(undefined, function(reason) {
+    nestedTryThrowIdentity = reason === trySentinel;
+  });
+}
+runNestedTryReturn();
+runNestedTryArguments();
+runNestedTryThrow();
+function invokeAsyncStyle(testFunction) {
+  try {
+    testFunction().then(function() {
+      asyncStyleTryStatus = 1;
+    }, function() {
+      asyncStyleTryStatus = 2;
+    });
+  } catch (error) {
+    asyncStyleTryStatus = 3;
+  }
+}
+invokeAsyncStyle(function() {
+  return Promise.try(function() { return trySentinel; }).then(function(value) {
+    if (value !== trySentinel) throw 17;
+  });
+});
+function TryCapability(executor) {
+  customConstructorCalls = customConstructorCalls + 1;
+  executor(function(value) { customTryValue = value; }, function(reason) {
+    customTryReason = reason;
+  });
+}
+var customTry = Promise.try.call(TryCapability, function(a, b) { return a + b; }, 4, 5);
+function RejectCapability(executor) {
+  executor(function() { customTryReason = -1; }, function(reason) {
+    customTryReason = reason;
+  });
+}
+Promise.try.call(RejectCapability, function() { throw 11; });
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -405,6 +488,16 @@ fn promise_any_and_aggregate_error_are_stable_for_every_batch_and_forced_major()
     assert_promise_any::<8>(5_807, false);
     assert_promise_any::<16>(5_809, false);
     assert_promise_any::<8>(5_811, true);
+}
+
+#[test]
+fn promise_try_is_stable_for_every_dispatch_batch_and_forced_major() {
+    assert_promise_try::<1>(5_901, false);
+    assert_promise_try::<2>(5_903, false);
+    assert_promise_try::<4>(5_905, false);
+    assert_promise_try::<8>(5_907, false);
+    assert_promise_try::<16>(5_909, false);
+    assert_promise_try::<8>(5_911, true);
 }
 
 /// Executes the setup and probe under one interpreter dispatch batch.
@@ -532,6 +625,27 @@ fn assert_promise_any<const N: usize>(source_id: u32, forced_major: bool) {
     let probe = compile_promise_source(
         source_id + 1,
         "anyValue === 2 && anyErrorBrand && anyErrorsTrace === 34 && emptyAnyLength === 0 && aggregateMessage === 'many' && aggregateCause === 7 && aggregateErrorsEnumerable === false;",
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Covers intrinsic assimilation/rejection and generic capability calls with exact arguments.
+fn assert_promise_try<const N: usize>(source_id: u32, forced_major: bool) {
+    let setup = compile_promise_source(source_id, PROMISE_TRY_SETUP);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "tryValue === 7 && tryReason === 9 && tryArguments === 123 && tryArgumentIdentity && tryReturnIdentity && tryThrowIdentity && nestedTryReturnIdentity && nestedTryArguments && nestedTryThrowIdentity && asyncStyleTryStatus === 1 && customTryValue === 9 && customTryReason === 11 && customConstructorCalls === 1 && customTry instanceof TryCapability;",
     );
     let mut isolate = test_isolate();
     if forced_major {

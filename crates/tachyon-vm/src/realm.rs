@@ -41,6 +41,7 @@ impl Isolate {
         self.initialize_reflect_intrinsics()?;
         self.initialize_proxy_intrinsics()?;
         self.initialize_promise_intrinsics()?;
+        self.initialize_signal_intrinsics()?;
         self.publish_realm_intrinsic_bindings(atoms)
     }
 
@@ -276,6 +277,28 @@ impl Isolate {
                 configurable: Some(true),
             }),
         )?;
+        let at = self.allocate_native_function(
+            NativeFunction::TypedArrayAt,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let at_atom = self.intern_intrinsic_name(b"at")?;
+        self.set_intrinsic_data_property(base_prototype, at_atom, at, true)?;
+        let includes = self.allocate_native_function(
+            NativeFunction::TypedArrayIncludes,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let includes_atom = self.intern_intrinsic_name(b"includes")?;
+        self.set_intrinsic_data_property(base_prototype, includes_atom, includes, true)?;
         let bytes_per_element = self.intern_intrinsic_name(b"BYTES_PER_ELEMENT")?;
         for kind in TypedArrayKind::ALL {
             let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -1503,6 +1526,7 @@ impl Isolate {
             reflect: self.intern_intrinsic_name(b"Reflect")?,
             proxy: self.intern_intrinsic_name(b"Proxy")?,
             promise: self.intern_intrinsic_name(b"Promise")?,
+            signal: self.intern_intrinsic_name(b"Signal")?,
             global_numbers: [
                 self.intern_intrinsic_name(b"isFinite")?,
                 self.intern_intrinsic_name(b"isNaN")?,
@@ -2913,6 +2937,7 @@ impl Isolate {
         for (name, native) in [
             (b"resolve".as_slice(), NativeFunction::PromiseResolve),
             (b"reject".as_slice(), NativeFunction::PromiseReject),
+            (b"try".as_slice(), NativeFunction::PromiseTry),
             (b"all".as_slice(), NativeFunction::PromiseAll),
             (b"allSettled".as_slice(), NativeFunction::PromiseAllSettled),
             (b"any".as_slice(), NativeFunction::PromiseAny),
@@ -2997,6 +3022,142 @@ impl Isolate {
                 configurable: Some(true),
             }),
         )
+    }
+
+    /// Installs the default realm-local State, Computed, and Watcher proposal surface.
+    fn initialize_signal_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function initializes before Signal");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object initializes before Signal");
+        let namespace = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let subtle = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.signal_namespace = Some(namespace);
+        self.realm.signal_subtle = Some(subtle);
+        let state = self.install_signal_constructor(
+            namespace,
+            b"State",
+            NativeFunction::SignalStateConstructor,
+            function_prototype,
+            object_prototype,
+        )?;
+        self.realm.signal_state_constructor = Some(state.0);
+        self.realm.signal_state_prototype = Some(state.1);
+        self.install_signal_method(
+            state.1,
+            b"get",
+            NativeFunction::SignalStateGet,
+            function_prototype,
+        )?;
+        self.install_signal_method(
+            state.1,
+            b"set",
+            NativeFunction::SignalStateSet,
+            function_prototype,
+        )?;
+        let computed = self.install_signal_constructor(
+            namespace,
+            b"Computed",
+            NativeFunction::SignalComputedConstructor,
+            function_prototype,
+            object_prototype,
+        )?;
+        self.realm.signal_computed_constructor = Some(computed.0);
+        self.realm.signal_computed_prototype = Some(computed.1);
+        self.install_signal_method(
+            computed.1,
+            b"get",
+            NativeFunction::SignalComputedGet,
+            function_prototype,
+        )?;
+        let watcher = self.install_signal_constructor(
+            subtle,
+            b"Watcher",
+            NativeFunction::SignalWatcherConstructor,
+            function_prototype,
+            object_prototype,
+        )?;
+        self.realm.signal_watcher_constructor = Some(watcher.0);
+        self.realm.signal_watcher_prototype = Some(watcher.1);
+        for (name, native) in [
+            (b"watch".as_slice(), NativeFunction::SignalWatcherWatch),
+            (b"unwatch".as_slice(), NativeFunction::SignalWatcherUnwatch),
+            (
+                b"getPending".as_slice(),
+                NativeFunction::SignalWatcherGetPending,
+            ),
+        ] {
+            self.install_signal_method(watcher.1, name, native, function_prototype)?;
+        }
+        let subtle_atom = self.intern_intrinsic_name(b"subtle")?;
+        self.set_intrinsic_data_property(namespace, subtle_atom, subtle, true)
+    }
+
+    /// Creates one proposal constructor/prototype pair and publishes it on its namespace.
+    fn install_signal_constructor(
+        &mut self,
+        namespace: Value,
+        name: &[u8],
+        native: NativeFunction,
+        function_prototype: Value,
+        object_prototype: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        let constructor = self.allocate_native_function(
+            native,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.set_function_prototype(constructor, prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        let name = self.intern_intrinsic_name(name)?;
+        self.set_intrinsic_data_property(namespace, name, constructor, true)?;
+        Ok((constructor, prototype))
+    }
+
+    /// Allocates and publishes one Signal prototype method with canonical metadata.
+    fn install_signal_method(
+        &mut self,
+        prototype: Value,
+        name: &[u8],
+        native: NativeFunction,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let function = self.allocate_native_function(
+            native,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let name = self.intern_intrinsic_name(name)?;
+        self.set_intrinsic_data_property(prototype, name, function, true)
     }
 
     /// Publishes all mandatory names without charging the host quota for user-created globals.
@@ -3193,6 +3354,13 @@ impl Isolate {
             self.realm
                 .promise_constructor
                 .expect("Promise initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.signal,
+            self.realm
+                .signal_namespace
+                .expect("Signal initializes before global publication"),
             true,
         )?;
         for (atom, value) in atoms
