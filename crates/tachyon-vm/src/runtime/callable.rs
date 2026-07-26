@@ -431,6 +431,8 @@ pub(crate) enum NativeFunction {
     TypedArrayAt,
     TypedArrayIncludes,
     TypedArrayFill,
+    TypedArrayCopyWithin,
+    TypedArrayReverse,
     TypedArraySearch(TypedArraySearchDirection),
     TypedArrayCallback(TypedArrayCallbackKind),
     ArrayIsArray,
@@ -1041,6 +1043,7 @@ impl NativeFunction {
             | Self::ArraySort
             | Self::ArrayToSorted => 1,
             Self::ArrayCopyWithin
+            | Self::TypedArrayCopyWithin
             | Self::ArrayWith
             | Self::ArrayToSpliced
             | Self::ArrayBufferSlice
@@ -1050,6 +1053,7 @@ impl NativeFunction {
             | Self::ArrayPop
             | Self::ArrayShift
             | Self::ArrayReverse
+            | Self::TypedArrayReverse
             | Self::ArrayToReversed
             | Self::ArrayBufferTransfer
             | Self::ArrayBufferTransferToFixedLength
@@ -1409,6 +1413,8 @@ impl NativeFunction {
             Self::TypedArrayAt => "at",
             Self::TypedArrayIncludes => "includes",
             Self::TypedArrayFill => "fill",
+            Self::TypedArrayCopyWithin => "copyWithin",
+            Self::TypedArrayReverse => "reverse",
             Self::TypedArraySearch(direction) => direction.name(),
             Self::TypedArrayCallback(kind) => kind.name(),
             Self::ArrayIsArray => "isArray",

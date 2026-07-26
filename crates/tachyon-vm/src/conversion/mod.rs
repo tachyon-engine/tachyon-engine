@@ -505,6 +505,20 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::TypedArrayCopyWithinTarget
+                            | ConversionConsumer::TypedArrayCopyWithinStart
+                            | ConversionConsumer::TypedArrayCopyWithinEnd
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_copy_within_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::TypedArraySearchFromIndex {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_typed_array_search_conversion(
@@ -1140,6 +1154,13 @@ impl Isolate {
                 | ConversionConsumer::TypedArrayFillStart
                 | ConversionConsumer::TypedArrayFillEnd => {
                     unreachable!("TypedArray fill conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayCopyWithinTarget
+                | ConversionConsumer::TypedArrayCopyWithinStart
+                | ConversionConsumer::TypedArrayCopyWithinEnd => {
+                    unreachable!(
+                        "TypedArray copyWithin conversion resumes inside its state machine"
+                    )
                 }
                 ConversionConsumer::TypedArraySearchFromIndex => {
                     unreachable!("TypedArray search conversion resumes inside its state machine")

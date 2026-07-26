@@ -344,6 +344,28 @@ impl Isolate {
         )?;
         let fill_atom = self.intern_intrinsic_name(b"fill")?;
         self.set_intrinsic_data_property(base_prototype, fill_atom, fill, true)?;
+        let copy_within = self.allocate_native_function(
+            NativeFunction::TypedArrayCopyWithin,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let copy_within_atom = self.intern_intrinsic_name(b"copyWithin")?;
+        self.set_intrinsic_data_property(base_prototype, copy_within_atom, copy_within, true)?;
+        let reverse = self.allocate_native_function(
+            NativeFunction::TypedArrayReverse,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
+        self.set_intrinsic_data_property(base_prototype, reverse_atom, reverse, true)?;
         for (direction, name) in [
             (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
             (

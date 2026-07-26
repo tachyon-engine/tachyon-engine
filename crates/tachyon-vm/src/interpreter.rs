@@ -6119,6 +6119,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayFill) => {
                     return self.begin_typed_array_fill(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayCopyWithin) => {
+                    return self.begin_typed_array_copy_within(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayReverse) => {
+                    return self.begin_typed_array_reverse(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);
                 }

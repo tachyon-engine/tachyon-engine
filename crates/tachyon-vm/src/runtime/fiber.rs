@@ -304,6 +304,9 @@ pub(crate) enum ConversionConsumer {
     TypedArrayFillValue,
     TypedArrayFillStart,
     TypedArrayFillEnd,
+    TypedArrayCopyWithinTarget,
+    TypedArrayCopyWithinStart,
+    TypedArrayCopyWithinEnd,
     TypedArraySearchFromIndex,
 }
 
@@ -382,6 +385,9 @@ impl ConversionConsumer {
             | Self::TypedArrayFillValue
             | Self::TypedArrayFillStart
             | Self::TypedArrayFillEnd
+            | Self::TypedArrayCopyWithinTarget
+            | Self::TypedArrayCopyWithinStart
+            | Self::TypedArrayCopyWithinEnd
             | Self::TypedArraySearchFromIndex => None,
         }
     }

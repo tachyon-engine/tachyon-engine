@@ -2,8 +2,10 @@
 
 mod at;
 mod callback;
+mod copy_within;
 mod fill;
 mod includes;
+mod reverse;
 mod search;
 
 use super::super::*;
