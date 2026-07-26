@@ -798,9 +798,14 @@ var abruptOptions = new Proxy({}, { get: function(target, key) {
 var getterIdentity = false;
 try { new Signal.Computed(function() { return 1; }, abruptOptions); }
 catch (error) { getterIdentity = error === getterMarker; }
+var invalidTrace = "";
 var callableCheck = false;
-try { new Signal.Computed(function() { return 1; }, { equals: 1 }); }
-catch (error) { callableCheck = error instanceof TypeError; }
+try {
+    new Signal.Computed(function() { return 1; }, new Proxy({}, { get: function(target, key) {
+        if (key === "equals") { invalidTrace += "e"; return 1; }
+        invalidTrace += "w";
+    } }));
+} catch (error) { callableCheck = error instanceof TypeError && invalidTrace === "e"; }
 
 var source = new Signal.State(1);
 var computeCalls = 0;
@@ -866,6 +871,93 @@ var throwCache = throwInitial && caughtFirst === throwMarker && caughtCached ===
 
 badCallback && constructorOrder && getterIdentity && callableCheck && diamondInitial &&
 diamondPruned && trackedInitial && trackedFirst && trackedAgain && throwCache && invalidated;
+"#;
+
+const SIGNAL_COMPUTED_HOOKS_SOURCE: &str = r#"
+var trace = "";
+var watchedThis = false;
+var unwatchedThis = false;
+var source = new Signal.State(1, {
+    [Signal.subtle.watched]: function() { trace += "s"; },
+    [Signal.subtle.unwatched]: function() { trace += "t"; }
+});
+var options = new Proxy({}, { get: function(target, key) {
+    if (key === "equals") { trace += "e"; return undefined; }
+    if (key === Signal.subtle.watched) {
+        trace += "w";
+        return function() { trace += "C"; watchedThis = this === computed; };
+    }
+    if (key === Signal.subtle.unwatched) {
+        trace += "u";
+        return function() { trace += "D"; unwatchedThis = this === computed; };
+    }
+} });
+var computed = new Signal.Computed(function() { return source.get(); }, options);
+computed.get();
+var first = new Signal.subtle.Watcher(function() {});
+var second = new Signal.subtle.Watcher(function() {});
+first.watch(computed);
+second.watch(computed);
+first.unwatch(computed);
+var deduplicated = trace === "ewuCs" && Signal.subtle.hasSinks(computed) &&
+    Signal.subtle.hasSinks(source);
+second.unwatch(computed);
+var lifecycle = trace === "ewuCsDt" && watchedThis && unwatchedThis &&
+    !Signal.subtle.hasSinks(computed) && !Signal.subtle.hasSinks(source);
+
+var getterMarker = {};
+var abruptTrace = "";
+var abrupt = false;
+try {
+    new Signal.Computed(function() { return 1; }, new Proxy({}, { get: function(target, key) {
+        if (key === "equals") { abruptTrace += "e"; return undefined; }
+        if (key === Signal.subtle.watched) { abruptTrace += "w"; throw getterMarker; }
+        abruptTrace += "u";
+    } }));
+} catch (error) { abrupt = error === getterMarker && abruptTrace === "ew"; }
+
+var hookMarker = {};
+var throwCalls = 0;
+var sourceWatched = 0;
+var throwingSource = new Signal.State(2, {
+    [Signal.subtle.watched]: function() { sourceWatched++; }
+});
+var throwing = new Signal.Computed(function() { return throwingSource.get(); }, {
+    [Signal.subtle.watched]: function() { throwCalls++; throw hookMarker; }
+});
+throwing.get();
+var throwingWatcher = new Signal.subtle.Watcher(function() {});
+var hookIdentity = false;
+try { throwingWatcher.watch(throwing); } catch (error) { hookIdentity = error === hookMarker; }
+var invariant = hookIdentity && throwCalls === 1 && sourceWatched === 0 &&
+    Signal.subtle.hasSinks(throwing) && Signal.subtle.hasSinks(throwingSource) &&
+    Signal.subtle.introspectSinks(throwing)[0] === throwingWatcher;
+throwingWatcher.watch(throwing);
+throwingWatcher.unwatch(throwing);
+var recovered = throwCalls === 1 && !Signal.subtle.hasSinks(throwing) &&
+    !Signal.subtle.hasSinks(throwingSource);
+
+var chooseLeft = new Signal.State(true);
+var leftTrace = "";
+var left = new Signal.State(3, {
+    [Signal.subtle.watched]: function() { leftTrace += "L"; },
+    [Signal.subtle.unwatched]: function() { leftTrace += "l"; }
+});
+var right = new Signal.State(4, {
+    [Signal.subtle.watched]: function() { leftTrace += "R"; }
+});
+var branchHooks = 0;
+var branch = new Signal.Computed(function() {
+    return chooseLeft.get() ? left.get() : right.get();
+}, { [Signal.subtle.watched]: function() { branchHooks++; } });
+branch.get();
+var branchWatcher = new Signal.subtle.Watcher(function() {});
+branchWatcher.watch(branch);
+chooseLeft.set(false);
+var switched = branch.get() === 4 && branchHooks === 1 && leftTrace === "LlR";
+branchWatcher.unwatch(branch);
+
+deduplicated && lifecycle && abrupt && invariant && recovered && switched;
 "#;
 
 #[test]
@@ -1240,6 +1332,47 @@ fn signal_computed_custom_equals_works_for_every_dispatch_batch() {
         SIGNAL_COMPUTED_EQUALS_SOURCE,
         8_745,
         "signals-computed-equals",
+        true,
+    );
+}
+
+/// Covers Computed hook option order, liveness transitions, abrupt recovery, and dynamic sources.
+#[test]
+fn signal_computed_lifecycle_hooks_work_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_750,
+        "signals-computed-hooks",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_751,
+        "signals-computed-hooks",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_752,
+        "signals-computed-hooks",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_753,
+        "signals-computed-hooks",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_754,
+        "signals-computed-hooks",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_HOOKS_SOURCE,
+        8_755,
+        "signals-computed-hooks",
         true,
     );
 }

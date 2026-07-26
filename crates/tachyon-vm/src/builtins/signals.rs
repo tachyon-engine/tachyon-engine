@@ -111,6 +111,22 @@ pub(crate) struct ComputedSignal {
 const COMPUTED_UNINITIALIZED_GENERATION: u64 = u64::MAX;
 const COMPUTED_THROW_COMPLETION_BIT: u64 = 1 << 63;
 const COMPUTED_GENERATION_MASK: u64 = !COMPUTED_THROW_COMPLETION_BIT;
+const COMPUTED_CALLBACK_SLOT: usize = 0;
+const COMPUTED_EQUALS_SLOT: usize = 1;
+const COMPUTED_WATCHED_SLOT: usize = 2;
+const COMPUTED_UNWATCHED_SLOT: usize = 3;
+const COMPUTED_OPTIONS_EQUALS_SLOT: usize = 2;
+const COMPUTED_OPTIONS_WATCHED_SLOT: usize = 3;
+const COMPUTED_OPTIONS_UNWATCHED_SLOT: usize = 4;
+const COMPUTED_OPTIONS_RECORD_COUNT: u8 = 5;
+
+#[derive(Clone, Copy, Debug)]
+struct SignalComputedCallbacks {
+    callback: Value,
+    equals: Value,
+    watched: Value,
+    unwatched: Value,
+}
 
 #[inline(always)]
 const fn computed_generation_is_throw(generation: u64) -> bool {
@@ -706,12 +722,18 @@ impl Isolate {
         let pending = self.native_call_state_reference(continuation.first())?;
         let snapshot = self.native_call_state_snapshot(pending)?;
         if stage == SignalStateStage::ComputedOptionsEquals {
-            return self.finish_signal_computed_options(
+            if value.as_immediate() != Some(Immediate::Undefined) {
+                self.resolve_function_object(value)
+                    .map_err(|_| ExecutionError::NonCallable(value))?;
+            }
+            self.set_signal_computed_option(pending, COMPUTED_OPTIONS_EQUALS_SLOT, value)?;
+            return self.dispatch_signal_state_option_get(
                 continuation.site(),
-                snapshot.values[0],
-                value,
+                pending,
+                SignalStateStage::OptionsWatched,
             );
         }
+        let computed_options = snapshot.count == COMPUTED_OPTIONS_RECORD_COUNT;
         let state_value = match stage {
             SignalStateStage::Equals => continuation.second(),
             _ => snapshot.values[0],
@@ -731,6 +753,14 @@ impl Isolate {
                 )
             }
             SignalStateStage::OptionsWatched => {
+                if computed_options {
+                    self.set_signal_computed_option(pending, COMPUTED_OPTIONS_WATCHED_SLOT, value)?;
+                    return self.dispatch_signal_state_option_get(
+                        continuation.site(),
+                        pending,
+                        SignalStateStage::OptionsUnwatched,
+                    );
+                }
                 self.set_signal_state_option(state_value, stage, value)?;
                 self.dispatch_signal_state_option_get(
                     continuation.site(),
@@ -739,6 +769,21 @@ impl Isolate {
                 )
             }
             SignalStateStage::OptionsUnwatched => {
+                if computed_options {
+                    self.set_signal_computed_option(
+                        pending,
+                        COMPUTED_OPTIONS_UNWATCHED_SLOT,
+                        value,
+                    )?;
+                    let snapshot = self.native_call_state_snapshot(pending)?;
+                    return self.finish_signal_computed_options(
+                        continuation.site(),
+                        snapshot.values[0],
+                        snapshot.values[COMPUTED_OPTIONS_EQUALS_SLOT],
+                        snapshot.values[COMPUTED_OPTIONS_WATCHED_SLOT],
+                        snapshot.values[COMPUTED_OPTIONS_UNWATCHED_SLOT],
+                    );
+                }
                 self.set_signal_state_option(state_value, stage, value)?;
                 self.write(
                     continuation.site().caller_base,
@@ -930,7 +975,7 @@ impl Isolate {
                 Value::from_immediate(Immediate::Undefined),
                 Value::from_immediate(Immediate::Undefined),
             ],
-            count: 2,
+            count: COMPUTED_OPTIONS_RECORD_COUNT,
         })?;
         self.dispatch_signal_state_option_get(
             NativeContinuationSite {
@@ -983,18 +1028,21 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
-    /// Installs a cold callback/equals sidecar only when a custom comparator is present.
+    /// Installs one cold callback/options sidecar only when Computed has custom behavior.
     fn finish_signal_computed_options(
         &mut self,
         site: NativeContinuationSite,
         computed: Value,
         equals: Value,
+        watched: Value,
+        unwatched: Value,
     ) -> Result<(), ExecutionError> {
-        if equals.as_immediate() == Some(Immediate::Undefined) {
+        if equals.as_immediate() == Some(Immediate::Undefined)
+            && is_nullish(watched)
+            && is_nullish(unwatched)
+        {
             return self.write(site.caller_base, site.destination, computed);
         }
-        self.resolve_function_object(equals)
-            .map_err(|_| ExecutionError::NonCallable(equals))?;
         self.write(site.caller_base, site.destination, computed)?;
         let computed_ref = self.signal_computed_reference(computed)?;
         let callback = self.computed_snapshot(computed_ref)?.3;
@@ -1002,11 +1050,11 @@ impl Isolate {
             values: [
                 callback,
                 equals,
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
+                watched,
+                unwatched,
                 Value::from_immediate(Immediate::Undefined),
             ],
-            count: 2,
+            count: 4,
         })?;
         let sidecar = Value::from_heap_ref(sidecar.raw());
         self.heap.with_running_scope(|scope| {
@@ -1023,6 +1071,33 @@ impl Isolate {
                 .map(|_| ())
         })?;
         self.write(site.caller_base, site.destination, computed)
+    }
+
+    /// Publishes one Computed option into the traced constructor record before the next Get.
+    fn set_signal_computed_option(
+        &mut self,
+        pending: GcRef<NativeCallState>,
+        index: usize,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let state = no_gc
+                    .borrow_mut(pending, self.types.native_call_state)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let slot = state
+                    .values
+                    .get_mut(index)
+                    .ok_or(ExecutionError::MissingNativeContinuation)?;
+                *slot = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(pending, value)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })
     }
 
     /// Allocates one Watcher node; notification dispatch is added by the next graph slice.
@@ -1370,7 +1445,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let computed = self.signal_computed_reference(receiver)?;
         let snapshot = self.computed_snapshot(computed)?;
-        let callback = self.signal_computed_callbacks(snapshot.3)?.0;
+        let callback = self.signal_computed_callbacks(snapshot.3)?.callback;
         self.set_pending_signal_watcher_arguments(pending, snapshot.1)?;
         self.clear_computed_sources(computed)?;
         let previous = self.signal_runtime.computing.replace(receiver);
@@ -1488,7 +1563,7 @@ impl Isolate {
         let old = snapshot.2;
         let initialized = snapshot.4 != COMPUTED_UNINITIALIZED_GENERATION
             && !computed_generation_is_throw(snapshot.4);
-        let equals = self.signal_computed_callbacks(snapshot.3)?.1;
+        let equals = self.signal_computed_callbacks(snapshot.3)?.equals;
         if initialized && equals.as_immediate() != Some(Immediate::Undefined) {
             return self.begin_signal_computed_equals(
                 continuation,
@@ -2369,24 +2444,35 @@ impl Isolate {
         })
     }
 
-    /// Returns the hook attached to one State, or `undefined` for Computed nodes.
+    /// Returns the lifecycle hook attached to either native Signal node kind.
     fn signal_hook_value(&mut self, hook: SignalLifecycleHook) -> Result<Value, ExecutionError> {
         if hook.kind == SignalLifecycleHookKind::Pull {
             return Err(ExecutionError::MissingNativeContinuation);
         }
-        let state = self.signal_state_reference(hook.signal)?;
-        self.heap.with_running_scope(|scope| {
-            let state = scope.root(state).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let node = no_gc
-                    .borrow(state, self.types.signal_state)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                Ok(match hook.kind {
-                    SignalLifecycleHookKind::Watched => node.watched,
-                    SignalLifecycleHookKind::Unwatched => node.unwatched,
-                    SignalLifecycleHookKind::Pull => unreachable!("pull frames are not callbacks"),
+        if let Ok(state) = self.signal_state_reference(hook.signal) {
+            return self.heap.with_running_scope(|scope| {
+                let state = scope.root(state).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let node = no_gc
+                        .borrow(state, self.types.signal_state)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    Ok(match hook.kind {
+                        SignalLifecycleHookKind::Watched => node.watched,
+                        SignalLifecycleHookKind::Unwatched => node.unwatched,
+                        SignalLifecycleHookKind::Pull => {
+                            unreachable!("pull frames are not callbacks")
+                        }
+                    })
                 })
-            })
+            });
+        }
+        let computed = self.signal_computed_reference(hook.signal)?;
+        let storage = self.computed_snapshot(computed)?.3;
+        let callbacks = self.signal_computed_callbacks(storage)?;
+        Ok(match hook.kind {
+            SignalLifecycleHookKind::Watched => callbacks.watched,
+            SignalLifecycleHookKind::Unwatched => callbacks.unwatched,
+            SignalLifecycleHookKind::Pull => unreachable!("pull frames are not callbacks"),
         })
     }
 
@@ -2685,18 +2771,34 @@ impl Isolate {
     fn signal_computed_callbacks(
         &mut self,
         storage: Value,
-    ) -> Result<(Value, Value), ExecutionError> {
+    ) -> Result<SignalComputedCallbacks, ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
         let Some(raw) = storage.as_heap_ref() else {
-            return Ok((storage, Value::from_immediate(Immediate::Undefined)));
+            return Ok(SignalComputedCallbacks {
+                callback: storage,
+                equals: undefined,
+                watched: undefined,
+                unwatched: undefined,
+            });
         };
         let Ok(sidecar) = self
             .heap
             .checked_reference(raw, self.types.native_call_state)
         else {
-            return Ok((storage, Value::from_immediate(Immediate::Undefined)));
+            return Ok(SignalComputedCallbacks {
+                callback: storage,
+                equals: undefined,
+                watched: undefined,
+                unwatched: undefined,
+            });
         };
         let snapshot = self.native_call_state_snapshot(sidecar)?;
-        Ok((snapshot.values[0], snapshot.values[1]))
+        Ok(SignalComputedCallbacks {
+            callback: snapshot.values[COMPUTED_CALLBACK_SLOT],
+            equals: snapshot.values[COMPUTED_EQUALS_SLOT],
+            watched: snapshot.values[COMPUTED_WATCHED_SLOT],
+            unwatched: snapshot.values[COMPUTED_UNWATCHED_SLOT],
+        })
     }
 
     /// Reads one ordered source without retaining an untraced Value across a GC point.
@@ -2878,7 +2980,7 @@ impl Isolate {
                 continue;
             }
             let computed = self.signal_computed_reference(current)?;
-            let (first, sources) = self.heap.with_running_scope(|scope| {
+            let (first, sources, storage) = self.heap.with_running_scope(|scope| {
                 let computed = scope.root(computed).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let node = no_gc
@@ -2889,10 +2991,21 @@ impl Isolate {
                         .live_sinks
                         .checked_add(1)
                         .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
-                    Ok((first, node.sources.try_snapshot()?))
+                    Ok((first, node.sources.try_snapshot()?, node.callback))
                 })
             })?;
             if first {
+                let watched = self.signal_computed_callbacks(storage)?.watched;
+                if !is_nullish(watched) {
+                    hooks
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                    hooks.push(SignalLifecycleHook {
+                        signal: current,
+                        kind: SignalLifecycleHookKind::Watched,
+                        next_source: 0,
+                    });
+                }
                 work.try_reserve(sources.len())
                     .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                 work.extend(sources.into_iter().rev());
@@ -2939,7 +3052,7 @@ impl Isolate {
                 continue;
             }
             let computed = self.signal_computed_reference(current)?;
-            let (last, sources) = self.heap.with_running_scope(|scope| {
+            let (last, sources, storage) = self.heap.with_running_scope(|scope| {
                 let computed = scope.root(computed).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
                     let node = no_gc
@@ -2949,10 +3062,25 @@ impl Isolate {
                         return Err(ExecutionError::PropertyStorageAllocationFailed);
                     }
                     node.live_sinks -= 1;
-                    Ok((node.live_sinks == 0, node.sources.try_snapshot()?))
+                    Ok((
+                        node.live_sinks == 0,
+                        node.sources.try_snapshot()?,
+                        node.callback,
+                    ))
                 })
             })?;
             if last {
+                let unwatched = self.signal_computed_callbacks(storage)?.unwatched;
+                if !is_nullish(unwatched) {
+                    hooks
+                        .try_reserve(1)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                    hooks.push(SignalLifecycleHook {
+                        signal: current,
+                        kind: SignalLifecycleHookKind::Unwatched,
+                        next_source: 0,
+                    });
+                }
                 work.try_reserve(sources.len())
                     .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                 work.extend(sources.into_iter().rev());
