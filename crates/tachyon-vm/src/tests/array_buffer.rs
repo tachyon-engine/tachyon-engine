@@ -167,6 +167,83 @@ var resultBytes = new Uint8Array(result);
 result.byteLength === 2 && resultBytes[0] === 41 && resultBytes[1] === 42;
 "#;
 
+const ARRAY_BUFFER_SLICE_OBSERVABLE_SOURCE: &str = r#"
+var source = new ArrayBuffer(5);
+var sourceBytes = new Uint8Array(source);
+sourceBytes[0] = 20;
+sourceBytes[1] = 21;
+sourceBytes[2] = 22;
+sourceBytes[3] = 23;
+sourceBytes[4] = 24;
+
+var order = "";
+var speciesTarget = {};
+speciesTarget[Symbol.species] = function(length) {
+  order += "c" + length;
+  return new ArrayBuffer(length);
+};
+var speciesProxy = new Proxy(speciesTarget, {
+  get: function(target, key, receiver) {
+    order += key === Symbol.species ? "p" : "?";
+    return Reflect.get(target, key, receiver);
+  }
+});
+Object.defineProperty(source, "constructor", {
+  get: function() {
+    order += "g";
+    return speciesProxy;
+  }
+});
+var result = source.slice(
+  { valueOf: function() { order += "s"; return -Infinity; } },
+  { valueOf: function() { order += "e"; return Infinity; } }
+);
+var resultBytes = new Uint8Array(result);
+var observable = order === "segpc5" && result.byteLength === 5 &&
+  resultBytes[0] === 20 && resultBytes[4] === 24;
+
+sourceBytes[0] = 99;
+var resultIndependent = resultBytes[0] === 20;
+resultBytes[1] = 88;
+var sourceIndependent = sourceBytes[1] === 21;
+
+var detachDuringStart = new ArrayBuffer(2);
+var detachDuringStartThrows = false;
+try {
+  detachDuringStart.slice({
+    valueOf: function() {
+      $262.detachArrayBuffer(detachDuringStart);
+      return 0;
+    }
+  });
+} catch (error) {
+  detachDuringStartThrows = error instanceof TypeError;
+}
+
+var constructorGetterSource = new ArrayBuffer(2);
+var getterOrder = "";
+Object.defineProperty(constructorGetterSource, "constructor", {
+  get: function() {
+    getterOrder += "g";
+    $262.detachArrayBuffer(constructorGetterSource);
+    return undefined;
+  }
+});
+var constructorGetterThrows = false;
+try {
+  constructorGetterSource.slice({
+    valueOf: function() { getterOrder += "s"; return 0; }
+  }, {
+    valueOf: function() { getterOrder += "e"; return 2; }
+  });
+} catch (error) {
+  constructorGetterThrows = error instanceof TypeError;
+}
+
+observable && resultIndependent && sourceIndependent && detachDuringStartThrows &&
+  constructorGetterThrows && getterOrder === "seg";
+"#;
+
 const ARRAY_BUFFER_TRANSFER_SOURCE: &str = r#"
 var first = new ArrayBuffer(4);
 var firstView = new Uint8Array(first);
@@ -294,6 +371,20 @@ fn array_buffer_slice_observes_species_and_validation_order_for_dispatch_batches
 #[test]
 fn array_buffer_slice_state_and_copy_survive_forced_major_collection() {
     assert_array_buffer_slice::<8>(true);
+}
+
+#[test]
+fn array_buffer_slice_preserves_proxy_order_detach_checks_and_copy_independence() {
+    assert_array_buffer_slice_observable::<1>(false);
+    assert_array_buffer_slice_observable::<2>(false);
+    assert_array_buffer_slice_observable::<4>(false);
+    assert_array_buffer_slice_observable::<8>(false);
+    assert_array_buffer_slice_observable::<16>(false);
+}
+
+#[test]
+fn array_buffer_slice_observable_edges_survive_forced_major_collection() {
+    assert_array_buffer_slice_observable::<8>(true);
 }
 
 #[test]
@@ -478,6 +569,33 @@ fn assert_array_buffer_slice<const N: usize>(forced_major: bool) {
             },
         )
         .expect("ArrayBuffer slice fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Exercises Proxy/getter ordering, conversion detach, and independent copy storage.
+fn assert_array_buffer_slice_observable<const N: usize>(forced_major: bool) {
+    let module = compile_source(ARRAY_BUFFER_SLICE_OBSERVABLE_SOURCE, 7_415);
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
+        .expect("detach host hook installs");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 524_288,
+                quantum: 524_288,
+            },
+        )
+        .expect("observable ArrayBuffer slice fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
