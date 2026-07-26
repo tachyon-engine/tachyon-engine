@@ -35,10 +35,12 @@ fn run_tachyon(
     let config_path = PathBuf::from(args.next().ok_or(USAGE)?);
     let checkout = PathBuf::from(args.next().ok_or(USAGE)?);
     let mut options = RunOptions::default();
+    let mut summary_only = false;
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--serial") => options.parallel = false,
             Some("--parallel") => options.parallel = true,
+            Some("--summary-only") => summary_only = true,
             Some("--seed") => {
                 let value = args.next().ok_or("--seed requires an unsigned integer")?;
                 options.seed = Some(
@@ -59,7 +61,13 @@ fn run_tachyon(
     let config_source = fs::read_to_string(config_path)?;
     let config = Test262Config::parse(&config_source)?;
     let report = run_checkout(&checkout, &config, &TachyonAdapter, &options)?;
-    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    if summary_only {
+        serde_json::to_writer_pretty(&mut output, &report.summary)?;
+    } else {
+        serde_json::to_writer_pretty(&mut output, &report)?;
+    }
     println!();
     Ok(())
 }
@@ -90,4 +98,4 @@ fn compare(
     Ok(())
 }
 
-const USAGE: &str = "usage:\n  test262-runner run-tachyon <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  test262-runner compare <base.json> <new.json> [--markdown]";
+const USAGE: &str = "usage:\n  test262-runner run-tachyon <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  test262-runner compare <base.json> <new.json> [--markdown]";

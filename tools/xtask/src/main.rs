@@ -117,7 +117,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -217,11 +217,13 @@ fn fetch_test262() -> Result<(), String> {
 /// Runs Tachyon with deterministic selection flags and writes a phase-aware JSON report to stdout.
 fn run_test262(arguments: &[String]) -> Result<(), String> {
     let mut options = RunOptions::default();
+    let mut summary_only = false;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--serial" => options.parallel = false,
             "--parallel" => options.parallel = true,
+            "--summary-only" => summary_only = true,
             "--seed" => {
                 index += 1;
                 let value = arguments.get(index).ok_or("--seed requires an integer")?;
@@ -244,8 +246,14 @@ fn run_test262(arguments: &[String]) -> Result<(), String> {
         &options,
     )
     .map_err(|error| error.to_string())?;
-    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
-        .map_err(|error| error.to_string())?;
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    if summary_only {
+        serde_json::to_writer_pretty(&mut output, &report.summary)
+    } else {
+        serde_json::to_writer_pretty(&mut output, &report)
+    }
+    .map_err(|error| error.to_string())?;
     println!();
     Ok(())
 }
