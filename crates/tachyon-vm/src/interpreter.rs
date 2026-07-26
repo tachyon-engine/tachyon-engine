@@ -2133,6 +2133,9 @@ impl Isolate {
             NativeContinuationKind::ArraySlice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ArrayBufferSlice(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6064,6 +6067,9 @@ impl Isolate {
                     let result = self.array_buffer_is_view(value);
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferSlice) => {
+                    return self.begin_array_buffer_slice(&site);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::ArrayBufferByteLength
                     | NativeFunction::ArrayBufferMaxByteLength
@@ -7364,6 +7370,10 @@ impl Isolate {
                     let state = self.pending_array_slice_reference(continuation.first())?;
                     self.resume_array_slice(site, state, stage, value)
                 }
+                NativeContinuationKind::ArrayBufferSlice(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_array_buffer_slice(site, state, stage, value)
+                }
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;
                     self.resume_array_splice(site, state, stage, value, continuation.second())
@@ -7686,6 +7696,17 @@ impl Isolate {
                 if continuation.kind() == NativeContinuationKind::SignalWatcherHook {
                     let site = continuation.site();
                     match self.continue_signal_watcher_hook_abrupt(continuation, value)? {
+                        None => return Ok(None),
+                        Some(replacement) => {
+                            completion = CompletionRecord::throw(replacement);
+                            instruction_offset = site.call_site;
+                            continue;
+                        }
+                    }
+                }
+                if continuation.kind() == NativeContinuationKind::SignalComputed {
+                    let site = continuation.site();
+                    match self.continue_signal_computed_abrupt(continuation, value)? {
                         None => return Ok(None),
                         Some(replacement) => {
                             completion = CompletionRecord::throw(replacement);

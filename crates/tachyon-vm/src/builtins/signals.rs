@@ -108,13 +108,29 @@ pub(crate) struct ComputedSignal {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+const COMPUTED_UNINITIALIZED_GENERATION: u64 = u64::MAX;
+const COMPUTED_THROW_COMPLETION_BIT: u64 = 1 << 63;
+const COMPUTED_GENERATION_MASK: u64 = !COMPUTED_THROW_COMPLETION_BIT;
+
+#[inline(always)]
+const fn computed_generation_is_throw(generation: u64) -> bool {
+    generation != COMPUTED_UNINITIALIZED_GENERATION
+        && generation & COMPUTED_THROW_COMPLETION_BIT != 0
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum SignalWatcherOperationKind {
     Watch,
     Unwatch,
-    Reconcile,
+    ComputedPull,
     Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SignalComputedPullFrame {
+    computed: Value,
+    next_source: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,12 +138,14 @@ enum SignalWatcherOperationKind {
 enum SignalLifecycleHookKind {
     Watched,
     Unwatched,
+    Pull,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SignalLifecycleHook {
     signal: Value,
     kind: SignalLifecycleHookKind,
+    next_source: u32,
 }
 
 impl Trace for SignalLifecycleHook {
@@ -529,7 +547,7 @@ impl Isolate {
                     sources: OrderedSignals::try_new()?,
                     sinks: OrderedSignals::try_new()?,
                     live_sinks: 0,
-                    generation: u64::MAX,
+                    generation: COMPUTED_UNINITIALIZED_GENERATION,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -817,31 +835,94 @@ impl Isolate {
         let snapshot = self.computed_snapshot(computed)?;
         if snapshot.0 == ComputedState::Clean {
             self.record_signal_dependency(receiver)?;
+            if computed_generation_is_throw(snapshot.4) {
+                return Err(ExecutionError::HostThrown(snapshot.2));
+            }
             return self.write(site.caller_base, site.destination, snapshot.2);
         }
         if snapshot.0 == ComputedState::Computing {
             return Err(ExecutionError::NotObject(receiver));
         }
-        let pending = self.allocate_pending_signal_watcher_operation(
-            receiver,
-            SignalWatcherOperationKind::Reconcile,
-            snapshot.1,
-        )?;
+        let pending = self.allocate_pending_signal_computed_pull(receiver)?;
+        self.resume_signal_computed_pull(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            pending,
+        )
+    }
+
+    /// Polls a Checked graph iteratively and starts only the deepest dirty callback.
+    fn resume_signal_computed_pull(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            let Some(frame) = self.pending_signal_computed_pull_top(pending)? else {
+                return self.finish_signal_computed_pull(site, pending);
+            };
+            let computed = self.signal_computed_reference(frame.computed)?;
+            let snapshot = self.computed_pull_snapshot(computed, frame.next_source)?;
+            match snapshot.0 {
+                ComputedState::Clean => {
+                    self.pending_signal_computed_pull_pop(pending)?;
+                }
+                ComputedState::Computing => {
+                    return Err(ExecutionError::NotObject(frame.computed));
+                }
+                ComputedState::Dirty => {
+                    return self.start_signal_computed_callback(site, pending, frame.computed);
+                }
+                ComputedState::Checked => {
+                    if let Some(source) = snapshot.1 {
+                        self.pending_signal_computed_pull_advance(pending)?;
+                        if let Ok(source) = self.signal_computed_reference(source) {
+                            let state = self.computed_pull_snapshot(source, 0)?.0;
+                            if state != ComputedState::Clean {
+                                self.pending_signal_computed_pull_push(
+                                    pending,
+                                    Value::from_heap_ref(source.raw()),
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                    self.set_computed_state(computed, ComputedState::Clean)?;
+                    self.pending_signal_computed_pull_pop(pending)?;
+                }
+            }
+        }
+    }
+
+    /// Publishes old sources, enters Computing, and dispatches one callback without Rust recursion.
+    fn start_signal_computed_callback(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: GcRef<PendingSignalWatcherOperation>,
+        receiver: Value,
+    ) -> Result<(), ExecutionError> {
+        let computed = self.signal_computed_reference(receiver)?;
+        let snapshot = self.computed_snapshot(computed)?;
+        self.set_pending_signal_watcher_arguments(pending, snapshot.1)?;
         self.clear_computed_sources(computed)?;
         let previous = self.signal_runtime.computing.replace(receiver);
         self.set_computed_state(computed, ComputedState::Computing)?;
-        self.fiber
+        if self
+            .fiber
             .completions
             .push_native(NativeContinuation::signal_computed(
-                NativeContinuationSite {
-                    caller_base: site.caller_base,
-                    destination: site.destination,
-                    call_site: site.call_site,
-                },
+                site,
                 Value::from_heap_ref(pending.raw()),
                 previous.unwrap_or(Value::from_immediate(Immediate::Undefined)),
             ))
-            .map_err(|_| ExecutionError::CompletionAllocationFailed)?;
+            .is_err()
+        {
+            self.restore_failed_signal_computed_start(computed, pending, previous)?;
+            return Err(ExecutionError::CompletionAllocationFailed);
+        }
         let frame_depth = self.fiber.frames.len();
         let result = self.call(CallSite {
             caller_base: site.caller_base,
@@ -859,9 +940,14 @@ impl Isolate {
             call_site: site.call_site,
         });
         if let Err(error) = result {
-            self.signal_runtime.computing = previous;
-            self.set_computed_state(computed, ComputedState::Dirty)?;
-            self.pop_native_continuation()?;
+            let continuation = self.pop_native_continuation()?;
+            if let ExecutionError::HostThrown(thrown) = error {
+                return match self.continue_signal_computed_abrupt(continuation, thrown)? {
+                    Some(error) => Err(ExecutionError::HostThrown(error)),
+                    None => Ok(()),
+                };
+            }
+            self.restore_failed_signal_computed_start(computed, pending, previous)?;
             return Err(error);
         }
         if self.fiber.frames.len() != frame_depth {
@@ -879,47 +965,143 @@ impl Isolate {
         self.resume_signal_computed(continuation, returned)
     }
 
-    /// Commits one successful Computed callback and restores nested dependency tracking.
+    /// Restores old dependencies when a callback cannot enter the resumable JS-frame path.
+    fn restore_failed_signal_computed_start(
+        &mut self,
+        computed: GcRef<ComputedSignal>,
+        pending: GcRef<PendingSignalWatcherOperation>,
+        previous: Option<Value>,
+    ) -> Result<(), ExecutionError> {
+        let old_sources = self.pending_signal_watcher_arguments(pending)?;
+        self.signal_runtime.computing = previous;
+        self.heap.with_running_scope(|scope| {
+            let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(computed, self.types.signal_computed)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                node.sources.entries.clear();
+                node.sources
+                    .entries
+                    .try_reserve(old_sources.len())
+                    .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                node.sources.entries.extend(old_sources.iter().copied());
+                node.state = ComputedState::Dirty;
+                Ok::<(), ExecutionError>(())
+            })?;
+            for source in old_sources {
+                scope
+                    .write_value_barrier(computed, source)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Commits one successful callback and resumes its iterative pull operation.
     pub(crate) fn resume_signal_computed(
         &mut self,
         continuation: NativeContinuation,
         value: Value,
     ) -> Result<(), ExecutionError> {
         let pending = self.pending_signal_watcher_reference(continuation.first())?;
-        let receiver = self.pending_signal_watcher_subject(pending)?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            Value::from_heap_ref(pending.raw()),
+        )?;
+        let receiver = self
+            .pending_signal_computed_pull_top(pending)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?
+            .computed;
         let computed = self.signal_computed_reference(receiver)?;
         let (old, initialized) = self.heap.with_running_scope(|scope| {
             let computed = scope.root(computed).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
+            let result = scope.with_no_gc_scope(|no_gc| {
                 let node = no_gc
                     .borrow_mut(computed, self.types.signal_computed)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 let old = node.cached;
-                let initialized = node.generation != u64::MAX;
+                let initialized = node.generation != COMPUTED_UNINITIALIZED_GENERATION
+                    && !computed_generation_is_throw(node.generation);
                 node.cached = value;
                 node.state = ComputedState::Clean;
-                node.generation = self.signal_runtime.generation;
+                node.generation = self.signal_runtime.generation & COMPUTED_GENERATION_MASK;
                 Ok((old, initialized))
-            })
+            })?;
+            scope
+                .write_value_barrier(computed, value)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok::<_, ExecutionError>(result)
         })?;
         let previous = continuation.second();
         self.signal_runtime.computing =
             (previous.as_immediate() != Some(Immediate::Undefined)).then_some(previous);
         let old_sources = self.pending_signal_watcher_arguments(pending)?;
         let hooks = self.reconcile_computed_sources(receiver, computed, old_sources)?;
-        self.record_signal_dependency(receiver)?;
         let changed = !initialized || !self.same_value(old, value)?;
         self.finish_computed_coloring(receiver, changed)?;
+        self.pending_signal_computed_pull_pop(pending)?;
+        self.clear_pending_signal_computed_callback_state(pending)?;
         if hooks.is_empty() {
-            return self.write(
-                continuation.site().caller_base,
-                continuation.site().destination,
-                value,
-            );
+            return self.resume_signal_computed_pull(continuation.site(), pending);
         }
-        self.replace_pending_signal_watcher_arguments(pending, value)?;
         self.pending_signal_watcher_append_hooks(pending, hooks)?;
         self.resume_signal_watcher_operation(continuation.site(), pending)
+    }
+
+    /// Caches a thrown callback completion by identity and resumes parent pull/restoration.
+    pub(crate) fn continue_signal_computed_abrupt(
+        &mut self,
+        continuation: NativeContinuation,
+        error: Value,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let pending = self.pending_signal_watcher_reference(continuation.first())?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            Value::from_heap_ref(pending.raw()),
+        )?;
+        let receiver = self
+            .pending_signal_computed_pull_top(pending)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?
+            .computed;
+        let computed = self.signal_computed_reference(receiver)?;
+        self.heap.with_running_scope(|scope| {
+            let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(computed, self.types.signal_computed)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                node.cached = error;
+                node.state = ComputedState::Clean;
+                node.generation = (self.signal_runtime.generation & COMPUTED_GENERATION_MASK)
+                    | COMPUTED_THROW_COMPLETION_BIT;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(computed, error)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })?;
+        let previous = continuation.second();
+        self.signal_runtime.computing =
+            (previous.as_immediate() != Some(Immediate::Undefined)).then_some(previous);
+        let old_sources = self.pending_signal_watcher_arguments(pending)?;
+        let hooks = self.reconcile_computed_sources(receiver, computed, old_sources)?;
+        self.finish_computed_coloring(receiver, true)?;
+        self.pending_signal_computed_pull_pop(pending)?;
+        self.clear_pending_signal_computed_callback_state(pending)?;
+        if !hooks.is_empty() {
+            self.pending_signal_watcher_append_hooks(pending, hooks)?;
+            self.resume_signal_watcher_operation(continuation.site(), pending)?;
+            return Ok(None);
+        }
+        match self.resume_signal_computed_pull(continuation.site(), pending) {
+            Ok(()) => Ok(None),
+            Err(ExecutionError::HostThrown(error)) => Ok(Some(error)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Adds valid signals to a Watcher's ordered set after complete argument validation.
@@ -1030,6 +1212,20 @@ impl Isolate {
         Ok(pending)
     }
 
+    /// Allocates the transient, traced DFS stack used by one public Computed.get operation.
+    fn allocate_pending_signal_computed_pull(
+        &mut self,
+        computed: Value,
+    ) -> Result<GcRef<PendingSignalWatcherOperation>, ExecutionError> {
+        let pending = self.allocate_pending_signal_watcher_operation(
+            computed,
+            SignalWatcherOperationKind::ComputedPull,
+            Vec::new(),
+        )?;
+        self.pending_signal_computed_pull_push(pending, computed)?;
+        Ok(pending)
+    }
+
     fn set_pending_signal_watcher_watcher(
         &mut self,
         pending: GcRef<PendingSignalWatcherOperation>,
@@ -1105,14 +1301,6 @@ impl Isolate {
                 }
                 return self.finish_signal_watcher_notifications(site, pending);
             }
-            if snapshot.kind == SignalWatcherOperationKind::Reconcile && snapshot.hook.is_none() {
-                return self.finish_signal_watcher_operation(
-                    site,
-                    pending,
-                    snapshot.watcher,
-                    snapshot.kind,
-                );
-            }
             if let Some(hook) = snapshot.hook {
                 self.pending_signal_watcher_advance_hook(pending)?;
                 let callback = self.signal_hook_value(hook)?;
@@ -1130,6 +1318,10 @@ impl Isolate {
                 )?;
                 return Ok(());
             }
+            if snapshot.kind == SignalWatcherOperationKind::ComputedPull {
+                self.restore_pending_signal_computed_pull_stack(pending)?;
+                return self.resume_signal_computed_pull(site, pending);
+            }
             if let Some(signal) = snapshot.argument {
                 self.pending_signal_watcher_advance_argument(pending)?;
                 let mut hooks = Vec::new();
@@ -1143,14 +1335,15 @@ impl Isolate {
                     SignalWatcherOperationKind::Unwatch => {
                         self.prepare_signal_unwatch(signal, snapshot.watcher, &mut hooks)?;
                     }
-                    SignalWatcherOperationKind::Reconcile | SignalWatcherOperationKind::Notify => {
+                    SignalWatcherOperationKind::ComputedPull
+                    | SignalWatcherOperationKind::Notify => {
                         return Err(ExecutionError::MissingNativeContinuation);
                     }
                 }
                 self.pending_signal_watcher_append_hooks(pending, hooks)?;
                 continue;
             }
-            self.finish_signal_watcher_operation(site, pending, snapshot.watcher, snapshot.kind)?;
+            self.finish_signal_watcher_operation(site, snapshot.watcher)?;
             return Ok(());
         }
     }
@@ -1258,6 +1451,141 @@ impl Isolate {
         })
     }
 
+    fn pending_signal_computed_pull_top(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<Option<SignalComputedPullFrame>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(pending, self.types.pending_signal_watcher_operation)
+                    .map(|node| {
+                        node.hooks.last().and_then(|frame| {
+                            (frame.kind == SignalLifecycleHookKind::Pull).then_some(
+                                SignalComputedPullFrame {
+                                    computed: frame.signal,
+                                    next_source: frame.next_source as usize,
+                                },
+                            )
+                        })
+                    })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Pushes a rooted DFS frame and publishes its Value edge before any later GC point.
+    fn pending_signal_computed_pull_push(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+        computed: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                node.hooks
+                    .try_reserve(1)
+                    .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                node.hooks.push(SignalLifecycleHook {
+                    signal: computed,
+                    kind: SignalLifecycleHookKind::Pull,
+                    next_source: 0,
+                });
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(pending, computed)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })
+    }
+
+    fn pending_signal_computed_pull_pop(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .hooks
+                    .pop()
+                    .filter(|frame| frame.kind == SignalLifecycleHookKind::Pull)
+                    .ok_or(ExecutionError::MissingNativeContinuation)?;
+                Ok(())
+            })
+        })
+    }
+
+    fn pending_signal_computed_pull_advance(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let frame = node
+                    .hooks
+                    .last_mut()
+                    .ok_or(ExecutionError::MissingNativeContinuation)?;
+                if frame.kind != SignalLifecycleHookKind::Pull {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                frame.next_source = frame
+                    .next_source
+                    .checked_add(1)
+                    .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
+                Ok(())
+            })
+        })
+    }
+
+    /// Clears callback-local roots while retaining the bounded pull stack itself.
+    fn clear_pending_signal_computed_callback_state(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                node.arguments.clear();
+                node.argument_index = node.hooks.len();
+                node.hook_index = node.hooks.len();
+                Ok(())
+            })
+        })
+    }
+
+    /// Drops the drained lifecycle suffix and reveals the traced DFS prefix again.
+    fn restore_pending_signal_computed_pull_stack(
+        &mut self,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                node.hooks.truncate(node.argument_index);
+                node.hook_index = node.hooks.len();
+                Ok(())
+            })
+        })
+    }
+
     fn pending_signal_watcher_arguments(
         &mut self,
         pending: GcRef<PendingSignalWatcherOperation>,
@@ -1277,32 +1605,6 @@ impl Isolate {
                         Ok(arguments)
                     })
             })
-        })
-    }
-
-    fn replace_pending_signal_watcher_arguments(
-        &mut self,
-        pending: GcRef<PendingSignalWatcherOperation>,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let pending = scope.root(pending).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let node = no_gc
-                    .borrow_mut(pending, self.types.pending_signal_watcher_operation)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                node.arguments.clear();
-                node.arguments
-                    .try_reserve(1)
-                    .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
-                node.arguments.push(value);
-                node.argument_index = 0;
-                Ok::<(), ExecutionError>(())
-            })?;
-            scope
-                .write_value_barrier(pending, value)
-                .map_err(ExecutionError::HeapReference)
-                .map(|_| ())
         })
     }
 
@@ -1364,6 +1666,9 @@ impl Isolate {
 
     /// Returns the hook attached to one State, or `undefined` for Computed nodes.
     fn signal_hook_value(&mut self, hook: SignalLifecycleHook) -> Result<Value, ExecutionError> {
+        if hook.kind == SignalLifecycleHookKind::Pull {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
         let state = self.signal_state_reference(hook.signal)?;
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
@@ -1374,6 +1679,7 @@ impl Isolate {
                 Ok(match hook.kind {
                     SignalLifecycleHookKind::Watched => node.watched,
                     SignalLifecycleHookKind::Unwatched => node.unwatched,
+                    SignalLifecycleHookKind::Pull => unreachable!("pull frames are not callbacks"),
                 })
             })
         })
@@ -1503,27 +1809,8 @@ impl Isolate {
     fn finish_signal_watcher_operation(
         &mut self,
         site: NativeContinuationSite,
-        pending: GcRef<PendingSignalWatcherOperation>,
         watcher: Value,
-        kind: SignalWatcherOperationKind,
     ) -> Result<(), ExecutionError> {
-        if kind == SignalWatcherOperationKind::Reconcile {
-            let value = self.heap.with_running_scope(|scope| {
-                let pending = scope.root(pending).map_err(ExecutionError::Root)?;
-                scope.with_no_gc_scope(|no_gc| {
-                    no_gc
-                        .borrow(pending, self.types.pending_signal_watcher_operation)
-                        .map_err(ExecutionError::NoGcBorrow)
-                        .and_then(|node| {
-                            node.arguments
-                                .first()
-                                .copied()
-                                .ok_or(ExecutionError::MissingNativeContinuation)
-                        })
-                })
-            })?;
-            return self.write(site.caller_base, site.destination, value);
-        }
         let watcher = self.signal_watcher_reference(watcher)?;
         self.heap.with_running_scope(|scope| {
             let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
@@ -1647,7 +1934,7 @@ impl Isolate {
     fn computed_snapshot(
         &mut self,
         computed: GcRef<ComputedSignal>,
-    ) -> Result<(ComputedState, Vec<Value>, Value, Value), ExecutionError> {
+    ) -> Result<(ComputedState, Vec<Value>, Value, Value, u64), ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let computed = scope.root(computed).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -1660,10 +1947,47 @@ impl Isolate {
                             node.sources.try_snapshot()?,
                             node.cached,
                             node.callback,
+                            node.generation,
                         ))
                     })
             })
         })
+    }
+
+    /// Reads one ordered source without retaining an untraced Value across a GC point.
+    fn computed_pull_snapshot(
+        &mut self,
+        computed: GcRef<ComputedSignal>,
+        source_index: usize,
+    ) -> Result<(ComputedState, Option<Value>), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
+                    .borrow(computed, self.types.signal_computed)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok((node.state, node.sources.entries.get(source_index).copied()))
+            })
+        })
+    }
+
+    /// Returns or rethrows the requested root only after every pull frame has settled.
+    fn finish_signal_computed_pull(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: GcRef<PendingSignalWatcherOperation>,
+    ) -> Result<(), ExecutionError> {
+        let receiver = self.pending_signal_watcher_subject(pending)?;
+        let computed = self.signal_computed_reference(receiver)?;
+        let snapshot = self.computed_snapshot(computed)?;
+        if snapshot.0 != ComputedState::Clean {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
+        self.record_signal_dependency(receiver)?;
+        if computed_generation_is_throw(snapshot.4) {
+            return Err(ExecutionError::HostThrown(snapshot.2));
+        }
+        self.write(site.caller_base, site.destination, snapshot.2)
     }
 
     fn set_computed_state(
@@ -1803,6 +2127,7 @@ impl Isolate {
                     hooks.push(SignalLifecycleHook {
                         signal: current,
                         kind: SignalLifecycleHookKind::Watched,
+                        next_source: 0,
                     });
                 }
                 continue;
@@ -1863,6 +2188,7 @@ impl Isolate {
                     hooks.push(SignalLifecycleHook {
                         signal: current,
                         kind: SignalLifecycleHookKind::Unwatched,
+                        next_source: 0,
                     });
                 }
                 continue;

@@ -35,7 +35,10 @@ var valuesOkay = true;
 for (var i = 0; i < constructors.length; i++) valuesOkay = valuesOkay && verify(constructors[i]);
 
 var typedArrayPrototype = Object.getPrototypeOf(Int8Array).prototype;
-var names = ["every", "some", "find", "findIndex", "findLast", "findLastIndex"];
+var names = [
+  "every", "some", "find", "findIndex", "findLast", "findLastIndex",
+  "forEach", "reduce", "reduceRight"
+];
 var metadataOkay = true;
 for (var j = 0; j < names.length; j++) {
   var property = Object.getOwnPropertyDescriptor(typedArrayPrototype, names[j]);
@@ -58,8 +61,56 @@ detached.every(function(value, index, receiver) {
   detachedCalls++;
   return true;
 });
-valuesOkay && metadataOkay && rejected === 6 && nonCallable &&
-  detachedCalls === 2 && detachedSecond === undefined;
+var array = new Uint8Array([1, 2, 3, 4]);
+var thisArg = { marker: 9 };
+var forEachSeen = "";
+var forEachResult = array.forEach(function(value, index, receiver) {
+  forEachSeen += value + ":" + index + ":" + (receiver === array) + ":" + (this === thisArg) + ";";
+}, thisArg);
+var reduceCalls = 0;
+var reduceResult = array.reduce(function(accumulator, value, index, receiver) {
+  "use strict";
+  reduceCalls++;
+  return accumulator + value + index + (receiver === array ? 0 : 100) + (this === undefined ? 0 : 100);
+}, 10);
+var reduceRightSeen = "";
+var reduceRightResult = array.reduceRight(function(accumulator, value, index, receiver) {
+  "use strict";
+  reduceRightSeen += index;
+  return accumulator - value;
+});
+var omittedCalls = 0;
+var omitted = new Uint8Array([9]).reduce(function() { omittedCalls++; });
+var explicitUndefinedCalls = 0;
+var explicitUndefined = new Uint8Array([7]).reduce(function(accumulator, value) {
+  explicitUndefinedCalls++;
+  return accumulator === undefined ? value : 99;
+}, undefined);
+var reverseOmittedCalls = 0;
+var reverseOmitted = new Uint8Array([11]).reduceRight(function() { reverseOmittedCalls++; });
+var reverseExplicitCalls = 0;
+var reverseExplicit = new Uint8Array([12]).reduceRight(function(accumulator, value) {
+  reverseExplicitCalls++;
+  return accumulator === undefined ? value : 99;
+}, undefined);
+var emptyExplicit = new Uint8Array(0).reduce(function() { throw 1; }, undefined);
+var emptyOmitted = false;
+try { new Uint8Array(0).reduce(function() {}); }
+catch (error) { emptyOmitted = error instanceof TypeError; }
+var emptyRightOmitted = false;
+try { new Uint8Array(0).reduceRight(function() {}); }
+catch (error) { emptyRightOmitted = error instanceof TypeError; }
+var abrupt = {};
+var abruptIdentity = false;
+try { array.forEach(function() { throw abrupt; }); }
+catch (error) { abruptIdentity = error === abrupt; }
+valuesOkay && metadataOkay && rejected === 9 && nonCallable &&
+  detachedCalls === 2 && detachedSecond === undefined &&
+  forEachResult === undefined && forEachSeen === "1:0:true:true;2:1:true:true;3:2:true:true;4:3:true:true;" &&
+  reduceResult === 26 && reduceCalls === 4 && reduceRightResult === -2 && reduceRightSeen === "210" &&
+  omitted === 9 && omittedCalls === 0 && explicitUndefined === 7 && explicitUndefinedCalls === 1 &&
+  reverseOmitted === 11 && reverseOmittedCalls === 0 && reverseExplicit === 12 && reverseExplicitCalls === 1 &&
+  emptyExplicit === undefined && emptyOmitted && emptyRightOmitted && abruptIdentity;
 "#;
 
 const TYPED_ARRAY_CALLBACK_GC_SOURCE: &str = r#"
@@ -79,7 +130,44 @@ detached.some(function(value, index, receiver) {
   detachedCalls++;
   return false;
 });
-result === 3 && seen === 9 && detachedCalls === 2 && detachedSecond === undefined;
+var forEachDetached = new Uint8Array([7, 8, 9]);
+var forEachDetachedSeen = "";
+forEachDetached.forEach(function(value, index, receiver) {
+  if (index === 0) $262.detachArrayBuffer(receiver.buffer);
+  forEachDetachedSeen += String(value) + ";";
+});
+var reduceDetached = new Uint8Array([10, 20, 30]);
+var reduceDetachedSeen = "";
+var reduceDetachedResult = reduceDetached.reduce(function(accumulator, value, index, receiver) {
+  if (index === 0) $262.detachArrayBuffer(receiver.buffer);
+  reduceDetachedSeen += String(value) + ";";
+  return accumulator;
+}, { rooted: true });
+var reducedObject = array.reduce(function(accumulator, value) {
+  return { total: accumulator.total + value };
+}, { total: 0 });
+var live = new Uint8Array([1, 2, 3]);
+var liveSeen = "";
+live.reduce(function(accumulator, value, index, receiver) {
+  liveSeen += value;
+  if (index === 0) receiver[1] = 9;
+  return accumulator;
+}, 0);
+result === 3 && seen === 9 && detachedCalls === 2 && detachedSecond === undefined &&
+  forEachDetachedSeen === "7;undefined;undefined;" &&
+  reduceDetachedSeen === "10;undefined;undefined;" && reduceDetachedResult.rooted === true &&
+  reducedObject.total === 13 && liveSeen === "193";
+"#;
+
+const TYPED_ARRAY_CALLBACK_LONG_SOURCE: &str = r#"
+var length = 20000;
+var array = new Uint8Array(length);
+var calls = 0;
+var result = array.reduce(function(accumulator, value, index, receiver) {
+  calls++;
+  return accumulator + (receiver === array && value === 0 && index < length ? 1 : 0);
+}, 0);
+result === length && calls === length;
 "#;
 
 #[test]
@@ -94,6 +182,25 @@ fn typed_array_callbacks_work_for_every_dispatch_batch() {
 #[test]
 fn typed_array_callback_state_survives_forced_major_collection() {
     assert_typed_array_callbacks::<8>(true);
+}
+
+#[test]
+fn typed_array_callback_loop_does_not_grow_rust_stack() {
+    let module = compile_typed_array_callback_fixture(TYPED_ARRAY_CALLBACK_LONG_SOURCE);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_000_000,
+                quantum: 4_000_000,
+            },
+        )
+        .expect("long TypedArray callback fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "long callback loop returned {outcome:?}"
+    );
 }
 
 /// Executes all callback modes, metadata, branding, and rooting under one policy.

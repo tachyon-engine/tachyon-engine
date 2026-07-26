@@ -281,6 +281,8 @@ pub(crate) enum ConversionConsumer {
     ArraySliceLength,
     ArraySliceStart,
     ArraySliceEnd,
+    ArrayBufferSliceStart,
+    ArrayBufferSliceEnd,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -353,6 +355,8 @@ impl ConversionConsumer {
             | Self::ArraySliceLength
             | Self::ArraySliceStart
             | Self::ArraySliceEnd
+            | Self::ArrayBufferSliceStart
+            | Self::ArrayBufferSliceEnd
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
@@ -738,6 +742,15 @@ pub(crate) enum ArraySliceStage {
     ElementGet,
     ElementDefine,
     FinalLength,
+}
+
+/// One observable constructor/species boundary in fixed ArrayBuffer slicing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ArrayBufferSliceStage {
+    Constructor,
+    Value,
+    Construct,
 }
 
 /// One observable boundary in the resumable Array.prototype.splice algorithm.
@@ -1139,6 +1152,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayCopyWithin(ArrayCopyWithinStage),
     ArrayToSorted(ArrayToSortedStage),
     ArraySlice(ArraySliceStage),
+    ArrayBufferSlice(ArrayBufferSliceStage),
     ArraySplice(ArraySpliceStage),
     ArrayRemove(ArrayRemoveStage),
     ArrayInsert(ArrayInsertStage),
@@ -2050,6 +2064,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArraySlice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one fixed ArrayBuffer slice state across property access or construction.
+    #[inline]
+    pub(crate) const fn array_buffer_slice(
+        site: NativeContinuationSite,
+        stage: ArrayBufferSliceStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ArrayBufferSlice(stage),
             first: state,
             second: retained,
         }

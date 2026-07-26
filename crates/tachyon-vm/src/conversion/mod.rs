@@ -705,6 +705,19 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArrayBufferSliceStart
+                            | ConversionConsumer::ArrayBufferSliceEnd
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_array_buffer_slice_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ArraySpliceLength
                             | ConversionConsumer::ArraySpliceStart
                             | ConversionConsumer::ArraySpliceDeleteCount
@@ -1050,6 +1063,10 @@ impl Isolate {
                 | ConversionConsumer::ArraySliceStart
                 | ConversionConsumer::ArraySliceEnd => {
                     unreachable!("Array slice conversion resumes inside its state machine")
+                }
+                ConversionConsumer::ArrayBufferSliceStart
+                | ConversionConsumer::ArrayBufferSliceEnd => {
+                    unreachable!("ArrayBuffer slice conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength

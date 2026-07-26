@@ -42,6 +42,9 @@ impl TypedArraySearchDirection {
 pub(crate) enum TypedArrayCallbackKind {
     Every,
     Some,
+    ForEach,
+    Reduce,
+    ReduceRight,
     Find,
     FindIndex,
     FindLast,
@@ -54,6 +57,9 @@ impl TypedArrayCallbackKind {
         match self {
             Self::Every => "every",
             Self::Some => "some",
+            Self::ForEach => "forEach",
+            Self::Reduce => "reduce",
+            Self::ReduceRight => "reduceRight",
             Self::Find => "find",
             Self::FindIndex => "findIndex",
             Self::FindLast => "findLast",
@@ -409,6 +415,7 @@ pub(crate) enum NativeFunction {
     ArrayBufferMaxByteLength,
     ArrayBufferResizable,
     ArrayBufferDetached,
+    ArrayBufferSlice,
     DataViewConstructor,
     DataViewBuffer,
     DataViewByteLength,
@@ -1030,6 +1037,7 @@ impl NativeFunction {
             Self::ArrayCopyWithin
             | Self::ArrayWith
             | Self::ArrayToSpliced
+            | Self::ArrayBufferSlice
             | Self::DataViewSet(_) => 2,
             Self::ArrayOf
             | Self::ArrayFlat
@@ -1373,6 +1381,7 @@ impl NativeFunction {
             Self::ArrayBufferMaxByteLength => "get maxByteLength",
             Self::ArrayBufferResizable => "get resizable",
             Self::ArrayBufferDetached => "get detached",
+            Self::ArrayBufferSlice => "slice",
             Self::DataViewConstructor => "DataView",
             Self::DataViewBuffer => "get buffer",
             Self::DataViewByteLength => "get byteLength",

@@ -75,6 +75,7 @@ impl Isolate {
         )?;
         self.realm.array_buffer_constructor = Some(constructor);
         self.set_function_prototype(constructor, prototype)?;
+        self.install_species_accessor(constructor, function_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
         let is_view = self.allocate_native_function(
@@ -89,6 +90,17 @@ impl Isolate {
         self.realm.array_buffer_is_view = Some(is_view);
         let is_view_atom = self.intern_intrinsic_name(b"isView")?;
         self.set_intrinsic_data_property(constructor, is_view_atom, is_view, true)?;
+        let slice = self.allocate_native_function(
+            NativeFunction::ArrayBufferSlice,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let slice_atom = self.intern_intrinsic_name(b"slice")?;
+        self.set_intrinsic_data_property(prototype, slice_atom, slice, true)?;
         for (name, native) in [
             (
                 b"byteLength".as_slice(),
@@ -324,6 +336,9 @@ impl Isolate {
         for kind in [
             TypedArrayCallbackKind::Every,
             TypedArrayCallbackKind::Some,
+            TypedArrayCallbackKind::ForEach,
+            TypedArrayCallbackKind::Reduce,
+            TypedArrayCallbackKind::ReduceRight,
             TypedArrayCallbackKind::Find,
             TypedArrayCallbackKind::FindIndex,
             TypedArrayCallbackKind::FindLast,

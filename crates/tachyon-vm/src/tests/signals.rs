@@ -294,6 +294,77 @@ var value = selected.get();
 trace === "SLNlR" && value === 2;
 "#;
 
+const SIGNAL_CHECKED_PULL_SOURCE: &str = r#"
+var source = new Signal.State(1);
+var stableCalls = 0;
+var stable = new Signal.Computed(function() {
+    stableCalls++;
+    source.get();
+    return 5;
+});
+var middleCalls = 0;
+var middle = new Signal.Computed(function() { middleCalls++; return stable.get() + 1; });
+var topCalls = 0;
+var top = new Signal.Computed(function() { topCalls++; return middle.get() + 1; });
+var initialPruned = top.get() === 7 && stableCalls === 1 && middleCalls === 1 && topCalls === 1;
+var watcher = new Signal.subtle.Watcher(function() {});
+watcher.watch(top);
+source.set(2);
+var pruned = top.get() === 7 && stableCalls === 2 && middleCalls === 1 && topCalls === 1;
+
+var diamondSource = new Signal.State(1);
+var baseCalls = 0;
+var base = new Signal.Computed(function() { baseCalls++; return diamondSource.get() * 2; });
+var leftCalls = 0;
+var left = new Signal.Computed(function() { leftCalls++; return base.get() + 1; });
+var rightCalls = 0;
+var right = new Signal.Computed(function() { rightCalls++; return base.get() + 2; });
+var diamondCalls = 0;
+var diamond = new Signal.Computed(function() {
+    diamondCalls++;
+    return left.get() + right.get();
+});
+var diamondWatcher = new Signal.subtle.Watcher(function() {});
+diamondWatcher.watch(diamond);
+var initialDiamond = diamond.get() === 7;
+diamondSource.set(2);
+var updatedDiamond = diamond.get() === 11 && baseCalls === 2 && leftCalls === 2 &&
+    rightCalls === 2 && diamondCalls === 2;
+
+var firstError = {};
+var secondError = {};
+var errorSource = new Signal.State(firstError);
+var innerErrorCalls = 0;
+var innerError = new Signal.Computed(function() {
+    innerErrorCalls++;
+    throw errorSource.get();
+});
+var outerErrorCalls = 0;
+var outerError = new Signal.Computed(function() {
+    outerErrorCalls++;
+    return innerError.get();
+});
+var caughtFirst;
+try { outerError.get(); } catch (error) { caughtFirst = error; }
+var caughtCached;
+try { outerError.get(); } catch (error) { caughtCached = error; }
+errorSource.set(secondError);
+var caughtSecond;
+try { outerError.get(); } catch (error) { caughtSecond = error; }
+var cachedErrors = caughtFirst === firstError && caughtCached === firstError &&
+    caughtSecond === secondError && innerErrorCalls === 2 && outerErrorCalls === 2;
+
+var cycle;
+cycle = new Signal.Computed(function() { return cycle.get(); });
+var cycleFirst;
+var cycleSecond;
+try { cycle.get(); } catch (error) { cycleFirst = error; }
+try { cycle.get(); } catch (error) { cycleSecond = error; }
+var cachedCycle = cycleFirst instanceof TypeError && cycleSecond === cycleFirst;
+
+initialPruned && pruned && initialDiamond && updatedDiamond && cachedErrors && cachedCycle;
+"#;
+
 #[test]
 fn signal_namespace_is_installed_in_every_realm() {
     let mut isolate = test_isolate();
@@ -450,6 +521,47 @@ fn signal_dynamic_dependency_diff_runs_lifecycle_hooks() {
         SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
         8_723,
         "signals-dynamic-dependencies",
+        true,
+    );
+}
+
+/// Covers iterative pruning, shared diamonds, cached throws, invalidation, and cycles.
+#[test]
+fn signal_checked_pull_prunes_diamonds_and_caches_abrupt_completions() {
+    assert_signal_behavior::<1>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_730,
+        "signals-checked-pull",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_731,
+        "signals-checked-pull",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_732,
+        "signals-checked-pull",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_733,
+        "signals-checked-pull",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_734,
+        "signals-checked-pull",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CHECKED_PULL_SOURCE,
+        8_735,
+        "signals-checked-pull",
         true,
     );
 }

@@ -1,6 +1,7 @@
 //! Centralized VM tuning families; resource limits remain typed host configuration.
 
 pub(crate) mod arrays;
+pub(crate) mod buffers;
 pub(crate) mod collections;
 pub(crate) mod dispatch;
 pub(crate) mod numbers;
