@@ -2,13 +2,14 @@
 
 mod at;
 mod includes;
+mod search;
 
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
 use crate::object::{ArrayBufferData, TypedArrayKind, TypedArrayObject};
 use crate::property::array_index;
-use crate::runtime::callable::{DataViewElement, TypedArrayGetter};
+use crate::runtime::callable::{DataViewElement, TypedArrayGetter, TypedArraySearchDirection};
 
 #[derive(Clone, Copy)]
 pub(crate) struct TypedArraySnapshot {
@@ -954,9 +955,23 @@ impl Isolate {
         getter: TypedArrayGetter,
     ) -> Result<Value, ExecutionError> {
         let snapshot = self.typed_array_snapshot(receiver)?;
+        let attached = match getter {
+            TypedArrayGetter::Length
+            | TypedArrayGetter::ByteLength
+            | TypedArrayGetter::ByteOffset => match self.typed_array_backing(snapshot.buffer) {
+                Ok(_) => true,
+                Err(ExecutionError::DetachedArrayBuffer) => false,
+                Err(error) => return Err(error),
+            },
+            TypedArrayGetter::Buffer | TypedArrayGetter::ToStringTag => true,
+        };
         Ok(match getter {
+            TypedArrayGetter::Length if !attached => Value::from_i32(0),
             TypedArrayGetter::Length => safe_integer_value(snapshot.length as u64),
             TypedArrayGetter::Buffer => snapshot.buffer,
+            TypedArrayGetter::ByteLength | TypedArrayGetter::ByteOffset if !attached => {
+                Value::from_i32(0)
+            }
             TypedArrayGetter::ByteLength => safe_integer_value(
                 snapshot
                     .length
@@ -1029,9 +1044,11 @@ impl Isolate {
         if index >= snapshot.length {
             return Ok(Some(None));
         }
-        self.typed_array_read_element(snapshot, index)
-            .map(Some)
-            .map(Some)
+        match self.typed_array_read_element(snapshot, index) {
+            Ok(value) => Ok(Some(Some(value))),
+            Err(ExecutionError::DetachedArrayBuffer) => Ok(Some(None)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Writes one canonical numeric property, returning None only for non-numeric keys.
@@ -1055,8 +1072,11 @@ impl Isolate {
         }
         let converted = numeric_value(self.convert_to_number(value)?)
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-        self.typed_array_write_element(snapshot, index, converted)?;
-        Ok(Some(true))
+        match self.typed_array_write_element(snapshot, index, converted) {
+            Ok(()) => Ok(Some(true)),
+            Err(ExecutionError::DetachedArrayBuffer) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
     }
 
     #[inline(always)]
@@ -1108,7 +1128,7 @@ impl Isolate {
                     .borrow(buffer, self.types.array_buffer_object)
                     .map_err(ExecutionError::NoGcBorrow)?
                     .data
-                    .ok_or(ExecutionError::InvalidArrayLength)
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
             })?;
             let data = scope.root(data).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -1139,7 +1159,7 @@ impl Isolate {
                     .borrow(object, self.types.array_buffer_object)
                     .map_err(ExecutionError::NoGcBorrow)?
                     .data
-                    .ok_or(ExecutionError::InvalidArrayLength)
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
             })
         })
     }

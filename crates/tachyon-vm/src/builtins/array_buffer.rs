@@ -14,6 +14,27 @@ struct ArrayBufferDataSnapshot {
 }
 
 impl Isolate {
+    /// Clears one fixed ArrayBuffer's backing edge; repeated detach is a no-op.
+    pub(crate) fn detach_array_buffer(&mut self, value: Value) -> Result<(), ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(object, self.types.array_buffer_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .data = None;
+                Ok(())
+            })
+        })
+    }
+
     /// Implements the fixed-length `ArrayBuffer` constructor without host allocation hooks.
     pub(crate) fn create_array_buffer_from_site(
         &mut self,
@@ -161,7 +182,10 @@ impl Isolate {
         let Some(snapshot) = self.array_buffer_data_snapshot(receiver)? else {
             return Ok(match getter {
                 NativeFunction::ArrayBufferDetached => Value::from_immediate(Immediate::True),
-                _ => return Err(ExecutionError::InvalidArrayLength),
+                NativeFunction::ArrayBufferByteLength
+                | NativeFunction::ArrayBufferMaxByteLength => Value::from_i32(0),
+                NativeFunction::ArrayBufferResizable => Value::from_immediate(Immediate::False),
+                _ => return Err(ExecutionError::MissingNativeContinuation),
             });
         };
         Ok(match getter {

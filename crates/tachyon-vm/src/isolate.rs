@@ -190,10 +190,21 @@ impl Isolate {
                 prototype,
             },
         )?;
+        let detach = self.allocate_native_function(
+            NativeFunction::HostDetachArrayBuffer,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype,
+            },
+        )?;
         let create_atom = self.intern_intrinsic_name(b"createRealm")?;
         let eval_atom = self.intern_intrinsic_name(b"evalScript")?;
+        let detach_atom = self.intern_intrinsic_name(b"detachArrayBuffer")?;
         self.set_own_data_property(hooks, create_atom, create)?;
         self.set_own_data_property(hooks, eval_atom, eval)?;
+        self.set_own_data_property(hooks, detach_atom, detach)?;
         let eval_global_atom = self.intern_intrinsic_name(b"eval")?;
         self.set_own_data_property(global, eval_global_atom, eval)?;
         self.realm.set(eval_global_atom, eval)
@@ -354,6 +365,9 @@ impl Isolate {
             signal_watcher: registry
                 .try_register("WatcherSignal")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_signal_watcher_operation: registry
+                .try_register("PendingSignalWatcherOperation")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_typed_array_construction: registry
                 .try_register("PendingTypedArrayConstruction")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -362,6 +376,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             array: registry
                 .try_register("ArrayObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            array_elements: registry
+                .try_register("ArrayElements")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             array_iterator: registry
                 .try_register("ArrayIteratorObject")
@@ -1693,6 +1710,7 @@ impl Isolate {
                         storage: Some(storage),
                         prototype: roots.prototype,
                     },
+                    elements: None,
                 },
                 space,
                 &mut roots,

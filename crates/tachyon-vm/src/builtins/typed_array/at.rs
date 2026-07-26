@@ -52,7 +52,7 @@ impl Isolate {
         } else {
             number.trunc()
         };
-        let snapshot = self.typed_array_at_snapshot(receiver)?;
+        let snapshot = self.typed_array_snapshot(receiver)?;
         let index = if relative_index >= 0.0 {
             relative_index
         } else {
@@ -61,7 +61,13 @@ impl Isolate {
         let result = if !(0.0..snapshot.length as f64).contains(&index) {
             Value::from_immediate(Immediate::Undefined)
         } else {
-            self.typed_array_read_element(snapshot, index as usize)?
+            match self.typed_array_read_element(snapshot, index as usize) {
+                Ok(value) => value,
+                Err(ExecutionError::DetachedArrayBuffer) => {
+                    Value::from_immediate(Immediate::Undefined)
+                }
+                Err(error) => return Err(error),
+            }
         };
         self.write(site.caller_base, site.destination, result)
     }

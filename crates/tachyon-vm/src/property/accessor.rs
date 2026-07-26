@@ -427,6 +427,9 @@ impl Isolate {
             if self.is_proxy_value(current) {
                 return Ok(PropertyReadResolution::Proxy(current));
             }
+            if let Some(value) = self.dense_array_value(current, key)? {
+                return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
+            }
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
@@ -564,6 +567,11 @@ impl Isolate {
                 }
                 Err(error) => return Err(error),
             };
+            if self.dense_array_value(current, key)?.is_some() {
+                return self
+                    .write_data_property_boolean(receiver, key, value)
+                    .map(PropertyWriteResolution::Write);
+            }
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
                     Some(StoredProperty::Data(_)) => {

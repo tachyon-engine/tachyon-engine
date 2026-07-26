@@ -138,8 +138,23 @@ impl Isolate {
         let found = if cursor >= initial_length {
             false
         } else {
-            let snapshot = self.typed_array_includes_snapshot(receiver)?;
-            self.scan_typed_array_includes(snapshot, initial_length, cursor, search)?
+            let snapshot = self.typed_array_snapshot(receiver)?;
+            if search.as_immediate() == Some(Immediate::Undefined)
+                && matches!(
+                    self.typed_array_backing(snapshot.buffer),
+                    Err(ExecutionError::DetachedArrayBuffer)
+                )
+            {
+                true
+            } else {
+                match self.scan_typed_array_includes(snapshot, initial_length, cursor, search) {
+                    Ok(found) => found,
+                    Err(ExecutionError::DetachedArrayBuffer) => {
+                        search.as_immediate() == Some(Immediate::Undefined)
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         };
         self.write(site.caller_base, site.destination, boolean_value(found))
     }

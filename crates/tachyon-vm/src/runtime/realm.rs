@@ -249,6 +249,8 @@ pub(crate) struct Realm {
     pub(crate) signal_computed_prototype: Option<Value>,
     pub(crate) signal_watcher_constructor: Option<Value>,
     pub(crate) signal_watcher_prototype: Option<Value>,
+    pub(crate) signal_watched_symbol: Option<Value>,
+    pub(crate) signal_unwatched_symbol: Option<Value>,
     pub(crate) json_parse: Option<Value>,
     pub(crate) json_stringify: Option<Value>,
     pub(crate) math_pow: Option<Value>,
@@ -412,6 +414,8 @@ impl Realm {
             signal_computed_prototype: None,
             signal_watcher_constructor: None,
             signal_watcher_prototype: None,
+            signal_watched_symbol: None,
+            signal_unwatched_symbol: None,
             json_parse: None,
             json_stringify: None,
             math_pow: None,
@@ -809,6 +813,8 @@ impl Trace for Realm {
         self.signal_computed_prototype.trace(tracer);
         self.signal_watcher_constructor.trace(tracer);
         self.signal_watcher_prototype.trace(tracer);
+        self.signal_watched_symbol.trace(tracer);
+        self.signal_unwatched_symbol.trace(tracer);
         self.math_pow.trace(tracer);
         self.math_functions.trace(tracer);
         self.global_number_functions.trace(tracer);

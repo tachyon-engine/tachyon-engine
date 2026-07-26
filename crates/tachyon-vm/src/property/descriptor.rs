@@ -269,6 +269,34 @@ impl Isolate {
             }
             return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
         }
+        if self.dense_array_value(receiver, key)?.is_some() {
+            match descriptor {
+                PropertyDescriptor::Data(data)
+                    if data.writable != Some(false)
+                        && data.enumerable != Some(false)
+                        && data.configurable != Some(false) =>
+                {
+                    if let Some(value) = data.value {
+                        let index = self
+                            .array_property_index(key)
+                            .expect("dense properties have canonical Array indices");
+                        self.set_dense_array_value(receiver, index, value)?;
+                    }
+                    return Ok(());
+                }
+                PropertyDescriptor::Generic(data)
+                    if data.enumerable != Some(false) && data.configurable != Some(false) =>
+                {
+                    return Ok(());
+                }
+                descriptor => {
+                    self.define_missing_property_raw(receiver, key, descriptor)?;
+                    let removed = self.delete_dense_array_value(receiver, key)?;
+                    debug_assert!(removed, "published descriptor replaces one dense property");
+                    return Ok(());
+                }
+            }
+        }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         let property = self.shapes.lookup(snapshot.shape, key);
         if let Some(property) = property
@@ -303,6 +331,17 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        if let Some(index) = self.array_property_index(key)
+            && index <= tuning::arrays::MAX_DENSE_ELEMENT_INDEX
+            && let PropertyDescriptor::Data(data) = descriptor
+            && data.writable == Some(true)
+            && data.enumerable == Some(true)
+            && data.configurable == Some(true)
+            && let Some(value) = data.value
+            && self.set_dense_array_value(receiver, index, value)?
+        {
+            return self.grow_array_length_for_index_property(receiver, key);
+        }
         self.define_missing_property_raw(receiver, key, descriptor)?;
         self.grow_array_length_for_index_property(receiver, key)
     }
@@ -734,6 +773,14 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<Option<PropertyDescriptor>, ExecutionError> {
         let key = key.into();
+        if let Some(value) = self.dense_array_value(receiver, key)? {
+            return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(true),
+                enumerable: Some(true),
+                configurable: Some(true),
+            })));
+        }
         if let Some(indexed) = self.typed_array_index_get(receiver, key)? {
             return Ok(indexed.map(|value| {
                 PropertyDescriptor::Data(DataPropertyDescriptor {

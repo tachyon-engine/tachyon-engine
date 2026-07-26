@@ -1,6 +1,7 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
+use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::object::{
     ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
@@ -15,6 +16,24 @@ pub(crate) enum TypedArrayGetter {
     ByteLength,
     ByteOffset,
     ToStringTag,
+}
+
+/// Direction selected by the shared fixed TypedArray strict-equality search.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArraySearchDirection {
+    Forward,
+    Reverse,
+}
+
+impl TypedArraySearchDirection {
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Forward => "indexOf",
+            Self::Reverse => "lastIndexOf",
+        }
+    }
 }
 
 /// Number-backed element formats exposed by the fixed DataView implementation.
@@ -371,6 +390,7 @@ pub(crate) enum NativeFunction {
     TypedArrayGetter(TypedArrayGetter),
     TypedArrayAt,
     TypedArrayIncludes,
+    TypedArraySearch(TypedArraySearchDirection),
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -501,6 +521,7 @@ pub(crate) enum NativeFunction {
     GlobalEncodeUriComponent,
     HostCreateRealm,
     HostEvalScript,
+    HostDetachArrayBuffer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -960,6 +981,7 @@ impl NativeFunction {
             | Self::DataViewGet(_)
             | Self::TypedArrayAt
             | Self::TypedArrayIncludes
+            | Self::TypedArraySearch(_)
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1126,6 +1148,7 @@ impl NativeFunction {
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
             Self::HostEvalScript => 1,
+            Self::HostDetachArrayBuffer => 1,
         }
     }
 
@@ -1331,6 +1354,7 @@ impl NativeFunction {
             Self::TypedArrayGetter(TypedArrayGetter::ToStringTag) => "get [Symbol.toStringTag]",
             Self::TypedArrayAt => "at",
             Self::TypedArrayIncludes => "includes",
+            Self::TypedArraySearch(direction) => direction.name(),
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
@@ -1417,6 +1441,7 @@ impl NativeFunction {
             Self::JsonStringify => "stringify",
             Self::HostCreateRealm => "createRealm",
             Self::HostEvalScript => "evalScript",
+            Self::HostDetachArrayBuffer => "detachArrayBuffer",
             Self::MathAbs
             | Self::MathAcos
             | Self::MathAcosh
@@ -1905,8 +1930,10 @@ pub(crate) struct VmTypes {
     pub(crate) signal_state: GcType<StateSignal>,
     pub(crate) signal_computed: GcType<ComputedSignal>,
     pub(crate) signal_watcher: GcType<WatcherSignal>,
+    pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,
+    pub(crate) array_elements: GcType<ArrayElements>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
     pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
@@ -2067,7 +2094,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidFinalizationRegistration(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::InvalidDatePrimitiveHint(_)
-        | ExecutionError::InvalidJsonCircularStructure => Some(NativeErrorKind::Type),
+        | ExecutionError::InvalidJsonCircularStructure
+        | ExecutionError::DetachedArrayBuffer => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }

@@ -26,18 +26,15 @@ impl Isolate {
         let raw = buffer
             .as_heap_ref()
             .ok_or(ExecutionError::NotObject(buffer))?;
-        let array_buffer = self
-            .heap
+        self.heap
             .checked_reference(raw, self.types.array_buffer_object)
             .map_err(|_| ExecutionError::NotObject(buffer))?;
+        let offset_value = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let offset = self.ecma_to_index(offset_value)?;
+        let data = self.data_view_backing(buffer)?;
         let buffer_length = self.heap.with_running_scope(|scope| {
-            let array_buffer = scope.root(array_buffer).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                let object = no_gc
-                    .borrow(array_buffer, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                object.data.ok_or(ExecutionError::InvalidArrayLength)
-            })?;
             let data = scope.root(data).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
@@ -46,10 +43,6 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
-        let offset_value = self
-            .call_argument(site, 1)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let offset = self.ecma_to_index(offset_value)?;
         if offset > buffer_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
@@ -69,6 +62,7 @@ impl Isolate {
         let byte_length =
             u32::try_from(byte_length).map_err(|_| ExecutionError::InvalidArrayLength)?;
         let prototype = self.data_view_prototype_for_new_target(site.new_target)?;
+        self.data_view_backing(buffer)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -106,6 +100,9 @@ impl Isolate {
         getter: NativeFunction,
     ) -> Result<Value, ExecutionError> {
         let snapshot = self.data_view_snapshot(receiver)?;
+        if getter != NativeFunction::DataViewBuffer {
+            self.data_view_backing(snapshot.buffer)?;
+        }
         Ok(match getter {
             NativeFunction::DataViewBuffer => snapshot.buffer,
             NativeFunction::DataViewByteLength => Value::from_f64(snapshot.byte_length as f64),
@@ -209,8 +206,8 @@ impl Isolate {
         offset: usize,
         width: usize,
     ) -> Result<[u8; 8], ExecutionError> {
-        let range = data_view_range(view, offset, width)?;
         let data = self.data_view_backing(view.buffer)?;
+        let range = data_view_range(view, offset, width)?;
         self.heap.with_running_scope(|scope| {
             let data = scope.root(data).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -232,8 +229,8 @@ impl Isolate {
         width: usize,
         bytes: [u8; 8],
     ) -> Result<(), ExecutionError> {
-        let range = data_view_range(view, offset, width)?;
         let data = self.data_view_backing(view.buffer)?;
+        let range = data_view_range(view, offset, width)?;
         self.heap.with_running_scope(|scope| {
             let data = scope.root(data).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -266,7 +263,7 @@ impl Isolate {
                     .borrow(object, self.types.array_buffer_object)
                     .map_err(ExecutionError::NoGcBorrow)?
                     .data
-                    .ok_or(ExecutionError::InvalidArrayLength)
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
             })
         })
     }

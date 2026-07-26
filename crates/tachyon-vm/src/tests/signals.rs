@@ -40,7 +40,11 @@ var globalDescriptor = builtinDescriptor(this, "Signal", true, true);
 var namespaceDescriptors = builtinDescriptor(Signal, "State", true, true) &&
     builtinDescriptor(Signal, "Computed", true, true) &&
     builtinDescriptor(Signal, "subtle", true, true) &&
-    builtinDescriptor(Signal.subtle, "Watcher", true, true);
+    builtinDescriptor(Signal.subtle, "Watcher", true, true) &&
+    builtinDescriptor(Signal.subtle, "watched", true, true) &&
+    builtinDescriptor(Signal.subtle, "unwatched", true, true) &&
+    typeof Signal.subtle.watched === "symbol" && typeof Signal.subtle.unwatched === "symbol" &&
+    Signal.subtle.watched !== Signal.subtle.unwatched;
 var prototypeDescriptors = builtinDescriptor(Signal.State.prototype, "constructor", true, true) &&
     builtinDescriptor(Signal.State.prototype, "get", true, true) &&
     builtinDescriptor(Signal.State.prototype, "set", true, true) &&
@@ -109,7 +113,9 @@ const SIGNAL_CROSS_REALM_SOURCE: &str = r#"
 var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.State &&
     foreignSignal.State.prototype !== Signal.State.prototype &&
     foreignSignal.Computed !== Signal.Computed &&
-    foreignSignal.subtle.Watcher !== Signal.subtle.Watcher;
+    foreignSignal.subtle.Watcher !== Signal.subtle.Watcher &&
+    foreignSignal.subtle.watched !== Signal.subtle.watched &&
+    foreignSignal.subtle.unwatched !== Signal.subtle.unwatched;
 var local = new Signal.State(2);
 var foreign = new foreignSignal.State(3);
 var crossBrand = Signal.State.prototype.get.call(foreign) === 3 &&
@@ -122,6 +128,95 @@ var callbackReceiver;
 class ForeignComputedSubclass extends foreignSignal.Computed {}
 var computed = new ForeignComputedSubclass(function() { callbackReceiver = this; return foreign.get(); });
 identities && crossBrand && subclassed && computed.get() === 3 && callbackReceiver === computed;
+"#;
+
+const SIGNAL_OPTIONS_SOURCE: &str = r#"
+var trace = "";
+var equalsThis = false;
+var watchedThis = false;
+var unwatchedThis = false;
+var options = {};
+Object.defineProperty(options, "equals", { get: function() {
+    trace = trace + "e";
+    return function(oldValue, newValue) {
+        trace = trace + "q";
+        equalsThis = this === state;
+        return Object.is(oldValue, newValue);
+    };
+} });
+Object.defineProperty(options, Signal.subtle.watched, { get: function() {
+    trace = trace + "w";
+    return function() { trace = trace + "W"; watchedThis = this === state; };
+} });
+Object.defineProperty(options, Signal.subtle.unwatched, { get: function() {
+    trace = trace + "u";
+    return function() { trace = trace + "U"; unwatchedThis = this === state; };
+} });
+var state = new Signal.State(1, options);
+var defaultState = new Signal.State(NaN);
+var defaultCalls = 0;
+var defaultComputed = new Signal.Computed(function() {
+    defaultCalls = defaultCalls + 1;
+    return defaultState.get();
+});
+defaultComputed.get();
+defaultState.set(NaN);
+defaultComputed.get();
+var zeroState = new Signal.State(-0);
+var zeroCalls = 0;
+var zeroComputed = new Signal.Computed(function() {
+    zeroCalls = zeroCalls + 1;
+    return zeroState.get();
+});
+zeroComputed.get();
+zeroState.set(0);
+zeroComputed.get();
+state.set(1);
+state.set(2);
+var watcher = new Signal.subtle.Watcher(function() {});
+var watcher2 = new Signal.subtle.Watcher(function() {});
+watcher.watch(state);
+watcher2.watch(state);
+watcher.unwatch(state);
+watcher2.unwatch(state);
+trace === "ewuqqWU" && equalsThis && watchedThis && unwatchedThis &&
+defaultCalls === 1 && zeroCalls === 2 && defaultState.get() !== defaultState.get();
+"#;
+
+const SIGNAL_HOOK_THROW_SOURCE: &str = r#"
+var watchedCalls = 0;
+var state = new Signal.State(1, { [Signal.subtle.watched]: function() {
+    watchedCalls = watchedCalls + 1;
+    if (watchedCalls === 1) throw 17;
+} });
+var watcher = new Signal.subtle.Watcher(function() {});
+var first = false;
+try { watcher.watch(state); } catch (error) { first = error === 17; }
+var second = true;
+try { watcher.watch(state); } catch (error) { second = false; }
+first && second && watchedCalls === 1;
+"#;
+
+const SIGNAL_OPTIONS_ABRUPT_SOURCE: &str = r#"
+var getterTrace = "";
+var getterThrow = false;
+try {
+    new Signal.State(1, {
+        get equals() { getterTrace = getterTrace + "e"; throw 13; },
+        get [Signal.subtle.watched]() { getterTrace = getterTrace + "w"; },
+        get [Signal.subtle.unwatched]() { getterTrace = getterTrace + "u"; }
+    });
+} catch (error) { getterThrow = error === 13; }
+var equalsThis = false;
+var state = new Signal.State(4, { equals: function() {
+    equalsThis = this === state;
+    throw 17;
+} });
+var equalsThrow = false;
+try { state.set(5); } catch (error) { equalsThrow = error === 17; }
+var nullOptions = new Signal.State(6, null);
+getterThrow && getterTrace === "e" && equalsThrow && equalsThis && state.get() === 4 &&
+nullOptions.get() === 6;
 "#;
 
 #[test]
@@ -174,6 +269,84 @@ fn signal_cross_realm_identity_and_calls_work_for_every_dispatch_batch() {
     assert_signal_cross_realm::<4>();
     assert_signal_cross_realm::<8>();
     assert_signal_cross_realm::<16>();
+}
+
+#[test]
+fn signal_state_options_and_live_hooks_work_for_every_dispatch_batch() {
+    assert_signal_options::<1>(false);
+    assert_signal_options::<2>(false);
+    assert_signal_options::<4>(false);
+    assert_signal_options::<8>(false);
+    assert_signal_options::<16>(false);
+}
+
+#[test]
+fn signal_state_options_and_live_hooks_survive_forced_major_collection() {
+    assert_signal_options::<8>(true);
+}
+
+#[test]
+fn signal_hook_throw_preserves_graph_invariants() {
+    let module = compile_signal_source(SIGNAL_HOOK_THROW_SOURCE, 8_650, "signals-hook-throw");
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<4>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("Signal hook throw fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+}
+
+#[test]
+fn signal_state_option_and_equals_abrupt_completion_restore_state() {
+    let module = compile_signal_source(
+        SIGNAL_OPTIONS_ABRUPT_SOURCE,
+        8_675,
+        "signals-options-abrupt",
+    );
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("Signal options abrupt fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+}
+
+/// Executes State options access, Object.is, custom equality, and live sink hooks.
+fn assert_signal_options<const N: usize>(forced_major: bool) {
+    let module = compile_signal_source(SIGNAL_OPTIONS_SOURCE, 8_600 + N as u32, "signals-options");
+    let mut isolate = signal_api_test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("Signal options fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Signal options dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }
 
 /// Executes the shared native Signal graph under one dispatch and collection policy.

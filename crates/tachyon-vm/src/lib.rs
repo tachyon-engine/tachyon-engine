@@ -143,7 +143,7 @@ pub(crate) enum IntrinsicPrototypeKind {
 }
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
-use array::{ArrayObject, MAX_SAFE_INTEGER, safe_integer_property_index};
+use array::{ArrayElements, ArrayObject, MAX_SAFE_INTEGER, safe_integer_property_index};
 use array_concat::PendingArrayConcat;
 use array_copy::{ArrayCopyKind, PendingArrayCopy};
 use array_copy_within::PendingArrayCopyWithin;
@@ -242,9 +242,9 @@ use runtime::{
         ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, StringSplitStage,
-        SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage, VmRoots,
-        next_to_primitive_stage,
+        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, SignalStateStage,
+        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
+        VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
@@ -458,6 +458,7 @@ pub enum ExecutionError {
     SymbolRegistryAllocationFailed,
     ArrayLengthOverflow,
     InvalidArrayLength,
+    DetachedArrayBuffer,
     OwnPropertyKeyAllocationFailed,
     ForInKeyAllocationFailed,
     InvalidForInIterator(Value),

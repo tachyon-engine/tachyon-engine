@@ -4,7 +4,7 @@ mod string_iterator;
 
 use super::*;
 use crate::object::TypedArrayKind;
-use crate::runtime::callable::{DataViewElement, TypedArrayGetter};
+use crate::runtime::callable::{DataViewElement, TypedArrayGetter, TypedArraySearchDirection};
 
 impl Isolate {
     /// Builds the object/function prototype graph and intrinsic constructors before publication.
@@ -299,6 +299,25 @@ impl Isolate {
         )?;
         let includes_atom = self.intern_intrinsic_name(b"includes")?;
         self.set_intrinsic_data_property(base_prototype, includes_atom, includes, true)?;
+        for (direction, name) in [
+            (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
+            (
+                TypedArraySearchDirection::Reverse,
+                b"lastIndexOf".as_slice(),
+            ),
+        ] {
+            let search = self.allocate_native_function(
+                NativeFunction::TypedArraySearch(direction),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(base_prototype, atom, search, true)?;
+        }
         let bytes_per_element = self.intern_intrinsic_name(b"BYTES_PER_ELEMENT")?;
         for kind in TypedArrayKind::ALL {
             let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
@@ -3102,6 +3121,31 @@ impl Isolate {
             ),
         ] {
             self.install_signal_method(watcher.1, name, native, function_prototype)?;
+        }
+        for (name, description, watched) in [
+            (
+                b"watched".as_slice(),
+                b"Signal.subtle.watched".as_slice(),
+                true,
+            ),
+            (
+                b"unwatched".as_slice(),
+                b"Signal.subtle.unwatched".as_slice(),
+                false,
+            ),
+        ] {
+            let description = self.allocate_runtime_string(
+                JsString::try_from_latin1(description)
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let symbol = self.allocate_symbol(Some(description))?;
+            if watched {
+                self.realm.signal_watched_symbol = Some(symbol);
+            } else {
+                self.realm.signal_unwatched_symbol = Some(symbol);
+            }
+            let name = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(subtle, name, symbol, true)?;
         }
         let subtle_atom = self.intern_intrinsic_name(b"subtle")?;
         self.set_intrinsic_data_property(namespace, subtle_atom, subtle, true)

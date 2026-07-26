@@ -17,6 +17,309 @@ struct CompactPropertyStorage {
 }
 
 impl Isolate {
+    /// Returns the canonical Array index represented by one atom key.
+    #[inline(always)]
+    pub(crate) fn array_property_index(&self, key: PropertyKey) -> Option<u32> {
+        key.atom().and_then(|atom| {
+            self.atoms
+                .get(atom)
+                .and_then(|name| crate::property::keys::array_index(name.as_view()))
+        })
+    }
+
+    /// Reads one present default dense Array property without consulting ordinary shape storage.
+    #[inline(always)]
+    pub(crate) fn dense_array_value(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let Some(index) = self.array_property_index(key) else {
+            return Ok(None);
+        };
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(None);
+        };
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            let Some(elements) = elements else {
+                return Ok(None);
+            };
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(elements, self.types.array_elements)
+                    .map(|elements| elements.value(index))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Writes a default dense Array property, geometrically replacing fixed backing when needed.
+    pub(super) fn set_dense_array_value(
+        &mut self,
+        receiver: Value,
+        index: u32,
+        value: Value,
+    ) -> Result<bool, ExecutionError> {
+        if index > tuning::arrays::MAX_DENSE_ELEMENT_INDEX {
+            return Ok(false);
+        }
+        let raw = receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(false);
+        };
+        let elements = self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if elements.is_none() && (index as usize) >= tuning::arrays::INITIAL_DENSE_ELEMENT_CAPACITY
+        {
+            return Ok(false);
+        }
+        if let Some(elements) = elements {
+            let capacity = self.heap.with_running_scope(|scope| {
+                let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(elements, self.types.array_elements)
+                        .map(|elements| elements.capacity())
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            if (index as usize).saturating_sub(capacity) > tuning::arrays::MAX_DENSE_GROWTH_GAP {
+                return Ok(false);
+            }
+            if (index as usize) < capacity {
+                self.heap.with_running_scope(|scope| {
+                    let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(elements, self.types.array_elements)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .set(index, value)
+                            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)
+                    })?;
+                    scope
+                        .write_value_barrier(elements, value)
+                        .map_err(ExecutionError::HeapReference)
+                })?;
+                return Ok(true);
+            }
+        }
+        self.grow_dense_array_value(receiver, elements, index, value)?;
+        Ok(true)
+    }
+
+    /// Allocates, initializes, and publishes one larger exactly accounted dense backing.
+    fn grow_dense_array_value(
+        &mut self,
+        receiver: Value,
+        previous: Option<GcRef<ArrayElements>>,
+        index: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let current_capacity = if let Some(previous) = previous {
+            self.heap.with_running_scope(|scope| {
+                let previous = scope.root(previous).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(previous, self.types.array_elements)
+                        .map(|elements| elements.capacity())
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else {
+            0
+        };
+        let required = (index as usize)
+            .checked_add(1)
+            .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
+        let capacity = tuning::arrays::grown_dense_element_capacity(current_capacity, required)
+            .ok_or(ExecutionError::PropertyStorageAllocationFailed)?;
+        let mut grown = if let Some(previous) = previous {
+            self.heap.with_running_scope(|scope| {
+                let previous = scope.root(previous).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(previous, self.types.array_elements)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .grow_copy(capacity)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)
+                })
+            })?
+        } else {
+            ArrayElements::with_capacity(capacity)
+                .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?
+        };
+        grown
+            .set(index, value)
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        let mut roots = PropertyMutationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            receiver,
+            value,
+            symbol_key: None,
+        };
+        let elements = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.array_elements,
+                0,
+                grown,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let raw = roots
+            .receiver
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(roots.receiver))?;
+        let array = self
+            .heap
+            .checked_reference(raw, self.types.array)
+            .map_err(ExecutionError::HeapReference)?;
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(array, self.types.array)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .elements = Some(elements.as_gc_ref());
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_barrier(array, elements)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Turns one present dense index into a hole and reports whether it was present.
+    pub(super) fn delete_dense_array_value(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<bool, ExecutionError> {
+        let Some(index) = self.array_property_index(key) else {
+            return Ok(false);
+        };
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(false);
+        };
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(false);
+        };
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            let Some(elements) = elements else {
+                return Ok(false);
+            };
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(elements, self.types.array_elements)
+                    .map(|elements| elements.delete(index))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Snapshots present dense indices so atom interning never overlaps a GC backing borrow.
+    pub(crate) fn dense_array_indices(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Vec<u32>, ExecutionError> {
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(Vec::new());
+        };
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(Vec::new());
+        };
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            let Some(elements) = elements else {
+                return Ok(Vec::new());
+            };
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let elements = no_gc
+                    .borrow(elements, self.types.array_elements)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                let mut indices = Vec::new();
+                indices
+                    .try_reserve_exact(elements.present_count() as usize)
+                    .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+                indices.extend(elements.present_indices());
+                Ok(indices)
+            })
+        })
+    }
+
+    /// Clears default dense properties after ordinary non-configurable length checks succeed.
+    fn truncate_dense_array(&mut self, receiver: Value, length: u32) -> Result<(), ExecutionError> {
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(());
+        };
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(());
+        };
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            let Some(elements) = elements else {
+                return Ok(());
+            };
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(elements, self.types.array_elements)
+                    .map(|elements| elements.truncate(length))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Applies OrdinarySetPrototypeOf for ordinary-object payloads without allocating or invoking JS.
     pub(crate) fn ordinary_set_prototype_of(
         &mut self,
@@ -165,6 +468,14 @@ impl Isolate {
             return self.set_function_prototype(receiver, value);
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
+        let dense_index = self.array_property_index(key);
+        if let Some(index) = dense_index
+            && self.dense_array_value(receiver, key)?.is_some()
+        {
+            self.set_dense_array_value(receiver, index, value)?;
+            self.grow_array_length_for_index_property(receiver, key)?;
+            return Ok(());
+        }
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             match self.stored_property_from_snapshot(snapshot, property)? {
                 Some(StoredProperty::Data(_)) => {
@@ -176,7 +487,14 @@ impl Isolate {
                 Some(StoredProperty::Accessor { .. }) => {
                     return Err(ExecutionError::UnsupportedAccessorDescriptor);
                 }
-                None => {}
+                None => {
+                    if let Some(index) = dense_index
+                        && self.set_dense_array_value(receiver, index, value)?
+                    {
+                        self.grow_array_length_for_index_property(receiver, key)?;
+                        return Ok(());
+                    }
+                }
             }
             if !snapshot.extensible {
                 return Err(ExecutionError::NonExtensibleObject(receiver));
@@ -198,6 +516,12 @@ impl Isolate {
         }
         if !snapshot.extensible {
             return Err(ExecutionError::NonExtensibleObject(receiver));
+        }
+        if let Some(index) = dense_index
+            && self.set_dense_array_value(receiver, index, value)?
+        {
+            self.grow_array_length_for_index_property(receiver, key)?;
+            return Ok(());
         }
         self.add_property_slot(
             object,
@@ -292,6 +616,7 @@ impl Isolate {
                     return Err(ExecutionError::ReadOnlyProperty(receiver));
                 }
             }
+            self.truncate_dense_array(receiver, new_length as u32)?;
         }
         let (_, snapshot) = self.object_snapshot(receiver)?;
         let property = self
@@ -352,6 +677,9 @@ impl Isolate {
             if key == PropertyKey::Atom(length) || existing_index {
                 return Ok(false);
             }
+        }
+        if self.delete_dense_array_value(receiver, key)? {
+            return Ok(true);
         }
         let (object, snapshot) = self.object_snapshot(receiver)?;
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {

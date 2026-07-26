@@ -70,6 +70,9 @@ impl Isolate {
             receiver
         };
         loop {
+            if let Some(value) = self.dense_array_value(current, key)? {
+                return Ok(Some(value));
+            }
             let (_, snapshot) = self.object_snapshot(current)?;
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 if let Some(value) = self.property_value_from_snapshot(snapshot, property)? {

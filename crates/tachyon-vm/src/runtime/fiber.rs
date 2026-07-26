@@ -298,6 +298,7 @@ pub(crate) enum ConversionConsumer {
     TypedArrayElement,
     TypedArrayAtIndex,
     TypedArrayIncludesFromIndex,
+    TypedArraySearchFromIndex,
 }
 
 impl ConversionConsumer {
@@ -368,7 +369,7 @@ impl ConversionConsumer {
             | Self::TypedArrayLength
             | Self::TypedArrayElement
             | Self::TypedArrayAtIndex => None,
-            Self::TypedArrayIncludesFromIndex => None,
+            Self::TypedArrayIncludesFromIndex | Self::TypedArraySearchFromIndex => None,
         }
     }
 
@@ -472,6 +473,7 @@ impl ConversionConsumer {
                 | Self::TypedArrayElement
                 | Self::TypedArrayAtIndex
                 | Self::TypedArrayIncludesFromIndex
+                | Self::TypedArraySearchFromIndex
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -1062,6 +1064,16 @@ pub(crate) enum TypedArrayConstructionStage {
     ArrayLikeElement,
 }
 
+/// Observable callback boundaries in `Signal.State` construction and mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SignalStateStage {
+    OptionsEquals,
+    OptionsWatched,
+    OptionsUnwatched,
+    Equals,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -1140,6 +1152,8 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
+    SignalState(SignalStateStage),
+    SignalWatcherHook,
     SignalComputed,
     PromiseExecutor,
     PromiseReaction,
@@ -1169,6 +1183,37 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots State construction/mutation state across one observable getter or callback.
+    #[inline]
+    pub(crate) const fn signal_state(
+        site: NativeContinuationSite,
+        stage: SignalStateStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SignalState(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots a pending Watcher operation while one lifecycle hook executes.
+    #[inline]
+    pub(crate) const fn signal_watcher_hook(
+        site: NativeContinuationSite,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SignalWatcherHook,
+            first: state,
+            second: receiver,
+        }
+    }
+
     #[inline]
     pub(crate) const fn signal_computed(
         site: NativeContinuationSite,

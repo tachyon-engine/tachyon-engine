@@ -2197,6 +2197,14 @@ impl Isolate {
             NativeContinuationKind::TypedArrayConstruction(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 2)
+            }
+            NativeContinuationKind::SignalWatcherHook => (continuation.second(), 0, None, 0),
+            NativeContinuationKind::SignalState(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::SignalComputed => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4422,8 +4430,7 @@ impl Isolate {
                     return self.begin_promise_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalStateConstructor) => {
-                    let state = self.create_signal_state_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, state);
+                    return self.begin_signal_state_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalComputedConstructor) => {
                     let computed = self.create_signal_computed_from_site(&site)?;
@@ -5192,6 +5199,17 @@ impl Isolate {
                     let realm = self.realm_for_callable(site.callee)?;
                     let result = callback(self, realm, EvalKind::Indirect, source)?;
                     return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::HostDetachArrayBuffer) => {
+                    let buffer = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    self.detach_array_buffer(buffer)?;
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::NumberIsNaN
@@ -6001,22 +6019,16 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalStateSet) => {
-                    let value = self
-                        .call_argument(&site, 0)?
-                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
-                    let result = self.signal_state_set(site.this_value, value)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_signal_state_set(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalComputedGet) => {
                     return self.begin_signal_computed_get(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalWatcherWatch) => {
-                    let result = self.signal_watcher_watch(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.signal_watcher_watch(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalWatcherUnwatch) => {
-                    let result = self.signal_watcher_unwatch(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.signal_watcher_unwatch(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalWatcherGetPending) => {
                     let result = self.signal_watcher_get_pending(&site)?;
@@ -6079,6 +6091,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayIncludes) => {
                     return self.begin_typed_array_includes(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
+                    return self.begin_typed_array_search(&site, direction);
                 }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
@@ -7390,6 +7405,12 @@ impl Isolate {
                 }
                 NativeContinuationKind::TypedArrayConstruction(stage) => {
                     self.resume_typed_array_construction(continuation, stage, value)
+                }
+                NativeContinuationKind::SignalState(stage) => {
+                    self.resume_signal_state(continuation, stage, value)
+                }
+                NativeContinuationKind::SignalWatcherHook => {
+                    self.resume_signal_watcher_hook(continuation)
                 }
                 NativeContinuationKind::SignalComputed => {
                     self.resume_signal_computed(continuation, value)
