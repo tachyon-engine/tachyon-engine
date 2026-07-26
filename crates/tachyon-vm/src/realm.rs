@@ -1049,8 +1049,12 @@ impl Isolate {
             )
         };
         let constructor = allocate(self, NativeFunction::DateConstructor)?;
-        let prototype =
-            self.allocate_date_object(f64::NAN, object_prototype, AllocationSpace::Old)?;
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
         self.realm.date_constructor = Some(constructor);
         self.realm.date_prototype = Some(prototype);
         self.set_function_prototype(constructor, prototype)?;
@@ -1088,6 +1092,27 @@ impl Isolate {
         let to_utc = allocate(self, NativeFunction::DateToUtcString)?;
         self.set_intrinsic_data_property(prototype, to_utc_atom, to_utc, true)?;
         self.set_intrinsic_data_property(prototype, to_gmt_atom, to_utc, true)?;
+        for (name, native) in [
+            (b"toString".as_slice(), NativeFunction::DateToString),
+            (b"toDateString".as_slice(), NativeFunction::DateToDateString),
+            (b"toTimeString".as_slice(), NativeFunction::DateToTimeString),
+            (
+                b"toLocaleString".as_slice(),
+                NativeFunction::DateToLocaleString,
+            ),
+            (
+                b"toLocaleDateString".as_slice(),
+                NativeFunction::DateToLocaleDateString,
+            ),
+            (
+                b"toLocaleTimeString".as_slice(),
+                NativeFunction::DateToLocaleTimeString,
+            ),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            let function = allocate(self, native)?;
+            self.set_intrinsic_data_property(prototype, atom, function, true)?;
+        }
         let to_primitive_symbol = self
             .realm
             .well_known_symbols
@@ -1108,12 +1133,21 @@ impl Isolate {
         let to_json_atom = self.intern_intrinsic_name(b"toJSON")?;
         let to_json = allocate(self, NativeFunction::DateToJson)?;
         self.set_intrinsic_data_property(prototype, to_json_atom, to_json, true)?;
+        let timezone_offset_atom = self.intern_intrinsic_name(b"getTimezoneOffset")?;
+        let timezone_offset = allocate(self, NativeFunction::DateTimezoneOffset)?;
+        self.set_intrinsic_data_property(prototype, timezone_offset_atom, timezone_offset, true)?;
         for field in DateUtcField::ALL {
+            let local_atom = self.intern_intrinsic_name(field.local_name().as_bytes())?;
+            let local_getter = allocate(self, NativeFunction::DateLocalGetter(field))?;
+            self.set_intrinsic_data_property(prototype, local_atom, local_getter, true)?;
             let atom = self.intern_intrinsic_name(field.name().as_bytes())?;
             let getter = allocate(self, NativeFunction::DateUtcGetter(field))?;
             self.set_intrinsic_data_property(prototype, atom, getter, true)?;
         }
         for setter in DateUtcSetter::ALL {
+            let local_atom = self.intern_intrinsic_name(setter.local_name().as_bytes())?;
+            let local_function = allocate(self, NativeFunction::DateLocalSetter(setter))?;
+            self.set_intrinsic_data_property(prototype, local_atom, local_function, true)?;
             let atom = self.intern_intrinsic_name(setter.name().as_bytes())?;
             let function = allocate(self, NativeFunction::DateUtcSetter(setter))?;
             self.set_intrinsic_data_property(prototype, atom, function, true)?;

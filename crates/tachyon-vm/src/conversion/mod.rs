@@ -477,6 +477,13 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::DateConstructSingle {
+                        return self.resume_single_date_constructor(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::ArrayToSortedLength
@@ -899,10 +906,9 @@ impl Isolate {
                 | ConversionConsumer::ErrorToStringMessage => {
                     unreachable!("Error messages finish inside the conversion state machine")
                 }
-                ConversionConsumer::DateNumericArgument => {
-                    unreachable!(
-                        "Date numeric arguments finish inside the conversion state machine"
-                    )
+                ConversionConsumer::DateConstructSingle
+                | ConversionConsumer::DateNumericArgument => {
+                    unreachable!("Date construction finishes inside the conversion state machine")
                 }
                 ConversionConsumer::DateToPrimitiveString
                 | ConversionConsumer::DateToPrimitiveNumber => argument,

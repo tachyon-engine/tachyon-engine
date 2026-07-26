@@ -3,7 +3,7 @@
 mod parse;
 
 use super::super::*;
-use parse::{ParsedDateTime, parse_iso_date_time};
+use parse::{ParsedDateTime, parse_date_time};
 
 const MAX_TIME_VALUE: f64 = 8.64e15;
 const MS_PER_SECOND: i64 = 1_000;
@@ -27,9 +27,18 @@ const MONTH_START_DAYS: [[i64; 12]; 2] = [
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum DateNumericOperation {
+    Construct,
     Utc,
     SetTime,
+    LocalSetter(DateUtcSetter),
     UtcSetter(DateUtcSetter),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DateLocalFormat {
+    DateAndTime,
+    DateOnly,
+    TimeOnly,
 }
 
 /// Traced cold-path state retained while Date numeric arguments invoke JavaScript conversion code.
@@ -66,15 +75,16 @@ impl Trace for PendingDateNumericRoots<'_> {
 }
 
 impl Isolate {
-    /// Parses an already-ToString-converted Date.parse argument without consulting host timezone state.
+    /// Parses an already-ToString-converted Date.parse argument through the injected timezone.
     pub(crate) fn date_parse_primitive_value(
         &mut self,
         value: Value,
     ) -> Result<Value, ExecutionError> {
         let units = self.string_value_to_utf16(value)?;
-        let parsed = match parse_iso_date_time(&units) {
+        let parsed = match parse_date_time(&units) {
             Some(ParsedDateTime::Utc(value)) => value,
-            Some(ParsedDateTime::Local(_)) | None => f64::NAN,
+            Some(ParsedDateTime::Local(fields)) => self.local_fields_to_utc(fields)?,
+            None => f64::NAN,
         };
         Ok(Value::from_f64(parsed))
     }
@@ -208,41 +218,115 @@ impl Isolate {
         )
     }
 
-    /// Constructs the clock-independent single-argument Date form with Realm-correct prototype.
+    /// Starts Date construction, sharing resumable numeric conversion for the multi-field form.
+    pub(crate) fn begin_date_constructor(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if site.argument_count == 0 {
+            let date = self.create_date_from_site(site)?;
+            return self.write(site.caller_base, site.destination, date);
+        }
+        if site.argument_count == 1 {
+            let argument = self
+                .call_argument(site, 0)?
+                .expect("the single argument is present");
+            if let Some(date_value) = self.date_time_value(argument)? {
+                let date = self.allocate_date_from_new_target(date_value, site.new_target)?;
+                return self.write(site.caller_base, site.destination, date);
+            }
+            if self.is_object_value(argument) {
+                return self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::DateConstructSingle,
+                    site.caller_base,
+                    site.destination,
+                    site.new_target,
+                    argument,
+                    site.call_site,
+                );
+            }
+            return self.finish_single_date_constructor(
+                Self::date_continuation_site(site),
+                site.new_target,
+                argument,
+            );
+        }
+        let pending = self.pending_date_arguments(
+            site,
+            DateNumericOperation::Construct,
+            site.new_target,
+            [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            site.argument_count.min(7) as u8,
+            false,
+        )?;
+        self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
+    }
+
+    /// Finishes one-argument Date construction after default-hint ToPrimitive has completed.
+    pub(crate) fn resume_single_date_constructor(
+        &mut self,
+        site: NativeContinuationSite,
+        new_target: Value,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        self.finish_single_date_constructor(site, new_target, primitive)
+    }
+
+    /// Parses string primitives and TimeClips all other primitive constructor arguments.
+    fn finish_single_date_constructor(
+        &mut self,
+        site: NativeContinuationSite,
+        new_target: Value,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        let date_value = if self.is_string_value(primitive) {
+            numeric_value(self.date_parse_primitive_value(primitive)?)
+                .expect("Date.parse produces a Number")
+        } else {
+            let number = self.convert_to_number(primitive)?;
+            time_clip(numeric_value(number).expect("ToNumber returns a numeric value"))
+        };
+        let date = self.allocate_date_from_new_target(date_value, new_target)?;
+        self.write(site.caller_base, site.destination, date)
+    }
+
+    /// Constructs the zero-argument Date form with a Realm-correct prototype.
     pub(crate) fn create_date_from_site(
         &mut self,
         site: &CallSite,
     ) -> Result<Value, ExecutionError> {
-        let date_value = if let Some(argument) = self.call_argument(site, 0)? {
-            if let Some(date_value) = self.date_time_value(argument)? {
-                date_value
-            } else {
-                let number = self.convert_to_number(argument)?;
-                time_clip(numeric_value(number).expect("ToNumber returns a numeric value"))
-            }
-        } else {
-            self.host_wall_clock_time()?
-        };
+        debug_assert_eq!(site.argument_count, 0);
+        let date_value = self.host_wall_clock_time()?;
+        self.allocate_date_from_new_target(date_value, site.new_target)
+    }
+
+    /// Allocates one Date after resolving the constructor Realm's intrinsic fallback.
+    fn allocate_date_from_new_target(
+        &mut self,
+        date_value: f64,
+        new_target: Value,
+    ) -> Result<Value, ExecutionError> {
         let default_prototype = self
             .realm
             .date_prototype
             .expect("Date prototype initializes before Date construction");
-        let prototype = if self.is_object_value(site.new_target) {
+        let prototype = if self.is_object_value(new_target) {
             let prototype_atom = self.prototype_atom()?;
-            self.constructor_prototype_value(site.new_target, prototype_atom)?
+            self.constructor_prototype_value(new_target, prototype_atom)?
                 .filter(|value| self.is_object_value(*value))
                 .or_else(|| {
-                    self.realm_for_callable(site.new_target)
-                        .ok()
-                        .and_then(|realm| {
-                            self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Date)
-                        })
+                    self.realm_for_callable(new_target).ok().and_then(|realm| {
+                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Date)
+                    })
                 })
                 .unwrap_or(default_prototype)
         } else {
             default_prototype
         };
         self.allocate_date_object(date_value, prototype, AllocationSpace::Young)
+    }
+
+    /// Implements the non-constructor Date call by formatting the injected current instant.
+    pub(crate) fn date_function_call(&mut self) -> Result<Value, ExecutionError> {
+        let now = self.host_wall_clock_time()?;
+        self.format_local_date_value(now, DateLocalFormat::DateAndTime)
     }
 
     /// Reads the injected wall clock and applies the same clipping contract as Date construction.
@@ -260,6 +344,47 @@ impl Isolate {
             .unix_time_milliseconds()
             .map(|milliseconds| time_clip(milliseconds as f64))
             .map_err(ExecutionError::WallClockProvider)
+    }
+
+    /// Reads the host's UTC-to-local offset without retaining the provider borrow.
+    fn host_time_zone_offset(&mut self, utc_milliseconds: i64) -> Result<i64, ExecutionError> {
+        let offset = self
+            .host_providers
+            .time_zone_mut()
+            .ok_or(ExecutionError::MissingTimeZoneProvider)?
+            .offset_milliseconds_for_utc(utc_milliseconds)
+            .map_err(ExecutionError::TimeZoneProvider)?;
+        if offset.unsigned_abs() > MS_PER_DAY as u64 {
+            return Err(ExecutionError::InvalidDateValue);
+        }
+        Ok(offset)
+    }
+
+    /// Delegates DST gap/overlap disambiguation for a local wall-time coordinate to the host.
+    fn host_utc_for_local(&mut self, local_milliseconds: i64) -> Result<i64, ExecutionError> {
+        self.host_providers
+            .time_zone_mut()
+            .ok_or(ExecutionError::MissingTimeZoneProvider)?
+            .utc_milliseconds_for_local(local_milliseconds)
+            .map_err(ExecutionError::TimeZoneProvider)
+    }
+
+    /// Converts one clipped UTC instant to the local wall-time coordinate used by calendar math.
+    fn local_time_from_utc(&mut self, utc_milliseconds: i64) -> Result<i64, ExecutionError> {
+        let offset = self.host_time_zone_offset(utc_milliseconds)?;
+        utc_milliseconds
+            .checked_add(offset)
+            .ok_or(ExecutionError::InvalidDateValue)
+    }
+
+    /// Normalizes local calendar fields, asks the host to resolve them, then applies TimeClip.
+    fn local_fields_to_utc(&mut self, fields: [f64; 7]) -> Result<f64, ExecutionError> {
+        let local = make_utc_date_unclipped(fields);
+        if !local.is_finite() || local < i64::MIN as f64 || local > i64::MAX as f64 {
+            return Ok(f64::NAN);
+        }
+        let utc = self.host_utc_for_local(local as i64)?;
+        Ok(time_clip(utc as f64))
     }
 
     /// Implements the shared thisTimeValue operation for Date.prototype.getTime/valueOf.
@@ -297,6 +422,53 @@ impl Isolate {
             DateUtcField::Milliseconds => parts.milliseconds,
         };
         Ok(Value::from_f64(value as f64))
+    }
+
+    /// Returns one local calendar field after resolving the instant through the timezone provider.
+    pub(crate) fn date_local_field_value(
+        &mut self,
+        receiver: Value,
+        field: DateUtcField,
+    ) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        if date_value.is_nan() {
+            return Ok(Value::from_f64(f64::NAN));
+        }
+        let local = self.local_time_from_utc(date_value as i64)?;
+        let parts = UtcDateParts::from_time(local);
+        let value = match field {
+            DateUtcField::FullYear => parts.year,
+            DateUtcField::Month => parts.month,
+            DateUtcField::Date => parts.date,
+            DateUtcField::Day => parts.day,
+            DateUtcField::Hours => parts.hours,
+            DateUtcField::Minutes => parts.minutes,
+            DateUtcField::Seconds => parts.seconds,
+            DateUtcField::Milliseconds => parts.milliseconds,
+        };
+        Ok(Value::from_f64(value as f64))
+    }
+
+    /// Implements Date.prototype.getTimezoneOffset using the offset for the receiver's instant.
+    pub(crate) fn date_timezone_offset(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        if date_value.is_nan() {
+            return Ok(Value::from_f64(f64::NAN));
+        }
+        let offset = self.host_time_zone_offset(date_value as i64)?;
+        let minutes = if offset == 0 {
+            0.0
+        } else {
+            -(offset as f64) / MS_PER_MINUTE as f64
+        };
+        Ok(Value::from_f64(minutes))
     }
 
     /// Starts Date.UTC argument conversion, allocating continuation state only for object operands.
@@ -358,6 +530,38 @@ impl Isolate {
         self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
     }
 
+    /// Starts one local setter after snapshotting both the receiver and its current local fields.
+    pub(crate) fn begin_date_local_setter(
+        &mut self,
+        site: &CallSite,
+        setter: DateUtcSetter,
+    ) -> Result<(), ExecutionError> {
+        let original = self
+            .date_time_value(site.this_value)?
+            .ok_or(ExecutionError::NotObject(site.this_value))?;
+        let preserve_invalid = original.is_nan() && setter != DateUtcSetter::FullYear;
+        let fields = if preserve_invalid {
+            [f64::NAN; 7]
+        } else {
+            let utc = if original.is_nan() {
+                0
+            } else {
+                original as i64
+            };
+            UtcDateParts::from_time(self.local_time_from_utc(utc)?).make_date_fields()
+        };
+        let count = site.argument_count.min(setter.length() as u32).max(1) as u8;
+        let pending = self.pending_date_arguments(
+            site,
+            DateNumericOperation::LocalSetter(setter),
+            site.this_value,
+            fields,
+            count,
+            preserve_invalid,
+        )?;
+        self.drive_date_numeric_arguments(Self::date_continuation_site(site), pending, None, None)
+    }
+
     /// Formats the canonical simplified ISO UTC representation without heap intermediates.
     pub(crate) fn date_to_iso_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         let date_value = self
@@ -409,6 +613,60 @@ impl Isolate {
         output.push_byte(b' ');
         output.push_clock(parts);
         output.push_bytes(b" GMT");
+        self.allocate_date_format(output.as_bytes())
+    }
+
+    /// Formats Date.prototype.toString using provider-backed local fields and numeric GMT offset.
+    pub(crate) fn date_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        self.format_local_date_value(date_value, DateLocalFormat::DateAndTime)
+    }
+
+    /// Formats Date.prototype.toDateString without consulting locale services.
+    pub(crate) fn date_to_date_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        self.format_local_date_value(date_value, DateLocalFormat::DateOnly)
+    }
+
+    /// Formats Date.prototype.toTimeString with the provider's numeric UTC offset.
+    pub(crate) fn date_to_time_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let date_value = self
+            .date_time_value(receiver)?
+            .ok_or(ExecutionError::NotObject(receiver))?;
+        self.format_local_date_value(date_value, DateLocalFormat::TimeOnly)
+    }
+
+    /// Builds the implementation-defined local Date string in a fixed stack buffer.
+    fn format_local_date_value(
+        &mut self,
+        date_value: f64,
+        format: DateLocalFormat,
+    ) -> Result<Value, ExecutionError> {
+        if date_value.is_nan() {
+            return self.allocate_date_format(INVALID_DATE);
+        }
+        let utc = date_value as i64;
+        let offset = self.host_time_zone_offset(utc)?;
+        let parts = UtcDateParts::from_time(
+            utc.checked_add(offset)
+                .ok_or(ExecutionError::InvalidDateValue)?,
+        );
+        let mut output = DateFormatBuffer::new();
+        if format != DateLocalFormat::TimeOnly {
+            output.push_local_date(parts);
+        }
+        if format == DateLocalFormat::DateAndTime {
+            output.push_byte(b' ');
+        }
+        if format != DateLocalFormat::DateOnly {
+            output.push_clock(parts);
+            output.push_bytes(b" GMT");
+            output.push_offset(offset);
+        }
         self.allocate_date_format(output.as_bytes())
     }
 
@@ -507,9 +765,11 @@ impl Isolate {
             .ok_or(ExecutionError::UnsupportedNumberConversion(primitive))?
             .trunc();
         let field = match pending.operation {
-            DateNumericOperation::Utc => pending.next_argument as usize,
+            DateNumericOperation::Construct | DateNumericOperation::Utc => {
+                pending.next_argument as usize
+            }
             DateNumericOperation::SetTime => 0,
-            DateNumericOperation::UtcSetter(setter) => {
+            DateNumericOperation::LocalSetter(setter) | DateNumericOperation::UtcSetter(setter) => {
                 date_utc_setter_start(setter) + pending.next_argument as usize
             }
         };
@@ -524,18 +784,37 @@ impl Isolate {
         mut pending: PendingDateNumericArguments,
     ) -> Result<Value, ExecutionError> {
         let date_value = match pending.operation {
-            DateNumericOperation::Utc => {
+            DateNumericOperation::Construct | DateNumericOperation::Utc => {
                 if (0.0..=99.0).contains(&pending.fields[0]) {
                     pending.fields[0] += 1900.0;
                 }
-                make_utc_date(pending.fields)
+                if pending.operation == DateNumericOperation::Construct {
+                    self.local_fields_to_utc(pending.fields)?
+                } else {
+                    make_utc_date(pending.fields)
+                }
             }
             DateNumericOperation::SetTime => time_clip(pending.fields[0]),
+            DateNumericOperation::LocalSetter(_) if pending.preserve_invalid_receiver => f64::NAN,
+            DateNumericOperation::LocalSetter(_) => self.local_fields_to_utc(pending.fields)?,
             DateNumericOperation::UtcSetter(_) if pending.preserve_invalid_receiver => f64::NAN,
             DateNumericOperation::UtcSetter(_) => make_utc_date(pending.fields),
         };
-        if pending.operation != DateNumericOperation::Utc && !pending.preserve_invalid_receiver {
-            self.set_date_time_value(pending.receiver, date_value)?;
+        match pending.operation {
+            DateNumericOperation::Construct => {
+                return self.allocate_date_from_new_target(date_value, pending.receiver);
+            }
+            DateNumericOperation::Utc => {}
+            DateNumericOperation::SetTime
+            | DateNumericOperation::LocalSetter(_)
+            | DateNumericOperation::UtcSetter(_)
+                if !pending.preserve_invalid_receiver =>
+            {
+                self.set_date_time_value(pending.receiver, date_value)?;
+            }
+            DateNumericOperation::SetTime
+            | DateNumericOperation::LocalSetter(_)
+            | DateNumericOperation::UtcSetter(_) => {}
         }
         Ok(Value::from_f64(date_value))
     }
@@ -747,6 +1026,28 @@ impl DateFormatBuffer {
         self.push_unsigned(parts.minutes as u64, 2);
         self.push_byte(b':');
         self.push_unsigned(parts.seconds as u64, 2);
+    }
+
+    /// Emits the implementation-defined local date component without locale allocation.
+    fn push_local_date(&mut self, parts: UtcDateParts) {
+        self.push_bytes(&WEEKDAY_NAMES[parts.day as usize]);
+        self.push_byte(b' ');
+        self.push_bytes(&MONTH_NAMES[parts.month as usize]);
+        self.push_byte(b' ');
+        self.push_unsigned(parts.date as u64, 2);
+        self.push_byte(b' ');
+        if parts.year < 0 {
+            self.push_byte(b'-');
+        }
+        self.push_unsigned(parts.year.unsigned_abs(), 4);
+    }
+
+    /// Emits a signed HHMM offset; the provider boundary validates the one-day maximum.
+    fn push_offset(&mut self, offset_milliseconds: i64) {
+        self.push_byte(if offset_milliseconds < 0 { b'-' } else { b'+' });
+        let total_minutes = offset_milliseconds.unsigned_abs() / MS_PER_MINUTE as u64;
+        self.push_unsigned(total_minutes / 60, 2);
+        self.push_unsigned(total_minutes % 60, 2);
     }
 }
 

@@ -103,6 +103,20 @@ impl DateUtcField {
             Self::Milliseconds => "getUTCMilliseconds",
         }
     }
+
+    #[inline(always)]
+    pub(crate) const fn local_name(self) -> &'static str {
+        match self {
+            Self::FullYear => "getFullYear",
+            Self::Month => "getMonth",
+            Self::Date => "getDate",
+            Self::Day => "getDay",
+            Self::Hours => "getHours",
+            Self::Minutes => "getMinutes",
+            Self::Seconds => "getSeconds",
+            Self::Milliseconds => "getMilliseconds",
+        }
+    }
 }
 
 /// UTC Date setters sharing the same field normalization implementation.
@@ -139,6 +153,19 @@ impl DateUtcSetter {
             Self::Minutes => "setUTCMinutes",
             Self::Seconds => "setUTCSeconds",
             Self::Milliseconds => "setUTCMilliseconds",
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn local_name(self) -> &'static str {
+        match self {
+            Self::FullYear => "setFullYear",
+            Self::Month => "setMonth",
+            Self::Date => "setDate",
+            Self::Hours => "setHours",
+            Self::Minutes => "setMinutes",
+            Self::Seconds => "setSeconds",
+            Self::Milliseconds => "setMilliseconds",
         }
     }
 
@@ -277,9 +304,18 @@ pub(crate) enum NativeFunction {
     DateSetTime,
     DateToISOString,
     DateToUtcString,
+    DateToString,
+    DateToDateString,
+    DateToTimeString,
+    DateToLocaleString,
+    DateToLocaleDateString,
+    DateToLocaleTimeString,
     DateToPrimitive,
     DateToJson,
     DateValueOf,
+    DateTimezoneOffset,
+    DateLocalGetter(DateUtcField),
+    DateLocalSetter(DateUtcSetter),
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
@@ -777,7 +813,7 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
             Self::DateNow => 0,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
-            Self::DateUtcSetter(setter) => setter.length(),
+            Self::DateLocalSetter(setter) | Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty
             | Self::ReflectDefineProperty
             | Self::TypedArrayConstructor(_) => 3,
@@ -1014,7 +1050,15 @@ impl NativeFunction {
             | Self::DateGetTime
             | Self::DateToISOString
             | Self::DateToUtcString
+            | Self::DateToString
+            | Self::DateToDateString
+            | Self::DateToTimeString
+            | Self::DateToLocaleString
+            | Self::DateToLocaleDateString
+            | Self::DateToLocaleTimeString
             | Self::DateValueOf
+            | Self::DateTimezoneOffset
+            | Self::DateLocalGetter(_)
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
             | Self::SpeciesGetter
@@ -1178,9 +1222,18 @@ impl NativeFunction {
             Self::DateSetTime => "setTime",
             Self::DateToISOString => "toISOString",
             Self::DateToUtcString => "toUTCString",
+            Self::DateToString => "toString",
+            Self::DateToDateString => "toDateString",
+            Self::DateToTimeString => "toTimeString",
+            Self::DateToLocaleString => "toLocaleString",
+            Self::DateToLocaleDateString => "toLocaleDateString",
+            Self::DateToLocaleTimeString => "toLocaleTimeString",
             Self::DateToPrimitive => "[Symbol.toPrimitive]",
             Self::DateToJson => "toJSON",
             Self::DateValueOf => "valueOf",
+            Self::DateTimezoneOffset => "getTimezoneOffset",
+            Self::DateLocalGetter(field) => field.local_name(),
+            Self::DateLocalSetter(setter) => setter.local_name(),
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",

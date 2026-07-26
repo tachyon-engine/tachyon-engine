@@ -20,6 +20,42 @@ impl WallClockProvider for FailingClock {
     }
 }
 
+struct FixedTimeZone(i64);
+
+impl TimeZoneProvider for FixedTimeZone {
+    fn offset_milliseconds_for_utc(
+        &mut self,
+        _utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Ok(self.0)
+    }
+
+    fn utc_milliseconds_for_local(
+        &mut self,
+        local_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Ok(local_milliseconds - self.0)
+    }
+}
+
+struct FailingTimeZone;
+
+impl TimeZoneProvider for FailingTimeZone {
+    fn offset_milliseconds_for_utc(
+        &mut self,
+        _utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Err(HostProviderError::Failure(23))
+    }
+
+    fn utc_milliseconds_for_local(
+        &mut self,
+        _local_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Err(HostProviderError::Failure(29))
+    }
+}
+
 const DATE_SOURCE: &str = r#"
 var positive = new Date(1.9);
 var negative = new Date(-1.9);
@@ -241,6 +277,47 @@ fn missing_and_failing_wall_clock_providers_remain_structured_host_errors() {
         isolate.date_now(),
         Err(ExecutionError::WallClockProvider(
             HostProviderError::Failure(17)
+        ))
+    );
+}
+
+#[test]
+fn injected_timezone_drives_local_date_operations_for_every_dispatch_batch() {
+    assert_date_timezone_batch::<1>(false);
+    assert_date_timezone_batch::<2>(false);
+    assert_date_timezone_batch::<4>(false);
+    assert_date_timezone_batch::<8>(false);
+    assert_date_timezone_batch::<16>(false);
+    assert_date_timezone_batch::<8>(true);
+}
+
+#[test]
+fn missing_and_failing_timezone_providers_remain_structured_host_errors() {
+    let mut missing = date_clock_isolate(FixedClock(0));
+    let date = missing
+        .allocate_date_object(
+            0.0,
+            missing.realm.date_prototype.expect("Date prototype exists"),
+            AllocationSpace::Young,
+        )
+        .expect("Date allocation succeeds");
+    assert_eq!(
+        missing.date_timezone_offset(date),
+        Err(ExecutionError::MissingTimeZoneProvider)
+    );
+
+    let mut failing = date_host_isolate(FixedClock(0), FailingTimeZone);
+    let date = failing
+        .allocate_date_object(
+            0.0,
+            failing.realm.date_prototype.expect("Date prototype exists"),
+            AllocationSpace::Young,
+        )
+        .expect("Date allocation succeeds");
+    assert_eq!(
+        failing.date_timezone_offset(date),
+        Err(ExecutionError::TimeZoneProvider(
+            HostProviderError::Failure(23)
         ))
     );
 }
@@ -481,6 +558,56 @@ descriptor.enumerable === false && descriptor.configurable === true;
     );
 }
 
+/// Executes both timezone directions, local mutation, and formatting under one dispatch policy.
+fn assert_date_timezone_batch<const N: usize>(forced_major: bool) {
+    let module = compile_date_program(
+        r#"
+var epoch = new Date(0);
+var constructed = new Date(1970, 0, 1, 1, 30, 0, 0);
+var converted = new Date({ valueOf() { return 0; } });
+var parsed = new Date("1970");
+var changed = new Date(0);
+var setResult = changed.setHours(2, 30, 0, 0);
+var called = Date("ignored");
+epoch.getFullYear() === 1970 && epoch.getMonth() === 0 &&
+epoch.getDate() === 1 && epoch.getDay() === 4 &&
+epoch.getHours() === 1 && epoch.getMinutes() === 30 &&
+epoch.getSeconds() === 0 && epoch.getMilliseconds() === 0 &&
+epoch.getTimezoneOffset() === -90 && constructed.getTime() === 0 &&
+converted.getTime() === 0 && parsed.getTime() === 0 &&
+Date.parse("1970-01-01T01:30:00") === 0 &&
+Date.parse(epoch.toString()) === 0 && Date.parse(epoch.toUTCString()) === 0 &&
+setResult === 3600000 && changed.getUTCHours() === 1 &&
+epoch.toString() === "Thu Jan 01 1970 01:30:00 GMT+0130" &&
+epoch.toDateString() === "Thu Jan 01 1970" &&
+epoch.toTimeString() === "01:30:00 GMT+0130" &&
+called === "Thu Jan 01 1970 01:30:00 GMT+0130" &&
+Date.prototype.getFullYear.name === "getFullYear" &&
+Date.prototype.setHours.length === 4;
+"#,
+        1_560 + N as u32,
+    );
+    let mut isolate = date_host_isolate(FixedClock(0), FixedTimeZone(90 * 60 * 1_000));
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("injected timezone Date fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date timezone batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
 /// Creates a normal test isolate while making its wall-clock dependency explicit.
 fn date_clock_isolate(provider: impl WallClockProvider + 'static) -> Isolate {
     Isolate::new_with_host_providers(
@@ -493,6 +620,25 @@ fn date_clock_isolate(provider: impl WallClockProvider + 'static) -> Isolate {
         HostProviders::new().with_wall_clock(provider),
     )
     .expect("Date provider test isolate descriptors register")
+}
+
+/// Creates a test isolate with independent wall-clock and timezone capabilities.
+fn date_host_isolate(
+    clock: impl WallClockProvider + 'static,
+    timezone: impl TimeZoneProvider + 'static,
+) -> Isolate {
+    Isolate::new_with_host_providers(
+        IsolateConfig::new(
+            AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+            HeapLimit::new(9 * SPAN_SIZE_BYTES),
+            StackLimits::new(64, 4_096),
+            RealmLimits::new(64, 1_024),
+        ),
+        HostProviders::new()
+            .with_wall_clock(clock)
+            .with_time_zone(timezone),
+    )
+    .expect("Date host-provider test isolate descriptors register")
 }
 
 /// Executes observable Date numeric conversion for one interpreter dispatch batch.

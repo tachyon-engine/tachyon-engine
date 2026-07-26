@@ -16,7 +16,7 @@ pub trait WallClockProvider: Send {
 
 /// Supplies ECMAScript-compatible local-time conversions without filesystem or locale access.
 pub trait TimeZoneProvider: Send {
-    /// Returns the local offset applied to one already-UTC epoch millisecond value.
+    /// Returns the local offset applied to UTC; values must remain within one civil day.
     fn offset_milliseconds_for_utc(
         &mut self,
         utc_milliseconds: i64,
@@ -61,10 +61,6 @@ impl HostProviders {
         self.wall_clock.as_deref_mut()
     }
 
-    #[allow(
-        dead_code,
-        reason = "local Date methods consume this provider in the next Date slice"
-    )]
     pub(crate) fn time_zone_mut(&mut self) -> Option<&mut (dyn TimeZoneProvider + 'static)> {
         self.time_zone.as_deref_mut()
     }

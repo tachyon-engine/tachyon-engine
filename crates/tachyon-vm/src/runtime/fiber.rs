@@ -249,6 +249,7 @@ pub(crate) enum ConversionConsumer {
     ErrorConstructorMessage,
     ErrorToStringName,
     ErrorToStringMessage,
+    DateConstructSingle,
     DateNumericArgument,
     DateToPrimitiveString,
     DateToPrimitiveNumber,
@@ -311,6 +312,7 @@ impl ConversionConsumer {
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
             | Self::ErrorToStringMessage
+            | Self::DateConstructSingle
             | Self::DateNumericArgument
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
@@ -386,7 +388,10 @@ impl ConversionConsumer {
     pub(crate) const fn preferred_type(self) -> PreferredType {
         if self.uses_string_hint() {
             PreferredType::String
-        } else if matches!(self, Self::AddLeft | Self::AddRight | Self::Equality(_)) {
+        } else if matches!(
+            self,
+            Self::AddLeft | Self::AddRight | Self::Equality(_) | Self::DateConstructSingle
+        ) {
             PreferredType::Default
         } else {
             PreferredType::Number
@@ -412,6 +417,7 @@ impl ConversionConsumer {
                 | Self::ErrorConstructorMessage
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
+                | Self::DateConstructSingle
                 | Self::DateNumericArgument
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber

@@ -4392,8 +4392,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
-                    let date = self.create_date_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, date);
+                    return self.begin_date_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
                     let object = self.create_object_from_site(&site)?;
@@ -5335,7 +5334,8 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, regexp);
                 }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
-                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
+                    let value = self.date_function_call()?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::DateNow) => {
                     let value = self.date_now()?;
@@ -5361,6 +5361,24 @@ impl Isolate {
                     let value = self.date_to_utc_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(
+                    NativeFunction::DateToString | NativeFunction::DateToLocaleString,
+                ) => {
+                    let value = self.date_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::DateToDateString | NativeFunction::DateToLocaleDateString,
+                ) => {
+                    let value = self.date_to_date_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::DateToTimeString | NativeFunction::DateToLocaleTimeString,
+                ) => {
+                    let value = self.date_to_time_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::DateToPrimitive) => {
                     return self.begin_date_to_primitive(&site);
                 }
@@ -5371,8 +5389,19 @@ impl Isolate {
                     let value = self.date_utc_field_value(site.this_value, field)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::DateLocalGetter(field)) => {
+                    let value = self.date_local_field_value(site.this_value, field)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::DateTimezoneOffset) => {
+                    let value = self.date_timezone_offset(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::DateUtcSetter(setter)) => {
                     return self.begin_date_utc_setter(&site, setter);
+                }
+                FunctionExecutable::Native(NativeFunction::DateLocalSetter(setter)) => {
+                    return self.begin_date_local_setter(&site, setter);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpExec) => {
                     let result = self.regexp_exec(&site)?;

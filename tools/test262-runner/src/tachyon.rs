@@ -6,8 +6,8 @@ use tachyon_compiler::{
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
     AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, HostProviderError,
-    HostProviders, Isolate, IsolateConfig, RealmId, RealmLimits, RunOutcome, StackLimits, Value,
-    WallClockProvider,
+    HostProviders, Isolate, IsolateConfig, RealmId, RealmLimits, RunOutcome, StackLimits,
+    TimeZoneProvider, Value, WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -41,6 +41,24 @@ struct Test262WallClock;
 impl WallClockProvider for Test262WallClock {
     fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
         Ok(0)
+    }
+}
+
+struct Test262UtcTimeZone;
+
+impl TimeZoneProvider for Test262UtcTimeZone {
+    fn offset_milliseconds_for_utc(
+        &mut self,
+        _utc_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Ok(0)
+    }
+
+    fn utc_milliseconds_for_local(
+        &mut self,
+        local_milliseconds: i64,
+    ) -> Result<i64, HostProviderError> {
+        Ok(local_milliseconds)
     }
 }
 
@@ -170,7 +188,9 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
             StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
             RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
         ),
-        HostProviders::new().with_wall_clock(Test262WallClock),
+        HostProviders::new()
+            .with_wall_clock(Test262WallClock)
+            .with_time_zone(Test262UtcTimeZone),
     ) {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),

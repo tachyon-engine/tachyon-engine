@@ -348,6 +348,8 @@ pub enum ExecutionError {
     InvalidDispatchBatch { batch: usize },
     MissingWallClockProvider,
     WallClockProvider(HostProviderError),
+    MissingTimeZoneProvider,
+    TimeZoneProvider(HostProviderError),
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
     HandlerStackTooLarge(u32),
