@@ -208,6 +208,11 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
         | HirExpressionKind::Unary {
             argument: property, ..
         } => collect_expression(property, bindings),
+        HirExpressionKind::Yield(argument) => {
+            if let Some(argument) = argument {
+                collect_expression(argument, bindings);
+            }
+        }
         HirExpressionKind::Binary { left, right, .. }
         | HirExpressionKind::Logical { left, right, .. } => {
             collect_expression(left, bindings);

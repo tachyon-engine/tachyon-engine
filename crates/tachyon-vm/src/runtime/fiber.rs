@@ -310,6 +310,9 @@ pub(crate) enum ConversionConsumer {
     TypedArraySetOffset,
     TypedArraySetLength,
     TypedArraySetElement,
+    TypedArrayJoinSeparator,
+    TypedArraySliceStart,
+    TypedArraySliceEnd,
     TypedArraySearchFromIndex,
 }
 
@@ -394,6 +397,9 @@ impl ConversionConsumer {
             | Self::TypedArraySetOffset
             | Self::TypedArraySetLength
             | Self::TypedArraySetElement
+            | Self::TypedArrayJoinSeparator
+            | Self::TypedArraySliceStart
+            | Self::TypedArraySliceEnd
             | Self::TypedArraySearchFromIndex => None,
         }
     }
@@ -425,6 +431,7 @@ impl ConversionConsumer {
                 | Self::ArrayToSortedRightString
                 | Self::ArrayJoinSeparator
                 | Self::ArrayJoinElement
+                | Self::TypedArrayJoinSeparator
                 | Self::StringSplitReceiver
                 | Self::StringSplitSeparator
         )
@@ -499,6 +506,9 @@ impl ConversionConsumer {
                 | Self::TypedArrayAtIndex
                 | Self::TypedArrayIncludesFromIndex
                 | Self::TypedArraySearchFromIndex
+                | Self::TypedArrayJoinSeparator
+                | Self::TypedArraySliceStart
+                | Self::TypedArraySliceEnd
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -1113,6 +1123,15 @@ pub(crate) enum TypedArraySetStage {
     Element,
 }
 
+/// Observable species boundaries in fixed Number `%TypedArray.prototype.slice%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArraySliceStage {
+    Constructor,
+    Species,
+    Construct,
+}
+
 /// Observable callback boundaries in `Signal.State` construction and mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1205,6 +1224,7 @@ pub(crate) enum NativeContinuationKind {
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
+    TypedArraySlice(TypedArraySliceStage),
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
@@ -1405,6 +1425,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::TypedArraySet(stage),
             first: state,
             second: receiver,
+        }
+    }
+
+    /// Roots one TypedArray slice state across species property access or construction.
+    #[inline]
+    pub(crate) const fn typed_array_slice(
+        site: NativeContinuationSite,
+        stage: TypedArraySliceStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArraySlice(stage),
+            first: state,
+            second: retained,
         }
     }
 

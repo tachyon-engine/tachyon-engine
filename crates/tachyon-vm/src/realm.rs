@@ -378,6 +378,28 @@ impl Isolate {
         )?;
         let set_atom = self.intern_intrinsic_name(b"set")?;
         self.set_intrinsic_data_property(base_prototype, set_atom, set, true)?;
+        let join = self.allocate_native_function(
+            NativeFunction::TypedArrayJoin,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let join_atom = self.intern_intrinsic_name(b"join")?;
+        self.set_intrinsic_data_property(base_prototype, join_atom, join, true)?;
+        let slice = self.allocate_native_function(
+            NativeFunction::TypedArraySlice,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let slice_atom = self.intern_intrinsic_name(b"slice")?;
+        self.set_intrinsic_data_property(base_prototype, slice_atom, slice, true)?;
         for (direction, name) in [
             (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
             (
@@ -3295,6 +3317,20 @@ impl Isolate {
             NativeFunction::SignalCurrentComputed,
             function_prototype,
         )?;
+        for (name, native) in [
+            (
+                b"introspectSources".as_slice(),
+                NativeFunction::SignalIntrospectSources,
+            ),
+            (
+                b"introspectSinks".as_slice(),
+                NativeFunction::SignalIntrospectSinks,
+            ),
+            (b"hasSources".as_slice(), NativeFunction::SignalHasSources),
+            (b"hasSinks".as_slice(), NativeFunction::SignalHasSinks),
+        ] {
+            self.install_signal_method(subtle, name, native, function_prototype)?;
+        }
         for (name, description, watched) in [
             (
                 b"watched".as_slice(),

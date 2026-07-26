@@ -43,6 +43,10 @@ var namespaceDescriptors = builtinDescriptor(Signal, "State", true, true) &&
     builtinDescriptor(Signal.subtle, "Watcher", true, true) &&
     builtinDescriptor(Signal.subtle, "untrack", true, true) &&
     builtinDescriptor(Signal.subtle, "currentComputed", true, true) &&
+    builtinDescriptor(Signal.subtle, "introspectSources", true, true) &&
+    builtinDescriptor(Signal.subtle, "introspectSinks", true, true) &&
+    builtinDescriptor(Signal.subtle, "hasSources", true, true) &&
+    builtinDescriptor(Signal.subtle, "hasSinks", true, true) &&
     builtinDescriptor(Signal.subtle, "watched", true, true) &&
     builtinDescriptor(Signal.subtle, "unwatched", true, true) &&
     typeof Signal.subtle.watched === "symbol" && typeof Signal.subtle.unwatched === "symbol" &&
@@ -67,7 +71,13 @@ var metadata = Signal.State.name === "State" && Signal.State.length === 1 &&
     Signal.subtle.Watcher.prototype.getPending.length === 0 &&
     Signal.subtle.untrack.name === "untrack" && Signal.subtle.untrack.length === 1 &&
     Signal.subtle.currentComputed.name === "currentComputed" &&
-    Signal.subtle.currentComputed.length === 0;
+    Signal.subtle.currentComputed.length === 0 &&
+    Signal.subtle.introspectSources.name === "introspectSources" &&
+    Signal.subtle.introspectSources.length === 1 &&
+    Signal.subtle.introspectSinks.name === "introspectSinks" &&
+    Signal.subtle.introspectSinks.length === 1 &&
+    Signal.subtle.hasSources.name === "hasSources" && Signal.subtle.hasSources.length === 1 &&
+    Signal.subtle.hasSinks.name === "hasSinks" && Signal.subtle.hasSinks.length === 1;
 var newOnly = false;
 try { Signal.State(1); } catch (error) { newOnly = error instanceof TypeError; }
 try { Signal.Computed(function() {}); newOnly = false; } catch (error) {
@@ -80,6 +90,18 @@ try { new Signal.subtle.untrack(function() {}); newOnly = false; } catch (error)
     newOnly = newOnly && error instanceof TypeError;
 }
 try { new Signal.subtle.currentComputed(); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.introspectSources({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.introspectSinks({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.hasSources({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.hasSinks({}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 var state = new Signal.State(1);
@@ -118,6 +140,100 @@ var newTarget = Object.getPrototypeOf(redirected) === StateTarget.prototype &&
 globalDescriptor && namespaceDescriptors && prototypeDescriptors && metadata && newOnly && brands &&
 callbackReceiver && subclasses && newTarget && Object.getPrototypeOf(Signal) === Object.prototype &&
 Object.getPrototypeOf(Signal.subtle) === Object.prototype;
+"#;
+
+const SIGNAL_INTROSPECTION_SOURCE: &str = r#"
+var select = new Signal.State(true);
+var left = new Signal.State(2);
+var right = new Signal.State(3);
+var computed = new Signal.Computed(function() {
+    select.get();
+    if (select.get()) {
+        left.get();
+        right.get();
+        return left.get();
+    }
+    right.get();
+    left.get();
+    return right.get();
+});
+var watcher = new Signal.subtle.Watcher(function() {});
+var beforeSources = Signal.subtle.introspectSources(computed);
+var before = beforeSources.length === 0 && !Signal.subtle.hasSources(computed) &&
+    !Signal.subtle.hasSinks(computed) && !Signal.subtle.hasSinks(left);
+watcher.watch(computed);
+var value = computed.get() === 2;
+var sources = Signal.subtle.introspectSources(computed);
+var watched = Signal.subtle.introspectSources(watcher);
+var sourceOrder = sources.length === 3 && sources[0] === select && sources[1] === left &&
+    sources[2] === right && watched.length === 1 && watched[0] === computed;
+var sinkOrder = Signal.subtle.introspectSinks(select).length === 1 &&
+    Signal.subtle.introspectSinks(select)[0] === computed &&
+    Signal.subtle.introspectSinks(left)[0] === computed &&
+    Signal.subtle.introspectSinks(right)[0] === computed &&
+    Signal.subtle.introspectSinks(computed)[0] === watcher &&
+    Signal.subtle.hasSinks(select) && Signal.subtle.hasSinks(computed) &&
+    Signal.subtle.hasSources(computed) && Signal.subtle.hasSources(watcher);
+sources[0] = right;
+watched[0] = left;
+var freshSources = Signal.subtle.introspectSources(computed);
+var freshWatched = Signal.subtle.introspectSources(watcher);
+var fresh = freshSources !== sources && freshWatched !== watched &&
+    freshSources[0] === select && freshWatched[0] === computed;
+
+select.set(false);
+var switched = computed.get() === 3;
+var switchedSources = Signal.subtle.introspectSources(computed);
+var switchedOrder = switchedSources.length === 3 && switchedSources[0] === select &&
+    switchedSources[1] === right && switchedSources[2] === left;
+watcher.unwatch(computed);
+var detached = Signal.subtle.introspectSinks(select).length === 0 &&
+    Signal.subtle.introspectSinks(left).length === 0 &&
+    Signal.subtle.introspectSinks(right).length === 0 &&
+    Signal.subtle.introspectSinks(computed).length === 0 &&
+    !Signal.subtle.hasSinks(select) && !Signal.subtle.hasSinks(computed) &&
+    Signal.subtle.hasSources(computed) && !Signal.subtle.hasSources(watcher);
+
+var frozenRejections = 0;
+var directWatcher = new Signal.subtle.Watcher(function() {
+    try { Signal.subtle.introspectSources(directWatcher); } catch (error) {
+        if (error instanceof TypeError) frozenRejections++;
+    }
+    try { Signal.subtle.introspectSinks(left); } catch (error) {
+        if (error instanceof TypeError) frozenRejections++;
+    }
+    try { Signal.subtle.hasSources(directWatcher); } catch (error) {
+        if (error instanceof TypeError) frozenRejections++;
+    }
+    try { Signal.subtle.hasSinks(left); } catch (error) {
+        if (error instanceof TypeError) frozenRejections++;
+    }
+});
+directWatcher.watch(left);
+left.set(4);
+directWatcher.unwatch(left);
+
+var brands = 0;
+try { Signal.subtle.introspectSources(left); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+try { Signal.subtle.introspectSources({}); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+try { Signal.subtle.hasSources(left); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+try { Signal.subtle.introspectSinks(watcher); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+try { Signal.subtle.hasSinks(watcher); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+try { Signal.subtle.hasSinks(); } catch (error) {
+    if (error instanceof TypeError) brands++;
+}
+before && value && sourceOrder && sinkOrder && fresh && switched && switchedOrder && detached &&
+frozenRejections === 4 && brands === 6;
 "#;
 
 const SIGNAL_CURRENT_COMPUTED_SOURCE: &str = r#"
@@ -284,6 +400,10 @@ var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.Stat
     foreignSignal.subtle.Watcher !== Signal.subtle.Watcher &&
     foreignSignal.subtle.untrack !== Signal.subtle.untrack &&
     foreignSignal.subtle.currentComputed !== Signal.subtle.currentComputed &&
+    foreignSignal.subtle.introspectSources !== Signal.subtle.introspectSources &&
+    foreignSignal.subtle.introspectSinks !== Signal.subtle.introspectSinks &&
+    foreignSignal.subtle.hasSources !== Signal.subtle.hasSources &&
+    foreignSignal.subtle.hasSinks !== Signal.subtle.hasSinks &&
     foreignSignal.subtle.watched !== Signal.subtle.watched &&
     foreignSignal.subtle.unwatched !== Signal.subtle.unwatched;
 var local = new Signal.State(2);
@@ -304,8 +424,22 @@ localComputed = new Signal.Computed(function() {
     foreignCurrent = foreignSignal.subtle.currentComputed() === localComputed;
     return local.get();
 });
-identities && crossBrand && subclassed && computed.get() === 3 && callbackReceiver === computed &&
-foreignUntrack && localComputed.get() === 2 && foreignCurrent;
+var crossIntrospection = false;
+localComputed.get();
+var foreignSources = foreignSignal.subtle.introspectSources(localComputed);
+var foreignComputedValue = computed.get() === 3;
+var localSources = Signal.subtle.introspectSources(computed);
+var crossWatcher = new foreignSignal.subtle.Watcher(function() {});
+crossWatcher.watch(localComputed);
+crossIntrospection = foreignSources.length === 1 && foreignSources[0] === local &&
+    localSources.length === 1 && localSources[0] === foreign &&
+    Signal.subtle.introspectSources(crossWatcher)[0] === localComputed &&
+    foreignSignal.subtle.introspectSinks(localComputed)[0] === crossWatcher &&
+    foreignSignal.subtle.hasSources(localComputed) && Signal.subtle.hasSources(crossWatcher) &&
+    Signal.subtle.hasSinks(localComputed);
+crossWatcher.unwatch(localComputed);
+identities && crossBrand && subclassed && foreignComputedValue && callbackReceiver === computed &&
+foreignUntrack && localComputed.get() === 2 && foreignCurrent && crossIntrospection;
 "#;
 
 const SIGNAL_OPTIONS_SOURCE: &str = r#"
@@ -914,6 +1048,47 @@ fn signal_current_computed_tracks_nested_owners_for_every_dispatch_batch() {
         SIGNAL_CURRENT_COMPUTED_SOURCE,
         8_757,
         "signals-current-computed",
+        true,
+    );
+}
+
+/// Covers ordered graph snapshots, live-edge visibility, brands, and frozen read-only access.
+#[test]
+fn signal_introspection_reports_ordered_live_graph_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_758,
+        "signals-introspection",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_759,
+        "signals-introspection",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_760,
+        "signals-introspection",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_761,
+        "signals-introspection",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_762,
+        "signals-introspection",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_INTROSPECTION_SOURCE,
+        8_763,
+        "signals-introspection",
         true,
     );
 }

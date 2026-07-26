@@ -217,6 +217,25 @@ impl Trace for SignalStateRoots<'_> {
     }
 }
 
+struct SignalIntrospectionRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    entries: Vec<Value>,
+    storage: Option<GcRef<PropertyStorage>>,
+    elements: Option<GcRef<ArrayElements>>,
+}
+
+impl Trace for SignalIntrospectionRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.entries.trace(tracer);
+        self.storage.trace(tracer);
+        self.elements.trace(tracer);
+    }
+}
+
 impl Trace for ComputedSignal {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -263,6 +282,260 @@ impl Isolate {
         self.signal_runtime
             .computing
             .unwrap_or(Value::from_immediate(Immediate::Undefined))
+    }
+
+    /// Returns a fresh ordered snapshot of the Computed or Watcher source edges.
+    pub(crate) fn signal_introspect_sources(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let subject = self.signal_introspection_argument(site)?;
+        let entries = if let Ok(computed) = self.signal_computed_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(computed, self.types.signal_computed)
+                        .map_err(ExecutionError::NoGcBorrow)
+                        .and_then(|node| node.sources.try_snapshot())
+                })
+            })?
+        } else if let Ok(watcher) = self.signal_watcher_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(watcher, self.types.signal_watcher)
+                        .map_err(ExecutionError::NoGcBorrow)
+                        .and_then(|node| node.watched.try_snapshot())
+                })
+            })?
+        } else {
+            return Err(ExecutionError::NotObject(subject));
+        };
+        self.publish_signal_introspection_snapshot(site, entries)
+    }
+
+    /// Returns a fresh ordered snapshot of the live State or Computed sink edges.
+    pub(crate) fn signal_introspect_sinks(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let subject = self.signal_introspection_argument(site)?;
+        let entries = if let Ok(state) = self.signal_state_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let state = scope.root(state).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(state, self.types.signal_state)
+                        .map_err(ExecutionError::NoGcBorrow)
+                        .and_then(|node| node.sinks.try_snapshot())
+                })
+            })?
+        } else if let Ok(computed) = self.signal_computed_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(computed, self.types.signal_computed)
+                        .map_err(ExecutionError::NoGcBorrow)
+                        .and_then(|node| node.sinks.try_snapshot())
+                })
+            })?
+        } else {
+            return Err(ExecutionError::NotObject(subject));
+        };
+        let entries = self.filter_live_signal_sinks(entries)?;
+        self.publish_signal_introspection_snapshot(site, entries)
+    }
+
+    /// Reports whether a Computed or Watcher currently retains any ordered source edge.
+    pub(crate) fn signal_has_sources(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let subject = self.signal_introspection_argument(site)?;
+        let has_sources = if let Ok(computed) = self.signal_computed_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(computed, self.types.signal_computed)
+                        .map(|node| !node.sources.entries.is_empty())
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else if let Ok(watcher) = self.signal_watcher_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(watcher, self.types.signal_watcher)
+                        .map(|node| !node.watched.entries.is_empty())
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else {
+            return Err(ExecutionError::NotObject(subject));
+        };
+        Ok(Value::from_immediate(if has_sources {
+            Immediate::True
+        } else {
+            Immediate::False
+        }))
+    }
+
+    /// Reports whether a State or Computed currently has any recursively live sink edge.
+    pub(crate) fn signal_has_sinks(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let subject = self.signal_introspection_argument(site)?;
+        let has_sinks = if let Ok(state) = self.signal_state_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let state = scope.root(state).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(state, self.types.signal_state)
+                        .map(|node| node.live_sinks != 0)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else if let Ok(computed) = self.signal_computed_reference(subject) {
+            self.heap.with_running_scope(|scope| {
+                let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(computed, self.types.signal_computed)
+                        .map(|node| node.live_sinks != 0)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?
+        } else {
+            return Err(ExecutionError::NotObject(subject));
+        };
+        Ok(Value::from_immediate(if has_sinks {
+            Immediate::True
+        } else {
+            Immediate::False
+        }))
+    }
+
+    /// Removes cold Computed dependency-index edges while preserving live sink insertion order.
+    fn filter_live_signal_sinks(
+        &mut self,
+        mut entries: Vec<Value>,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let mut write = 0;
+        for read in 0..entries.len() {
+            let sink = entries[read];
+            let live = if self.signal_watcher_reference(sink).is_ok() {
+                true
+            } else {
+                let computed = self.signal_computed_reference(sink)?;
+                self.heap.with_running_scope(|scope| {
+                    let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow(computed, self.types.signal_computed)
+                            .map(|node| node.live_sinks != 0)
+                            .map_err(ExecutionError::NoGcBorrow)
+                    })
+                })?
+            };
+            if live {
+                entries[write] = sink;
+                write += 1;
+            }
+        }
+        entries.truncate(write);
+        Ok(entries)
+    }
+
+    #[inline(always)]
+    fn signal_introspection_argument(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        self.ensure_signal_runtime_unfrozen(site.this_value)?;
+        self.call_argument(site, 0)
+            .map(|argument| argument.unwrap_or(Value::from_immediate(Immediate::Undefined)))
+    }
+
+    /// Publishes the result before property definitions so every later GC sees the Array root.
+    fn publish_signal_introspection_snapshot(
+        &mut self,
+        site: &CallSite,
+        entries: Vec<Value>,
+    ) -> Result<(), ExecutionError> {
+        let length = self.length_atom()?;
+        let shape = self
+            .shapes
+            .transition_add(
+                ShapeId::EMPTY,
+                length,
+                PropertyAttributes::data(true, false, false),
+            )
+            .map_err(ExecutionError::Shape)?;
+        let mut elements = ArrayElements::with_capacity(entries.len())
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        for (index, value) in entries.iter().copied().enumerate() {
+            let index = u32::try_from(index).map_err(|_| ExecutionError::InvalidArrayLength)?;
+            elements
+                .set(index, value)
+                .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        }
+        let prototype = self.realm.array_prototype.expect("Array initialized");
+        let mut roots = SignalIntrospectionRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            prototype,
+            entries,
+            storage: None,
+            elements: None,
+        };
+        let storage = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.property_storage,
+                0,
+                PropertyStorage::new(Box::new([safe_integer_value(roots.entries.len() as u64)])),
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.storage = Some(storage);
+        let elements = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.array_elements,
+                0,
+                elements,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        roots.elements = Some(elements);
+        let array = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.array,
+                0,
+                0,
+                ArrayObject {
+                    ordinary: OrdinaryObject {
+                        shape,
+                        extensible: true,
+                        storage: roots.storage,
+                        prototype: roots.prototype,
+                    },
+                    elements: roots.elements,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(array.raw()),
+        )
     }
 
     /// Calls one callback with dependency ownership suspended until normal or abrupt completion.

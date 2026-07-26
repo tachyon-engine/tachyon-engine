@@ -258,6 +258,10 @@ pub(crate) enum NativeFunction {
     SignalWatcherGetPending,
     SignalUntrack,
     SignalCurrentComputed,
+    SignalIntrospectSources,
+    SignalIntrospectSinks,
+    SignalHasSources,
+    SignalHasSinks,
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -437,6 +441,8 @@ pub(crate) enum NativeFunction {
     TypedArrayCopyWithin,
     TypedArrayReverse,
     TypedArraySet,
+    TypedArrayJoin,
+    TypedArraySlice,
     TypedArraySearch(TypedArraySearchDirection),
     TypedArrayCallback(TypedArrayCallbackKind),
     ArrayIsArray,
@@ -897,8 +903,12 @@ impl NativeFunction {
             return 1;
         }
         match self {
-            Self::SignalStateSet => 1,
-            Self::SignalUntrack => 1,
+            Self::SignalStateSet
+            | Self::SignalUntrack
+            | Self::SignalIntrospectSources
+            | Self::SignalIntrospectSinks
+            | Self::SignalHasSources
+            | Self::SignalHasSinks => 1,
             Self::SignalStateConstructor
             | Self::SignalComputedConstructor
             | Self::SignalWatcherConstructor => 1,
@@ -1035,8 +1045,10 @@ impl NativeFunction {
             | Self::TypedArrayIncludes
             | Self::TypedArrayFill
             | Self::TypedArraySet
+            | Self::TypedArrayJoin
             | Self::TypedArraySearch(_)
             | Self::TypedArrayCallback(_)
+            | Self::GeneratorNext
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1051,6 +1063,7 @@ impl NativeFunction {
             | Self::ArrayToSorted => 1,
             Self::ArrayCopyWithin
             | Self::TypedArrayCopyWithin
+            | Self::TypedArraySlice
             | Self::ArrayWith
             | Self::ArrayToSpliced
             | Self::ArrayBufferSlice
@@ -1198,7 +1211,6 @@ impl NativeFunction {
             | Self::ArrayValues
             | Self::ArrayEntries
             | Self::ArrayIteratorNext
-            | Self::GeneratorNext
             | Self::IteratorIdentity => 0,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
@@ -1237,6 +1249,10 @@ impl NativeFunction {
             Self::SignalWatcherGetPending => "getPending",
             Self::SignalUntrack => "untrack",
             Self::SignalCurrentComputed => "currentComputed",
+            Self::SignalIntrospectSources => "introspectSources",
+            Self::SignalIntrospectSinks => "introspectSinks",
+            Self::SignalHasSources => "hasSources",
+            Self::SignalHasSinks => "hasSinks",
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",
@@ -1427,6 +1443,8 @@ impl NativeFunction {
             Self::TypedArrayCopyWithin => "copyWithin",
             Self::TypedArrayReverse => "reverse",
             Self::TypedArraySet => "set",
+            Self::TypedArrayJoin => "join",
+            Self::TypedArraySlice => "slice",
             Self::TypedArraySearch(direction) => direction.name(),
             Self::TypedArrayCallback(kind) => kind.name(),
             Self::ArrayIsArray => "isArray",
@@ -2176,6 +2194,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
+        | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)

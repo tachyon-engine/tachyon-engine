@@ -1,6 +1,7 @@
 mod control;
 mod instructions;
 mod names_literals;
+mod suspend_points;
 
 use tachyon_bytecode::MAX_ENCODED_INSTRUCTION_WORDS;
 
@@ -21,6 +22,7 @@ pub(super) struct LoweringCapacity {
     pub(super) break_targets: usize,
     pub(super) continue_targets: usize,
     pub(super) handlers: usize,
+    pub(super) suspend_points: usize,
     pub(super) max_handler_depth: u32,
     pub(super) max_completion_depth: u32,
 }
@@ -107,6 +109,7 @@ pub(super) fn estimate_entry(
         break_targets,
         continue_targets,
         handlers,
+        suspend_points: 0,
         max_handler_depth,
         max_completion_depth,
     })
@@ -193,6 +196,10 @@ pub(super) fn estimate_function(
         })?;
     let break_targets = control::statements_switch_count(&function.body)?;
     let continue_targets = control::statements_loop_count(&function.body)?;
+    let suspend_points = suspend_points::function_suspend_point_count(
+        &function.body,
+        &function.parameter_initializers,
+    )?;
 
     Ok(LoweringCapacity {
         bytecode_words,
@@ -202,6 +209,7 @@ pub(super) fn estimate_function(
         break_targets,
         continue_targets,
         handlers,
+        suspend_points,
         max_handler_depth,
         max_completion_depth,
     })

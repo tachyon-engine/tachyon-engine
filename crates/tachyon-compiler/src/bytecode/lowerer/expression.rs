@@ -390,6 +390,40 @@ impl Lowerer<'_> {
                 )?;
                 Ok(destination)
             }
+            HirExpressionKind::Yield(argument) => {
+                let source = match argument {
+                    Some(argument) => self.expression(argument)?,
+                    None => self.load_undefined(expression.span)?,
+                };
+                let destination = self.register()?;
+                let id = SuspendPointId::new(
+                    u32::try_from(self.suspend_points.len())
+                        .map_err(|_| CompileError::RegisterOverflow)?,
+                );
+                let instruction = self
+                    .builder
+                    .emit(
+                        Opcode::Yield,
+                        &[source.index(), destination.index(), id.index()],
+                        tachyon_bytecode::SourceSpan {
+                            start: expression.span.start,
+                            end: expression.span.end,
+                        },
+                    )
+                    .map_err(CompileError::Builder)?;
+                let resume_offset = self
+                    .builder
+                    .current_offset()
+                    .map_err(CompileError::Builder)?;
+                self.suspend_points.push(SuspendPoint {
+                    id,
+                    instruction,
+                    resume_offset,
+                    destination,
+                    completion_depth: self.finally_depth,
+                });
+                Ok(destination)
+            }
             HirExpressionKind::Sequence(expressions) => {
                 let mut result = None;
                 for expression in expressions.iter() {

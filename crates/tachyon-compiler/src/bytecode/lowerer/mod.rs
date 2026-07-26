@@ -4,7 +4,8 @@ mod statement;
 
 use tachyon_bytecode::{
     BindingLocation, BindingPlanEntry, BytecodeBuilder, BytecodeConstant, HandlerEntry,
-    HandlerKind, Label, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan,
+    HandlerKind, Label, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan, SuspendPoint,
+    SuspendPointId,
 };
 
 use crate::hir::HirObjectExpressionPart;
@@ -30,6 +31,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) break_targets: Vec<ControlTarget>,
     pub(super) continue_targets: Vec<ControlTarget>,
     pub(super) handlers: Vec<Option<HandlerEntry>>,
+    pub(super) suspend_points: Vec<SuspendPoint>,
     pub(super) finally_depth: u32,
     /// Number of dynamically-entered lexical environments in the current function.
     pub(super) environment_depth: u32,

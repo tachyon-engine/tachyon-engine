@@ -541,6 +541,27 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::TypedArrayJoinSeparator {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_join_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::TypedArraySliceStart
+                            | ConversionConsumer::TypedArraySliceEnd
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_slice_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::ArrayInsertLength {
                         let state = self.pending_array_insert_reference(continuation.receiver)?;
                         return self.resume_array_insert_conversion(
@@ -1183,6 +1204,13 @@ impl Isolate {
                 | ConversionConsumer::TypedArraySetLength
                 | ConversionConsumer::TypedArraySetElement => {
                     unreachable!("TypedArray set conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayJoinSeparator => {
+                    unreachable!("TypedArray join conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArraySliceStart
+                | ConversionConsumer::TypedArraySliceEnd => {
+                    unreachable!("TypedArray slice conversion resumes inside its state machine")
                 }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")

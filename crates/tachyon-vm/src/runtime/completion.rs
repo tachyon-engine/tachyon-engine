@@ -260,6 +260,29 @@ impl CompletionStack {
         }
     }
 
+    /// Returns a native continuation at a frame-owned index without changing stack ownership.
+    #[inline]
+    pub(crate) fn native_at(&self, index: usize) -> Option<NativeContinuation> {
+        match self.entries.get(index) {
+            Some(CompletionEntry::Native(continuation)) => Some(*continuation),
+            Some(CompletionEntry::Language(_)) | None => None,
+        }
+    }
+
+    /// Replaces one frame-owned native continuation after a generator yield resumes.
+    #[inline]
+    pub(crate) fn replace_native(
+        &mut self,
+        index: usize,
+        continuation: NativeContinuation,
+    ) -> bool {
+        let Some(CompletionEntry::Native(entry)) = self.entries.get_mut(index) else {
+            return false;
+        };
+        *entry = continuation;
+        true
+    }
+
     /// Drops abandoned callback trampolines without crossing a frame or language checkpoint.
     #[inline]
     pub(crate) fn discard_native_suffix(&mut self, frame_completion_base: u32) {

@@ -11,7 +11,7 @@ use crate::{
         callable::{CallSite, ResolvedCallTarget},
         code::CodeId,
         environment::Environment,
-        fiber::{NativeContinuation, NativeContinuationSite, VmRoots},
+        fiber::{Fiber, NativeContinuation, NativeContinuationSite, VmRoots},
     },
 };
 use tachyon_bytecode::FunctionId;
@@ -61,6 +61,9 @@ pub(crate) struct GeneratorObject {
     pub(crate) code: CodeId,
     pub(crate) function: FunctionId,
     activation: Option<GeneratorActivation>,
+    caller: Option<Fiber>,
+    paused: Option<Fiber>,
+    resume_destination: Option<u32>,
     pub(crate) state: GeneratorState,
 }
 
@@ -77,6 +80,9 @@ impl GeneratorObject {
             code,
             function,
             activation: Some(activation),
+            caller: None,
+            paused: None,
+            resume_destination: None,
             state: GeneratorState::SuspendedStart,
         }
     }
@@ -96,6 +102,12 @@ impl Trace for GeneratorObject {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.ordinary.trace(tracer);
         self.activation.trace(tracer);
+        if let Some(caller) = &mut self.caller {
+            caller.trace_roots(tracer);
+        }
+        if let Some(paused) = &mut self.paused {
+            paused.trace_roots(tracer);
+        }
     }
 }
 
@@ -174,9 +186,7 @@ impl Isolate {
                 return self.write(site.caller_base, site.destination, result);
             }
             GeneratorState::Executing => return Err(ExecutionError::GeneratorExecuting),
-            GeneratorState::SuspendedYield => {
-                return Err(ExecutionError::UnsupportedGeneratorYieldResume);
-            }
+            GeneratorState::SuspendedYield => return self.resume_generator_yield(generator, site),
             GeneratorState::SuspendedStart => {}
         }
         let activation = self.generator_activation(generator)?;
@@ -196,49 +206,59 @@ impl Isolate {
             },
             site.this_value,
         );
+        let caller_fiber = core::mem::take(&mut self.fiber);
+        if let Err((error, caller_fiber)) = self.set_generator_caller(generator, caller_fiber) {
+            self.fiber = caller_fiber;
+            return Err(error);
+        }
         self.fiber
             .completions
+            .set_limit(self.stack_limits.max_completions);
+        let pushed = self
+            .fiber
+            .completions
             .push_native(continuation)
-            .map_err(Self::completion_stack_error)?;
-        self.set_generator_state(generator, GeneratorState::Executing)?;
-        let pushed = self.push_call_frame(
-            ResolvedCallTarget {
-                code: header.code,
-                function: header.function,
-                environment: activation.environment,
-                kind: FunctionKind::Generator,
-                layout,
-                strictness,
-            },
-            CallSite {
-                caller_base: site.caller_base,
-                destination: site.destination,
-                callee: activation.callee,
-                argument_base: 0,
-                argument_source: None,
-                argument_prefix: Some(activation.argument_prefix),
-                argument_prefix_offset: 0,
-                argument_prefix_count: activation.argument_count,
-                argument_count: activation.argument_count,
-                this_value: activation.this_value,
-                new_target: Value::from_immediate(Immediate::Undefined),
-                construct_receiver: None,
-                call_site: site.call_site,
-            },
-        );
+            .map_err(Self::completion_stack_error)
+            .and_then(|()| {
+                self.set_generator_state(generator, GeneratorState::Executing)?;
+                self.push_call_frame(
+                    ResolvedCallTarget {
+                        code: header.code,
+                        function: header.function,
+                        environment: activation.environment,
+                        kind: FunctionKind::Generator,
+                        layout,
+                        strictness,
+                    },
+                    CallSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        callee: activation.callee,
+                        argument_base: 0,
+                        argument_source: None,
+                        argument_prefix: Some(activation.argument_prefix),
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: activation.argument_count,
+                        argument_count: activation.argument_count,
+                        this_value: activation.this_value,
+                        new_target: Value::from_immediate(Immediate::Undefined),
+                        construct_receiver: None,
+                        call_site: site.call_site,
+                    },
+                )
+            });
         if let Err(error) = pushed {
+            let _ = self.fiber.completions.pop_native();
             self.set_generator_state(generator, GeneratorState::SuspendedStart)?;
-            self.pop_native_continuation()?;
+            self.restore_generator_caller_fiber(generator)?;
             return Err(error);
         }
         self.clear_generator_activation(generator)?;
-        let frame = self
-            .fiber
+        self.fiber
             .frames
             .last_mut()
-            .expect("generator resume publishes one bytecode frame");
-        frame.return_register = None;
-        frame.return_continuation = true;
+            .expect("generator resume publishes one bytecode frame")
+            .return_continuation = true;
         Ok(())
     }
 
@@ -250,6 +270,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let generator = self.generator_reference(continuation.first())?;
         self.set_generator_state(generator, GeneratorState::Completed)?;
+        self.restore_generator_caller_fiber(generator)?;
         let result = self.create_iterator_result(value, true)?;
         let site = continuation.site();
         self.write(site.caller_base, site.destination, result)
@@ -261,7 +282,8 @@ impl Isolate {
         continuation: NativeContinuation,
     ) -> Result<(), ExecutionError> {
         let generator = self.generator_reference(continuation.first())?;
-        self.set_generator_state(generator, GeneratorState::Completed)
+        self.set_generator_state(generator, GeneratorState::Completed)?;
+        self.restore_generator_caller_fiber(generator)
     }
 
     fn generator_reference(&self, value: Value) -> Result<GcRef<GeneratorObject>, ExecutionError> {
@@ -304,6 +326,262 @@ impl Isolate {
                     .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
             })
         })
+    }
+
+    /// Stores the caller in the generator so every allocation safepoint traces the suspended roots.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the allocation-free rollback path must return full Fiber ownership"
+    )]
+    fn set_generator_caller(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        caller: Fiber,
+    ) -> Result<(), (ExecutionError, Fiber)> {
+        let mut caller = Some(caller);
+        let result = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.caller.is_some() {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.caller = caller.take();
+                Ok(())
+            })
+        });
+        result.map_err(|error| {
+            (
+                error,
+                caller.expect("failed caller publication retains fiber ownership"),
+            )
+        })
+    }
+
+    /// Takes the caller only after generator execution has yielded or completed.
+    fn take_generator_caller(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+    ) -> Result<Fiber, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .caller
+                    .take()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
+            })
+        })
+    }
+
+    /// Moves a suspended generator fiber back into the isolate and drops the empty execution fiber.
+    fn restore_generator_caller_fiber(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+    ) -> Result<(), ExecutionError> {
+        let caller = self.take_generator_caller(generator)?;
+        let _generator_fiber = core::mem::replace(&mut self.fiber, caller);
+        Ok(())
+    }
+
+    /// Suspends the active generator fiber and publishes one observable `{ value, done: false }`.
+    pub(crate) fn suspend_generator_yield(
+        &mut self,
+        code: CodeId,
+        instruction: tachyon_bytecode::WordOffset,
+        source: u32,
+        destination: u32,
+        suspend_id: u32,
+        base: u32,
+    ) -> Result<(), ExecutionError> {
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .copied()
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let continuation_index = frame
+            .completion_base
+            .checked_sub(1)
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
+            as usize;
+        let continuation = self
+            .fiber
+            .completions
+            .native_at(continuation_index)
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let generator = self.generator_reference(continuation.first())?;
+        let value = self.read(base, source)?;
+        let point = self
+            .loaded_code(code)?
+            .module
+            .function(frame.function)
+            .and_then(|function| function.suspend_points().get(suspend_id as usize).copied())
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        if point.instruction != instruction
+            || point.destination.index() != destination
+            || point.resume_offset != frame.pc
+        {
+            return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+        }
+        let paused = core::mem::take(&mut self.fiber);
+        let caller = match self.set_generator_paused(generator, paused, destination) {
+            Ok(caller) => caller,
+            Err((error, paused)) => {
+                self.fiber = paused;
+                return Err(error);
+            }
+        };
+        self.fiber = caller;
+        let result = self.create_iterator_result(value, false)?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            result,
+        )
+    }
+
+    /// Takes a paused activation without copying its register, handler, or completion storage.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the allocation-free rollback path must return full Fiber ownership"
+    )]
+    fn swap_generator_caller_for_paused(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        caller: Fiber,
+        continuation: NativeContinuation,
+        resume_value: Value,
+    ) -> Result<Fiber, (ExecutionError, Fiber)> {
+        let mut caller = Some(caller);
+        let result = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.caller.is_some() {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                let destination = generator
+                    .resume_destination
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let paused = generator
+                    .paused
+                    .as_mut()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let frame = paused
+                    .frames
+                    .last()
+                    .copied()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let continuation_index = frame
+                    .completion_base
+                    .checked_sub(1)
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
+                    as usize;
+                let destination_index = frame.base as usize + destination as usize;
+                let destination_slot = paused.registers.get_mut(destination_index).ok_or(
+                    ExecutionError::InvalidRegister(tachyon_bytecode::RegisterId::new(destination)),
+                )?;
+                if !paused
+                    .completions
+                    .replace_native(continuation_index, continuation)
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                *destination_slot = resume_value;
+                generator.state = GeneratorState::Executing;
+                generator.caller = caller.take();
+                generator.resume_destination = None;
+                Ok(generator
+                    .paused
+                    .take()
+                    .expect("validated paused generator fiber remains present"))
+            })
+        });
+        result.map_err(|error| {
+            (
+                error,
+                caller.expect("failed generator resume retains caller fiber ownership"),
+            )
+        })
+    }
+
+    /// Publishes a complete paused fiber and its resume destination as one generator state change.
+    #[allow(
+        clippy::result_large_err,
+        reason = "the allocation-free rollback path must return full Fiber ownership"
+    )]
+    fn set_generator_paused(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        paused: Fiber,
+        destination: u32,
+    ) -> Result<Fiber, (ExecutionError, Fiber)> {
+        let mut paused = Some(paused);
+        let result = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.caller.is_none()
+                    || generator.paused.is_some()
+                    || generator.resume_destination.is_some()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                let caller = generator
+                    .caller
+                    .take()
+                    .expect("validated generator caller remains present");
+                generator.paused = paused.take();
+                generator.resume_destination = Some(destination);
+                generator.state = GeneratorState::SuspendedYield;
+                Ok(caller)
+            })
+        });
+        result.map_err(|error| {
+            (
+                error,
+                paused.expect("failed paused publication retains fiber ownership"),
+            )
+        })
+    }
+
+    /// Restores a paused generator fiber and injects the next(value) result at its yield destination.
+    fn resume_generator_yield(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let resume_value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let continuation = NativeContinuation::generator_resume(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            site.this_value,
+        );
+        let caller = core::mem::take(&mut self.fiber);
+        match self.swap_generator_caller_for_paused(generator, caller, continuation, resume_value) {
+            Ok(paused) => {
+                self.fiber = paused;
+                Ok(())
+            }
+            Err((error, caller)) => {
+                self.fiber = caller;
+                Err(error)
+            }
+        }
     }
 
     /// Releases the creation-time roots after their ownership is visible through the frame.

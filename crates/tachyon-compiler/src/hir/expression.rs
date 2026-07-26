@@ -194,6 +194,7 @@ pub enum HirExpressionKind {
     Class(HirClass),
     This,
     NewTarget,
+    Yield(Option<Box<HirExpression>>),
     Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
     ObjectSpread(Arc<[HirObjectExpressionPart]>),
@@ -408,6 +409,19 @@ pub(super) fn lower_expression(
             if property.meta.name == "new" && property.property.name == "target" =>
         {
             HirExpressionKind::NewTarget
+        }
+        Expression::YieldExpression(expression) => {
+            if expression.delegate {
+                return Err(unsupported(source.name(), span, "delegated yield"));
+            }
+            HirExpressionKind::Yield(
+                expression
+                    .argument
+                    .as_ref()
+                    .map(|argument| lower_expression(argument, source, semantic, functions))
+                    .transpose()?
+                    .map(Box::new),
+            )
         }
         Expression::SequenceExpression(sequence) => {
             let mut expressions = Vec::with_capacity(sequence.expressions.len());

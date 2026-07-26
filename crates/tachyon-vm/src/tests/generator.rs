@@ -13,6 +13,7 @@ function* values(value) {
 var functionPrototype = Object.getPrototypeOf(values);
 var ownPrototype = values.prototype;
 var generatorPrototype = Object.getPrototypeOf(ownPrototype);
+var nextMetadata = generatorPrototype.next.name === "next" && generatorPrototype.next.length === 1;
 var generator = values(41);
 var delayed = entered === 0;
 var instanceChain = Object.getPrototypeOf(generator) === ownPrototype;
@@ -50,9 +51,47 @@ try { reentrant.next(); }
 catch (error) { executingRejected = error instanceof TypeError; }
 var afterReentry = reentrant.next();
 
-delayed && instanceChain && functionChain && descriptorOk && completionOk &&
+delayed && instanceChain && functionChain && nextMetadata && descriptorOk && completionOk &&
     brandRejected && newRejected && throwIdentity && afterThrow.done &&
     afterThrow.value === undefined && executingRejected && afterReentry.done;
+"#;
+
+const GENERATOR_YIELD_SOURCE: &str = r#"
+var entered = 0;
+function* exchange() {
+    entered = entered + 1;
+    var first = yield 1;
+    var second = yield first + 1;
+    return second + 1;
+}
+var generator = exchange();
+var before = entered === 0;
+var first = generator.next(999);
+var second = generator.next(40);
+var third = generator.next(41);
+var fourth = generator.next(100);
+var exchangeOk = before && entered === 1 && first.value === 1 && !first.done &&
+    second.value === 41 && !second.done && third.value === 42 && third.done &&
+    fourth.value === undefined && fourth.done;
+
+var finallyValue = 0;
+function* protectedYield() {
+    try {
+        yield 4;
+    } finally {
+        var injected = yield 5;
+        finallyValue = injected;
+    }
+}
+var protectedGenerator = protectedYield();
+var protectedFirst = protectedGenerator.next();
+var protectedSecond = protectedGenerator.next(10);
+var protectedThird = protectedGenerator.next(77);
+var finallyOk = protectedFirst.value === 4 && !protectedFirst.done &&
+    protectedSecond.value === 5 && !protectedSecond.done && protectedThird.done &&
+    protectedThird.value === undefined && finallyValue === 77;
+
+exchangeOk && finallyOk;
 "#;
 
 #[test]
@@ -67,6 +106,47 @@ fn generator_return_slice_runs_for_every_dispatch_batch() {
 #[test]
 fn generator_state_and_arguments_survive_forced_major_collection() {
     assert_generator_source::<8>(true);
+}
+
+#[test]
+fn generator_yield_and_next_value_run_for_every_dispatch_batch() {
+    assert_generator_yield_source::<1>(false);
+    assert_generator_yield_source::<2>(false);
+    assert_generator_yield_source::<4>(false);
+    assert_generator_yield_source::<8>(false);
+    assert_generator_yield_source::<16>(false);
+}
+
+#[test]
+fn generator_yield_state_survives_forced_major_collection() {
+    assert_generator_yield_source::<8>(true);
+}
+
+/// Exercises repeated Fiber ownership transfer without growing the native Rust call stack.
+#[test]
+fn generator_large_resume_loop_uses_constant_native_stack() {
+    let source = r#"
+function* count(limit) {
+    var index = 0;
+    while (index < limit) {
+        yield index;
+        index = index + 1;
+    }
+    return index;
+}
+var generator = count(512);
+var expected = 0;
+var valid = true;
+while (expected < 512) {
+    var result = generator.next();
+    valid = valid && !result.done && result.value === expected;
+    expected = expected + 1;
+}
+var completed = generator.next();
+valid && completed.done && completed.value === 512;
+"#;
+    let (_, outcome) = execute_generator_fixture(2_502, source);
+    assert_eq!(outcome.as_immediate(), Some(Immediate::True));
 }
 
 /// Verifies exact suspended storage and constant-space completed `.next()` behavior at large argc.
@@ -143,6 +223,40 @@ fn assert_generator_source<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Compiles and runs the complete ordinary-yield contract under one dispatch/collection policy.
+fn assert_generator_yield_source<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_600 + N as u32),
+                SourceName::new("generator-yield-slice"),
+                MediaType::JavaScript,
+                Arc::from(GENERATOR_YIELD_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("generator yield fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 200_000,
+                quantum: 200_000,
+            },
+        )
+        .expect("generator yield fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "yield dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

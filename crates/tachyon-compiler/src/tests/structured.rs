@@ -556,21 +556,23 @@ fn compiler_owns_anonymous_and_nested_function_expression_stencils() {
 }
 
 #[test]
-/// Freezes generator identity before the VM gains resume and yield execution support.
+/// Freezes generator identity independently from each later suspension point.
 fn compiler_freezes_generator_function_kind() {
-    let source = source(
+    let module_source = source(
         MediaType::JavaScript,
         "function* values() { return 1; } values;",
     );
     let hir = Compiler
-        .lower_to_hir(source.clone(), CompileOptions::default())
+        .lower_to_hir(module_source.clone(), CompileOptions::default())
         .unwrap();
     let [function] = hir.functions() else {
         panic!("expected one generator function stencil");
     };
     assert_eq!(function.kind, HirFunctionKind::Generator);
 
-    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let module = Compiler
+        .compile(module_source, CompileOptions::default())
+        .unwrap();
     assert_eq!(module.functions().len(), 2);
     assert_eq!(
         module.functions()[1].kind(),
@@ -581,6 +583,64 @@ fn compiler_freezes_generator_function_kind() {
             .unwrap()
             .contains("Return")
     );
+}
+
+#[test]
+/// Owns ordinary yield HIR and publishes contiguous verified resume metadata without yield*.
+fn compiler_emits_generator_yield_suspend_points() {
+    let module_source = source(
+        MediaType::JavaScript,
+        "function* values() { var first = yield 1; return yield first; } values;",
+    );
+    let hir = Compiler
+        .lower_to_hir(module_source.clone(), CompileOptions::default())
+        .unwrap();
+    let [function] = hir.functions() else {
+        panic!("expected one generator function stencil");
+    };
+    assert!(matches!(
+        function.body[0].kind,
+        HirStatementKind::VariableDeclaration(_)
+    ));
+    let module = Compiler
+        .compile(module_source, CompileOptions::default())
+        .unwrap();
+    let function = &module.functions()[1];
+    assert_eq!(function.suspend_points().len(), 2);
+    for (index, point) in function.suspend_points().iter().enumerate() {
+        assert_eq!(point.id.index(), index as u32);
+        let instruction = tachyon_bytecode::decode_instruction(
+            function.bytecode().bytecode().words(),
+            point.instruction,
+        )
+        .unwrap();
+        assert_eq!(instruction.opcode, tachyon_bytecode::Opcode::Yield);
+        assert_eq!(instruction.operands[1], point.destination.index());
+        assert_eq!(instruction.operands[2], point.id.index());
+        assert_eq!(
+            point.resume_offset.index(),
+            point.instruction.index() + u32::from(instruction.word_len)
+        );
+    }
+    let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+    assert!(disassembly.contains("Yield"));
+
+    let error = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "function* delegated(values) { yield* values; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CompileError::UnsupportedSyntax {
+            syntax: "delegated yield",
+            ..
+        }
+    ));
 }
 
 #[test]

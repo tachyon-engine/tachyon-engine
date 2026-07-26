@@ -114,6 +114,7 @@ fn lower_entry(
         break_targets: Vec::with_capacity(entry_capacity.break_targets),
         continue_targets: Vec::with_capacity(entry_capacity.continue_targets),
         handlers: Vec::with_capacity(entry_capacity.handlers),
+        suspend_points: Vec::with_capacity(entry_capacity.suspend_points),
         finally_depth: 0,
         environment_depth: 0,
         next_register: 0,
@@ -209,7 +210,9 @@ fn lower_entry(
         &[result.index()],
         SourceSpan { start: 0, end: 0 },
     )?;
+    debug_assert!(lowerer.suspend_points.len() <= entry_capacity.suspend_points);
     let handlers = freeze_handlers(lowerer.handlers)?;
+    let suspend_points = lowerer.suspend_points.into();
     let binding_plan = lowerer.binding_plan.into();
     let (bytecode, source_map, register_count) =
         lowerer.builder.finish().map_err(CompileError::Builder)?;
@@ -236,7 +239,7 @@ fn lower_entry(
         },
         source_map,
         handlers,
-        suspend_points: Default::default(),
+        suspend_points,
         feedback_sites: Default::default(),
         binding_plan,
         environment_record_kind: if environments.entry_slots.is_empty() {
@@ -922,6 +925,7 @@ fn lower_function(
         break_targets: Vec::with_capacity(function_capacity.break_targets),
         continue_targets: Vec::with_capacity(function_capacity.continue_targets),
         handlers: Vec::with_capacity(function_capacity.handlers),
+        suspend_points: Vec::with_capacity(function_capacity.suspend_points),
         finally_depth: 0,
         environment_depth: 0,
         next_register: 0,
@@ -1066,7 +1070,9 @@ fn lower_function(
             .find(|slot| slot.id == binding.id)
             .map(|slot| slot.slot)
     });
+    debug_assert!(lowerer.suspend_points.len() <= function_capacity.suspend_points);
     let handlers = freeze_handlers(lowerer.handlers)?;
+    let suspend_points = lowerer.suspend_points.into();
     let binding_plan = lowerer.binding_plan.into();
     // Unused parameters own frame registers even when no instruction mentions them. The bytecode
     // builder only observes encoded operands, so retain the lowerer's complete allocation frontier.
@@ -1128,7 +1134,7 @@ fn lower_function(
             },
             source_map,
             handlers,
-            suspend_points: Default::default(),
+            suspend_points,
             feedback_sites: Default::default(),
             binding_plan,
             environment_record_kind: EnvironmentRecordKind::Function,

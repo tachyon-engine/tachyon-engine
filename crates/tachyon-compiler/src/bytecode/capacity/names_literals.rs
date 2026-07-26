@@ -269,6 +269,11 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
         }
         HirExpressionKind::SuperStaticMember(_) => Ok(1),
         HirExpressionKind::SuperComputedMember(property) => expression_scope_name_count(property),
+        HirExpressionKind::Yield(argument) => argument
+            .as_deref()
+            .map(expression_scope_name_count)
+            .transpose()
+            .map(|count| count.unwrap_or(0)),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

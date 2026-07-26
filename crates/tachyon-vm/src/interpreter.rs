@@ -1710,7 +1710,13 @@ impl Isolate {
                     .expect("return retains its frame")
                     .has_finally
                 {
-                    if self.fiber.frames.len() == 1 {
+                    if self.fiber.frames.len() == 1
+                        && !self
+                            .fiber
+                            .frames
+                            .last()
+                            .is_some_and(|frame| frame.return_continuation)
+                    {
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -1727,7 +1733,13 @@ impl Isolate {
                     .expect("return retains its frame")
                     .has_finally
                 {
-                    if self.fiber.frames.len() == 1 {
+                    if self.fiber.frames.len() == 1
+                        && !self
+                            .fiber
+                            .frames
+                            .last()
+                            .is_some_and(|frame| frame.return_continuation)
+                    {
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -1738,6 +1750,17 @@ impl Isolate {
             Opcode::Throw => {
                 let value = self.read(base, operands[0])?;
                 return self.throw_value(value, instruction_offset);
+            }
+            Opcode::Yield => {
+                self.suspend_generator_yield(
+                    code,
+                    instruction_offset,
+                    operands[0],
+                    operands[1],
+                    operands[2],
+                    base,
+                )?;
+                return Ok(None);
             }
             Opcode::EnterFinally => {
                 let (index, handler) = self
@@ -2204,6 +2227,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::TypedArraySet(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::TypedArraySlice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
@@ -6095,6 +6121,20 @@ impl Isolate {
                     let result = self.signal_current_computed();
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::SignalIntrospectSources) => {
+                    return self.signal_introspect_sources(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalIntrospectSinks) => {
+                    return self.signal_introspect_sinks(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalHasSources) => {
+                    let result = self.signal_has_sources(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::SignalHasSinks) => {
+                    let result = self.signal_has_sinks(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -6173,6 +6213,12 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
                     return self.begin_typed_array_set(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayJoin) => {
+                    return self.begin_typed_array_join(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArraySlice) => {
+                    return self.begin_typed_array_slice(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);
@@ -7158,7 +7204,13 @@ impl Isolate {
     /// Selects top-level completion or the hot ordinary-callee frame return path.
     #[inline(always)]
     fn finish_return(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
-        if self.fiber.frames.len() == 1 {
+        if self.fiber.frames.len() == 1
+            && !self
+                .fiber
+                .frames
+                .last()
+                .is_some_and(|frame| frame.return_continuation)
+        {
             return Ok(Some(RunOutcome::Completed(value)));
         }
         self.return_from_callee(value)
@@ -7512,6 +7564,10 @@ impl Isolate {
                 NativeContinuationKind::TypedArraySet(stage) => {
                     self.resume_typed_array_set(continuation, stage, value)
                 }
+                NativeContinuationKind::TypedArraySlice(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_typed_array_slice(continuation.site(), state, stage, value)
+                }
                 NativeContinuationKind::SignalState(stage) => {
                     self.resume_signal_state(continuation, stage, value)
                 }
@@ -7703,7 +7759,7 @@ impl Isolate {
                     let value = completion
                         .value()
                         .ok_or(ExecutionError::MissingCompletionRecord)?;
-                    if self.fiber.frames.len() == 1 {
+                    if self.fiber.frames.len() == 1 && !frame.return_continuation {
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -7716,7 +7772,7 @@ impl Isolate {
             let value = completion
                 .value()
                 .ok_or(ExecutionError::MissingCompletionRecord)?;
-            if self.fiber.frames.len() == 1 {
+            if self.fiber.frames.len() == 1 && !frame.return_continuation {
                 return Ok(self.unhandled_throw(value));
             }
             let frame = self
