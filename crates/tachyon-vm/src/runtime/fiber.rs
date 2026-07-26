@@ -313,6 +313,8 @@ pub(crate) enum ConversionConsumer {
     TypedArrayJoinSeparator,
     TypedArraySliceStart,
     TypedArraySliceEnd,
+    TypedArraySubarrayStart,
+    TypedArraySubarrayEnd,
     TypedArraySearchFromIndex,
 }
 
@@ -400,6 +402,8 @@ impl ConversionConsumer {
             | Self::TypedArrayJoinSeparator
             | Self::TypedArraySliceStart
             | Self::TypedArraySliceEnd
+            | Self::TypedArraySubarrayStart
+            | Self::TypedArraySubarrayEnd
             | Self::TypedArraySearchFromIndex => None,
         }
     }
@@ -509,6 +513,8 @@ impl ConversionConsumer {
                 | Self::TypedArrayJoinSeparator
                 | Self::TypedArraySliceStart
                 | Self::TypedArraySliceEnd
+                | Self::TypedArraySubarrayStart
+                | Self::TypedArraySubarrayEnd
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -1132,6 +1138,15 @@ pub(crate) enum TypedArraySliceStage {
     Construct,
 }
 
+/// Observable species boundaries in fixed Number `%TypedArray.prototype.subarray%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArraySubarrayStage {
+    Constructor,
+    Species,
+    Construct,
+}
+
 /// Observable callback boundaries in `Signal.State` construction and mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1225,6 +1240,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
     TypedArraySlice(TypedArraySliceStage),
+    TypedArraySubarray(TypedArraySubarrayStage),
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
@@ -1439,6 +1455,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::TypedArraySlice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots one TypedArray subarray state across species access or construction.
+    #[inline]
+    pub(crate) const fn typed_array_subarray(
+        site: NativeContinuationSite,
+        stage: TypedArraySubarrayStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArraySubarray(stage),
             first: state,
             second: retained,
         }

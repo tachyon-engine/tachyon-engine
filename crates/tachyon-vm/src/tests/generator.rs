@@ -94,6 +94,116 @@ var finallyOk = protectedFirst.value === 4 && !protectedFirst.done &&
 exchangeOk && finallyOk;
 "#;
 
+const GENERATOR_ABRUPT_SOURCE: &str = r#"
+var marker = {};
+var replacement = {};
+var entered = 0;
+function* neverEntered() { entered = entered + 1; yield 1; }
+var startReturnGenerator = neverEntered();
+var startReturn = startReturnGenerator.return(11);
+var startReturnOk = entered === 0 && startReturn.value === 11 && startReturn.done &&
+    startReturnGenerator.next().done;
+var startThrowGenerator = neverEntered();
+var startThrowOk = false;
+try { startThrowGenerator.throw(marker); }
+catch (error) { startThrowOk = error === marker; }
+startThrowOk = startThrowOk && entered === 0 && startThrowGenerator.next().done;
+
+function* completedBody() { return 3; }
+var completedGenerator = completedBody();
+var completedFirst = completedGenerator.next();
+var completedReturn = completedGenerator.return(12);
+var completedThrowOk = false;
+try { completedGenerator.throw(marker); }
+catch (error) { completedThrowOk = error === marker; }
+var completedOk = completedFirst.value === 3 && completedFirst.done &&
+    completedReturn.value === 12 && completedReturn.done && completedThrowOk;
+
+function* caughtThrow() {
+    try { yield 1; }
+    catch (error) { yield error; }
+    return 4;
+}
+var caughtGenerator = caughtThrow();
+var caughtFirst = caughtGenerator.next();
+var caughtSecond = caughtGenerator.throw(marker);
+var caughtThird = caughtGenerator.next();
+var caughtOk = caughtFirst.value === 1 && !caughtFirst.done &&
+    caughtSecond.value === marker && !caughtSecond.done &&
+    caughtThird.value === 4 && caughtThird.done;
+
+function* returnThroughFinally() {
+    try { yield 1; }
+    finally { yield 2; }
+}
+var returnGenerator = returnThroughFinally();
+var returnFirst = returnGenerator.next();
+var returnSecond = returnGenerator.return(13);
+var returnThird = returnGenerator.next();
+var returnFinallyOk = returnFirst.value === 1 && !returnFirst.done &&
+    returnSecond.value === 2 && !returnSecond.done &&
+    returnThird.value === 13 && returnThird.done;
+
+function* throwThroughFinally() {
+    try { yield 1; }
+    finally { yield 2; }
+}
+var throwGenerator = throwThroughFinally();
+var throwFirst = throwGenerator.next();
+var throwSecond = throwGenerator.throw(marker);
+var throwThirdOk = false;
+try { throwGenerator.next(); }
+catch (error) { throwThirdOk = error === marker; }
+var throwFinallyOk = throwFirst.value === 1 && !throwFirst.done &&
+    throwSecond.value === 2 && !throwSecond.done && throwThirdOk &&
+    throwGenerator.next().done;
+
+function* overrideReturn() {
+    try { yield 1; }
+    finally { return 14; }
+}
+var overrideReturnGenerator = overrideReturn();
+overrideReturnGenerator.next();
+var overrideReturnResult = overrideReturnGenerator.return(15);
+var overrideReturnOk = overrideReturnResult.value === 14 && overrideReturnResult.done;
+function* overrideThrow() {
+    try { yield 1; }
+    finally { throw replacement; }
+}
+var overrideThrowGenerator = overrideThrow();
+overrideThrowGenerator.next();
+var overrideThrowOk = false;
+try { overrideThrowGenerator.return(16); }
+catch (error) { overrideThrowOk = error === replacement; }
+
+var reentrantReturn;
+function* reenterReturn() { return reentrantReturn.return(1); }
+reentrantReturn = reenterReturn();
+var executingReturnOk = false;
+try { reentrantReturn.next(); }
+catch (error) { executingReturnOk = error instanceof TypeError; }
+var reentrantThrow;
+function* reenterThrow() { return reentrantThrow.throw(marker); }
+reentrantThrow = reenterThrow();
+var executingThrowOk = false;
+try { reentrantThrow.next(); }
+catch (error) { executingThrowOk = error instanceof TypeError; }
+
+var prototype = Object.getPrototypeOf(Object.getPrototypeOf(neverEntered()));
+var metadataOk = prototype.return.name === "return" && prototype.return.length === 1 &&
+    prototype.throw.name === "throw" && prototype.throw.length === 1;
+var returnBrandOk = false;
+var throwBrandOk = false;
+try { prototype.return.call({}, 1); }
+catch (error) { returnBrandOk = error instanceof TypeError; }
+try { prototype.throw.call({}, marker); }
+catch (error) { throwBrandOk = error instanceof TypeError; }
+
+startReturnOk && startThrowOk && completedOk && caughtOk && returnFinallyOk &&
+    throwFinallyOk && overrideReturnOk && overrideThrowOk && executingReturnOk &&
+    executingThrowOk && metadataOk && returnBrandOk && throwBrandOk;
+"#;
+
 #[test]
 fn generator_return_slice_runs_for_every_dispatch_batch() {
     assert_generator_source::<1>(false);
@@ -120,6 +230,45 @@ fn generator_yield_and_next_value_run_for_every_dispatch_batch() {
 #[test]
 fn generator_yield_state_survives_forced_major_collection() {
     assert_generator_yield_source::<8>(true);
+}
+
+#[test]
+fn generator_return_and_throw_run_for_every_dispatch_batch() {
+    assert_generator_abrupt_source::<1>(false);
+    assert_generator_abrupt_source::<2>(false);
+    assert_generator_abrupt_source::<4>(false);
+    assert_generator_abrupt_source::<8>(false);
+    assert_generator_abrupt_source::<16>(false);
+}
+
+#[test]
+fn generator_abrupt_completions_survive_forced_major_collection() {
+    assert_generator_abrupt_source::<8>(true);
+}
+
+/// Repeats both abrupt kinds without growing the native stack or retaining completed Fibers.
+#[test]
+fn generator_abrupt_large_loop_uses_constant_native_stack() {
+    let source = r#"
+var marker = {};
+function* value() { yield 1; }
+var index = 0;
+var valid = true;
+while (index < 512) {
+    var returned = value();
+    returned.next();
+    var result = returned.return(index);
+    valid = valid && result.done && result.value === index;
+    var thrown = value();
+    thrown.next();
+    try { thrown.throw(marker); valid = false; }
+    catch (error) { valid = valid && error === marker; }
+    index = index + 1;
+}
+valid;
+"#;
+    let (_, outcome) = execute_generator_fixture_with_heap(2_503, source, 64);
+    assert_eq!(outcome.as_immediate(), Some(Immediate::True));
 }
 
 /// Exercises repeated Fiber ownership transfer without growing the native Rust call stack.
@@ -260,8 +409,51 @@ fn assert_generator_yield_source<const N: usize>(forced_major: bool) {
     );
 }
 
+/// Compiles and runs abrupt injection under one dispatch and collection policy.
+fn assert_generator_abrupt_source<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_700 + N as u32),
+                SourceName::new("generator-abrupt-slice"),
+                MediaType::JavaScript,
+                Arc::from(GENERATOR_ABRUPT_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("generator abrupt fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 300_000,
+                quantum: 300_000,
+            },
+        )
+        .expect("generator abrupt fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "abrupt dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
 /// Executes a generated stress fixture and returns both the isolate and its final generator value.
 fn execute_generator_fixture(source_id: u32, source: &str) -> (Isolate, Value) {
+    execute_generator_fixture_with_heap(source_id, source, 9)
+}
+
+/// Executes a stress fixture under an explicit heap bound sized to its intentional object churn.
+fn execute_generator_fixture_with_heap(
+    source_id: u32,
+    source: &str,
+    heap_spans: usize,
+) -> (Isolate, Value) {
     let module = Compiler
         .compile(
             SourceText::new(
@@ -273,7 +465,13 @@ fn execute_generator_fixture(source_id: u32, source: &str) -> (Isolate, Value) {
             CompileOptions::default(),
         )
         .expect("generator stress fixture compiles");
-    let mut isolate = test_isolate();
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(heap_spans * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("generator stress isolate descriptors register");
     let outcome = isolate
         .execute_with_batch::<8>(
             &module,

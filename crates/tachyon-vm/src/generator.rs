@@ -10,21 +10,42 @@ use crate::{
     runtime::{
         callable::{CallSite, ResolvedCallTarget},
         code::CodeId,
+        completion::{CompletionKind, CompletionRecord},
         environment::Environment,
         fiber::{Fiber, NativeContinuation, NativeContinuationSite, VmRoots},
     },
 };
-use tachyon_bytecode::FunctionId;
+use tachyon_bytecode::{FunctionId, WordOffset};
 
-/// Spec-visible generator execution state. `SuspendedYield` is reserved for the yield slice.
+#[derive(Clone, Copy, Debug)]
+enum GeneratorResume {
+    Next(Value),
+    Abrupt(CompletionRecord),
+}
+
+#[derive(Debug)]
+struct FiberTransferError {
+    error: ExecutionError,
+    fiber: Fiber,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InjectedGeneratorAbrupt {
+    completion: CompletionRecord,
+    instruction: WordOffset,
+}
+
+#[derive(Debug)]
+struct PreparedGeneratorResume {
+    fiber: Fiber,
+    abrupt: Option<InjectedGeneratorAbrupt>,
+}
+
+/// Spec-visible ordinary generator execution state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum GeneratorState {
     SuspendedStart,
-    #[allow(
-        dead_code,
-        reason = "reserved for the verified Yield opcode integration"
-    )]
     SuspendedYield,
     Executing,
     Completed,
@@ -64,6 +85,7 @@ pub(crate) struct GeneratorObject {
     caller: Option<Fiber>,
     paused: Option<Fiber>,
     resume_destination: Option<u32>,
+    resume_instruction: Option<WordOffset>,
     pub(crate) state: GeneratorState,
 }
 
@@ -83,6 +105,7 @@ impl GeneratorObject {
             caller: None,
             paused: None,
             resume_destination: None,
+            resume_instruction: None,
             state: GeneratorState::SuspendedStart,
         }
     }
@@ -207,9 +230,9 @@ impl Isolate {
             site.this_value,
         );
         let caller_fiber = core::mem::take(&mut self.fiber);
-        if let Err((error, caller_fiber)) = self.set_generator_caller(generator, caller_fiber) {
-            self.fiber = caller_fiber;
-            return Err(error);
+        if let Err(rollback) = self.set_generator_caller(generator, caller_fiber) {
+            self.fiber = rollback.fiber;
+            return Err(rollback.error);
         }
         self.fiber
             .completions
@@ -260,6 +283,64 @@ impl Isolate {
             .expect("generator resume publishes one bytecode frame")
             .return_continuation = true;
         Ok(())
+    }
+
+    /// Injects a Return completion into a suspended generator or completes an inactive one.
+    pub(crate) fn begin_generator_return(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.begin_generator_abrupt(site, CompletionRecord::return_value(value))
+    }
+
+    /// Injects a Throw completion into a suspended generator or throws from an inactive one.
+    pub(crate) fn begin_generator_throw(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let value = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.begin_generator_abrupt(site, CompletionRecord::throw(value))
+    }
+
+    /// Implements GeneratorResumeAbrupt without bypassing the existing catch/finally dispatcher.
+    fn begin_generator_abrupt(
+        &mut self,
+        site: &CallSite,
+        completion: CompletionRecord,
+    ) -> Result<(), ExecutionError> {
+        let generator = self.generator_reference(site.this_value)?;
+        let header = self.generator_header(generator)?;
+        if header.state == GeneratorState::Executing {
+            return Err(ExecutionError::GeneratorExecuting);
+        }
+        if matches!(
+            header.state,
+            GeneratorState::SuspendedStart | GeneratorState::Completed
+        ) {
+            if header.state == GeneratorState::SuspendedStart {
+                self.complete_generator_without_resume(generator)?;
+            }
+            return self.finish_inactive_generator_abrupt(site, completion);
+        }
+        self.resume_generator_abrupt(generator, site, completion)
+    }
+
+    /// Produces the state-independent observable result after no generator code can execute.
+    fn finish_inactive_generator_abrupt(
+        &mut self,
+        site: &CallSite,
+        completion: CompletionRecord,
+    ) -> Result<(), ExecutionError> {
+        let value = completion
+            .value()
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        match completion.kind() {
+            CompletionKind::Return => {
+                let result = self.create_iterator_result(value, true)?;
+                self.write(site.caller_base, site.destination, result)
+            }
+            CompletionKind::Throw => Err(ExecutionError::HostThrown(value)),
+            _ => Err(ExecutionError::MissingCompletionRecord),
+        }
     }
 
     /// Completes a generator return before creating the observable iterator result object.
@@ -328,6 +409,30 @@ impl Isolate {
         })
     }
 
+    /// Closes a suspended-start generator and releases roots without executing its body.
+    fn complete_generator_without_resume(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.state != GeneratorState::SuspendedStart
+                    || generator.caller.is_some()
+                    || generator.paused.is_some()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.activation = None;
+                generator.state = GeneratorState::Completed;
+                Ok(())
+            })
+        })
+    }
+
     /// Stores the caller in the generator so every allocation safepoint traces the suspended roots.
     #[allow(
         clippy::result_large_err,
@@ -337,7 +442,7 @@ impl Isolate {
         &mut self,
         generator: GcRef<GeneratorObject>,
         caller: Fiber,
-    ) -> Result<(), (ExecutionError, Fiber)> {
+    ) -> Result<(), FiberTransferError> {
         let mut caller = Some(caller);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
@@ -352,11 +457,9 @@ impl Isolate {
                 Ok(())
             })
         });
-        result.map_err(|error| {
-            (
-                error,
-                caller.expect("failed caller publication retains fiber ownership"),
-            )
+        result.map_err(|error| FiberTransferError {
+            error,
+            fiber: caller.expect("failed caller publication retains fiber ownership"),
         })
     }
 
@@ -429,11 +532,11 @@ impl Isolate {
             return Err(ExecutionError::UnsupportedGeneratorYieldResume);
         }
         let paused = core::mem::take(&mut self.fiber);
-        let caller = match self.set_generator_paused(generator, paused, destination) {
+        let caller = match self.set_generator_paused(generator, paused, destination, instruction) {
             Ok(caller) => caller,
-            Err((error, paused)) => {
-                self.fiber = paused;
-                return Err(error);
+            Err(rollback) => {
+                self.fiber = rollback.fiber;
+                return Err(rollback.error);
             }
         };
         self.fiber = caller;
@@ -455,8 +558,8 @@ impl Isolate {
         generator: GcRef<GeneratorObject>,
         caller: Fiber,
         continuation: NativeContinuation,
-        resume_value: Value,
-    ) -> Result<Fiber, (ExecutionError, Fiber)> {
+        resume: GeneratorResume,
+    ) -> Result<PreparedGeneratorResume, FiberTransferError> {
         let mut caller = Some(caller);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
@@ -469,6 +572,9 @@ impl Isolate {
                 }
                 let destination = generator
                     .resume_destination
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let instruction = generator
+                    .resume_instruction
                     .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
                 let paused = generator
                     .paused
@@ -485,30 +591,45 @@ impl Isolate {
                     .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
                     as usize;
                 let destination_index = frame.base as usize + destination as usize;
-                let destination_slot = paused.registers.get_mut(destination_index).ok_or(
-                    ExecutionError::InvalidRegister(tachyon_bytecode::RegisterId::new(destination)),
-                )?;
+                if matches!(resume, GeneratorResume::Next(_))
+                    && destination_index >= paused.registers.len()
+                {
+                    return Err(ExecutionError::InvalidRegister(
+                        tachyon_bytecode::RegisterId::new(destination),
+                    ));
+                }
                 if !paused
                     .completions
                     .replace_native(continuation_index, continuation)
                 {
                     return Err(ExecutionError::UnsupportedGeneratorYieldResume);
                 }
-                *destination_slot = resume_value;
+                let abrupt = match resume {
+                    GeneratorResume::Next(value) => {
+                        paused.registers[destination_index] = value;
+                        None
+                    }
+                    GeneratorResume::Abrupt(completion) => Some(InjectedGeneratorAbrupt {
+                        completion,
+                        instruction,
+                    }),
+                };
                 generator.state = GeneratorState::Executing;
                 generator.caller = caller.take();
                 generator.resume_destination = None;
-                Ok(generator
-                    .paused
-                    .take()
-                    .expect("validated paused generator fiber remains present"))
+                generator.resume_instruction = None;
+                Ok(PreparedGeneratorResume {
+                    fiber: generator
+                        .paused
+                        .take()
+                        .expect("validated paused generator fiber remains present"),
+                    abrupt,
+                })
             })
         });
-        result.map_err(|error| {
-            (
-                error,
-                caller.expect("failed generator resume retains caller fiber ownership"),
-            )
+        result.map_err(|error| FiberTransferError {
+            error,
+            fiber: caller.expect("failed generator resume retains caller fiber ownership"),
         })
     }
 
@@ -522,7 +643,8 @@ impl Isolate {
         generator: GcRef<GeneratorObject>,
         paused: Fiber,
         destination: u32,
-    ) -> Result<Fiber, (ExecutionError, Fiber)> {
+        instruction: WordOffset,
+    ) -> Result<Fiber, FiberTransferError> {
         let mut paused = Some(paused);
         let result = self.heap.with_running_scope(|scope| {
             let generator = scope.root(generator).map_err(ExecutionError::Root)?;
@@ -533,6 +655,7 @@ impl Isolate {
                 if generator.caller.is_none()
                     || generator.paused.is_some()
                     || generator.resume_destination.is_some()
+                    || generator.resume_instruction.is_some()
                 {
                     return Err(ExecutionError::UnsupportedGeneratorYieldResume);
                 }
@@ -542,15 +665,14 @@ impl Isolate {
                     .expect("validated generator caller remains present");
                 generator.paused = paused.take();
                 generator.resume_destination = Some(destination);
+                generator.resume_instruction = Some(instruction);
                 generator.state = GeneratorState::SuspendedYield;
                 Ok(caller)
             })
         });
-        result.map_err(|error| {
-            (
-                error,
-                paused.expect("failed paused publication retains fiber ownership"),
-            )
+        result.map_err(|error| FiberTransferError {
+            error,
+            fiber: paused.expect("failed paused publication retains fiber ownership"),
         })
     }
 
@@ -572,16 +694,74 @@ impl Isolate {
             site.this_value,
         );
         let caller = core::mem::take(&mut self.fiber);
-        match self.swap_generator_caller_for_paused(generator, caller, continuation, resume_value) {
-            Ok(paused) => {
-                self.fiber = paused;
+        match self.swap_generator_caller_for_paused(
+            generator,
+            caller,
+            continuation,
+            GeneratorResume::Next(resume_value),
+        ) {
+            Ok(prepared) => {
+                debug_assert!(prepared.abrupt.is_none());
+                self.fiber = prepared.fiber;
                 Ok(())
             }
-            Err((error, caller)) => {
-                self.fiber = caller;
+            Err(rollback) => {
+                self.fiber = rollback.fiber;
+                Err(rollback.error)
+            }
+        }
+    }
+
+    /// Restores one paused Fiber and routes injected Return/Throw through its protected ranges.
+    fn resume_generator_abrupt(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        site: &CallSite,
+        completion: CompletionRecord,
+    ) -> Result<(), ExecutionError> {
+        let continuation = NativeContinuation::generator_resume(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            site.this_value,
+        );
+        let caller = core::mem::take(&mut self.fiber);
+        let prepared = match self.swap_generator_caller_for_paused(
+            generator,
+            caller,
+            continuation,
+            GeneratorResume::Abrupt(completion),
+        ) {
+            Ok(prepared) => prepared,
+            Err(rollback) => {
+                self.fiber = rollback.fiber;
+                return Err(rollback.error);
+            }
+        };
+        self.fiber = prepared.fiber;
+        let abrupt = prepared
+            .abrupt
+            .ok_or(ExecutionError::MissingCompletionRecord)?;
+        match self.dispatch_abrupt(abrupt.completion, abrupt.instruction) {
+            Ok(None) => Ok(()),
+            Ok(Some(crate::RunOutcome::Thrown(value))) => Err(ExecutionError::HostThrown(value)),
+            Ok(Some(_)) => Err(ExecutionError::MissingCompletionRecord),
+            Err(error) => {
+                self.abort_generator_execution(generator)?;
                 Err(error)
             }
         }
+    }
+
+    /// Restores the caller and closes a generator after an engine fault during abrupt routing.
+    fn abort_generator_execution(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+    ) -> Result<(), ExecutionError> {
+        self.set_generator_state(generator, GeneratorState::Completed)?;
+        self.restore_generator_caller_fiber(generator)
     }
 
     /// Releases the creation-time roots after their ownership is visible through the frame.

@@ -443,6 +443,7 @@ pub(crate) enum NativeFunction {
     TypedArraySet,
     TypedArrayJoin,
     TypedArraySlice,
+    TypedArraySubarray,
     TypedArraySearch(TypedArraySearchDirection),
     TypedArrayCallback(TypedArrayCallbackKind),
     ArrayIsArray,
@@ -488,6 +489,8 @@ pub(crate) enum NativeFunction {
     ArrayEntries,
     ArrayIteratorNext,
     GeneratorNext,
+    GeneratorReturn,
+    GeneratorThrow,
     IteratorIdentity,
     MapConstructor,
     MapGet,
@@ -1049,6 +1052,8 @@ impl NativeFunction {
             | Self::TypedArraySearch(_)
             | Self::TypedArrayCallback(_)
             | Self::GeneratorNext
+            | Self::GeneratorReturn
+            | Self::GeneratorThrow
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1064,6 +1069,7 @@ impl NativeFunction {
             Self::ArrayCopyWithin
             | Self::TypedArrayCopyWithin
             | Self::TypedArraySlice
+            | Self::TypedArraySubarray
             | Self::ArrayWith
             | Self::ArrayToSpliced
             | Self::ArrayBufferSlice
@@ -1445,6 +1451,7 @@ impl NativeFunction {
             Self::TypedArraySet => "set",
             Self::TypedArrayJoin => "join",
             Self::TypedArraySlice => "slice",
+            Self::TypedArraySubarray => "subarray",
             Self::TypedArraySearch(direction) => direction.name(),
             Self::TypedArrayCallback(kind) => kind.name(),
             Self::ArrayIsArray => "isArray",
@@ -1490,6 +1497,8 @@ impl NativeFunction {
             Self::ArrayEntries => "entries",
             Self::ArrayIteratorNext => "next",
             Self::GeneratorNext => "next",
+            Self::GeneratorReturn => "return",
+            Self::GeneratorThrow => "throw",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",
             Self::MapGet => "get",

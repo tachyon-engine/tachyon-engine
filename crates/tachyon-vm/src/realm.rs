@@ -400,6 +400,17 @@ impl Isolate {
         )?;
         let slice_atom = self.intern_intrinsic_name(b"slice")?;
         self.set_intrinsic_data_property(base_prototype, slice_atom, slice, true)?;
+        let subarray = self.allocate_native_function(
+            NativeFunction::TypedArraySubarray,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let subarray_atom = self.intern_intrinsic_name(b"subarray")?;
+        self.set_intrinsic_data_property(base_prototype, subarray_atom, subarray, true)?;
         for (direction, name) in [
             (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
             (
@@ -2312,11 +2323,33 @@ impl Isolate {
                 prototype: function_prototype,
             },
         )?;
+        let r#return = self.allocate_native_function(
+            NativeFunction::GeneratorReturn,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let r#throw = self.allocate_native_function(
+            NativeFunction::GeneratorThrow,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
         self.realm.generator_function_prototype = Some(generator_function_prototype);
         self.realm.generator_prototype = Some(generator_prototype);
         self.realm.generator_next = Some(next);
         let next_atom = self.intern_intrinsic_name(b"next")?;
         self.set_intrinsic_data_property(generator_prototype, next_atom, next, true)?;
+        let return_atom = self.intern_intrinsic_name(b"return")?;
+        self.set_intrinsic_data_property(generator_prototype, return_atom, r#return, true)?;
+        let throw_atom = self.intern_intrinsic_name(b"throw")?;
+        self.set_intrinsic_data_property(generator_prototype, throw_atom, r#throw, true)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(
             generator_prototype,

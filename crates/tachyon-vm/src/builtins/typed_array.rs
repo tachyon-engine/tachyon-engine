@@ -10,6 +10,7 @@ mod reverse;
 mod search;
 mod set;
 mod slice;
+mod subarray;
 
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};

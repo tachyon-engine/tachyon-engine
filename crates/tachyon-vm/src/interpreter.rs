@@ -2232,6 +2232,9 @@ impl Isolate {
             NativeContinuationKind::TypedArraySlice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::TypedArraySubarray(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
@@ -6110,6 +6113,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::GeneratorNext) => {
                     return self.begin_generator_next(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::GeneratorReturn) => {
+                    return self.begin_generator_return(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::GeneratorThrow) => {
+                    return self.begin_generator_throw(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::GeneratorFunctionPrototype) => {
                     return self.write(
                         site.caller_base,
@@ -6219,6 +6228,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySlice) => {
                     return self.begin_typed_array_slice(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArraySubarray) => {
+                    return self.begin_typed_array_subarray(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);
@@ -6759,11 +6771,15 @@ impl Isolate {
             }
             FunctionExecutable::Native(_) => {
                 let prototype = function.ordinary.prototype;
-                if self.realm.function_prototype == Some(prototype) {
+                if self.realm.function_prototype == Some(prototype)
+                    || self.realm.typed_array_base_constructor == Some(prototype)
+                {
                     return Ok(self.active_realm);
                 }
                 for (id, realm) in &self.inactive_realms {
-                    if realm.function_prototype == Some(prototype) {
+                    if realm.function_prototype == Some(prototype)
+                        || realm.typed_array_base_constructor == Some(prototype)
+                    {
                         return Ok(*id);
                     }
                 }
@@ -7568,6 +7584,10 @@ impl Isolate {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_typed_array_slice(continuation.site(), state, stage, value)
                 }
+                NativeContinuationKind::TypedArraySubarray(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_typed_array_subarray(continuation.site(), state, stage, value)
+                }
                 NativeContinuationKind::SignalState(stage) => {
                     self.resume_signal_state(continuation, stage, value)
                 }
@@ -7705,7 +7725,7 @@ impl Isolate {
     /// Iteratively routes one abrupt completion through handlers, finalizers, and explicit frames.
     #[cold]
     #[inline(never)]
-    fn dispatch_abrupt(
+    pub(crate) fn dispatch_abrupt(
         &mut self,
         mut completion: CompletionRecord,
         mut instruction_offset: WordOffset,
