@@ -58,6 +58,10 @@ pub enum CompileError {
     LoweringCapacityOverflow {
         collection: &'static str,
     },
+    MalformedStringLiteral {
+        source_name: SourceName,
+        span: SourceSpan,
+    },
     UnboundExceptionHandler,
 }
 

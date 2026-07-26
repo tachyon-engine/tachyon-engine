@@ -317,7 +317,17 @@ fn lower_pattern_key(
     }
     let value = match key {
         PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
-        PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+        PropertyKey::StringLiteral(literal) => {
+            if literal.lone_surrogates {
+                return Ok(HirObjectPropertyKey::Computed(HirExpression {
+                    span: source_span(literal.span),
+                    kind: super::expression::HirExpressionKind::String(super::copy_string_literal(
+                        literal, source,
+                    )?),
+                }));
+            }
+            Arc::from(literal.value.as_str())
+        }
         PropertyKey::NumericLiteral(literal) => {
             let mut buffer = ryu_js::Buffer::new();
             Arc::from(if literal.value == 0.0 {

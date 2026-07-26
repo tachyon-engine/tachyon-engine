@@ -1,5 +1,74 @@
 use super::*;
 
+fn string_constants(module: &tachyon_bytecode::CompiledModule) -> Vec<&[u16]> {
+    module
+        .constants()
+        .iter()
+        .filter_map(|constant| match constant {
+            tachyon_bytecode::BytecodeConstant::String(value) => Some(value.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn compiler_preserves_string_literal_utf16_code_units() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "['\\n\\x41', '\\uD800', '\\uDFFF', '\\uD83D\\uDE00', '\\uFFFD', '\\uFFFD\\uD800'];",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let strings = string_constants(&module);
+
+    assert!(strings.contains(&[0x000a, 0x0041].as_slice()));
+    assert!(strings.contains(&[0xd800].as_slice()));
+    assert!(strings.contains(&[0xdfff].as_slice()));
+    assert!(strings.contains(&[0xd83d, 0xde00].as_slice()));
+    assert!(strings.contains(&[0xfffd].as_slice()));
+    assert!(strings.contains(&[0xfffd, 0xd800].as_slice()));
+}
+
+#[test]
+fn compiler_preserves_lone_surrogates_in_directives_and_property_keys() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "'\\uD800'; 'use strict'; var object = { '\\uD800': 1, get '\\uDFFF'() { return 2; } }; var { '\\uD800': value } = object; class Box { '\\uD800'() {} }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let strings = string_constants(&module);
+
+    assert_eq!(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap()
+            .strictness(),
+        tachyon_bytecode::FunctionStrictness::Strict
+    );
+    assert!(strings.contains(&[0xd800].as_slice()));
+    assert!(strings.contains(&[0xdfff].as_slice()));
+    assert!(
+        module
+            .scope_names()
+            .iter()
+            .all(|name| !name.contains("fffd"))
+    );
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.contains("CreateDataPropertyByValue"));
+}
+
 #[test]
 fn compiler_lowers_array_binding_with_elision_and_default() {
     Compiler

@@ -10,7 +10,7 @@ use crate::{CompileError, ProgramKind, SourceId, SourceSpan, SourceText};
 use super::expression::{HirExpression, HirExpressionKind};
 use super::pattern::HirPattern;
 use super::statement::{HirStatement, HirStatementKind, StatementContext, lower_statement};
-use super::{source_span, to_scope_id};
+use super::{copy_string_literal, source_span, to_scope_id};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(transparent)]
@@ -200,7 +200,10 @@ pub(crate) fn lower(
             completion: StatementCompletion::Value,
             kind: HirStatementKind::Expression(HirExpression {
                 span: source_span(directive.expression.span),
-                kind: HirExpressionKind::String(Arc::from(directive.expression.value.as_str())),
+                kind: HirExpressionKind::String(copy_string_literal(
+                    &directive.expression,
+                    source,
+                )?),
             }),
         });
     }

@@ -182,7 +182,7 @@ pub enum HirAssignmentOperator {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirExpressionKind {
     Number(u64),
-    String(Arc<str>),
+    String(Arc<[u16]>),
     RegExp {
         pattern: Arc<str>,
         flags: u8,
@@ -318,7 +318,7 @@ pub(super) fn lower_expression(
     let kind = match expression {
         Expression::NumericLiteral(literal) => HirExpressionKind::Number(literal.value.to_bits()),
         Expression::StringLiteral(literal) => {
-            HirExpressionKind::String(Arc::from(literal.value.as_str()))
+            HirExpressionKind::String(super::copy_string_literal(literal, source)?)
         }
         Expression::TemplateLiteral(template) => {
             let first = template
@@ -328,7 +328,12 @@ pub(super) fn lower_expression(
                 .ok_or_else(|| unsupported(source.name(), span, "template literal"))?;
             let mut accumulated = HirExpression {
                 span,
-                kind: HirExpressionKind::String(Arc::from(first.as_str())),
+                kind: HirExpressionKind::String(super::copy_oxc_string_units(
+                    first.as_str(),
+                    template.quasis[0].lone_surrogates,
+                    source,
+                    source_span(template.quasis[0].span),
+                )?),
             };
             for (expression, quasi) in template
                 .expressions
@@ -357,7 +362,12 @@ pub(super) fn lower_expression(
                             left: Box::new(accumulated),
                             right: Box::new(HirExpression {
                                 span,
-                                kind: HirExpressionKind::String(Arc::from(cooked.as_str())),
+                                kind: HirExpressionKind::String(super::copy_oxc_string_units(
+                                    cooked.as_str(),
+                                    quasi.lone_surrogates,
+                                    source,
+                                    source_span(quasi.span),
+                                )?),
                             }),
                         },
                     };
@@ -480,11 +490,22 @@ pub(super) fn lower_expression(
                         functions,
                     )?)
                 } else {
-                    let key: Arc<str> = match &property.key {
+                    match &property.key {
                         PropertyKey::StaticIdentifier(identifier) => {
-                            Arc::from(identifier.name.as_str())
+                            HirObjectPropertyKey::Static(Arc::from(identifier.name.as_str()))
                         }
-                        PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+                        PropertyKey::StringLiteral(literal) => {
+                            if literal.lone_surrogates {
+                                HirObjectPropertyKey::Computed(HirExpression {
+                                    span: source_span(literal.span),
+                                    kind: HirExpressionKind::String(super::copy_string_literal(
+                                        literal, source,
+                                    )?),
+                                })
+                            } else {
+                                HirObjectPropertyKey::Static(Arc::from(literal.value.as_str()))
+                            }
+                        }
                         PropertyKey::NumericLiteral(literal) => {
                             let mut buffer = ryu_js::Buffer::new();
                             let key = if literal.value == 0.0 {
@@ -492,7 +513,7 @@ pub(super) fn lower_expression(
                             } else {
                                 buffer.format(literal.value)
                             };
-                            Arc::from(key)
+                            HirObjectPropertyKey::Static(Arc::from(key))
                         }
                         _ => {
                             return Err(unsupported(
@@ -501,8 +522,7 @@ pub(super) fn lower_expression(
                                 "object property key",
                             ));
                         }
-                    };
-                    HirObjectPropertyKey::Static(key)
+                    }
                 };
                 let value = if property.kind == PropertyKind::Get
                     || property.kind == PropertyKind::Set
@@ -1300,7 +1320,15 @@ fn lower_class_key(
     }
     let name: Arc<str> = match key {
         PropertyKey::StaticIdentifier(identifier) => Arc::from(identifier.name.as_str()),
-        PropertyKey::StringLiteral(literal) => Arc::from(literal.value.as_str()),
+        PropertyKey::StringLiteral(literal) => {
+            if literal.lone_surrogates {
+                return Ok(HirObjectPropertyKey::Computed(HirExpression {
+                    span: source_span(literal.span),
+                    kind: HirExpressionKind::String(super::copy_string_literal(literal, source)?),
+                }));
+            }
+            Arc::from(literal.value.as_str())
+        }
         PropertyKey::NumericLiteral(literal) => {
             let mut buffer = ryu_js::Buffer::new();
             Arc::from(if literal.value == 0.0 {

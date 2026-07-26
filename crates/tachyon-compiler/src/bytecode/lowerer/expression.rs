@@ -157,12 +157,11 @@ impl Lowerer<'_> {
                 }
             }
             HirExpressionKind::String(value) => {
-                let code_unit_count = value.encode_utf16().count();
                 let mut code_units = Vec::new();
                 code_units
-                    .try_reserve_exact(code_unit_count)
+                    .try_reserve_exact(value.len())
                     .map_err(|_| CompileError::ConstantAllocationFailed)?;
-                code_units.extend(value.encode_utf16());
+                code_units.extend_from_slice(value);
                 let constant = u32::try_from(self.constants.len())
                     .map_err(|_| CompileError::ConstantOverflow)?;
                 self.constants
