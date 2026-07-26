@@ -257,6 +257,90 @@ pub(crate) struct SignalRuntime {
 }
 
 impl Isolate {
+    /// Calls one callback with dependency ownership suspended until normal or abrupt completion.
+    pub(crate) fn begin_signal_untrack(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        self.ensure_signal_runtime_unfrozen(site.this_value)?;
+        let callback = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_callable_value(callback)? {
+            return Err(ExecutionError::NonCallable(callback));
+        }
+        let previous = self
+            .signal_runtime
+            .computing
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::signal_untrack(
+                NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                previous,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        self.signal_runtime.computing = None;
+        let frame_depth = self.fiber.frames.len();
+        if let Err(error) = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: callback,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            let continuation = self.pop_native_continuation()?;
+            self.restore_signal_untrack_owner(continuation);
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            let frame = self
+                .fiber
+                .frames
+                .last_mut()
+                .expect("untrack callback publishes one callee frame");
+            frame.return_register = None;
+            frame.return_continuation = true;
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_signal_untrack(continuation, value)
+    }
+
+    /// Restores dependency ownership and forwards a normal callback result unchanged.
+    pub(crate) fn resume_signal_untrack(
+        &mut self,
+        continuation: NativeContinuation,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.restore_signal_untrack_owner(continuation);
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            value,
+        )
+    }
+
+    /// Restores dependency ownership while the original thrown completion keeps unwinding.
+    pub(crate) fn continue_signal_untrack_abrupt(&mut self, continuation: NativeContinuation) {
+        self.restore_signal_untrack_owner(continuation);
+    }
+
+    #[inline(always)]
+    fn restore_signal_untrack_owner(&mut self, continuation: NativeContinuation) {
+        self.signal_runtime.computing = signal_previous_computing(continuation.first());
+    }
+
     /// Starts State construction and reads options through ordered observable `Get` operations.
     pub(crate) fn begin_signal_state_constructor(
         &mut self,

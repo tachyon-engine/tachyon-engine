@@ -41,6 +41,7 @@ var namespaceDescriptors = builtinDescriptor(Signal, "State", true, true) &&
     builtinDescriptor(Signal, "Computed", true, true) &&
     builtinDescriptor(Signal, "subtle", true, true) &&
     builtinDescriptor(Signal.subtle, "Watcher", true, true) &&
+    builtinDescriptor(Signal.subtle, "untrack", true, true) &&
     builtinDescriptor(Signal.subtle, "watched", true, true) &&
     builtinDescriptor(Signal.subtle, "unwatched", true, true) &&
     typeof Signal.subtle.watched === "symbol" && typeof Signal.subtle.unwatched === "symbol" &&
@@ -62,13 +63,17 @@ var metadata = Signal.State.name === "State" && Signal.State.length === 1 &&
     Signal.subtle.Watcher.name === "Watcher" && Signal.subtle.Watcher.length === 1 &&
     Signal.subtle.Watcher.prototype.watch.length === 0 &&
     Signal.subtle.Watcher.prototype.unwatch.length === 0 &&
-    Signal.subtle.Watcher.prototype.getPending.length === 0;
+    Signal.subtle.Watcher.prototype.getPending.length === 0 &&
+    Signal.subtle.untrack.name === "untrack" && Signal.subtle.untrack.length === 1;
 var newOnly = false;
 try { Signal.State(1); } catch (error) { newOnly = error instanceof TypeError; }
 try { Signal.Computed(function() {}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 try { Signal.subtle.Watcher(function() {}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.subtle.untrack(function() {}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 var state = new Signal.State(1);
@@ -109,11 +114,78 @@ callbackReceiver && subclasses && newTarget && Object.getPrototypeOf(Signal) ===
 Object.getPrototypeOf(Signal.subtle) === Object.prototype;
 "#;
 
+const SIGNAL_UNTRACK_SOURCE: &str = r#"
+var tracked = new Signal.State(1);
+var hidden = new Signal.State(10);
+var tail = new Signal.State(100);
+var innerCalls = 0;
+var inner = new Signal.Computed(function() { innerCalls++; return hidden.get() * 2; });
+var outerCalls = 0;
+var marker = {};
+var caughtInside = 0;
+var invalidCaught = 0;
+var outer = new Signal.Computed(function() {
+    outerCalls++;
+    var first = tracked.get();
+    var middle = Signal.subtle.untrack(function() {
+        return Signal.subtle.untrack(function() { return inner.get(); });
+    });
+    try {
+        Signal.subtle.untrack(function() { hidden.get(); throw marker; });
+    } catch (error) {
+        if (error === marker) caughtInside++;
+    }
+    try { Signal.subtle.untrack(1); } catch (error) {
+        if (error instanceof TypeError) invalidCaught++;
+    }
+    return first + middle + tail.get();
+});
+var initial = outer.get() === 121 && outerCalls === 1 && innerCalls === 1 &&
+    caughtInside === 1 && invalidCaught === 1;
+hidden.set(11);
+var hiddenIgnored = outer.get() === 121 && outerCalls === 1 && innerCalls === 1;
+tail.set(101);
+var tailTracked = outer.get() === 124 && outerCalls === 2 && innerCalls === 2 &&
+    caughtInside === 2 && invalidCaught === 2;
+tracked.set(2);
+var ownerRestored = outer.get() === 125 && outerCalls === 3 && innerCalls === 2;
+
+var token = {};
+var nestedReturn = Signal.subtle.untrack(function() {
+    return Signal.subtle.untrack(function() { return token; });
+}) === token;
+var topMarker = {};
+var topIdentity = false;
+try { Signal.subtle.untrack(function() { throw topMarker; }); }
+catch (error) { topIdentity = error === topMarker; }
+var proxyCalls = 0;
+var proxyCallback = new Proxy(function() {}, { apply: function() { proxyCalls++; return token; } });
+var proxyResult = Signal.subtle.untrack(proxyCallback) === token && proxyCalls === 1;
+
+var frozenState = new Signal.State(0);
+var frozenCalls = 0;
+var frozenRejected = 0;
+var frozenWatcher = new Signal.subtle.Watcher(function() {
+    try {
+        Signal.subtle.untrack(function() { frozenCalls++; frozenState.get(); });
+    } catch (error) {
+        if (error instanceof TypeError) frozenRejected++;
+    }
+});
+frozenWatcher.watch(frozenState);
+frozenState.set(1);
+var frozen = frozenRejected === 1 && frozenCalls === 0;
+
+initial && hiddenIgnored && tailTracked && ownerRestored && nestedReturn && topIdentity &&
+proxyResult && frozen;
+"#;
+
 const SIGNAL_CROSS_REALM_SOURCE: &str = r#"
 var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.State &&
     foreignSignal.State.prototype !== Signal.State.prototype &&
     foreignSignal.Computed !== Signal.Computed &&
     foreignSignal.subtle.Watcher !== Signal.subtle.Watcher &&
+    foreignSignal.subtle.untrack !== Signal.subtle.untrack &&
     foreignSignal.subtle.watched !== Signal.subtle.watched &&
     foreignSignal.subtle.unwatched !== Signal.subtle.unwatched;
 var local = new Signal.State(2);
@@ -127,7 +199,9 @@ var subclassed = Object.getPrototypeOf(subclass) === ForeignStateSubclass.protot
 var callbackReceiver;
 class ForeignComputedSubclass extends foreignSignal.Computed {}
 var computed = new ForeignComputedSubclass(function() { callbackReceiver = this; return foreign.get(); });
-identities && crossBrand && subclassed && computed.get() === 3 && callbackReceiver === computed;
+var foreignUntrack = foreignSignal.subtle.untrack(function() { return local.get() + foreign.get(); }) === 5;
+identities && crossBrand && subclassed && computed.get() === 3 && callbackReceiver === computed &&
+foreignUntrack;
 "#;
 
 const SIGNAL_OPTIONS_SOURCE: &str = r#"
@@ -686,6 +760,17 @@ fn signal_notify_runs_all_watchers_and_aggregates_errors() {
         "signals-notify-errors",
         true,
     );
+}
+
+/// Covers nested untracking, abrupt restoration, frozen entry, and exact callback roots.
+#[test]
+fn signal_untrack_restores_dependency_ownership_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(SIGNAL_UNTRACK_SOURCE, 8_746, "signals-untrack", false);
+    assert_signal_behavior::<2>(SIGNAL_UNTRACK_SOURCE, 8_747, "signals-untrack", false);
+    assert_signal_behavior::<4>(SIGNAL_UNTRACK_SOURCE, 8_748, "signals-untrack", false);
+    assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_749, "signals-untrack", false);
+    assert_signal_behavior::<16>(SIGNAL_UNTRACK_SOURCE, 8_750, "signals-untrack", false);
+    assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_751, "signals-untrack", true);
 }
 
 /// Covers the pinned Watcher state machine, pending ordering, and idempotent membership.

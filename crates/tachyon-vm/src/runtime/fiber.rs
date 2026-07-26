@@ -1187,6 +1187,7 @@ pub(crate) enum NativeContinuationKind {
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
+    SignalUntrack,
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1257,6 +1258,17 @@ impl NativeContinuation {
             kind: NativeContinuationKind::SignalComputed,
             first: computed,
             second: previous,
+        }
+    }
+
+    /// Roots the prior dependency owner while untracked JavaScript executes.
+    #[inline]
+    pub(crate) const fn signal_untrack(site: NativeContinuationSite, previous: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SignalUntrack,
+            first: previous,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

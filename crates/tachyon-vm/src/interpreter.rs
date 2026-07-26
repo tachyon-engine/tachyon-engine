@@ -2214,6 +2214,9 @@ impl Isolate {
             NativeContinuationKind::SignalComputed => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::SignalUntrack => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6043,6 +6046,9 @@ impl Isolate {
                     let result = self.signal_watcher_get_pending(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::SignalUntrack) => {
+                    return self.begin_signal_untrack(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -7453,6 +7459,9 @@ impl Isolate {
                 NativeContinuationKind::SignalComputed => {
                     self.resume_signal_computed(continuation, value)
                 }
+                NativeContinuationKind::SignalUntrack => {
+                    self.resume_signal_untrack(continuation, value)
+                }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
@@ -7722,6 +7731,12 @@ impl Isolate {
                             continue;
                         }
                     }
+                }
+                if continuation.kind() == NativeContinuationKind::SignalUntrack {
+                    let site = continuation.site();
+                    self.continue_signal_untrack_abrupt(continuation);
+                    instruction_offset = site.call_site;
+                    continue;
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;

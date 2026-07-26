@@ -3193,6 +3193,12 @@ impl Isolate {
         ] {
             self.install_signal_method(watcher.1, name, native, function_prototype)?;
         }
+        self.install_signal_method(
+            subtle,
+            b"untrack",
+            NativeFunction::SignalUntrack,
+            function_prototype,
+        )?;
         for (name, description, watched) in [
             (
                 b"watched".as_slice(),

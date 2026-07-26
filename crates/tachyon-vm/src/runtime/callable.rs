@@ -255,6 +255,7 @@ pub(crate) enum NativeFunction {
     SignalWatcherWatch,
     SignalWatcherUnwatch,
     SignalWatcherGetPending,
+    SignalUntrack,
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -890,6 +891,7 @@ impl NativeFunction {
         }
         match self {
             Self::SignalStateSet => 1,
+            Self::SignalUntrack => 1,
             Self::SignalStateConstructor
             | Self::SignalComputedConstructor
             | Self::SignalWatcherConstructor => 1,
@@ -1220,6 +1222,7 @@ impl NativeFunction {
             Self::SignalWatcherWatch => "watch",
             Self::SignalWatcherUnwatch => "unwatch",
             Self::SignalWatcherGetPending => "getPending",
+            Self::SignalUntrack => "untrack",
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",
