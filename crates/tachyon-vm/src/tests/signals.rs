@@ -232,16 +232,115 @@ watcher = new Signal.subtle.Watcher(function() {
     try { state.get(); } catch (error) { if (error instanceof TypeError) frozen++; }
     try { state.set(9); } catch (error) { if (error instanceof TypeError) frozen++; }
     try { watcher.watch(); } catch (error) { if (error instanceof TypeError) frozen++; }
+    try { watcher.unwatch(computed); } catch (error) { if (error instanceof TypeError) frozen++; }
+    try { watcher.getPending(); } catch (error) { if (error instanceof TypeError) frozen++; }
 });
 watcher.watch(computed);
 trace = trace + "b";
 state.set(2);
 trace = trace + "a";
-var first = computed.get() === 4 && watcher.getPending()[0] === computed;
+var pending = watcher.getPending();
+var first = pending.length === 1 && pending[0] === computed && computed.get() === 4 &&
+    watcher.getPending().length === 0;
 watcher.watch();
 state.set(3);
 var second = computed.get() === 6;
-trace === "bnan" && frozen === 6 && first && second;
+trace === "bnan" && frozen === 10 && first && second;
+"#;
+
+const SIGNAL_WATCHER_STATE_SOURCE: &str = r#"
+var left = new Signal.State(1);
+var right = new Signal.State(2);
+var leftComputed = new Signal.Computed(function() { return left.get() * 2; });
+var rightComputed = new Signal.Computed(function() { return right.get() * 3; });
+var notifyCount = 0;
+var watcher = new Signal.subtle.Watcher(function() { notifyCount++; });
+watcher.watch(rightComputed, leftComputed, rightComputed);
+var initial = watcher.getPending();
+var initialOrder = initial.length === 2 && initial[0] === rightComputed &&
+    initial[1] === leftComputed;
+var rightValue = rightComputed.get() === 6;
+var afterRight = watcher.getPending();
+var settledOne = afterRight.length === 1 && afterRight[0] === leftComputed;
+var leftValue = leftComputed.get() === 2 && watcher.getPending().length === 0;
+
+left.set(4);
+var changed = watcher.getPending();
+var changedOrder = notifyCount === 1 && changed.length === 1 && changed[0] === leftComputed;
+var changedValue = leftComputed.get() === 8 && watcher.getPending().length === 0;
+left.set(5);
+var waitingPending = watcher.getPending();
+var waitingIgnored = notifyCount === 1 && waitingPending.length === 1 &&
+    waitingPending[0] === leftComputed;
+watcher.watch();
+var rearmKeepsPending = watcher.getPending()[0] === leftComputed;
+leftComputed.get();
+left.set(6);
+var rearmed = notifyCount === 2;
+
+var stateNotifyCount = 0;
+var stateWatcher = new Signal.subtle.Watcher(function() { stateNotifyCount++; });
+stateWatcher.watch(right);
+right.set(3);
+var stateOnly = stateNotifyCount === 1 && stateWatcher.getPending().length === 0;
+right.set(4);
+var stateWaiting = stateNotifyCount === 1;
+stateWatcher.watch();
+right.set(5);
+var stateRearmed = stateNotifyCount === 2 && stateWatcher.getPending().length === 0;
+
+var watchedHooks = 0;
+var unwatchedHooks = 0;
+var hooked = new Signal.State(0, {
+    [Signal.subtle.watched]: function() { watchedHooks++; },
+    [Signal.subtle.unwatched]: function() { unwatchedHooks++; }
+});
+var duplicateWatcher = new Signal.subtle.Watcher(function() {});
+duplicateWatcher.watch(hooked, hooked);
+duplicateWatcher.unwatch(hooked, hooked);
+var duplicateHooks = watchedHooks === 1 && unwatchedHooks === 1;
+
+var unwatchLeft = new Signal.State(0);
+var unwatchRight = new Signal.State(0);
+var unwatchNotifyCount = 0;
+var unwatchWatcher = new Signal.subtle.Watcher(function() { unwatchNotifyCount++; });
+unwatchWatcher.watch(unwatchLeft, unwatchRight);
+unwatchLeft.set(1);
+unwatchWatcher.unwatch(unwatchLeft);
+unwatchRight.set(1);
+var unwatchDidNotRearm = unwatchNotifyCount === 1;
+unwatchWatcher.watch();
+unwatchRight.set(2);
+var unwatchExplicitRearm = unwatchNotifyCount === 2;
+
+var pendingSource = new Signal.State(1);
+var pendingComputed = new Signal.Computed(function() { return pendingSource.get(); });
+pendingComputed.get();
+var pendingWatcher = new Signal.subtle.Watcher(function() {});
+pendingWatcher.watch(pendingComputed);
+pendingSource.set(2);
+var pendingBeforeUnwatch = pendingWatcher.getPending()[0] === pendingComputed;
+pendingWatcher.unwatch(pendingComputed);
+var unwatchClears = pendingWatcher.getPending().length === 0;
+
+var marker = {};
+var throwCount = 0;
+var throwState = new Signal.State(0);
+var throwWatcher = new Signal.subtle.Watcher(function() { throwCount++; throw marker; });
+throwWatcher.watch(throwState);
+var firstIdentity = false;
+try { throwState.set(1); } catch (error) { firstIdentity = error === marker; }
+throwState.set(2);
+var throwWaiting = throwCount === 1 && throwWatcher.getPending().length === 0;
+throwWatcher.watch();
+var secondIdentity = false;
+try { throwState.set(3); } catch (error) { secondIdentity = error === marker; }
+var throwRearmed = throwCount === 2;
+
+initialOrder && rightValue && settledOne && leftValue && changedOrder && changedValue &&
+waitingIgnored && rearmKeepsPending && rearmed && stateOnly && stateWaiting && stateRearmed &&
+duplicateHooks && unwatchDidNotRearm && unwatchExplicitRearm && pendingBeforeUnwatch &&
+unwatchClears && firstIdentity && throwWaiting && secondIdentity && throwRearmed;
 "#;
 
 const SIGNAL_NOTIFY_ERRORS_SOURCE: &str = r#"
@@ -310,7 +409,9 @@ var initialPruned = top.get() === 7 && stableCalls === 1 && middleCalls === 1 &&
 var watcher = new Signal.subtle.Watcher(function() {});
 watcher.watch(top);
 source.set(2);
-var pruned = top.get() === 7 && stableCalls === 2 && middleCalls === 1 && topCalls === 1;
+var topPending = watcher.getPending();
+var pruned = topPending.length === 1 && topPending[0] === top && top.get() === 7 &&
+    watcher.getPending().length === 0 && stableCalls === 2 && middleCalls === 1 && topCalls === 1;
 
 var diamondSource = new Signal.State(1);
 var baseCalls = 0;
@@ -583,6 +684,47 @@ fn signal_notify_runs_all_watchers_and_aggregates_errors() {
         SIGNAL_NOTIFY_ERRORS_SOURCE,
         8_711,
         "signals-notify-errors",
+        true,
+    );
+}
+
+/// Covers the pinned Watcher state machine, pending ordering, and idempotent membership.
+#[test]
+fn signal_watcher_state_machine_works_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_715,
+        "signals-watcher-state",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_716,
+        "signals-watcher-state",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_717,
+        "signals-watcher-state",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_718,
+        "signals-watcher-state",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_719,
+        "signals-watcher-state",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_WATCHER_STATE_SOURCE,
+        8_714,
+        "signals-watcher-state",
         true,
     );
 }

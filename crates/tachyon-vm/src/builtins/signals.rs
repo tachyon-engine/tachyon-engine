@@ -989,6 +989,7 @@ impl Isolate {
                         continue;
                     }
                     self.set_computed_state(computed, ComputedState::Clean)?;
+                    self.clear_signal_computed_from_watcher_pending(frame.computed)?;
                     self.pending_signal_computed_pull_pop(pending)?;
                 }
             }
@@ -1321,6 +1322,7 @@ impl Isolate {
         let old_sources = self.pending_signal_computed_old_sources(pending)?;
         let hooks = self.reconcile_computed_sources(receiver, computed, old_sources)?;
         self.finish_computed_coloring(receiver, changed)?;
+        self.clear_signal_computed_from_watcher_pending(receiver)?;
         self.pending_signal_computed_pull_pop(pending)?;
         self.clear_pending_signal_computed_callback_state(pending)?;
         if hooks.is_empty() {
@@ -1370,6 +1372,7 @@ impl Isolate {
         let old_sources = self.pending_signal_computed_old_sources(pending)?;
         let hooks = self.reconcile_computed_sources(receiver, computed, old_sources)?;
         self.finish_computed_coloring(receiver, true)?;
+        self.clear_signal_computed_from_watcher_pending(receiver)?;
         self.pending_signal_computed_pull_pop(pending)?;
         self.clear_pending_signal_computed_callback_state(pending)?;
         if !hooks.is_empty() {
@@ -1396,7 +1399,6 @@ impl Isolate {
                     let node = no_gc
                         .borrow_mut(watcher, self.types.signal_watcher)
                         .map_err(ExecutionError::NoGcBorrow)?;
-                    node.pending.entries.clear();
                     node.state = WatcherState::Watching;
                     Ok(())
                 })
@@ -1624,7 +1626,7 @@ impl Isolate {
                 self.pending_signal_watcher_append_hooks(pending, hooks)?;
                 continue;
             }
-            self.finish_signal_watcher_operation(site, snapshot.watcher)?;
+            self.finish_signal_watcher_operation(site, snapshot.watcher, snapshot.kind)?;
             return Ok(());
         }
     }
@@ -2081,26 +2083,45 @@ impl Isolate {
         hooks: &mut Vec<SignalLifecycleHook>,
     ) -> Result<(), ExecutionError> {
         let watcher_ref = self.signal_watcher_reference(watcher)?;
+        let initially_pending = self.signal_computed_needs_pull(signal)?;
         let inserted = self.heap.with_running_scope(|scope| {
             let watcher = scope.root(watcher_ref).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
+            let result = scope.with_no_gc_scope(|no_gc| {
+                let node = no_gc
                     .borrow_mut(watcher, self.types.signal_watcher)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .watched
-                    .insert(signal)
-            })
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if node.watched.entries.contains(&signal) {
+                    return Ok((false, false));
+                }
+                if node.watched.entries.len() == node.watched.entries.capacity() {
+                    node.watched
+                        .entries
+                        .try_reserve_exact(1)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                }
+                let pending_inserted = initially_pending && !node.pending.entries.contains(&signal);
+                if pending_inserted && node.pending.entries.len() == node.pending.entries.capacity()
+                {
+                    node.pending
+                        .entries
+                        .try_reserve_exact(1)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+                }
+                node.watched.entries.push(signal);
+                if pending_inserted {
+                    node.pending.entries.push(signal);
+                }
+                node.state = WatcherState::Watching;
+                Ok::<_, ExecutionError>((true, pending_inserted))
+            })?;
+            if result.0 || result.1 {
+                scope
+                    .write_value_barrier(watcher, signal)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            Ok(result.0)
         })?;
         if inserted {
-            self.heap.with_running_scope(|scope| {
-                let watcher = scope.root(watcher_ref).map_err(ExecutionError::Root)?;
-                scope.with_no_gc_scope(|no_gc| {
-                    no_gc
-                        .borrow_mut(watcher, self.types.signal_watcher)
-                        .map(|node| node.state = WatcherState::Watching)
-                        .map_err(ExecutionError::NoGcBorrow)
-                })
-            })?;
             self.add_signal_sink(signal, watcher)?;
             self.attach_signal_liveness(signal, hooks)?;
         }
@@ -2148,6 +2169,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         watcher: Value,
+        kind: SignalWatcherOperationKind,
     ) -> Result<(), ExecutionError> {
         let watcher = self.signal_watcher_reference(watcher)?;
         self.heap.with_running_scope(|scope| {
@@ -2156,7 +2178,9 @@ impl Isolate {
                 no_gc
                     .borrow_mut(watcher, self.types.signal_watcher)
                     .map(|node| {
-                        if !node.watched.entries.is_empty() {
+                        if kind == SignalWatcherOperationKind::Watch
+                            && !node.watched.entries.is_empty()
+                        {
                             node.state = WatcherState::Watching;
                         }
                     })
@@ -2704,25 +2728,108 @@ impl Isolate {
         Ok(watchers)
     }
 
-    /// Moves a watching Watcher to pending once and snapshots its computed roots.
+    /// Refreshes dirty Computeds and moves only an armed Watcher into Pending.
     fn mark_signal_watcher_pending(&mut self, watcher: Value) -> Result<bool, ExecutionError> {
         let watcher = self.signal_watcher_reference(watcher)?;
-        self.heap.with_running_scope(|scope| {
+        let (state, watched) = self.heap.with_running_scope(|scope| {
             let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(watcher, self.types.signal_watcher)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .and_then(|node| Ok((node.state, node.watched.try_snapshot()?)))
+            })
+        })?;
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(watched.len())
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        for signal in watched {
+            if self.signal_computed_needs_pull(signal)? {
+                pending.push(signal);
+            }
+        }
+        self.heap.with_running_scope(|scope| {
+            let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
+            let marked = scope.with_no_gc_scope(|no_gc| {
                 let node = no_gc
                     .borrow_mut(watcher, self.types.signal_watcher)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                if node.state != WatcherState::Watching {
-                    return Ok(false);
+                let additional = pending
+                    .iter()
+                    .filter(|signal| !node.pending.entries.contains(signal))
+                    .count();
+                if node.pending.entries.capacity() - node.pending.entries.len() < additional {
+                    node.pending
+                        .entries
+                        .try_reserve_exact(additional)
+                        .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                 }
-                for watched in node.watched.try_snapshot()? {
-                    node.pending.insert(watched)?;
+                for signal in pending.iter().copied() {
+                    node.pending.insert(signal)?;
                 }
-                node.state = WatcherState::Pending;
-                Ok(true)
+                if state == WatcherState::Watching {
+                    node.state = WatcherState::Pending;
+                }
+                Ok(state == WatcherState::Watching)
+            })?;
+            for signal in pending {
+                scope
+                    .write_value_barrier(watcher, signal)
+                    .map_err(ExecutionError::HeapReference)?;
+            }
+            Ok(marked)
+        })
+    }
+
+    /// Reports whether a value is a Computed whose cached completion needs validation.
+    fn signal_computed_needs_pull(&mut self, signal: Value) -> Result<bool, ExecutionError> {
+        let Ok(computed) = self.signal_computed_reference(signal) else {
+            return Ok(false);
+        };
+        self.heap.with_running_scope(|scope| {
+            let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(computed, self.types.signal_computed)
+                    .map(|node| node.state != ComputedState::Clean)
+                    .map_err(ExecutionError::NoGcBorrow)
             })
         })
+    }
+
+    /// Removes one settled Computed from every directly attached Watcher's pending subset.
+    fn clear_signal_computed_from_watcher_pending(
+        &mut self,
+        signal: Value,
+    ) -> Result<(), ExecutionError> {
+        let computed = self.signal_computed_reference(signal)?;
+        let sinks = self.heap.with_running_scope(|scope| {
+            let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(computed, self.types.signal_computed)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .and_then(|node| node.sinks.try_snapshot())
+            })
+        })?;
+        for sink in sinks {
+            let Ok(watcher) = self.signal_watcher_reference(sink) else {
+                continue;
+            };
+            self.heap.with_running_scope(|scope| {
+                let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(watcher, self.types.signal_watcher)
+                        .map(|node| {
+                            node.pending.remove(signal);
+                        })
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+        }
+        Ok(())
     }
 
     /// Promotes checked downstream nodes on change or cleans unchanged checked chains.
@@ -2782,6 +2889,9 @@ impl Isolate {
                     node.sinks.try_snapshot()
                 })
             })?;
+            if !changed {
+                self.clear_signal_computed_from_watcher_pending(sink)?;
+            }
             self.signal_runtime
                 .worklist
                 .try_reserve(downstream.len())
