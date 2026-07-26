@@ -202,6 +202,46 @@ try {
 }
 "#;
 
+const PROMISE_ALL_THEN_GETTER_CLOSE_SETUP: &str = r#"
+var thenGetterReason = 0;
+var thenGetterCalls = 0;
+var closeGetterCalls = 0;
+var closeCallCount = 0;
+var originalResolveForClose = Promise.resolve;
+Promise.resolve = function(value) {
+  var result = {};
+  Object.defineProperty(result, "then", {
+    get: function() {
+      thenGetterCalls = thenGetterCalls + 1;
+      throw 21;
+    }
+  });
+  return result;
+};
+var closeIterable = {};
+closeIterable[Symbol.iterator] = function() {
+  var done = false;
+  var iterator = {
+    next: function() {
+      if (done) return { value: undefined, done: true };
+      done = true;
+      return { value: 1, done: false };
+    }
+  };
+  Object.defineProperty(iterator, "return", {
+    get: function() {
+      closeGetterCalls = closeGetterCalls + 1;
+      throw 22;
+    }
+  });
+  return iterator;
+};
+Promise.all(closeIterable).then(undefined, function(reason) {
+  thenGetterReason = reason;
+});
+Promise.resolve = originalResolveForClose;
+"#;
+
 const PROMISE_ALL_CUSTOM_CAPABILITY_SETUP: &str = r#"
 var capabilityResult = 0;
 var capabilityReject = 0;
@@ -451,6 +491,14 @@ fn promise_all_rejects_when_get_promise_resolve_throws() {
 }
 
 #[test]
+fn promise_all_then_getter_abrupt_closes_and_preserves_original_reason() {
+    assert_promise_all_then_getter_close::<1>(5_421, false);
+    assert_promise_all_then_getter_close::<8>(5_423, false);
+    assert_promise_all_then_getter_close::<16>(5_425, false);
+    assert_promise_all_then_getter_close::<8>(5_427, true);
+}
+
+#[test]
 fn promise_all_custom_capability_is_stable_for_every_dispatch_batch() {
     assert_promise_all_custom_capability::<1>(5_501, false);
     assert_promise_all_custom_capability::<2>(5_503, false);
@@ -541,6 +589,27 @@ fn assert_promise_all_abrupt_source<const N: usize>(source_id: u32, forced_major
     let probe = compile_promise_source(
         source_id + 1,
         "abruptOutside === 0 && abruptReason === 9 && closeCount === 0;",
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Verifies `then` abrupt closes the iterator while close failure preserves the first throw.
+fn assert_promise_all_then_getter_close<const N: usize>(source_id: u32, forced_major: bool) {
+    let setup = compile_promise_source(source_id, PROMISE_ALL_THEN_GETTER_CLOSE_SETUP);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "thenGetterReason === 21 && thenGetterCalls === 1 && closeGetterCalls === 1 && closeCallCount === 0;",
     );
     let mut isolate = test_isolate();
     if forced_major {
