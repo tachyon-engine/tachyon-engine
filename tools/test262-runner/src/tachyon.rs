@@ -33,6 +33,7 @@ function $DONE(error) {
     __tachyonAsyncStatus = 1;
   }
 }
+globalThis.$DONE = $DONE;
 "#;
 const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
 
@@ -496,7 +497,7 @@ mod tests {
         ));
         assert_eq!(
             execute(&composed(
-                "$DONE();",
+                "if (!Object.prototype.hasOwnProperty.call(globalThis, '$DONE')) { $DONE('missing own property'); } else { $DONE(); }",
                 &[("doneprintHandle.js", "ignored by Tachyon")],
                 true,
             )),
@@ -514,5 +515,17 @@ mod tests {
                 ..
             } if &**error_type == "Test262Error"
         ));
+    }
+
+    #[test]
+    fn non_async_done_harness_is_not_replaced() {
+        assert_eq!(
+            execute(&composed(
+                "if ($DONE !== 7) { throw new TypeError(); }",
+                &[("doneprintHandle.js", "var $DONE = 7;")],
+                false,
+            )),
+            EngineOutcome::Completed
+        );
     }
 }
