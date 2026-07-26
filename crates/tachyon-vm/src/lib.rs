@@ -55,6 +55,7 @@ mod realm;
 mod regexp;
 mod runtime;
 mod string;
+mod string_split;
 mod tuning;
 mod weak_collection;
 
@@ -236,8 +237,8 @@ use runtime::{
         ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, SymbolAllocationRoots,
-        ToPrimitiveStage, VmRoots, next_to_primitive_stage,
+        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, StringSplitStage,
+        SymbolAllocationRoots, ToPrimitiveStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

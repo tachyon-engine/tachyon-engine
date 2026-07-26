@@ -834,6 +834,7 @@ impl Isolate {
                 NativeFunction::StringToLocaleUpperCase,
                 b"toLocaleUpperCase".as_slice(),
             ),
+            (NativeFunction::StringSplit, b"split".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
@@ -906,6 +907,23 @@ impl Isolate {
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
         self.initialize_remaining_well_known_symbols(symbol_constructor)?;
+        let regexp_split = allocate(self, NativeFunction::RegExpSplit)?;
+        let split_symbol = self
+            .realm
+            .well_known_symbols
+            .split
+            .expect("Symbol.split remains rooted during RegExp initialization");
+        let split_key = self.property_key(split_symbol)?;
+        self.define_data_property(
+            regexp_prototype,
+            split_key,
+            DataPropertyDescriptor {
+                value: Some(regexp_split),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         self.initialize_symbol_registry_functions(symbol_constructor, function_prototype)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
@@ -1298,6 +1316,8 @@ impl Isolate {
                 self.realm.well_known_symbols.replace = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
+            } else if name == b"split" {
+                self.realm.well_known_symbols.split = Some(symbol);
             }
             let symbol = if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag.unwrap()
@@ -1307,6 +1327,8 @@ impl Isolate {
                 self.realm.well_known_symbols.replace.unwrap()
             } else if name == b"species" {
                 self.realm.well_known_symbols.species.unwrap()
+            } else if name == b"split" {
+                self.realm.well_known_symbols.split.unwrap()
             } else {
                 symbol
             };

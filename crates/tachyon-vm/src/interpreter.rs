@@ -2187,6 +2187,13 @@ impl Isolate {
                 }
                 (continuation.first(), 0, None, 0)
             }
+            NativeContinuationKind::StringSplit(stage) => {
+                if stage != StringSplitStage::SplitterCall {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 2)
+            }
             NativeContinuationKind::PromiseExecutor => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5287,6 +5294,9 @@ impl Isolate {
                     let value = self.string_pad(&site, true)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringSplit) => {
+                    return self.begin_string_split(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::StringTrim) => {
                     let value = self.string_trim(site.this_value, true, true)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -5332,6 +5342,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, regexp);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpSplit) => {
+                    let result = self.regexp_split(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     let value = self.date_function_call()?;
@@ -7311,6 +7325,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::DateToJson(stage) => {
                     self.resume_date_to_json(continuation, stage, value)
+                }
+                NativeContinuationKind::StringSplit(stage) => {
+                    self.resume_string_split(continuation, stage, value)
                 }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())

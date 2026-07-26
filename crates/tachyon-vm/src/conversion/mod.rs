@@ -14,6 +14,19 @@ pub(crate) use numeric::{
     numeric_negate, numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
 };
 
+struct RuntimeStringAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    retained: Value,
+}
+
+impl Trace for RuntimeStringAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.retained.trace(tracer);
+    }
+}
+
 pub(super) enum ConversionCallbackResult {
     Suspended,
     Returned(Value),
@@ -87,6 +100,33 @@ impl Isolate {
         }
         self.allocate_runtime_string(
             JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Converts one primitive String argument while retaining an earlier managed edge.
+    pub(crate) fn primitive_string_value_retaining(
+        &mut self,
+        argument: Option<Value>,
+        retained: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let Some(argument) = argument else {
+            return self.allocate_runtime_string_retaining(
+                JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,
+                retained,
+            );
+        };
+        if self.is_string_value(argument) {
+            return Ok((argument, retained));
+        }
+        let mut units = Vec::new();
+        if self.is_symbol_value(argument) {
+            self.append_symbol_string_units(argument, &mut units)?;
+        } else {
+            self.append_primitive_string_units(argument, &mut units)?;
+        }
+        self.allocate_runtime_string_retaining(
+            JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+            retained,
         )
     }
 
@@ -448,6 +488,20 @@ impl Isolate {
                     ) {
                         let state = self.pending_array_join_reference(continuation.receiver)?;
                         return self.resume_array_join_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringSplitReceiver
+                            | ConversionConsumer::StringSplitLimit
+                            | ConversionConsumer::StringSplitSeparator
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_split_conversion(
                             continuation.site,
                             state,
                             continuation.consumer,
@@ -983,6 +1037,11 @@ impl Isolate {
                 | ConversionConsumer::ArrayJoinElement => {
                     unreachable!("Array join conversion resumes inside its state machine")
                 }
+                ConversionConsumer::StringSplitReceiver
+                | ConversionConsumer::StringSplitLimit
+                | ConversionConsumer::StringSplitSeparator => {
+                    unreachable!("String split conversion resumes inside its state machine")
+                }
                 ConversionConsumer::NativeCall(_) | ConversionConsumer::NativeConstruct(_) => {
                     unreachable!("native conversion consumers always carry a native function")
                 }
@@ -1300,6 +1359,35 @@ impl Isolate {
             )
             .map_err(ExecutionError::HeapAllocation)?;
         Ok(Value::from_heap_ref(value.raw()))
+    }
+
+    /// Allocates a String while updating one caller-owned edge across a moving collection.
+    pub(crate) fn allocate_runtime_string_retaining(
+        &mut self,
+        string: JsString,
+        retained: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let mut roots = RuntimeStringAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            retained,
+        };
+        let value = self
+            .heap
+            .try_allocate_external_with_gc(
+                self.types.string,
+                0,
+                string,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok((Value::from_heap_ref(value.raw()), roots.retained))
     }
 
     /// Converts the primitive values represented by the current numeric VM subset.

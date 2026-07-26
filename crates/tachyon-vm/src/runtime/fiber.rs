@@ -290,6 +290,9 @@ pub(crate) enum ConversionConsumer {
     ArrayFillLength,
     ArrayFillStart,
     ArrayFillEnd,
+    StringSplitReceiver,
+    StringSplitLimit,
+    StringSplitSeparator,
 }
 
 impl ConversionConsumer {
@@ -350,7 +353,12 @@ impl ConversionConsumer {
             | Self::ArrayRemoveLength
             | Self::ArrayInsertLength
             | Self::ArrayReverseLength => None,
-            Self::ArrayFillLength | Self::ArrayFillStart | Self::ArrayFillEnd => None,
+            Self::ArrayFillLength
+            | Self::ArrayFillStart
+            | Self::ArrayFillEnd
+            | Self::StringSplitReceiver
+            | Self::StringSplitLimit
+            | Self::StringSplitSeparator => None,
         }
     }
 
@@ -381,6 +389,8 @@ impl ConversionConsumer {
                 | Self::ArrayToSortedRightString
                 | Self::ArrayJoinSeparator
                 | Self::ArrayJoinElement
+                | Self::StringSplitReceiver
+                | Self::StringSplitSeparator
         )
     }
 
@@ -444,6 +454,9 @@ impl ConversionConsumer {
                 | Self::ArrayFillLength
                 | Self::ArrayFillStart
                 | Self::ArrayFillEnd
+                | Self::StringSplitReceiver
+                | Self::StringSplitLimit
+                | Self::StringSplitSeparator
                 | Self::ArrayCopyWithinLength
                 | Self::ArrayCopyWithinTarget
                 | Self::ArrayCopyWithinStart
@@ -1011,6 +1024,14 @@ pub(crate) enum DateToJsonStage {
     Call,
 }
 
+/// Observable callback boundaries in String.prototype.split.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringSplitStage {
+    SplitterGet,
+    SplitterCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -1087,6 +1108,7 @@ pub(crate) enum NativeContinuationKind {
     },
     ObjectToLocaleString(ObjectToLocaleStringStage),
     DateToJson(DateToJsonStage),
+    StringSplit(StringSplitStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1169,6 +1191,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::DateToJson(stage),
             first: receiver,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    #[inline]
+    pub(crate) const fn string_split(
+        site: NativeContinuationSite,
+        stage: StringSplitStage,
+        state: Value,
+        separator: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::StringSplit(stage),
+            first: state,
+            second: separator,
         }
     }
 

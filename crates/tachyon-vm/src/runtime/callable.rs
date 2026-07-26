@@ -269,12 +269,14 @@ pub(crate) enum NativeFunction {
     StringToUpperCase,
     StringToLocaleLowerCase,
     StringToLocaleUpperCase,
+    StringSplit,
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
     RegExpExec,
     RegExpTest,
     RegExpToString,
+    RegExpSplit,
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
@@ -826,6 +828,8 @@ impl NativeFunction {
             Self::ReflectConstruct => 2,
             Self::ProxyConstructor
             | Self::ProxyRevocable
+            | Self::StringSplit
+            | Self::RegExpSplit
             | Self::ArraySlice
             | Self::ArraySplice => 2,
             Self::ObjectAssign
@@ -1163,6 +1167,7 @@ impl NativeFunction {
             Self::RegExpExec => "exec",
             Self::RegExpTest => "test",
             Self::RegExpToString => "toString",
+            Self::RegExpSplit => "[Symbol.split]",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
             Self::StringAt => "at",
@@ -1191,6 +1196,7 @@ impl NativeFunction {
             Self::StringToUpperCase => "toUpperCase",
             Self::StringToLocaleLowerCase => "toLocaleLowerCase",
             Self::StringToLocaleUpperCase => "toLocaleUpperCase",
+            Self::StringSplit => "split",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",

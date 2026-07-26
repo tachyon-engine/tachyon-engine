@@ -55,8 +55,9 @@ impl Isolate {
             JsString::try_from_utf16(pattern).map_err(ExecutionError::ConstantString)?,
         )?;
         let flag_text = regexp_flag_text(flags)?;
-        let flags = self.allocate_runtime_string(
+        let (flags, source) = self.allocate_runtime_string_retaining(
             JsString::try_from_latin1(&flag_text).map_err(ExecutionError::ConstantString)?,
+            source,
         )?;
         self.validate_regexp_flags(flags)?;
         let source_text =
@@ -98,7 +99,7 @@ impl Isolate {
                     .is_ok()
             })
         });
-        let (mut pattern, flags) = if flags_are_absent && let Some(regexp) = copied_regexp {
+        let (mut pattern, mut flags) = if flags_are_absent && let Some(regexp) = copied_regexp {
             self.regexp_data(regexp)?
         } else {
             let pattern = if pattern_argument.is_none()
@@ -111,18 +112,20 @@ impl Isolate {
             } else {
                 self.regexp_string_argument(pattern_argument)?
             };
-            let flags = if flags_are_absent {
-                self.allocate_runtime_string(
+            let (flags, pattern) = if flags_are_absent {
+                self.allocate_runtime_string_retaining(
                     JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
+                    pattern,
                 )?
             } else {
-                self.regexp_string_argument(flags_argument)?
+                self.regexp_string_argument_retaining(flags_argument, pattern)?
             };
             (pattern, flags)
         };
         if self.regexp_string_units(pattern)?.is_empty() {
-            pattern = self.allocate_runtime_string(
+            (pattern, flags) = self.allocate_runtime_string_retaining(
                 JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+                flags,
             )?;
         }
         let source_units = self.regexp_string_units(pattern)?;
@@ -268,6 +271,118 @@ impl Isolate {
         ))
     }
 
+    /// Splits one primitive-coercible input through a genuine RegExp backend fast path.
+    pub(crate) fn regexp_split(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let (source_value, flags_value) = self.regexp_data(site.this_value)?;
+        let input_argument = self.call_argument(site, 0)?;
+        let input = self.regexp_string_argument(input_argument)?;
+        let input_units = self.regexp_string_units(input)?;
+        let source = String::from_utf16(&self.regexp_string_units(source_value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let flags = self.regexp_flags(flags_value)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let limit_argument = self.call_argument(site, 1)?;
+        let limit = self.regexp_split_limit(limit_argument)?;
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before RegExp split");
+        let result = self.create_array_object_with_prototype(prototype)?;
+        self.write(site.caller_base, site.destination, result)?;
+        if limit == 0 {
+            return Ok(result);
+        }
+        if input_units.is_empty() {
+            if program.find_ucs2(&input_units, 0).is_none() {
+                self.string_split_push_value(result, 0, input)?;
+            }
+            return self.read(site.caller_base, site.destination);
+        }
+        let mut output_index = 0_u32;
+        let mut segment_start = 0;
+        let mut search = 0;
+        while search < input_units.len() {
+            let matched = program
+                .find_ucs2(&input_units, search)
+                .filter(|matched| matched.start == search);
+            let Some(matched) = matched else {
+                search = advance_regexp_split_index(
+                    &input_units,
+                    search,
+                    flags.unicode || flags.unicode_sets,
+                );
+                continue;
+            };
+            if matched.end == segment_start {
+                search = advance_regexp_split_index(
+                    &input_units,
+                    search,
+                    flags.unicode || flags.unicode_sets,
+                );
+                continue;
+            }
+            self.string_split_push_units(
+                NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                output_index,
+                &input_units[segment_start..search],
+            )?;
+            output_index += 1;
+            if output_index == limit {
+                return self.read(site.caller_base, site.destination);
+            }
+            segment_start = matched.end.min(input_units.len());
+            for capture in matched.captures {
+                let key = self.property_key_atom(safe_integer_value(u64::from(output_index)))?;
+                let value = match capture {
+                    Some(range) => self.allocate_runtime_string(
+                        JsString::try_from_utf16(&input_units[range])
+                            .map_err(ExecutionError::PropertyKeyString)?,
+                    )?,
+                    None => Value::from_immediate(Immediate::Undefined),
+                };
+                let result = self.read(site.caller_base, site.destination)?;
+                self.set_own_data_property(result, key, value)?;
+                output_index += 1;
+                if output_index == limit {
+                    return self.read(site.caller_base, site.destination);
+                }
+            }
+            search = segment_start;
+        }
+        self.string_split_push_units(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            output_index,
+            &input_units[segment_start..],
+        )?;
+        self.read(site.caller_base, site.destination)
+    }
+
+    /// Normalizes the optional RegExp split limit with the ToUint32 modulo rule.
+    fn regexp_split_limit(&mut self, value: Option<Value>) -> Result<u32, ExecutionError> {
+        let Some(value) = value.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+        else {
+            return Ok(u32::MAX);
+        };
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        Ok(if !number.is_finite() || number == 0.0 {
+            0
+        } else {
+            number.trunc().rem_euclid(4_294_967_296.0) as u32
+        })
+    }
+
     /// Builds the canonical slash-delimited source and flag representation.
     pub(crate) fn regexp_to_string(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         let (source, flags) = self.regexp_data(receiver)?;
@@ -330,6 +445,24 @@ impl Isolate {
             return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
         }
         self.primitive_string_value(Some(value))
+    }
+
+    /// Converts one primitive RegExp argument while retaining a prior managed edge.
+    fn regexp_string_argument_retaining(
+        &mut self,
+        value: Option<Value>,
+        retained: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let value = value.unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_string_wrapper(value) {
+            return self
+                .string_primitive_value(value)
+                .map(|string| (string, retained));
+        }
+        if self.is_object_value(value) {
+            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
+        }
+        self.primitive_string_value_retaining(Some(value), retained)
     }
 
     /// Copies exact UTF-16 code units so backend offsets remain ECMAScript-visible positions.
@@ -446,4 +579,21 @@ fn regexp_flag_text(flags: u8) -> Result<Vec<u8>, ExecutionError> {
         }
     }
     Ok(result)
+}
+
+/// Advances one UTF-16 position, preserving surrogate pairs only in Unicode matching mode.
+#[inline(always)]
+fn advance_regexp_split_index(input: &[u16], index: usize, unicode: bool) -> usize {
+    if unicode
+        && input
+            .get(index)
+            .is_some_and(|unit| (0xd800..=0xdbff).contains(unit))
+        && input
+            .get(index + 1)
+            .is_some_and(|unit| (0xdc00..=0xdfff).contains(unit))
+    {
+        index + 2
+    } else {
+        index + 1
+    }
 }
