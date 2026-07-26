@@ -38,6 +38,7 @@ mod execution_profile;
 mod finalization;
 mod finalization_registry;
 mod for_in;
+mod host;
 mod interpreter;
 mod isolate;
 mod iterator;
@@ -66,6 +67,7 @@ pub use finalization::{
     FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
     FinalizationSafepointStats,
 };
+pub use host::{HostProviderError, HostProviders, TimeZoneProvider, WallClockProvider};
 pub use isolate::Isolate;
 pub use object::ShapeError;
 pub use runtime::{callable::NativeErrorKind, code::CodeId};
@@ -344,6 +346,8 @@ pub enum RunOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     InvalidDispatchBatch { batch: usize },
+    MissingWallClockProvider,
+    WallClockProvider(HostProviderError),
     MissingEntryFunction(FunctionId),
     RegisterWindowTooLarge(u32),
     HandlerStackTooLarge(u32),

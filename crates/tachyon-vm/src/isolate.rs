@@ -54,6 +54,7 @@ pub struct Isolate {
     pub(crate) intrinsic_property_atoms: IntrinsicPropertyAtoms,
     pub(crate) next_symbol_serial: NonZeroU32,
     pub(crate) math_random_state: u64,
+    pub(crate) host_providers: HostProviders,
     pub(crate) stack_limits: StackLimits,
     #[cfg(feature = "opcode-profile")]
     pub(crate) execution_profile: ExecutionProfile,
@@ -315,6 +316,14 @@ impl Isolate {
 
     /// Registers VM payload descriptors before constructing an otherwise empty isolate heap.
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
+        Self::new_with_host_providers(config, HostProviders::new())
+    }
+
+    /// Builds an isolate with explicit host capabilities and no implicit process fallbacks.
+    pub fn new_with_host_providers(
+        config: IsolateConfig,
+        host_providers: HostProviders,
+    ) -> Result<Self, IsolateCreationError> {
         let mut registry = TypeRegistry::new();
         let types = VmTypes {
             accessor_pair: registry
@@ -558,6 +567,7 @@ impl Isolate {
             intrinsic_property_atoms: IntrinsicPropertyAtoms::default(),
             next_symbol_serial: NonZeroU32::MIN,
             math_random_state: 0x6a09_e667_f3bc_c909,
+            host_providers,
             stack_limits: config.stack_limits,
             #[cfg(feature = "opcode-profile")]
             execution_profile: ExecutionProfile::default(),

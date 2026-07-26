@@ -5337,6 +5337,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
+                FunctionExecutable::Native(NativeFunction::DateNow) => {
+                    let value = self.date_now()?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(
                     NativeFunction::DateGetTime | NativeFunction::DateValueOf,
                 ) => {

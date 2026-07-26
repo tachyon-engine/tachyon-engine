@@ -270,6 +270,7 @@ pub(crate) enum NativeFunction {
     BooleanToString,
     BooleanValueOf,
     DateConstructor,
+    DateNow,
     DateParse,
     DateUtc,
     DateGetTime,
@@ -774,6 +775,7 @@ impl NativeFunction {
         match self {
             Self::DateConstructor | Self::DateUtc => 7,
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
+            Self::DateNow => 0,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
             Self::DateUtcSetter(setter) => setter.length(),
             Self::ObjectDefineProperty
@@ -1169,6 +1171,7 @@ impl NativeFunction {
             Self::BooleanToString => "toString",
             Self::BooleanValueOf => "valueOf",
             Self::DateConstructor => "Date",
+            Self::DateNow => "now",
             Self::DateParse => "parse",
             Self::DateUtc => "UTC",
             Self::DateGetTime => "getTime",

@@ -4,6 +4,22 @@ use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName
 
 use super::{fixtures::test_isolate, *};
 
+struct FixedClock(i64);
+
+impl WallClockProvider for FixedClock {
+    fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
+        Ok(self.0)
+    }
+}
+
+struct FailingClock;
+
+impl WallClockProvider for FailingClock {
+    fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
+        Err(HostProviderError::Failure(17))
+    }
+}
+
 const DATE_SOURCE: &str = r#"
 var positive = new Date(1.9);
 var negative = new Date(-1.9);
@@ -202,6 +218,31 @@ fn date_numeric_construction_is_stable_for_every_dispatch_batch() {
     assert_date_batch::<4>();
     assert_date_batch::<8>();
     assert_date_batch::<16>();
+}
+
+#[test]
+fn injected_wall_clock_drives_date_now_and_zero_argument_construction() {
+    assert_date_clock_batch::<1>(false);
+    assert_date_clock_batch::<2>(false);
+    assert_date_clock_batch::<4>(false);
+    assert_date_clock_batch::<8>(false);
+    assert_date_clock_batch::<16>(false);
+    assert_date_clock_batch::<8>(true);
+}
+
+#[test]
+fn missing_and_failing_wall_clock_providers_remain_structured_host_errors() {
+    assert_eq!(
+        test_isolate().date_now(),
+        Err(ExecutionError::MissingWallClockProvider)
+    );
+    let mut isolate = date_clock_isolate(FailingClock);
+    assert_eq!(
+        isolate.date_now(),
+        Err(ExecutionError::WallClockProvider(
+            HostProviderError::Failure(17)
+        ))
+    );
 }
 
 #[test]
@@ -405,6 +446,53 @@ fn assert_date_batch<const N: usize>() {
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"
     );
+}
+
+/// Executes both clock consumers under one dispatch and forced-collection policy.
+fn assert_date_clock_batch<const N: usize>(forced_major: bool) {
+    let module = compile_date_program(
+        r#"
+var descriptor = Object.getOwnPropertyDescriptor(Date, "now");
+Date.now() === 123456789 && new Date().getTime() === 123456789 &&
+Date.now.name === "now" && Date.now.length === 0 &&
+descriptor.value === Date.now && descriptor.writable === true &&
+descriptor.enumerable === false && descriptor.configurable === true;
+"#,
+        1_540 + N as u32,
+    );
+    let mut isolate = date_clock_isolate(FixedClock(123_456_789));
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("injected Date clock fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Date clock batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Creates a normal test isolate while making its wall-clock dependency explicit.
+fn date_clock_isolate(provider: impl WallClockProvider + 'static) -> Isolate {
+    Isolate::new_with_host_providers(
+        IsolateConfig::new(
+            AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+            HeapLimit::new(9 * SPAN_SIZE_BYTES),
+            StackLimits::new(64, 4_096),
+            RealmLimits::new(64, 1_024),
+        ),
+        HostProviders::new().with_wall_clock(provider),
+    )
+    .expect("Date provider test isolate descriptors register")
 }
 
 /// Executes observable Date numeric conversion for one interpreter dispatch batch.

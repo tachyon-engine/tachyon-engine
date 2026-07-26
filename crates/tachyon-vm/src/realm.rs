@@ -1057,6 +1057,9 @@ impl Isolate {
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
 
+        let now_atom = self.intern_intrinsic_name(b"now")?;
+        let now = allocate(self, NativeFunction::DateNow)?;
+        self.set_intrinsic_data_property(constructor, now_atom, now, true)?;
         let utc_atom = self.intern_intrinsic_name(b"UTC")?;
         let utc = allocate(self, NativeFunction::DateUtc)?;
         self.set_intrinsic_data_property(constructor, utc_atom, utc, true)?;

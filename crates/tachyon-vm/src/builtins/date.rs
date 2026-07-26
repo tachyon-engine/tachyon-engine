@@ -213,16 +213,15 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<Value, ExecutionError> {
-        let argument =
-            self.call_argument(site, 0)?
-                .ok_or(ExecutionError::UnsupportedNumberConversion(
-                    Value::from_immediate(Immediate::Undefined),
-                ))?;
-        let date_value = if let Some(date_value) = self.date_time_value(argument)? {
-            date_value
+        let date_value = if let Some(argument) = self.call_argument(site, 0)? {
+            if let Some(date_value) = self.date_time_value(argument)? {
+                date_value
+            } else {
+                let number = self.convert_to_number(argument)?;
+                time_clip(numeric_value(number).expect("ToNumber returns a numeric value"))
+            }
         } else {
-            let number = self.convert_to_number(argument)?;
-            time_clip(numeric_value(number).expect("ToNumber returns a numeric value"))
+            self.host_wall_clock_time()?
         };
         let default_prototype = self
             .realm
@@ -244,6 +243,23 @@ impl Isolate {
             default_prototype
         };
         self.allocate_date_object(date_value, prototype, AllocationSpace::Young)
+    }
+
+    /// Reads the injected wall clock and applies the same clipping contract as Date construction.
+    pub(crate) fn date_now(&mut self) -> Result<Value, ExecutionError> {
+        Ok(Value::from_f64(self.host_wall_clock_time()?))
+    }
+
+    /// Isolates the only wall-clock capability call used by Date builtins.
+    fn host_wall_clock_time(&mut self) -> Result<f64, ExecutionError> {
+        let provider = self
+            .host_providers
+            .wall_clock_mut()
+            .ok_or(ExecutionError::MissingWallClockProvider)?;
+        provider
+            .unix_time_milliseconds()
+            .map(|milliseconds| time_clip(milliseconds as f64))
+            .map_err(ExecutionError::WallClockProvider)
     }
 
     /// Implements the shared thisTimeValue operation for Date.prototype.getTime/valueOf.

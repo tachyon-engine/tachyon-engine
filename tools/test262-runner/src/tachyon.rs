@@ -5,8 +5,9 @@ use tachyon_compiler::{
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, Isolate, IsolateConfig,
-    RealmId, RealmLimits, RunOutcome, StackLimits, Value,
+    AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, HostProviderError,
+    HostProviders, Isolate, IsolateConfig, RealmId, RealmLimits, RunOutcome, StackLimits, Value,
+    WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -34,6 +35,14 @@ function $DONE(error) {
 }
 "#;
 const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
+
+struct Test262WallClock;
+
+impl WallClockProvider for Test262WallClock {
+    fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
+        Ok(0)
+    }
+}
 
 /// Compiles and executes `$262.evalScript` in the realm selected by the host hook.
 fn eval_script_callback(
@@ -150,16 +159,19 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         }
     }
 
-    let mut isolate = match Isolate::new(IsolateConfig::new(
-        AtomTableConfig::new(
-            ATOM_MAX_ENTRIES,
-            ATOM_MAX_BYTES,
-            AtomHashSeed::new(0x7461_6368_796f_6e31, 0x7465_7374_3236_3231),
+    let mut isolate = match Isolate::new_with_host_providers(
+        IsolateConfig::new(
+            AtomTableConfig::new(
+                ATOM_MAX_ENTRIES,
+                ATOM_MAX_BYTES,
+                AtomHashSeed::new(0x7461_6368_796f_6e31, 0x7465_7374_3236_3231),
+            ),
+            HeapLimit::new(HEAP_LIMIT_BYTES),
+            StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
+            RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
         ),
-        HeapLimit::new(HEAP_LIMIT_BYTES),
-        StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
-        RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
-    )) {
+        HostProviders::new().with_wall_clock(Test262WallClock),
+    ) {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),
     };
