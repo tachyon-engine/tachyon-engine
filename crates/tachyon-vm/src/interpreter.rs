@@ -4439,8 +4439,7 @@ impl Isolate {
                     return self.begin_signal_state_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalComputedConstructor) => {
-                    let computed = self.create_signal_computed_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, computed);
+                    return self.begin_signal_computed_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::SignalWatcherConstructor) => {
                     let watcher = self.create_signal_watcher_from_site(&site)?;
@@ -6070,6 +6069,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayBufferSlice) => {
                     return self.begin_array_buffer_slice(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferTransfer) => {
+                    return self.begin_array_buffer_transfer(&site, false);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferTransferToFixedLength) => {
+                    return self.begin_array_buffer_transfer(&site, true);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::ArrayBufferByteLength
                     | NativeFunction::ArrayBufferMaxByteLength
@@ -6104,6 +6109,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayIncludes) => {
                     return self.begin_typed_array_includes(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayFill) => {
+                    return self.begin_typed_array_fill(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySearch(direction)) => {
                     return self.begin_typed_array_search(&site, direction);

@@ -290,6 +290,92 @@ impl Isolate {
         self.finish_array_buffer_slice_start(site, state, start)
     }
 
+    /// Begins fixed ArrayBuffer copy-and-detach while preserving observable ToIndex order.
+    pub(crate) fn begin_array_buffer_transfer(
+        &mut self,
+        site: &CallSite,
+        to_fixed_length: bool,
+    ) -> Result<(), ExecutionError> {
+        let source = site.this_value;
+        let initial = self.array_buffer_data_snapshot(source)?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let new_length = self.call_argument(site, 0)?.unwrap_or(undefined);
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if new_length.as_immediate() == Some(Immediate::Undefined) {
+            let length = initial
+                .ok_or(ExecutionError::DetachedArrayBuffer)?
+                .byte_length;
+            return self.finish_array_buffer_transfer(native_site, source, length, to_fixed_length);
+        }
+        if self.is_object_value(new_length) {
+            let state = self.allocate_array_buffer_slice_state(NativeCallState {
+                values: [source, undefined, undefined, undefined, undefined],
+                count: 0,
+            })?;
+            self.root_array_buffer_slice_state(native_site, state)?;
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::ArrayBufferTransferLength(to_fixed_length),
+                native_site.caller_base,
+                native_site.destination,
+                Value::from_heap_ref(state.raw()),
+                new_length,
+                native_site.call_site,
+            );
+        }
+        let new_length = self.ecma_to_index(new_length)?;
+        self.finish_array_buffer_transfer(native_site, source, new_length, to_fixed_length)
+    }
+
+    /// Resumes explicit newLength conversion, then revalidates source attachment.
+    pub(crate) fn resume_array_buffer_transfer_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        to_fixed_length: bool,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.root_array_buffer_slice_state(site, state)?;
+        let source = self.native_call_state_snapshot(state)?.values[0];
+        let new_length = self.ecma_to_index(value)?;
+        self.finish_array_buffer_transfer(site, source, new_length, to_fixed_length)
+    }
+
+    /// Allocates and copies the complete result before atomically clearing the source edge.
+    fn finish_array_buffer_transfer(
+        &mut self,
+        site: NativeContinuationSite,
+        source: Value,
+        new_length: usize,
+        _to_fixed_length: bool,
+    ) -> Result<(), ExecutionError> {
+        if new_length > MAX_ARRAY_BUFFER_BYTES {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        let source_snapshot = self
+            .array_buffer_data_snapshot(source)?
+            .ok_or(ExecutionError::DetachedArrayBuffer)?;
+        let prototype = self
+            .realm
+            .array_buffer_prototype
+            .expect("ArrayBuffer prototype initializes before transfer");
+        let result = self.allocate_array_buffer_object(new_length, new_length, false, prototype)?;
+        let result_snapshot = self
+            .array_buffer_data_snapshot(result)?
+            .expect("new ArrayBuffer result is attached");
+        self.copy_array_buffer_slice_bytes(
+            source_snapshot.data,
+            result_snapshot.data,
+            0,
+            source_snapshot.byte_length.min(new_length),
+        )?;
+        self.detach_array_buffer(source)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
     /// Resumes either observable index conversion without retaining Rust stack state.
     pub(crate) fn resume_array_buffer_slice_conversion(
         &mut self,

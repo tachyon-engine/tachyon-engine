@@ -419,6 +419,17 @@ impl Isolate {
                             result,
                         );
                     }
+                    if let ConversionConsumer::ArrayBufferTransferLength(to_fixed_length) =
+                        continuation.consumer
+                    {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_array_buffer_transfer_conversion(
+                            continuation.site,
+                            state,
+                            to_fixed_length,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::ErrorConstructorMessage
@@ -477,6 +488,20 @@ impl Isolate {
                         return self.resume_typed_array_includes_conversion(
                             continuation.site,
                             state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::TypedArrayFillValue
+                            | ConversionConsumer::TypedArrayFillStart
+                            | ConversionConsumer::TypedArrayFillEnd
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_fill_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
                             value,
                         );
                     }
@@ -1068,6 +1093,9 @@ impl Isolate {
                 | ConversionConsumer::ArrayBufferSliceEnd => {
                     unreachable!("ArrayBuffer slice conversion resumes inside its state machine")
                 }
+                ConversionConsumer::ArrayBufferTransferLength(_) => {
+                    unreachable!("ArrayBuffer transfer conversion resumes inside its state machine")
+                }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength
                 | ConversionConsumer::ArraySpliceDeleteCount => {
@@ -1107,6 +1135,11 @@ impl Isolate {
                 }
                 ConversionConsumer::TypedArrayIncludesFromIndex => {
                     unreachable!("TypedArray includes conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayFillValue
+                | ConversionConsumer::TypedArrayFillStart
+                | ConversionConsumer::TypedArrayFillEnd => {
+                    unreachable!("TypedArray fill conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArraySearchFromIndex => {
                     unreachable!("TypedArray search conversion resumes inside its state machine")

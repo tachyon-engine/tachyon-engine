@@ -167,6 +167,77 @@ var resultBytes = new Uint8Array(result);
 result.byteLength === 2 && resultBytes[0] === 41 && resultBytes[1] === 42;
 "#;
 
+const ARRAY_BUFFER_TRANSFER_SOURCE: &str = r#"
+var first = new ArrayBuffer(4);
+var firstView = new Uint8Array(first);
+firstView[0] = 21;
+firstView[3] = 24;
+var grown = first.transfer(6);
+var grownView = new Uint8Array(grown);
+var grownOk = first.detached && firstView.length === 0 && grown.byteLength === 6 &&
+  !grown.resizable && grown.maxByteLength === 6 && grownView[0] === 21 &&
+  grownView[3] === 24 && grownView[4] === 0 && grownView[5] === 0;
+
+var second = new ArrayBuffer(5);
+var secondView = new Uint8Array(second);
+secondView[0] = 31;
+secondView[1] = 32;
+secondView[2] = 33;
+var shrunk = second.transferToFixedLength(2);
+var shrunkView = new Uint8Array(shrunk);
+var shrunkOk = second.detached && shrunk.byteLength === 2 && !shrunk.resizable &&
+  shrunk.maxByteLength === 2 && shrunkView[0] === 31 && shrunkView[1] === 32;
+
+var third = new ArrayBuffer(3);
+var same = third.transfer(undefined);
+var sameOk = third.detached && same.byteLength === 3;
+
+var conversionSource = new ArrayBuffer(4);
+var conversionLog = "";
+var converted = conversionSource.transfer({
+  valueOf: function() { conversionLog += "v"; return 2; }
+});
+var conversionOk = conversionLog === "v" && conversionSource.detached &&
+  converted.byteLength === 2;
+
+var throwSource = new ArrayBuffer(2);
+var conversionThrows = false;
+try {
+  throwSource.transfer({ valueOf: function() { throw 17; } });
+} catch (error) {
+  conversionThrows = error === 17;
+}
+var throwAtomic = conversionThrows && !throwSource.detached && throwSource.byteLength === 2;
+
+var detachedSource = new ArrayBuffer(2);
+$262.detachArrayBuffer(detachedSource);
+var detachedLog = "";
+var detachedThrows = false;
+try {
+  detachedSource.transferToFixedLength({
+    valueOf: function() { detachedLog += "v"; return 1; }
+  });
+} catch (error) {
+  detachedThrows = error instanceof TypeError;
+}
+
+var detachDuringConversion = new ArrayBuffer(2);
+var detachDuringThrows = false;
+try {
+  detachDuringConversion.transfer({
+    valueOf: function() {
+      $262.detachArrayBuffer(detachDuringConversion);
+      return 1;
+    }
+  });
+} catch (error) {
+  detachDuringThrows = error instanceof TypeError;
+}
+
+grownOk && shrunkOk && sameOk && conversionOk && throwAtomic && detachedThrows &&
+  detachedLog === "v" && detachDuringThrows;
+"#;
+
 #[test]
 fn array_buffer_fixed_constructor_and_accessors_work_for_dispatch_batches() {
     assert_array_buffer_source::<1>();
@@ -279,6 +350,62 @@ fn array_buffer_slice_constructs_foreign_species_in_its_realm() {
     );
 }
 
+#[test]
+fn array_buffer_transfer_copy_detach_and_conversion_order_match_for_dispatch_batches() {
+    assert_array_buffer_transfer::<1>(false);
+    assert_array_buffer_transfer::<2>(false);
+    assert_array_buffer_transfer::<4>(false);
+    assert_array_buffer_transfer::<8>(false);
+    assert_array_buffer_transfer::<16>(false);
+}
+
+#[test]
+fn array_buffer_transfer_roots_source_and_result_under_forced_major_collection() {
+    assert_array_buffer_transfer::<8>(true);
+}
+
+#[test]
+fn array_buffer_transfer_oom_leaves_source_attached() {
+    let setup = compile_source("var oomSource = new ArrayBuffer(150000); true;", 7_415);
+    let transfer = compile_source("oomSource.transfer(100000);", 7_416);
+    let mut isolate = test_isolate();
+    assert!(matches!(
+        isolate
+            .execute(&setup, ExecutionBudget { fuel: 65_536, quantum: 65_536 })
+            .expect("OOM setup executes"),
+        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
+    ));
+    assert!(matches!(
+        isolate.execute(
+            &transfer,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        ),
+        Err(ExecutionError::HeapAllocation(_))
+    ));
+    let source_atom = isolate.intern_intrinsic_name(b"oomSource").unwrap();
+    let source = isolate
+        .realm
+        .resolve(source_atom)
+        .and_then(|slot| isolate.realm.get_slot(slot))
+        .expect("OOM source remains published");
+    assert_eq!(
+        isolate
+            .array_buffer_getter(source, NativeFunction::ArrayBufferByteLength)
+            .unwrap(),
+        Value::from_f64(150_000.0)
+    );
+    assert_eq!(
+        isolate
+            .array_buffer_getter(source, NativeFunction::ArrayBufferDetached)
+            .unwrap()
+            .as_immediate(),
+        Some(Immediate::False)
+    );
+}
+
 /// Compiles and runs the fixed ArrayBuffer fixture under one dispatch policy.
 fn assert_array_buffer_source<const N: usize>() {
     let module = compile_array_buffer_fixture();
@@ -351,6 +478,33 @@ fn assert_array_buffer_slice<const N: usize>(forced_major: bool) {
             },
         )
         .expect("ArrayBuffer slice fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes both fixed transfer variants, observable conversion, detach ordering, and copying.
+fn assert_array_buffer_transfer<const N: usize>(forced_major: bool) {
+    let module = compile_source(ARRAY_BUFFER_TRANSFER_SOURCE, 7_414);
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
+        .expect("detach host hook installs");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("ArrayBuffer transfer fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

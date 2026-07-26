@@ -63,6 +63,7 @@ mod string_split;
 mod typed_array;
 mod typed_array_at;
 mod typed_array_callback;
+mod typed_array_fill;
 mod typed_array_includes;
 mod typed_array_search;
 mod uri;

@@ -416,6 +416,8 @@ pub(crate) enum NativeFunction {
     ArrayBufferResizable,
     ArrayBufferDetached,
     ArrayBufferSlice,
+    ArrayBufferTransfer,
+    ArrayBufferTransferToFixedLength,
     DataViewConstructor,
     DataViewBuffer,
     DataViewByteLength,
@@ -427,6 +429,7 @@ pub(crate) enum NativeFunction {
     TypedArrayGetter(TypedArrayGetter),
     TypedArrayAt,
     TypedArrayIncludes,
+    TypedArrayFill,
     TypedArraySearch(TypedArraySearchDirection),
     TypedArrayCallback(TypedArrayCallbackKind),
     ArrayIsArray,
@@ -1020,6 +1023,7 @@ impl NativeFunction {
             | Self::DataViewGet(_)
             | Self::TypedArrayAt
             | Self::TypedArrayIncludes
+            | Self::TypedArrayFill
             | Self::TypedArraySearch(_)
             | Self::TypedArrayCallback(_)
             | Self::ArrayIsArray
@@ -1045,6 +1049,8 @@ impl NativeFunction {
             | Self::ArrayShift
             | Self::ArrayReverse
             | Self::ArrayToReversed
+            | Self::ArrayBufferTransfer
+            | Self::ArrayBufferTransferToFixedLength
             | Self::MapConstructor
             | Self::SetConstructor
             | Self::WeakMapConstructor
@@ -1382,6 +1388,8 @@ impl NativeFunction {
             Self::ArrayBufferResizable => "get resizable",
             Self::ArrayBufferDetached => "get detached",
             Self::ArrayBufferSlice => "slice",
+            Self::ArrayBufferTransfer => "transfer",
+            Self::ArrayBufferTransferToFixedLength => "transferToFixedLength",
             Self::DataViewConstructor => "DataView",
             Self::DataViewBuffer => "get buffer",
             Self::DataViewByteLength => "get byteLength",
@@ -1397,6 +1405,7 @@ impl NativeFunction {
             Self::TypedArrayGetter(TypedArrayGetter::ToStringTag) => "get [Symbol.toStringTag]",
             Self::TypedArrayAt => "at",
             Self::TypedArrayIncludes => "includes",
+            Self::TypedArrayFill => "fill",
             Self::TypedArraySearch(direction) => direction.name(),
             Self::TypedArrayCallback(kind) => kind.name(),
             Self::ArrayIsArray => "isArray",

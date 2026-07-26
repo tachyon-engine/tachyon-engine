@@ -283,6 +283,7 @@ pub(crate) enum ConversionConsumer {
     ArraySliceEnd,
     ArrayBufferSliceStart,
     ArrayBufferSliceEnd,
+    ArrayBufferTransferLength(bool),
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -300,6 +301,9 @@ pub(crate) enum ConversionConsumer {
     TypedArrayElement,
     TypedArrayAtIndex,
     TypedArrayIncludesFromIndex,
+    TypedArrayFillValue,
+    TypedArrayFillStart,
+    TypedArrayFillEnd,
     TypedArraySearchFromIndex,
 }
 
@@ -357,6 +361,7 @@ impl ConversionConsumer {
             | Self::ArraySliceEnd
             | Self::ArrayBufferSliceStart
             | Self::ArrayBufferSliceEnd
+            | Self::ArrayBufferTransferLength(_)
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
@@ -373,7 +378,11 @@ impl ConversionConsumer {
             | Self::TypedArrayLength
             | Self::TypedArrayElement
             | Self::TypedArrayAtIndex => None,
-            Self::TypedArrayIncludesFromIndex | Self::TypedArraySearchFromIndex => None,
+            Self::TypedArrayIncludesFromIndex
+            | Self::TypedArrayFillValue
+            | Self::TypedArrayFillStart
+            | Self::TypedArrayFillEnd
+            | Self::TypedArraySearchFromIndex => None,
         }
     }
 
@@ -1091,6 +1100,7 @@ pub(crate) enum SignalStateStage {
     OptionsEquals,
     OptionsWatched,
     OptionsUnwatched,
+    ComputedOptionsEquals,
     Equals,
 }
 

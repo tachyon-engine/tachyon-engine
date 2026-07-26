@@ -102,6 +102,25 @@ impl Isolate {
         let slice_atom = self.intern_intrinsic_name(b"slice")?;
         self.set_intrinsic_data_property(prototype, slice_atom, slice, true)?;
         for (name, native) in [
+            (b"transfer".as_slice(), NativeFunction::ArrayBufferTransfer),
+            (
+                b"transferToFixedLength".as_slice(),
+                NativeFunction::ArrayBufferTransferToFixedLength,
+            ),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(prototype, atom, function, true)?;
+        }
+        for (name, native) in [
             (
                 b"byteLength".as_slice(),
                 NativeFunction::ArrayBufferByteLength,
@@ -314,6 +333,17 @@ impl Isolate {
         )?;
         let includes_atom = self.intern_intrinsic_name(b"includes")?;
         self.set_intrinsic_data_property(base_prototype, includes_atom, includes, true)?;
+        let fill = self.allocate_native_function(
+            NativeFunction::TypedArrayFill,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let fill_atom = self.intern_intrinsic_name(b"fill")?;
+        self.set_intrinsic_data_property(base_prototype, fill_atom, fill, true)?;
         for (direction, name) in [
             (TypedArraySearchDirection::Forward, b"indexOf".as_slice()),
             (

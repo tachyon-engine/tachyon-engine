@@ -365,6 +365,96 @@ var cachedCycle = cycleFirst instanceof TypeError && cycleSecond === cycleFirst;
 initialPruned && pruned && initialDiamond && updatedDiamond && cachedErrors && cachedCycle;
 "#;
 
+const SIGNAL_COMPUTED_EQUALS_SOURCE: &str = r#"
+var order = "";
+var optionsRead = 0;
+var orderedOptions = new Proxy({}, { get: function(target, key) {
+    if (key === "equals") { optionsRead++; order += "g"; return undefined; }
+} });
+var badCallback = false;
+try { new Signal.Computed(1, orderedOptions); } catch (error) {
+    badCallback = error instanceof TypeError && optionsRead === 0;
+}
+var ordered = new Signal.Computed(function() { order += "c"; return 1; }, orderedOptions);
+var constructorOrder = ordered.get() === 1 && order === "gc" && optionsRead === 1;
+
+var getterMarker = {};
+var abruptOptions = new Proxy({}, { get: function(target, key) {
+    if (key === "equals") throw getterMarker;
+} });
+var getterIdentity = false;
+try { new Signal.Computed(function() { return 1; }, abruptOptions); }
+catch (error) { getterIdentity = error === getterMarker; }
+var callableCheck = false;
+try { new Signal.Computed(function() { return 1; }, { equals: 1 }); }
+catch (error) { callableCheck = error instanceof TypeError; }
+
+var source = new Signal.State(1);
+var computeCalls = 0;
+var equalsCalls = 0;
+var equalsThis = false;
+var equalsArgs = false;
+var stable = new Signal.Computed(function() { computeCalls++; source.get(); return 5; }, {
+    equals: function(oldValue, newValue) {
+        equalsCalls++;
+        equalsThis = this === stable;
+        equalsArgs = oldValue === 5 && newValue === 5;
+        return true;
+    }
+});
+var leftCalls = 0;
+var left = new Signal.Computed(function() { leftCalls++; return stable.get() + 1; });
+var rightCalls = 0;
+var right = new Signal.Computed(function() { rightCalls++; return stable.get() + 2; });
+var diamondCalls = 0;
+var diamond = new Signal.Computed(function() { diamondCalls++; return left.get() + right.get(); });
+var watcher = new Signal.subtle.Watcher(function() {});
+watcher.watch(diamond);
+var diamondInitial = diamond.get() === 13;
+source.set(2);
+var diamondPruned = diamond.get() === 13 && computeCalls === 2 && equalsCalls === 1 &&
+    leftCalls === 1 && rightCalls === 1 && diamondCalls === 1 && equalsThis && equalsArgs;
+
+var exact = new Signal.State(1);
+var epsilon = new Signal.State(0.1);
+var trackedInnerCalls = 0;
+var trackedEqualsCalls = 0;
+var trackedInner = new Signal.Computed(function() { trackedInnerCalls++; return exact.get(); }, {
+    equals: function() { trackedEqualsCalls++; epsilon.get(); return true; }
+});
+var trackedOuterCalls = 0;
+var trackedOuter = new Signal.Computed(function() { trackedOuterCalls++; return trackedInner.get(); });
+var trackedWatcher = new Signal.subtle.Watcher(function() {});
+trackedWatcher.watch(trackedOuter);
+var trackedInitial = trackedOuter.get() === 1;
+exact.set(2);
+var trackedFirst = trackedOuter.get() === 1 && trackedInnerCalls === 2 &&
+    trackedEqualsCalls === 1 && trackedOuterCalls === 1;
+epsilon.set(0.2);
+var trackedAgain = trackedOuter.get() === 1 && trackedInnerCalls === 3 &&
+    trackedEqualsCalls === 2 && trackedOuterCalls === 1;
+
+var throwSource = new Signal.State(1);
+var throwMarker = {};
+var throwComputeCalls = 0;
+var throwEqualsCalls = 0;
+var throwing = new Signal.Computed(function() { throwComputeCalls++; return throwSource.get(); }, {
+    equals: function() { throwEqualsCalls++; throw throwMarker; }
+});
+var throwInitial = throwing.get() === 1;
+throwSource.set(2);
+var caughtFirst;
+try { throwing.get(); } catch (error) { caughtFirst = error; }
+var caughtCached;
+try { throwing.get(); } catch (error) { caughtCached = error; }
+throwSource.set(3);
+var invalidated = throwing.get() === 3 && throwComputeCalls === 3 && throwEqualsCalls === 1;
+var throwCache = throwInitial && caughtFirst === throwMarker && caughtCached === throwMarker;
+
+badCallback && constructorOrder && getterIdentity && callableCheck && diamondInitial &&
+diamondPruned && trackedInitial && trackedFirst && trackedAgain && throwCache && invalidated;
+"#;
+
 #[test]
 fn signal_namespace_is_installed_in_every_realm() {
     let mut isolate = test_isolate();
@@ -562,6 +652,47 @@ fn signal_checked_pull_prunes_diamonds_and_caches_abrupt_completions() {
         SIGNAL_CHECKED_PULL_SOURCE,
         8_735,
         "signals-checked-pull",
+        true,
+    );
+}
+
+/// Covers Computed options order, custom equality, pruning, abrupt cache, and invalidation.
+#[test]
+fn signal_computed_custom_equals_works_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_740,
+        "signals-computed-equals",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_741,
+        "signals-computed-equals",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_742,
+        "signals-computed-equals",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_743,
+        "signals-computed-equals",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_744,
+        "signals-computed-equals",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_EQUALS_SOURCE,
+        8_745,
+        "signals-computed-equals",
         true,
     );
 }
