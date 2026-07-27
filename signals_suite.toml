@@ -82,3 +82,21 @@ id = "untrack-introspection-brands"
 path = "tests/proposal-signals/untrack-introspection-brands.js"
 source_sha256 = "981f70ad4af2b32d16618a8054a2247fb37cc967144baa08efb881373dcbd579"
 upstream = ["tests/Signal/subtle/currentComputed.test.ts", "tests/Signal/subtle/untrack.test.ts", "tests/behaviors/type-checking.test.ts"]
+
+[[cases]]
+id = "ported-graph-regressions"
+path = "tests/proposal-signals/ported-graph-regressions.js"
+source_sha256 = "8c7064666adb4ec22b7f894ce858ada693a4dcc49453de31a972989a434ab6aa"
+upstream = ["tests/Signal/ported/preact.test.ts", "tests/Signal/ported/vue.test.ts", "tests/behaviors/graph.test.ts"]
+
+[[cases]]
+id = "graph-convergence-order"
+path = "tests/proposal-signals/graph-convergence-order.js"
+source_sha256 = "9381158e21a935f5c0f758837ac23ad87ee9594fb821c87cd31fd056d108e991"
+upstream = ["tests/behaviors/graph.test.ts"]
+
+[[cases]]
+id = "watcher-dynamic-dependencies"
+path = "tests/proposal-signals/watcher-dynamic-dependencies.js"
+source_sha256 = "eb2963492df453a80f6c88b3fb616aa2d5b0a1e20da0e3d5d921fc6b2764cf59"
+upstream = ["tests/Signal/subtle/watch-unwatch.test.ts"]
