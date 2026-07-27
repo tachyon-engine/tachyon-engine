@@ -58,6 +58,7 @@ mod properties;
 mod property_keys;
 mod proxy;
 mod realm_gc;
+mod regexp_accessors;
 mod regexp_escape;
 mod regexp_exec;
 mod regexp_match_all;

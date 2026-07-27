@@ -754,6 +754,156 @@ impl Isolate {
         )
     }
 
+    /// Implements the branded source and boolean flag accessors on `%RegExp.prototype%`.
+    pub(crate) fn regexp_getter(
+        &mut self,
+        receiver: Value,
+        getter: RegExpGetter,
+        getter_realm: RealmId,
+    ) -> Result<Value, ExecutionError> {
+        let intrinsic_prototype = if getter_realm == self.active_realm {
+            self.realm.regexp_prototype
+        } else {
+            self.inactive_realms
+                .iter()
+                .find_map(|(id, realm)| (*id == getter_realm).then_some(realm.regexp_prototype))
+                .flatten()
+        };
+        if intrinsic_prototype == Some(receiver) {
+            return match getter {
+                RegExpGetter::Source => self.allocate_runtime_string(
+                    JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+                ),
+                RegExpGetter::Flags => self.allocate_runtime_string(
+                    JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
+                ),
+                _ => Ok(Value::from_immediate(Immediate::Undefined)),
+            };
+        }
+        if getter == RegExpGetter::Flags {
+            return self.regexp_flags_getter(receiver);
+        }
+        if getter == RegExpGetter::Source {
+            let (source, _) = self.regexp_data(receiver)?;
+            return self.regexp_source_display(source);
+        }
+        let flag = match getter {
+            RegExpGetter::Source => unreachable!("source returns before flag selection"),
+            RegExpGetter::Flags => unreachable!("flags returns before flag selection"),
+            RegExpGetter::HasIndices => u16::from(b'd'),
+            RegExpGetter::Global => u16::from(b'g'),
+            RegExpGetter::IgnoreCase => u16::from(b'i'),
+            RegExpGetter::Multiline => u16::from(b'm'),
+            RegExpGetter::DotAll => u16::from(b's'),
+            RegExpGetter::Unicode => u16::from(b'u'),
+            RegExpGetter::UnicodeSets => u16::from(b'v'),
+            RegExpGetter::Sticky => u16::from(b'y'),
+        };
+        Ok(Value::from_immediate(
+            if self.regexp_flag_enabled(receiver, flag)? {
+                Immediate::True
+            } else {
+                Immediate::False
+            },
+        ))
+    }
+
+    /// Builds flags in specification order, preserving own data-property overrides.
+    fn regexp_flags_getter(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        if !self.is_object_value(receiver) {
+            return Err(ExecutionError::NotObject(receiver));
+        }
+        let private_flags = self
+            .regexp_data(receiver)
+            .ok()
+            .and_then(|(_, value)| self.regexp_string_units(value).ok());
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(8)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        for (name, flag) in [
+            (b"hasIndices".as_slice(), b'd'),
+            (b"global".as_slice(), b'g'),
+            (b"ignoreCase".as_slice(), b'i'),
+            (b"multiline".as_slice(), b'm'),
+            (b"dotAll".as_slice(), b's'),
+            (b"unicode".as_slice(), b'u'),
+            (b"unicodeSets".as_slice(), b'v'),
+            (b"sticky".as_slice(), b'y'),
+        ] {
+            let atom = self.intern_intrinsic_name(name)?;
+            let property = if private_flags.is_some() {
+                self.own_data_property_with_attributes(receiver, atom)?
+                    .map(|(value, _)| value)
+            } else {
+                self.get_data_property(receiver, atom)?
+            };
+            let enabled = if let Some(value) = property {
+                self.is_truthy_value(value)?
+            } else {
+                private_flags
+                    .as_ref()
+                    .is_some_and(|flags| flags.contains(&u16::from(flag)))
+            };
+            if enabled {
+                output.push(u16::from(flag));
+            }
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
+    /// Escapes pattern delimiters and line terminators for the observable `source` string.
+    fn regexp_source_display(&mut self, source: Value) -> Result<Value, ExecutionError> {
+        let units = self.regexp_string_units(source)?;
+        let extra = regexp_source_escape_extra(&units);
+        if extra == 0 {
+            return Ok(source);
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(units.len().saturating_add(extra))
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        let mut preceding_backslashes = 0_usize;
+        for unit in units {
+            match unit {
+                0x0a => output.extend_from_slice(&[u16::from(b'\\'), u16::from(b'n')]),
+                0x0d => output.extend_from_slice(&[u16::from(b'\\'), u16::from(b'r')]),
+                0x2028 => output.extend_from_slice(&[
+                    u16::from(b'\\'),
+                    u16::from(b'u'),
+                    u16::from(b'2'),
+                    u16::from(b'0'),
+                    u16::from(b'2'),
+                    u16::from(b'8'),
+                ]),
+                0x2029 => output.extend_from_slice(&[
+                    u16::from(b'\\'),
+                    u16::from(b'u'),
+                    u16::from(b'2'),
+                    u16::from(b'0'),
+                    u16::from(b'2'),
+                    u16::from(b'9'),
+                ]),
+                unit if unit == u16::from(b'/') && preceding_backslashes.is_multiple_of(2) => {
+                    output.extend_from_slice(&[u16::from(b'\\'), unit]);
+                }
+                unit => output.push(unit),
+            }
+            preceding_backslashes = if unit == u16::from(b'\\') {
+                preceding_backslashes.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Reads the private source and flags slots after validating the receiver's exotic identity.
     pub(crate) fn regexp_data(
         &mut self,
@@ -1010,6 +1160,26 @@ fn regexp_escape_output_length(units: &[u16]) -> Result<usize, ExecutionError> {
             .ok_or(ExecutionError::InvalidStringLength)?;
     }
     Ok(length)
+}
+
+/// Counts the exact extra UTF-16 units needed by `EscapeRegExpPattern`'s visible cases.
+fn regexp_source_escape_extra(units: &[u16]) -> usize {
+    let mut extra = 0_usize;
+    let mut preceding_backslashes = 0_usize;
+    for &unit in units {
+        extra = extra.saturating_add(match unit {
+            0x0a | 0x0d => 1,
+            0x2028 | 0x2029 => 5,
+            unit if unit == u16::from(b'/') && preceding_backslashes.is_multiple_of(2) => 1,
+            _ => 0,
+        });
+        preceding_backslashes = if unit == u16::from(b'\\') {
+            preceding_backslashes.saturating_add(1)
+        } else {
+            0
+        };
+    }
+    extra
 }
 
 #[inline(always)]

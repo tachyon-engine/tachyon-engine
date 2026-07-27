@@ -19,6 +19,22 @@ pub(crate) enum TypedArrayGetter {
     ToStringTag,
 }
 
+/// Branded accessors installed on `%RegExp.prototype%`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum RegExpGetter {
+    Source,
+    Flags,
+    HasIndices,
+    Global,
+    IgnoreCase,
+    Multiline,
+    DotAll,
+    Unicode,
+    UnicodeSets,
+    Sticky,
+}
+
 /// Direction selected by the shared fixed TypedArray strict-equality search.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -358,6 +374,7 @@ pub(crate) enum NativeFunction {
     RegExpExec,
     RegExpTest,
     RegExpToString,
+    RegExpGetter(RegExpGetter),
     RegExpSplit,
     RegExpSearch,
     RegExpMatch,
@@ -1256,6 +1273,7 @@ impl NativeFunction {
             | Self::StringToLocaleUpperCase
             | Self::StringIterator
             | Self::StringIteratorNext
+            | Self::RegExpGetter(_)
             | Self::RegExpStringIteratorNext => 0,
             Self::ArrayKeys
             | Self::ArrayValues
@@ -1358,6 +1376,18 @@ impl NativeFunction {
             Self::RegExpExec => "exec",
             Self::RegExpTest => "test",
             Self::RegExpToString => "toString",
+            Self::RegExpGetter(getter) => match getter {
+                RegExpGetter::Source => "get source",
+                RegExpGetter::Flags => "get flags",
+                RegExpGetter::HasIndices => "get hasIndices",
+                RegExpGetter::Global => "get global",
+                RegExpGetter::IgnoreCase => "get ignoreCase",
+                RegExpGetter::Multiline => "get multiline",
+                RegExpGetter::DotAll => "get dotAll",
+                RegExpGetter::Unicode => "get unicode",
+                RegExpGetter::UnicodeSets => "get unicodeSets",
+                RegExpGetter::Sticky => "get sticky",
+            },
             Self::RegExpSplit => "[Symbol.split]",
             Self::RegExpSearch => "[Symbol.search]",
             Self::RegExpMatch => "[Symbol.match]",

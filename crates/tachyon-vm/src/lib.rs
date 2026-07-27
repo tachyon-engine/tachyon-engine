@@ -220,8 +220,8 @@ use runtime::{
         DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics, FunctionExecutable,
         FunctionObject, GenericPropertyDescriptor, GlobalNumberFunction, GlobalUriFunction,
         IntrinsicPropertyAtoms, MathFunction, NativeCallState, NativeFunction, ObjectReceiver,
-        PropertyDescriptor, RealmIntrinsicAtoms, ResolvedCallTarget, SymbolValue, VmTypes,
-        execution_error_kind,
+        PropertyDescriptor, RealmIntrinsicAtoms, RegExpGetter, ResolvedCallTarget, SymbolValue,
+        VmTypes, execution_error_kind,
     },
     class::{
         ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,

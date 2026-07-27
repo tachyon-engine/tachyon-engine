@@ -427,49 +427,6 @@ impl Isolate {
         if let Some(value) = self.mapped_argument_value(target, key)? {
             return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
         }
-        if let Some(raw) = target.as_heap_ref()
-            && self
-                .heap
-                .checked_reference(raw, self.types.regexp_object)
-                .is_ok()
-        {
-            let source = self.intern_intrinsic_name(b"source")?;
-            let flags = self.intern_intrinsic_name(b"flags")?;
-            let (regexp_source, regexp_flags) = self.regexp_data(target)?;
-            if key == PropertyKey::Atom(source) {
-                return Ok(PropertyReadResolution::Read(PropertyRead::Data(
-                    regexp_source,
-                )));
-            }
-            if key == PropertyKey::Atom(flags) {
-                return Ok(PropertyReadResolution::Read(PropertyRead::Data(
-                    regexp_flags,
-                )));
-            }
-            for (name, flag) in [
-                (b"hasIndices".as_slice(), 100_u16),
-                (b"global".as_slice(), 103_u16),
-                (b"ignoreCase".as_slice(), 105_u16),
-                (b"multiline".as_slice(), 109_u16),
-                (b"dotAll".as_slice(), 115_u16),
-                (b"unicode".as_slice(), 117_u16),
-                (b"unicodeSets".as_slice(), 118_u16),
-                (b"sticky".as_slice(), 121_u16),
-            ] {
-                let atom = self.intern_intrinsic_name(name)?;
-                if key == PropertyKey::Atom(atom) {
-                    return self.regexp_flag_enabled(target, flag).map(|enabled| {
-                        PropertyReadResolution::Read(PropertyRead::Data(Value::from_immediate(
-                            if enabled {
-                                Immediate::True
-                            } else {
-                                Immediate::False
-                            },
-                        )))
-                    });
-                }
-            }
-        }
         let mut current = if self.is_string_value(target) || self.is_string_wrapper(target) {
             let length = self.length_atom()?;
             if key == PropertyKey::Atom(length) {

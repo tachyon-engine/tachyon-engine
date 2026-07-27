@@ -1122,6 +1122,25 @@ impl Isolate {
             regexp_constructor,
             true,
         )?;
+        for (name, getter) in [
+            (b"source".as_slice(), RegExpGetter::Source),
+            (b"flags".as_slice(), RegExpGetter::Flags),
+            (b"hasIndices".as_slice(), RegExpGetter::HasIndices),
+            (b"global".as_slice(), RegExpGetter::Global),
+            (b"ignoreCase".as_slice(), RegExpGetter::IgnoreCase),
+            (b"multiline".as_slice(), RegExpGetter::Multiline),
+            (b"dotAll".as_slice(), RegExpGetter::DotAll),
+            (b"unicode".as_slice(), RegExpGetter::Unicode),
+            (b"unicodeSets".as_slice(), RegExpGetter::UnicodeSets),
+            (b"sticky".as_slice(), RegExpGetter::Sticky),
+        ] {
+            self.install_collection_accessor(
+                regexp_prototype,
+                function_prototype,
+                name,
+                NativeFunction::RegExpGetter(getter),
+            )?;
+        }
         for (native, name) in [
             (NativeFunction::RegExpExec, b"exec".as_slice()),
             (NativeFunction::RegExpTest, b"test".as_slice()),
