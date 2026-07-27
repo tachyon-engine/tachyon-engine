@@ -183,6 +183,42 @@ identity && calls > 0 && parity.join(",") === "2,4,6,7,5,3,1" &&
   detachedIdentity && detachCalls > 0 && detached.length === 0;
 "#;
 
+const TYPED_ARRAY_TO_SORTED_SOURCE: &str = r#"
+var source = new Int16Array([7, 2, 5, 4, 3, 6, 1]);
+var ascending = source.toSorted();
+var parity = source.toSorted(function(left, right) {
+  return (left % 2) - (right % 2);
+});
+var independent = ascending !== source && parity !== source && ascending.buffer !== source.buffer;
+
+var bigSource = new BigInt64Array([3n, -2n, 1n]);
+var bigCopy = bigSource.toSorted(function() { return 0; });
+
+var marker = { marker: true };
+var abruptIdentity = false;
+try {
+  source.toSorted(function() { throw marker; });
+} catch (error) {
+  abruptIdentity = error === marker;
+}
+
+var detachedSource = new Uint8Array([4, 3, 2, 1]);
+var detachedBuffer = detachedSource.buffer;
+var detachCalls = 0;
+var detachedResult = detachedSource.toSorted(function(left, right) {
+  detachCalls++;
+  if (detachCalls === 1) detachedBuffer.transfer();
+  return left - right;
+});
+
+independent && source.join(",") === "7,2,5,4,3,6,1" &&
+  ascending.join(",") === "1,2,3,4,5,6,7" &&
+  parity.join(",") === "2,4,6,7,5,3,1" &&
+  bigSource.join(",") === "3,-2,1" && bigCopy.join(",") === "3,-2,1" &&
+  abruptIdentity && detachedSource.length === 0 &&
+  detachedResult.join(",") === "1,2,3,4";
+"#;
+
 const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
 var source = new Array(10000).fill(7);
 var copied = Array.from(source);
@@ -368,6 +404,24 @@ fn typed_array_callable_sort_survives_forced_major_collection() {
     assert_typed_array_callable_sort::<16>(true);
 }
 
+#[test]
+fn typed_array_to_sorted_works_for_every_dispatch_batch() {
+    assert_typed_array_to_sorted::<1>(false);
+    assert_typed_array_to_sorted::<2>(false);
+    assert_typed_array_to_sorted::<4>(false);
+    assert_typed_array_to_sorted::<8>(false);
+    assert_typed_array_to_sorted::<16>(false);
+}
+
+#[test]
+fn typed_array_to_sorted_survives_forced_major_collection() {
+    assert_typed_array_to_sorted::<1>(true);
+    assert_typed_array_to_sorted::<2>(true);
+    assert_typed_array_to_sorted::<4>(true);
+    assert_typed_array_to_sorted::<8>(true);
+    assert_typed_array_to_sorted::<16>(true);
+}
+
 /// Executes default numeric ordering under one dispatch and collection policy.
 fn assert_typed_array_sort<const N: usize>(forced_major: bool) {
     let module = compile_typed_array_source(TYPED_ARRAY_SORT_SOURCE, 7_500 + N as u32);
@@ -416,6 +470,36 @@ fn assert_typed_array_callable_sort<const N: usize>(forced_major: bool) {
             },
         )
         .expect("callable TypedArray sort fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes same-kind copying and both comparator paths under one VM policy.
+fn assert_typed_array_to_sorted<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(TYPED_ARRAY_TO_SORTED_SOURCE, 7_580 + N as u32);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(14 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("TypedArray toSorted isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("TypedArray toSorted fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

@@ -380,6 +380,17 @@ impl Isolate {
         )?;
         let sort_atom = self.intern_intrinsic_name(b"sort")?;
         self.set_intrinsic_data_property(base_prototype, sort_atom, sort, true)?;
+        let to_sorted = self.allocate_native_function(
+            NativeFunction::TypedArrayToSorted,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let to_sorted_atom = self.intern_intrinsic_name(b"toSorted")?;
+        self.set_intrinsic_data_property(base_prototype, to_sorted_atom, to_sorted, true)?;
         let set = self.allocate_native_function(
             NativeFunction::TypedArraySet,
             OrdinaryObject {

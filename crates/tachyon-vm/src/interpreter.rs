@@ -6376,6 +6376,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArraySort) => {
                     return self.begin_typed_array_sort(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayToSorted) => {
+                    return self.begin_typed_array_to_sorted(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
                     return self.begin_typed_array_set(&site);
                 }

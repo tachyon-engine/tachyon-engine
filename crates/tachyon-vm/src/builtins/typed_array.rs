@@ -12,6 +12,7 @@ mod set;
 mod slice;
 mod sort;
 mod subarray;
+mod to_sorted;
 
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
@@ -200,7 +201,7 @@ impl Isolate {
     }
 
     /// Allocates one TypedArray payload while retaining its buffer and selected prototype.
-    fn allocate_typed_array_view(
+    pub(crate) fn allocate_typed_array_view(
         &mut self,
         buffer: Value,
         byte_offset: usize,
@@ -735,7 +736,7 @@ impl Isolate {
     }
 
     /// Copies a same-kind source byte-for-byte so NaN payloads and signed zero survive.
-    fn copy_same_kind_typed_array(
+    pub(crate) fn copy_same_kind_typed_array(
         &mut self,
         source: Value,
         target: Value,
