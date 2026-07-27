@@ -13,7 +13,10 @@ b.byteLength === 8 && b.maxByteLength === 8 && !b.resizable && !b.detached &&
 const ARRAY_BUFFER_RAB_SOURCE: &str = r#"
 var rab = new ArrayBuffer(4, { maxByteLength: 8 });
 rab.resize(8);
-rab.byteLength === 8 && rab.maxByteLength === 8 && rab.resizable;
+var sameLimit = new ArrayBuffer(8, { maxByteLength: 8 });
+sameLimit.resize(4);
+rab.byteLength === 8 && rab.maxByteLength === 8 && rab.resizable &&
+  sameLimit.byteLength === 4 && sameLimit.maxByteLength === 8 && sameLimit.resizable;
 "#;
 
 const ARRAY_BUFFER_RAB_VIEW_SOURCE: &str = r#"

@@ -69,25 +69,24 @@ impl Isolate {
             return Err(ExecutionError::InvalidArrayLength);
         }
         let mut max_byte_length = length;
+        let mut resizable = false;
         let options = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         if self.is_object_value(options) {
             let max_atom = self.intern_intrinsic_name(b"maxByteLength")?;
-            if let Some(value) = self.get_data_property(options, max_atom)? {
+            if let Some(value) = self.get_data_property(options, max_atom)?
+                && value.as_immediate() != Some(Immediate::Undefined)
+            {
                 max_byte_length = self.ecma_to_index(value)?;
                 if max_byte_length < length {
                     return Err(ExecutionError::InvalidArrayLength);
                 }
+                resizable = true;
             }
         }
         let prototype = self.array_buffer_prototype_for_new_target(site.new_target)?;
-        self.allocate_array_buffer_object(
-            length,
-            max_byte_length,
-            max_byte_length != length,
-            prototype,
-        )
+        self.allocate_array_buffer_object(length, max_byte_length, resizable, prototype)
     }
 
     /// Resizes a resizable ArrayBuffer in place while preserving its backing identity.

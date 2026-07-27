@@ -80,6 +80,64 @@ Object.getPrototypeOf(result) === Uint16Array.prototype &&
   result[0] === 10 && result[1] === 99 && result[2] === 30;
 "#;
 
+const TYPED_ARRAY_WITH_RAB_SOURCE: &str = r#"
+var constructors = [
+  Float64Array, Float32Array, Int32Array, Int16Array, Int8Array,
+  Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray,
+  BigInt64Array, BigUint64Array
+];
+var okay = true;
+for (var i = 0; i < constructors.length; i++) {
+  var TA = constructors[i];
+  var width = TA.BYTES_PER_ELEMENT;
+  var rab = new ArrayBuffer(width * 3, { maxByteLength: width * 6 });
+  var source = new TA(rab);
+  var replacement = i < 9 ? 7 : 7n;
+  var result = source.with(1, replacement);
+  okay = okay && source.length === 3 && result.length === 3 && result[1] === replacement;
+}
+okay;
+"#;
+
+const TYPED_ARRAY_WITH_SOURCE_FACTORIES: &str = r#"
+function copy(dest, source) {
+  var out = new Uint8Array(dest);
+  var input = new Uint8Array(source);
+  for (var i = 0; i < input.length; i++) out[i] = input[i];
+  return dest;
+}
+function args(TA) {
+  var values = [0, 1, 2];
+  var fixed = new TA(values).buffer;
+  var bytes = fixed.byteLength;
+  var resizable = copy(new ArrayBuffer(bytes, { maxByteLength: bytes * 2 }), fixed);
+  var grown = new ArrayBuffer(Math.floor(bytes / 2), { maxByteLength: bytes });
+  grown.resize(bytes);
+  copy(grown, fixed);
+  var shrunk = copy(new ArrayBuffer(bytes * 2, { maxByteLength: bytes * 2 }), fixed);
+  shrunk.resize(bytes);
+  var arrayLike = { 0: 0, 1: 1, 2: 2, length: 3 };
+  var iterable = {};
+  iterable[Symbol.iterator] = function() { return values[Symbol.iterator](); };
+  return [values, values.slice(), arrayLike, iterable, fixed, resizable, grown, shrunk];
+}
+var constructors = [
+  Float64Array, Float32Array, Int32Array, Int16Array, Int8Array,
+  Uint32Array, Uint16Array, Uint8Array, Uint8ClampedArray
+];
+var okay = true;
+for (var c = 0; c < constructors.length; c++) {
+  var TA = constructors[c];
+  var sources = args(TA);
+  for (var f = 0; f < sources.length; f++) {
+    var source = new TA(sources[f]);
+    var result = source.with(1, 4);
+    okay = okay && result[0] === 0 && result[1] === 4 && result[2] === 2;
+  }
+}
+okay;
+"#;
+
 #[test]
 fn typed_array_with_works_for_every_dispatch_batch() {
     assert_typed_array_with::<1>(TYPED_ARRAY_WITH_SOURCE, false);
@@ -131,6 +189,26 @@ fn typed_array_with_uses_the_active_realm_same_kind_intrinsic() {
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "cross-Realm TypedArray with returned {outcome:?}"
     );
+}
+
+#[test]
+fn typed_array_with_copies_length_tracking_rab_sources() {
+    assert_typed_array_with::<1>(TYPED_ARRAY_WITH_RAB_SOURCE, false);
+    assert_typed_array_with::<2>(TYPED_ARRAY_WITH_RAB_SOURCE, false);
+    assert_typed_array_with::<4>(TYPED_ARRAY_WITH_RAB_SOURCE, false);
+    assert_typed_array_with::<8>(TYPED_ARRAY_WITH_RAB_SOURCE, false);
+    assert_typed_array_with::<16>(TYPED_ARRAY_WITH_RAB_SOURCE, false);
+    assert_typed_array_with::<8>(TYPED_ARRAY_WITH_RAB_SOURCE, true);
+}
+
+#[test]
+fn typed_array_with_accepts_all_standard_source_factories() {
+    assert_typed_array_with::<1>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, false);
+    assert_typed_array_with::<2>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, false);
+    assert_typed_array_with::<4>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, false);
+    assert_typed_array_with::<8>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, false);
+    assert_typed_array_with::<16>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, false);
+    assert_typed_array_with::<8>(TYPED_ARRAY_WITH_SOURCE_FACTORIES, true);
 }
 
 /// Executes one with fixture under the selected dispatch and collection policy.
