@@ -138,6 +138,51 @@ identity && signed.join(",") === "-8,-1,2,3" &&
   compareThrows && Int8Array.prototype.sort.length === 1;
 "#;
 
+const TYPED_ARRAY_CALLABLE_SORT_SOURCE: &str = r#"
+var calls = 0;
+var parity = new Int16Array([7, 2, 5, 4, 3, 6, 1]);
+var identity = parity.sort(function(left, right) {
+  calls++;
+  return {
+    valueOf: function() {
+      return (left % 2) - (right % 2);
+    }
+  };
+}) === parity;
+
+var descending = new Float64Array([-0, 3, 1, 2]);
+descending.sort(function(left, right) {
+  return right - left;
+});
+var nanEqual = new Uint8Array([3, 2, 1]);
+nanEqual.sort(function() { return NaN; });
+
+var marker = { marker: true };
+var abruptIdentity = false;
+try {
+  new Uint8Array([3, 2, 1]).sort(function() { throw marker; });
+} catch (error) {
+  abruptIdentity = error === marker;
+}
+var bigints = new BigInt64Array([3n, -2n, 1n]);
+bigints.sort(function() { return 0; });
+
+var detached = new Uint8Array([4, 3, 2, 1]);
+var detachedBuffer = detached.buffer;
+var detachCalls = 0;
+var detachedIdentity = detached.sort(function(left, right) {
+  detachCalls++;
+  if (detachCalls === 1) detachedBuffer.transfer();
+  return left - right;
+}) === detached;
+
+identity && calls > 0 && parity.join(",") === "2,4,6,7,5,3,1" &&
+  descending[0] === 3 && descending[1] === 2 && descending[2] === 1 &&
+  1 / descending[3] === -Infinity && nanEqual.join(",") === "3,2,1" &&
+  abruptIdentity && bigints.join(",") === "3,-2,1" &&
+  detachedIdentity && detachCalls > 0 && detached.length === 0;
+"#;
+
 const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
 var source = new Array(10000).fill(7);
 var copied = Array.from(source);
@@ -305,6 +350,24 @@ fn typed_array_default_sort_survives_forced_major_collection() {
     assert_typed_array_sort::<8>(true);
 }
 
+#[test]
+fn typed_array_callable_sort_works_for_every_dispatch_batch() {
+    assert_typed_array_callable_sort::<1>(false);
+    assert_typed_array_callable_sort::<2>(false);
+    assert_typed_array_callable_sort::<4>(false);
+    assert_typed_array_callable_sort::<8>(false);
+    assert_typed_array_callable_sort::<16>(false);
+}
+
+#[test]
+fn typed_array_callable_sort_survives_forced_major_collection() {
+    assert_typed_array_callable_sort::<1>(true);
+    assert_typed_array_callable_sort::<2>(true);
+    assert_typed_array_callable_sort::<4>(true);
+    assert_typed_array_callable_sort::<8>(true);
+    assert_typed_array_callable_sort::<16>(true);
+}
+
 /// Executes default numeric ordering under one dispatch and collection policy.
 fn assert_typed_array_sort<const N: usize>(forced_major: bool) {
     let module = compile_typed_array_source(TYPED_ARRAY_SORT_SOURCE, 7_500 + N as u32);
@@ -323,6 +386,36 @@ fn assert_typed_array_sort<const N: usize>(forced_major: bool) {
             },
         )
         .expect("TypedArray sort fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes resumable comparator calls and detach handling under one VM policy.
+fn assert_typed_array_callable_sort<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(TYPED_ARRAY_CALLABLE_SORT_SOURCE, 7_550 + N as u32);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(14 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("callable TypedArray sort isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("callable TypedArray sort fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

@@ -1,6 +1,7 @@
 //! Resumable stable `Array.prototype.sort` and `toSorted` merge machine.
 
 mod support;
+mod typed_array;
 
 use core::{cmp::Ordering, mem::size_of};
 

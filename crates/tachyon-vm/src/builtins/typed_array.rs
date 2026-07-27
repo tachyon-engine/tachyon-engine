@@ -1193,7 +1193,7 @@ impl Isolate {
     }
 
     /// Copies one checked element into a stack word and decodes explicit little-endian storage.
-    fn typed_array_read_element(
+    pub(crate) fn typed_array_read_element(
         &mut self,
         array: TypedArraySnapshot,
         index: usize,

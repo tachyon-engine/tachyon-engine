@@ -18,7 +18,7 @@ impl Isolate {
             if !self.is_callable_value(compare)? {
                 return Err(ExecutionError::NonCallable(compare));
             }
-            return Err(ExecutionError::UnsupportedNumberConversion(compare));
+            return self.begin_typed_array_callable_sort(site, compare);
         }
         let snapshot = self.typed_array_snapshot(receiver)?;
         let data = self.typed_array_backing(snapshot.buffer)?;
