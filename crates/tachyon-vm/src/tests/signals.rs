@@ -393,6 +393,102 @@ initial && hiddenIgnored && tailTracked && ownerRestored && nestedReturn && topI
 proxyResult && frozen;
 "#;
 
+const SIGNAL_COMPUTED_WRITE_SOURCE: &str = r#"
+var state = new Signal.State(1);
+var calls = 0;
+var computed = new Signal.Computed(function() {
+    calls++;
+    state.set(state.get() + 1);
+    return state.get();
+});
+var initial = computed.get() === 2 && state.get() === 2 && calls === 1;
+var cached = computed.get() === 2 && state.get() === 2 && calls === 1;
+state.set(3);
+var updated = computed.get() === 4 && state.get() === 4 && calls === 2;
+var recached = computed.get() === 4 && state.get() === 4 && calls === 2;
+
+var outerState = new Signal.State(10);
+var innerCalls = 0;
+var inner = new Signal.Computed(function() {
+    innerCalls++;
+    outerState.set(outerState.get() + 1);
+    return outerState.get();
+});
+var outerCalls = 0;
+var outer = new Signal.Computed(function() {
+    outerCalls++;
+    return inner.get() * 2;
+});
+var nestedInitial = outer.get() === 22 && outerState.get() === 11 &&
+    innerCalls === 1 && outerCalls === 1;
+var nestedCached = outer.get() === 22 && innerCalls === 1 && outerCalls === 1;
+outerState.set(20);
+var nestedUpdated = outer.get() === 42 && outerState.get() === 21 &&
+    innerCalls === 2 && outerCalls === 2;
+initial && cached && updated && recached && nestedInitial && nestedCached && nestedUpdated;
+"#;
+
+const SIGNAL_CALLABLE_PROXY_SOURCE: &str = r#"
+var stateEqualsThis = false;
+var stateEqualsArgs = false;
+var stateEqualsCalls = 0;
+var stateEquals = new Proxy(function(oldValue, newValue) {
+    stateEqualsCalls++;
+    stateEqualsThis = this === state;
+    stateEqualsArgs = stateEqualsArgs || (oldValue === 1 && newValue === 2);
+    return false;
+}, {});
+var state = new Signal.State(1, { equals: stateEquals });
+state.set(2);
+
+var callbackThis = false;
+var callbackCalls = 0;
+var callback = new Proxy(function() {
+    callbackCalls++;
+    callbackThis = this === computed;
+    return state.get() * 2;
+}, {});
+var computedEqualsThis = false;
+var computedEqualsArgs = false;
+var computedEqualsCalls = 0;
+var computedEquals = new Proxy(function(oldValue, newValue) {
+    computedEqualsCalls++;
+    computedEqualsThis = this === computed;
+    computedEqualsArgs = oldValue === 4 && newValue === 6;
+    return false;
+}, {});
+var computed = new Signal.Computed(callback, { equals: computedEquals });
+var initial = computed.get() === 4 && callbackCalls === 1 && callbackThis;
+
+var notifyThis = false;
+var notifyCalls = 0;
+var watcher;
+var notify = new Proxy(function() {
+    notifyCalls++;
+    notifyThis = this === watcher;
+}, {});
+watcher = new Signal.subtle.Watcher(notify);
+watcher.watch(computed);
+state.set(3);
+var notified = notifyCalls === 1 && notifyThis && watcher.getPending()[0] === computed;
+var updated = computed.get() === 6 && callbackCalls === 2 && computedEqualsCalls === 1 &&
+    computedEqualsThis && computedEqualsArgs && watcher.getPending().length === 0;
+
+var nonCallableProxy = new Proxy({}, {});
+var rejected = 0;
+try { new Signal.Computed(nonCallableProxy); } catch (error) {
+    if (error instanceof TypeError) rejected++;
+}
+try { new Signal.Computed(function() {}, { equals: nonCallableProxy }); } catch (error) {
+    if (error instanceof TypeError) rejected++;
+}
+try { new Signal.subtle.Watcher(nonCallableProxy); } catch (error) {
+    if (error instanceof TypeError) rejected++;
+}
+initial && notified && updated && stateEqualsCalls === 2 && stateEqualsThis && stateEqualsArgs &&
+rejected === 3;
+"#;
+
 const SIGNAL_CROSS_REALM_SOURCE: &str = r#"
 var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.State &&
     foreignSignal.State.prototype !== Signal.State.prototype &&
@@ -1291,6 +1387,88 @@ fn signal_untrack_restores_dependency_ownership_for_every_dispatch_batch() {
     assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_749, "signals-untrack", false);
     assert_signal_behavior::<16>(SIGNAL_UNTRACK_SOURCE, 8_750, "signals-untrack", false);
     assert_signal_behavior::<8>(SIGNAL_UNTRACK_SOURCE, 8_751, "signals-untrack", true);
+}
+
+/// Covers pinned semantics that permit writes while a Computed callback owns tracking.
+#[test]
+fn signal_computed_callbacks_allow_state_writes_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_900,
+        "signals-computed-write",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_901,
+        "signals-computed-write",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_902,
+        "signals-computed-write",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_903,
+        "signals-computed-write",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_904,
+        "signals-computed-write",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_COMPUTED_WRITE_SOURCE,
+        8_905,
+        "signals-computed-write",
+        true,
+    );
+}
+
+/// Ensures every user callback position follows ECMAScript IsCallable semantics.
+#[test]
+fn signal_callable_proxies_work_for_every_dispatch_batch() {
+    assert_signal_behavior::<1>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_906,
+        "signals-callable-proxy",
+        false,
+    );
+    assert_signal_behavior::<2>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_907,
+        "signals-callable-proxy",
+        false,
+    );
+    assert_signal_behavior::<4>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_908,
+        "signals-callable-proxy",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_909,
+        "signals-callable-proxy",
+        false,
+    );
+    assert_signal_behavior::<16>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_910,
+        "signals-callable-proxy",
+        false,
+    );
+    assert_signal_behavior::<8>(
+        SIGNAL_CALLABLE_PROXY_SOURCE,
+        8_911,
+        "signals-callable-proxy",
+        true,
+    );
 }
 
 /// Covers agent-wide current owner visibility without exposing graph internals.

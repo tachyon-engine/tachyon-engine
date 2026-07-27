@@ -762,9 +762,10 @@ impl Isolate {
         let pending = self.native_call_state_reference(continuation.first())?;
         let snapshot = self.native_call_state_snapshot(pending)?;
         if stage == SignalStateStage::ComputedOptionsEquals {
-            if value.as_immediate() != Some(Immediate::Undefined) {
-                self.resolve_function_object(value)
-                    .map_err(|_| ExecutionError::NonCallable(value))?;
+            if value.as_immediate() != Some(Immediate::Undefined)
+                && !self.is_callable_value(value)?
+            {
+                return Err(ExecutionError::NonCallable(value));
             }
             self.set_signal_computed_option(pending, COMPUTED_OPTIONS_EQUALS_SLOT, value)?;
             return self.dispatch_signal_state_option_get(
@@ -991,8 +992,9 @@ impl Isolate {
         let callback = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.resolve_function_object(callback)
-            .map_err(|_| ExecutionError::NonCallable(callback))?;
+        if !self.is_callable_value(callback)? {
+            return Err(ExecutionError::NonCallable(callback));
+        }
         let options = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -1148,8 +1150,9 @@ impl Isolate {
         let notify = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.resolve_function_object(notify)
-            .map_err(|_| ExecutionError::NonCallable(notify))?;
+        if !self.is_callable_value(notify)? {
+            return Err(ExecutionError::NonCallable(notify));
+        }
         let prototype = self.signal_prototype_for_new_target(
             site.new_target,
             IntrinsicPrototypeKind::SignalWatcher,
@@ -1241,7 +1244,9 @@ impl Isolate {
                 Value::from_immediate(Immediate::Undefined),
             );
         }
-        self.resolve_function_object(equals)?;
+        if !self.is_callable_value(equals)? {
+            return Err(ExecutionError::NonCallable(equals));
+        }
         let pending = self.allocate_signal_state_call_state(NativeCallState {
             values: [
                 old,
