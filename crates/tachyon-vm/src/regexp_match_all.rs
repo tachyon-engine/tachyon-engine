@@ -4,9 +4,20 @@ use tachyon_gc::{AllocationSpace, GcRef, Trace, Tracer};
 use tachyon_value::{Immediate, Value};
 
 use crate::{
-    ExecutionError, Isolate, JsString, OrdinaryObject, PropertyAttributes, ShapeId, VmRoots,
-    builtins::advance_regexp_split_index, regexp_exec::regexp_to_length,
+    ExecutionError, Isolate, JsString, NativeCallState, OrdinaryObject, PropertyAttributes,
+    ShapeId, VmRoots,
+    builtins::advance_regexp_split_index,
+    regexp_exec::{REGEXP_EXEC_RESULT, regexp_to_length},
+    runtime::fiber::{
+        ConversionConsumer, NativeContinuation, NativeContinuationSite, ProxySetMode,
+        RegExpStringIteratorStage,
+    },
 };
+
+const ITERATOR_INPUT: usize = 0;
+const ITERATOR_MATCHER: usize = 1;
+const ITERATOR_OBJECT: usize = 2;
+const ITERATOR_RESULT: usize = 3;
 
 /// Internal slots for one `%RegExpStringIteratorPrototype%` instance.
 #[derive(Clone, Copy, Debug)]
@@ -112,55 +123,395 @@ impl Isolate {
         )
     }
 
-    /// Executes one lazy iterator step and advances empty matches by code point when required.
+    /// Starts one lazy iterator step through the observable RegExpExec protocol.
     pub(crate) fn regexp_string_iterator_next(
         &mut self,
         site: &crate::CallSite,
-    ) -> Result<Value, ExecutionError> {
+    ) -> Result<(), ExecutionError> {
         let value = site.this_value;
         let iterator = self.regexp_string_iterator_reference(value)?;
         let snapshot = self.regexp_string_iterator_snapshot(iterator)?;
         if snapshot.done {
-            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
+            let result =
+                self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true)?;
+            return self.write(site.caller_base, site.destination, result);
         }
-        let last_index_atom = self.intern_intrinsic_name(b"lastIndex")?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let state = self.allocate_regexp_exec_state(snapshot.matcher, snapshot.input, 1)?;
+        self.update_regexp_exec_state_value(state, ITERATOR_OBJECT, value)?;
+        self.root_regexp_string_iterator_state(native_site, state)?;
+        let exec = self.intern_intrinsic_name(b"exec")?;
+        self.dispatch_regexp_string_iterator_read(
+            native_site,
+            state,
+            snapshot.matcher,
+            exec.into(),
+            RegExpStringIteratorStage::ExecGet,
+        )
+    }
+
+    /// Advances an observable iterator Get, Call, or Set completion.
+    pub(crate) fn resume_regexp_string_iterator(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: RegExpStringIteratorStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        let state = self.native_call_state_reference(continuation.first())?;
+        self.root_regexp_string_iterator_state(site, state)?;
+        match stage {
+            RegExpStringIteratorStage::ExecGet if self.is_callable_value(value)? => {
+                self.dispatch_regexp_string_iterator_call(site, state, value)
+            }
+            RegExpStringIteratorStage::ExecGet => {
+                self.finish_regexp_string_iterator_builtin(site, state)
+            }
+            RegExpStringIteratorStage::ExecCall => {
+                self.validate_regexp_string_iterator_exec_result(value)?;
+                self.update_regexp_exec_state_value(state, ITERATOR_RESULT, value)?;
+                self.finish_regexp_string_iterator_exec(site, state)
+            }
+            RegExpStringIteratorStage::MatchGet => {
+                self.begin_regexp_string_iterator_match_conversion(site, state, value)
+            }
+            RegExpStringIteratorStage::LastIndexGet => {
+                self.begin_regexp_string_iterator_last_index_conversion(site, state, value)
+            }
+            RegExpStringIteratorStage::LastIndexSet => {
+                self.publish_regexp_string_iterator_result(site, state)
+            }
+        }
+    }
+
+    /// Resumes ToString for an observable custom match element zero.
+    pub(crate) fn resume_regexp_string_iterator_match_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        self.root_regexp_string_iterator_state(site, state)?;
+        self.finish_regexp_string_iterator_match_conversion(site, state, primitive)
+    }
+
+    /// Resumes ToLength for an observable matcher lastIndex value.
+    pub(crate) fn resume_regexp_string_iterator_last_index_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        self.root_regexp_string_iterator_state(site, state)?;
+        self.finish_regexp_string_iterator_last_index(site, state, primitive)
+    }
+
+    /// Calls a custom exec method with the original matcher and String argument.
+    fn dispatch_regexp_string_iterator_call(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        method: Value,
+    ) -> Result<(), ExecutionError> {
+        let matcher = self.native_call_state_snapshot(state)?.values[ITERATOR_MATCHER];
+        self.dispatch_property_callback(
+            NativeContinuation::regexp_string_iterator(
+                site,
+                RegExpStringIteratorStage::ExecCall,
+                Value::from_heap_ref(state.raw()),
+                matcher,
+            ),
+            method,
+        )
+        .map(|_| ())
+    }
+
+    /// Retains the legacy branded fallback while custom exec uses the resumable protocol.
+    fn finish_regexp_string_iterator_builtin(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let matcher = snapshot.values[ITERATOR_MATCHER];
+        let input = snapshot.values[ITERATOR_INPUT];
+        self.regexp_data(matcher)?;
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
         let observed = self
-            .own_data_property_with_attributes(snapshot.matcher, last_index_atom)?
+            .own_data_property_with_attributes(matcher, last_index)?
             .map_or(Value::from_i32(0), |(value, _)| value);
         let index = regexp_to_length(self.convert_to_number(observed)?)?;
-        let state = self.allocate_regexp_exec_state(snapshot.matcher, snapshot.input, 0)?;
+        let exec_state = self.allocate_regexp_exec_state(matcher, input, 0)?;
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::regexp_string_iterator(
+                site,
+                RegExpStringIteratorStage::ExecGet,
+                Value::from_heap_ref(state.raw()),
+                matcher,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(exec_state.raw()),
+        )?;
+        let outcome = self.regexp_builtin_exec(matcher, input, exec_state, index);
+        let rooted_exec_state = self.read(site.caller_base, site.destination)?;
+        let prepared = (|| -> Result<Value, ExecutionError> {
+            let outcome = outcome?;
+            if let Some(next) = outcome.last_index {
+                self.set_own_data_property(matcher, last_index, next)?;
+            }
+            if outcome.value.as_immediate() == Some(Immediate::Null) {
+                Ok(outcome.value)
+            } else {
+                let exec_state = self.native_call_state_reference(rooted_exec_state)?;
+                Ok(self.native_call_state_snapshot(exec_state)?.values[REGEXP_EXEC_RESULT])
+            }
+        })();
+        let parent = self.pop_native_continuation()?;
+        let state = self.native_call_state_reference(parent.first())?;
+        self.root_regexp_string_iterator_state(site, state)?;
+        let result = prepared?;
+        self.update_regexp_exec_state_value(state, ITERATOR_RESULT, result)?;
+        self.finish_regexp_string_iterator_exec(site, state)
+    }
+
+    /// Handles null/non-global results or begins observable element-zero lookup.
+    fn finish_regexp_string_iterator_exec(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let iterator_value = snapshot.values[ITERATOR_OBJECT];
+        let result = snapshot.values[ITERATOR_RESULT];
+        let iterator = self.regexp_string_iterator_reference(iterator_value)?;
+        let slots = self.regexp_string_iterator_snapshot(iterator)?;
+        if result.as_immediate() == Some(Immediate::Null) {
+            self.finish_regexp_string_iterator(iterator)?;
+            let output =
+                self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true)?;
+            return self.write(site.caller_base, site.destination, output);
+        }
+        if !slots.global {
+            self.finish_regexp_string_iterator(iterator)?;
+            return self.publish_regexp_string_iterator_result(site, state);
+        }
+        let zero = self.property_key_atom(Value::from_i32(0))?;
+        self.dispatch_regexp_string_iterator_read(
+            site,
+            state,
+            result,
+            zero.into(),
+            RegExpStringIteratorStage::MatchGet,
+        )
+    }
+
+    /// Converts the first match to String and advances lastIndex only for an empty match.
+    fn begin_regexp_string_iterator_match_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_object_value(value) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::RegExpStringIteratorMatch,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                value,
+                site.call_site,
+            );
+        }
+        self.finish_regexp_string_iterator_match_conversion(site, state, value)
+    }
+
+    /// Checks the primitive match String and performs the required lastIndex Get.
+    fn finish_regexp_string_iterator_match_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_symbol_value(value) {
+            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(value));
+        }
+        let matched = self.primitive_string_value(Some(value))?;
+        self.root_regexp_string_iterator_state(site, state)?;
+        if !self.regexp_string_units(matched)?.is_empty() {
+            return self.publish_regexp_string_iterator_result(site, state);
+        }
+        let matcher = self.native_call_state_snapshot(state)?.values[ITERATOR_MATCHER];
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        self.dispatch_regexp_string_iterator_read(
+            site,
+            state,
+            matcher,
+            last_index.into(),
+            RegExpStringIteratorStage::LastIndexGet,
+        )
+    }
+
+    /// Converts an observed lastIndex with number hint before advancing the input cursor.
+    fn begin_regexp_string_iterator_last_index_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_object_value(value) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::RegExpStringIteratorLastIndex,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                value,
+                site.call_site,
+            );
+        }
+        self.finish_regexp_string_iterator_last_index(site, state, value)
+    }
+
+    /// Applies AdvanceStringIndex and performs the strict observable lastIndex Set.
+    fn finish_regexp_string_iterator_last_index(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let index = usize::try_from(regexp_to_length(self.convert_to_number(value)?)?)
+            .unwrap_or(usize::MAX);
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let iterator = self.regexp_string_iterator_reference(snapshot.values[ITERATOR_OBJECT])?;
+        let slots = self.regexp_string_iterator_snapshot(iterator)?;
+        let units = self.regexp_string_units(snapshot.values[ITERATOR_INPUT])?;
+        let next = advance_regexp_split_index(&units, index, slots.unicode);
+        self.dispatch_regexp_string_iterator_write(
+            site,
+            state,
+            snapshot.values[ITERATOR_MATCHER],
+            crate::safe_integer_value(next as u64),
+        )
+    }
+
+    /// Publishes the retained match as a fresh iterator result object.
+    fn publish_regexp_string_iterator_result(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let result = self.native_call_state_snapshot(state)?.values[ITERATOR_RESULT];
+        let output = self.create_iterator_result(result, false)?;
+        self.write(site.caller_base, site.destination, output)
+    }
+
+    /// Performs one observable property read while retaining the full iterator step.
+    fn dispatch_regexp_string_iterator_read(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        receiver: Value,
+        key: crate::PropertyKey,
+        stage: RegExpStringIteratorStage,
+    ) -> Result<(), ExecutionError> {
+        let continuation = NativeContinuation::regexp_string_iterator(
+            site,
+            stage,
+            Value::from_heap_ref(state.raw()),
+            receiver,
+        );
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        if let Err(error) = self.dispatch_proxy_aware_property_read(site, receiver, receiver, key) {
+            if self.fiber.completions.len() > depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frames || self.fiber.completions.len() <= depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_regexp_string_iterator(continuation, stage, value)
+    }
+
+    /// Performs the strict lastIndex write needed after an empty custom match.
+    fn dispatch_regexp_string_iterator_write(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        receiver: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let stage = RegExpStringIteratorStage::LastIndexSet;
+        let continuation = NativeContinuation::regexp_string_iterator(
+            site,
+            stage,
+            Value::from_heap_ref(state.raw()),
+            receiver,
+        );
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let key = self.intern_intrinsic_name(b"lastIndex")?;
+        if let Err(error) = self.dispatch_proxy_aware_property_write(
+            site,
+            receiver,
+            receiver,
+            key.into(),
+            value,
+            ProxySetMode::ObjectAssign,
+        ) {
+            if self.fiber.completions.len() > depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frames || self.fiber.completions.len() <= depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        self.resume_regexp_string_iterator(continuation, stage, value)
+    }
+
+    #[inline(always)]
+    fn root_regexp_string_iterator_state(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
         self.write(
             site.caller_base,
             site.destination,
             Value::from_heap_ref(state.raw()),
-        )?;
-        let outcome = self.regexp_builtin_exec(snapshot.matcher, snapshot.input, state, index)?;
-        if let Some(last_index) = outcome.last_index {
-            self.set_own_data_property(snapshot.matcher, last_index_atom, last_index)?;
+        )
+    }
+
+    #[inline(always)]
+    fn validate_regexp_string_iterator_exec_result(
+        &self,
+        result: Value,
+    ) -> Result<(), ExecutionError> {
+        if result.as_immediate() == Some(Immediate::Null) || self.is_object_value(result) {
+            Ok(())
+        } else {
+            Err(ExecutionError::NotObject(result))
         }
-        if outcome.value.as_immediate() == Some(Immediate::Null) {
-            self.finish_regexp_string_iterator(iterator)?;
-            return self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true);
-        }
-        if !snapshot.global {
-            self.finish_regexp_string_iterator(iterator)?;
-            return self.create_iterator_result(outcome.value, false);
-        }
-        if self.regexp_match_result_is_empty(outcome.value)? {
-            let current = self
-                .own_data_property_with_attributes(snapshot.matcher, last_index_atom)?
-                .map_or(Value::from_i32(0), |(value, _)| value);
-            let current = usize::try_from(regexp_to_length(self.convert_to_number(current)?)?)
-                .unwrap_or(usize::MAX);
-            let input = self.regexp_string_units(snapshot.input)?;
-            let advanced = advance_regexp_split_index(&input, current, snapshot.unicode);
-            self.set_own_data_property(
-                snapshot.matcher,
-                last_index_atom,
-                crate::safe_integer_value(advanced as u64),
-            )?;
-        }
-        self.create_iterator_result(outcome.value, false)
     }
 
     /// Allocates a globally flagged matcher for a non-RegExp String pattern.
@@ -243,21 +594,6 @@ impl Isolate {
             )
             .map(|iterator| Value::from_heap_ref(iterator.raw()))
             .map_err(ExecutionError::HeapAllocation)
-    }
-
-    /// Returns whether match result element zero is the empty String.
-    fn regexp_match_result_is_empty(&mut self, result: Value) -> Result<bool, ExecutionError> {
-        let zero = self.property_key_atom(Value::from_i32(0))?;
-        let matched = if let Some(value) = self.dense_array_value(result, zero.into())? {
-            Some(value)
-        } else {
-            self.own_data_property_with_attributes(result, zero)?
-                .map(|(value, _)| value)
-        };
-        let Some(matched) = matched else {
-            return Ok(false);
-        };
-        Ok(self.regexp_string_units(matched)?.is_empty())
     }
 
     fn regexp_string_iterator_reference(

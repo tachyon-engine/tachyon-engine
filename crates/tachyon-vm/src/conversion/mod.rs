@@ -797,6 +797,22 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::RegExpStringIteratorMatch {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_regexp_string_iterator_match_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::RegExpStringIteratorLastIndex {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_regexp_string_iterator_last_index_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::StringSearchReceiver
@@ -1407,6 +1423,8 @@ impl Isolate {
                 }
                 ConversionConsumer::RegExpSearchInput
                 | ConversionConsumer::RegExpReplaceResult
+                | ConversionConsumer::RegExpStringIteratorMatch
+                | ConversionConsumer::RegExpStringIteratorLastIndex
                 | ConversionConsumer::StringSearchReceiver
                 | ConversionConsumer::StringSearchPattern => {
                     unreachable!("RegExp search conversion resumes inside its state machine")

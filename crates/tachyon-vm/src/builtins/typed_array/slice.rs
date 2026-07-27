@@ -29,8 +29,7 @@ impl Isolate {
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
         let source = site.this_value;
-        let snapshot = self.typed_array_snapshot(source)?;
-        self.typed_array_backing(snapshot.buffer)?;
+        let snapshot = self.validated_typed_array_snapshot(source)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let start = self.call_argument(site, 0)?.unwrap_or(undefined);
         let end = self.call_argument(site, 1)?.unwrap_or(undefined);

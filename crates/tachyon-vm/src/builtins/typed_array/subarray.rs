@@ -145,7 +145,7 @@ impl Isolate {
         self.finish_typed_array_subarray_indices(site, state, end)
     }
 
-    /// Saves the fixed-view result count and starts SpeciesConstructor lookup.
+    /// Saves either a fixed result count or the omitted-length tracking marker.
     fn finish_typed_array_subarray_indices(
         &mut self,
         site: NativeContinuationSite,
@@ -154,10 +154,18 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let start = typed_array_subarray_usize(pending.values[SUBARRAY_START])?;
+        let tracking_omitted = pending.values[SUBARRAY_END].as_immediate()
+            == Some(Immediate::Undefined)
+            && self.typed_array_length_mode(pending.values[SUBARRAY_SOURCE])?
+                == ViewLengthMode::Tracking;
         self.set_typed_array_subarray_value(
             state,
             SUBARRAY_END,
-            Value::from_f64(end.saturating_sub(start) as f64),
+            if tracking_omitted {
+                Value::from_immediate(Immediate::Undefined)
+            } else {
+                Value::from_f64(end.saturating_sub(start) as f64)
+            },
         )?;
         let constructor = self.constructor_atom()?;
         if let Some(value) = self.dispatch_typed_array_subarray_get(
@@ -241,7 +249,7 @@ impl Isolate {
         self.construct_typed_array_subarray_result(site, state, constructor)
     }
 
-    /// Constructs one fixed view with the exact buffer, byteOffset, and length arguments.
+    /// Constructs a tracking two-argument or fixed three-argument species result.
     fn construct_typed_array_subarray_result(
         &mut self,
         site: NativeContinuationSite,
@@ -260,11 +268,14 @@ impl Isolate {
                     .ok_or(ExecutionError::InvalidArrayLength)?,
             )
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        let arguments = vec![
-            pending.values[SUBARRAY_BUFFER],
-            Value::from_f64(byte_offset as f64),
-            pending.values[SUBARRAY_END],
-        ];
+        let tracking = pending.values[SUBARRAY_END].as_immediate() == Some(Immediate::Undefined);
+        let argument_count = if tracking { 2 } else { 3 };
+        let mut arguments = Vec::with_capacity(argument_count);
+        arguments.push(pending.values[SUBARRAY_BUFFER]);
+        arguments.push(Value::from_f64(byte_offset as f64));
+        if !tracking {
+            arguments.push(pending.values[SUBARRAY_END]);
+        }
         let undefined = Value::from_immediate(Immediate::Undefined);
         self.push_typed_array_subarray_parent(
             site,
@@ -297,8 +308,8 @@ impl Isolate {
             argument_source: None,
             argument_prefix: Some(prefix),
             argument_prefix_offset: 0,
-            argument_prefix_count: 3,
-            argument_count: 3,
+            argument_prefix_count: argument_count as u32,
+            argument_count: argument_count as u32,
             this_value: undefined,
             new_target: constructor,
             construct_receiver: None,

@@ -36,6 +36,14 @@ pub(crate) struct TypedArraySnapshot {
     pub(crate) kind: TypedArrayKind,
 }
 
+#[derive(Clone, Copy)]
+struct TypedArrayWitness {
+    snapshot: TypedArraySnapshot,
+    length_mode: ViewLengthMode,
+    detached: bool,
+    out_of_bounds: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TypedArrayIndex {
     NonNumeric,
@@ -451,6 +459,8 @@ impl Isolate {
         if offset > buffer_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
+        let auto_length =
+            explicit_length.is_none() && self.array_buffer_is_resizable(snapshot.source)?;
         let length = if let Some(length) = explicit_length {
             let bytes = length
                 .checked_mul(snapshot.kind.byte_width())
@@ -460,13 +470,11 @@ impl Isolate {
             }
             length
         } else {
-            if buffer_length % snapshot.kind.byte_width() != 0 {
+            if !auto_length && (buffer_length - offset) % snapshot.kind.byte_width() != 0 {
                 return Err(ExecutionError::InvalidArrayLength);
             }
             (buffer_length - offset) / snapshot.kind.byte_width()
         };
-        let auto_length =
-            explicit_length.is_none() && self.array_buffer_is_resizable(snapshot.source)?;
         let target = self.allocate_typed_array_view(
             snapshot.source,
             offset,
@@ -1132,6 +1140,36 @@ impl Isolate {
         &mut self,
         value: Value,
     ) -> Result<TypedArraySnapshot, ExecutionError> {
+        self.typed_array_witness(value)
+            .map(|witness| witness.snapshot)
+    }
+
+    /// Implements ValidateTypedArray by rejecting detached and currently OOB views.
+    pub(crate) fn validated_typed_array_snapshot(
+        &mut self,
+        value: Value,
+    ) -> Result<TypedArraySnapshot, ExecutionError> {
+        let witness = self.typed_array_witness(value)?;
+        if witness.detached {
+            return Err(ExecutionError::DetachedArrayBuffer);
+        }
+        if witness.out_of_bounds {
+            return Err(ExecutionError::OutOfBoundsTypedArray);
+        }
+        Ok(witness.snapshot)
+    }
+
+    /// Returns the immutable fixed/tracking mode stored in a TypedArray payload.
+    pub(crate) fn typed_array_length_mode(
+        &mut self,
+        value: Value,
+    ) -> Result<ViewLengthMode, ExecutionError> {
+        self.typed_array_witness(value)
+            .map(|witness| witness.length_mode)
+    }
+
+    /// Rebuilds current bounds from the ArrayBuffer edge without retaining a borrow.
+    fn typed_array_witness(&mut self, value: Value) -> Result<TypedArrayWitness, ExecutionError> {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::NotObject(value))?;
@@ -1159,12 +1197,14 @@ impl Isolate {
             })
         })?;
         let (snapshot, length_mode) = snapshot;
-        let available = match self.array_buffer_length_for_view_value(snapshot.buffer) {
-            Ok(length) => length,
-            Err(ExecutionError::DetachedArrayBuffer) => 0,
+        let (available, detached) = match self.array_buffer_length_for_view_value(snapshot.buffer) {
+            Ok(length) => (length, false),
+            Err(ExecutionError::DetachedArrayBuffer) => (0, true),
             Err(error) => return Err(error),
         };
-        let effective_length = if length_mode == ViewLengthMode::Tracking {
+        let effective_length = if detached {
+            0
+        } else if length_mode == ViewLengthMode::Tracking {
             available.saturating_sub(snapshot.byte_offset) / snapshot.kind.byte_width()
         } else {
             snapshot.length
@@ -1173,15 +1213,15 @@ impl Isolate {
             .byte_offset
             .checked_add(effective_length.saturating_mul(snapshot.kind.byte_width()))
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        if required > available {
-            return Ok(TypedArraySnapshot {
-                length: 0,
+        let out_of_bounds = !detached && (snapshot.byte_offset > available || required > available);
+        Ok(TypedArrayWitness {
+            snapshot: TypedArraySnapshot {
+                length: if out_of_bounds { 0 } else { effective_length },
                 ..snapshot
-            });
-        }
-        Ok(TypedArraySnapshot {
-            length: effective_length,
-            ..snapshot
+            },
+            length_mode,
+            detached,
+            out_of_bounds,
         })
     }
 

@@ -100,6 +100,32 @@ result.buffer === source.buffer && result.length === 2 &&
   result[0] === 20 && result[1] === 30;
 "#;
 
+const TYPED_ARRAY_SUBARRAY_RAB_SOURCE: &str = r#"
+var rab = new ArrayBuffer(10, { maxByteLength: 10 });
+var tracking = new Int8Array(rab, 4);
+var trackingArgs = -1;
+tracking.constructor = {};
+tracking.constructor[Symbol.species] = function(buffer, offset) {
+  trackingArgs = arguments.length;
+  return new Int8Array(buffer, offset);
+};
+var trackingResult = tracking.subarray(1);
+
+var fixed = new Int8Array(rab, 4, 2);
+var fixedArgs = -1;
+fixed.constructor = {};
+fixed.constructor[Symbol.species] = function(buffer, offset, length) {
+  fixedArgs = arguments.length;
+  return new Int8Array(buffer, offset, length);
+};
+rab.resize(0);
+var start = { valueOf: function() { rab.resize(10); return 1; } };
+var fixedResult = fixed.subarray(start);
+
+trackingArgs === 2 && trackingResult.byteOffset === 5 && trackingResult.length === 5 &&
+  fixedArgs === 3 && fixedResult.byteOffset === 4 && fixedResult.length === 0;
+"#;
+
 #[test]
 fn typed_array_subarray_works_for_every_dispatch_batch() {
     assert_typed_array_subarray::<1>(false);
@@ -112,6 +138,23 @@ fn typed_array_subarray_works_for_every_dispatch_batch() {
 #[test]
 fn typed_array_subarray_state_survives_forced_major_collection() {
     assert_typed_array_subarray::<8>(true);
+}
+
+#[test]
+fn typed_array_subarray_tracks_rab_species_arguments_and_oob_recovery() {
+    assert_typed_array_subarray_source::<1>(TYPED_ARRAY_SUBARRAY_RAB_SOURCE, None);
+    assert_typed_array_subarray_source::<2>(TYPED_ARRAY_SUBARRAY_RAB_SOURCE, None);
+    assert_typed_array_subarray_source::<4>(TYPED_ARRAY_SUBARRAY_RAB_SOURCE, None);
+    assert_typed_array_subarray_source::<8>(TYPED_ARRAY_SUBARRAY_RAB_SOURCE, None);
+    assert_typed_array_subarray_source::<16>(TYPED_ARRAY_SUBARRAY_RAB_SOURCE, None);
+    assert_typed_array_subarray_source::<8>(
+        TYPED_ARRAY_SUBARRAY_RAB_SOURCE,
+        Some(ForcedCollectionMode::Minor),
+    );
+    assert_typed_array_subarray_source::<8>(
+        TYPED_ARRAY_SUBARRAY_RAB_SOURCE,
+        Some(ForcedCollectionMode::Major),
+    );
 }
 
 #[test]
@@ -171,17 +214,40 @@ fn typed_array_subarray_constructs_foreign_species_in_its_realm() {
     );
 }
 
+/// Gives forced-minor construction enough bounded heap for repeated nursery evacuation.
+fn typed_array_subarray_test_isolate(collection: Option<ForcedCollectionMode>) -> Isolate {
+    if collection != Some(ForcedCollectionMode::Minor) {
+        return test_isolate();
+    }
+    Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("TypedArray subarray forced-minor isolate initializes")
+}
+
 /// Executes the shared fixture under one dispatch and collection policy.
 fn assert_typed_array_subarray<const N: usize>(forced_major: bool) {
-    let module = compile_typed_array_subarray_fixture(TYPED_ARRAY_SUBARRAY_SOURCE, 7_437);
-    let mut isolate = test_isolate();
+    assert_typed_array_subarray_source::<N>(
+        TYPED_ARRAY_SUBARRAY_SOURCE,
+        forced_major.then_some(ForcedCollectionMode::Major),
+    );
+}
+
+/// Executes an arbitrary subarray fixture under one dispatch and collection policy.
+fn assert_typed_array_subarray_source<const N: usize>(
+    source: &'static str,
+    collection: Option<ForcedCollectionMode>,
+) {
+    let module = compile_typed_array_subarray_fixture(source, 7_437);
+    let mut isolate = typed_array_subarray_test_isolate(collection);
     isolate
         .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
         .expect("detach host hook installs");
-    if forced_major {
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    if let Some(mode) = collection {
+        isolate.heap.set_forced_collection_mode(mode);
     }
     let outcome = isolate
         .execute_with_batch::<N>(
@@ -194,7 +260,7 @@ fn assert_typed_array_subarray<const N: usize>(forced_major: bool) {
         .expect("TypedArray subarray fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        "dispatch batch {N}, collection={collection:?} returned {outcome:?}"
     );
 }
 

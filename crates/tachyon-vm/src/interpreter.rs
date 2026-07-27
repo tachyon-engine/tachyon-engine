@@ -2355,6 +2355,13 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 1)
             }
+            NativeContinuationKind::RegExpStringIterator(stage) => {
+                if stage != RegExpStringIteratorStage::ExecCall {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 1)
+            }
             NativeContinuationKind::RegExpFlags(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::StringSplit(stage) => {
                 if stage != StringSplitStage::SplitterCall {
@@ -5730,8 +5737,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpStringIteratorNext) => {
-                    let result = self.regexp_string_iterator_next(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.regexp_string_iterator_next(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpReplace) => {
                     return self.regexp_replace(&site);
@@ -7845,6 +7851,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::RegExpSearch(stage) => {
                     self.resume_regexp_search(continuation, stage, value)
+                }
+                NativeContinuationKind::RegExpStringIterator(stage) => {
+                    self.resume_regexp_string_iterator(continuation, stage, value)
                 }
                 NativeContinuationKind::RegExpReplace => {
                     self.resume_regexp_replace_callback(continuation, value)

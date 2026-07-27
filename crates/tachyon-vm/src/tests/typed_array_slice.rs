@@ -131,6 +131,31 @@ result.length === length && result.buffer !== source.buffer &&
   result[length - 2] === 33 && result[length - 1] === 44;
 "#;
 
+const TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE: &str = r#"
+var nonDivisible = new ArrayBuffer(10, { maxByteLength: 20 });
+var tracking = new Uint32Array(nonDivisible);
+var floorLengthOkay = tracking.length === 2;
+
+var source = new Uint32Array([1, 2]);
+source.constructor = {};
+source.constructor[Symbol.species] = function() {
+  nonDivisible.resize(0);
+  return tracking;
+};
+var shortTargetTypeError = false;
+try { source.slice(); }
+catch (error) { shortTargetTypeError = error instanceof TypeError; }
+
+var oobBuffer = new ArrayBuffer(16, { maxByteLength: 20 });
+var oob = new Uint32Array(oobBuffer, 4, 2);
+oobBuffer.resize(11);
+var sourceTypeError = false;
+try { oob.slice(); }
+catch (error) { sourceTypeError = error instanceof TypeError; }
+
+floorLengthOkay && shortTargetTypeError && sourceTypeError;
+"#;
+
 #[test]
 fn typed_array_slice_works_for_every_dispatch_batch() {
     assert_typed_array_slice::<1>(TYPED_ARRAY_SLICE_SOURCE, false);
@@ -146,11 +171,28 @@ fn typed_array_slice_species_state_survives_forced_major_collection() {
 }
 
 #[test]
+fn typed_array_slice_rebuilds_rab_witnesses_for_every_dispatch_batch() {
+    assert_typed_array_slice_mode::<1>(TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE, None);
+    assert_typed_array_slice_mode::<2>(TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE, None);
+    assert_typed_array_slice_mode::<4>(TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE, None);
+    assert_typed_array_slice_mode::<8>(TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE, None);
+    assert_typed_array_slice_mode::<16>(TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE, None);
+    assert_typed_array_slice_mode::<8>(
+        TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE,
+        Some(ForcedCollectionMode::Minor),
+    );
+    assert_typed_array_slice_mode::<8>(
+        TYPED_ARRAY_SLICE_RAB_WITNESS_SOURCE,
+        Some(ForcedCollectionMode::Major),
+    );
+}
+
+#[test]
 fn typed_array_slice_large_view_does_not_grow_rust_stack() {
     let module = compile_typed_array_slice_fixture(TYPED_ARRAY_SLICE_LONG_SOURCE);
     let mut isolate = Isolate::new(IsolateConfig::new(
         AtomTableConfig::new(4_096, 1024 * 1024, AtomHashSeed::new(1, 2)),
-        HeapLimit::new(32 * SPAN_SIZE_BYTES),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
         RealmLimits::new(64, 4_096).with_max_shapes(4_096),
     ))
@@ -172,15 +214,21 @@ fn typed_array_slice_large_view_does_not_grow_rust_stack() {
 
 /// Executes one slice fixture under the selected dispatch and collection policy.
 fn assert_typed_array_slice<const N: usize>(source: &'static str, forced_major: bool) {
+    assert_typed_array_slice_mode::<N>(source, forced_major.then_some(ForcedCollectionMode::Major));
+}
+
+/// Executes one slice fixture with an optional forced collector policy.
+fn assert_typed_array_slice_mode<const N: usize>(
+    source: &'static str,
+    collection: Option<ForcedCollectionMode>,
+) {
     let module = compile_typed_array_slice_fixture(source);
-    let mut isolate = test_isolate();
+    let mut isolate = typed_array_slice_test_isolate(collection);
     isolate
         .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
         .expect("detach host hook installs");
-    if forced_major {
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    if let Some(mode) = collection {
+        isolate.heap.set_forced_collection_mode(mode);
     }
     let outcome = isolate
         .execute_with_batch::<N>(
@@ -193,8 +241,22 @@ fn assert_typed_array_slice<const N: usize>(source: &'static str, forced_major: 
         .expect("TypedArray slice fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        "dispatch batch {N}, collection={collection:?} returned {outcome:?}"
     );
+}
+
+/// Gives forced-minor species construction enough bounded nursery headroom.
+fn typed_array_slice_test_isolate(collection: Option<ForcedCollectionMode>) -> Isolate {
+    if collection != Some(ForcedCollectionMode::Minor) {
+        return test_isolate();
+    }
+    Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("TypedArray slice forced-minor isolate initializes")
 }
 
 fn unused_eval_callback(

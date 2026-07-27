@@ -287,6 +287,8 @@ pub(crate) enum ConversionConsumer {
     RegExpTestInput,
     RegExpSearchInput,
     RegExpReplaceResult,
+    RegExpStringIteratorMatch,
+    RegExpStringIteratorLastIndex,
     StringSearchReceiver,
     StringSearchPattern,
     RegExpLastIndex,
@@ -394,6 +396,8 @@ impl ConversionConsumer {
             | Self::RegExpTestInput
             | Self::RegExpSearchInput
             | Self::RegExpReplaceResult
+            | Self::RegExpStringIteratorMatch
+            | Self::RegExpStringIteratorLastIndex
             | Self::StringSearchReceiver
             | Self::StringSearchPattern
             | Self::RegExpLastIndex
@@ -498,6 +502,8 @@ impl ConversionConsumer {
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
                 | Self::RegExpReplaceResult
+                | Self::RegExpStringIteratorMatch
+                | Self::RegExpStringIteratorLastIndex
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
                 | Self::ArrayToSortedLeftString
@@ -560,6 +566,8 @@ impl ConversionConsumer {
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
                 | Self::RegExpReplaceResult
+                | Self::RegExpStringIteratorMatch
+                | Self::RegExpStringIteratorLastIndex
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
                 | Self::RegExpLastIndex
@@ -1235,6 +1243,17 @@ pub(crate) enum RegExpSearchStage {
     ResultIndexGet,
 }
 
+/// Observable boundaries in `%RegExpStringIteratorPrototype%.next`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum RegExpStringIteratorStage {
+    ExecGet,
+    ExecCall,
+    MatchGet,
+    LastIndexGet,
+    LastIndexSet,
+}
+
 /// Observable callback boundaries in source-based TypedArray construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1379,6 +1398,7 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     RegExpTest(RegExpTestStage),
     RegExpSearch(RegExpSearchStage),
+    RegExpStringIterator(RegExpStringIteratorStage),
     RegExpReplace,
     RegExpFlags(u8),
     StringSplit(StringSplitStage),
@@ -1586,6 +1606,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::RegExpSearch(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots one iterator step state across an observable Get or Call.
+    #[inline]
+    pub(crate) const fn regexp_string_iterator(
+        site: NativeContinuationSite,
+        stage: RegExpStringIteratorStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::RegExpStringIterator(stage),
             first: state,
             second: receiver,
         }
