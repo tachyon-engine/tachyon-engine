@@ -129,27 +129,22 @@ function throws(expected, callback) {
 var huge = 340282366920938463463374607431768211455n;
 var boxed = Object(huge);
 var failure = 0;
-try { if (!(typeof boxed === "object" && boxed.valueOf() === huge &&
+if (!(typeof boxed === "object" && boxed.valueOf() === huge &&
       boxed.toString() === "340282366920938463463374607431768211455" &&
-      Object.prototype.toString.call(boxed) === "[object BigInt]")) failure = 1; }
-catch (error) { failure = 11; }
-try { if (!(huge.toString(16) === "ffffffffffffffffffffffffffffffff" &&
+      Object.prototype.toString.call(boxed) === "[object BigInt]")) failure = 1;
+if (!(huge.toString(16) === "ffffffffffffffffffffffffffffffff" &&
       (-255n).toString(16) === "-ff" && 35n.toString(36) === "z" &&
-      huge.toLocaleString() === huge.toString())) failure = 2; }
-catch (error) { failure = 12; }
-try { if (!(BigInt.asUintN(0, -1n) === 0n && BigInt.asUintN(8, -1n) === 255n &&
+      huge.toLocaleString() === huge.toString())) failure = 2;
+if (!(BigInt.asUintN(0, -1n) === 0n && BigInt.asUintN(8, -1n) === 255n &&
       BigInt.asUintN(64, -2n) === 18446744073709551614n &&
       BigInt.asUintN(128, -1n) === huge &&
       BigInt.asIntN(8, 128n) === -128n && BigInt.asIntN(8, 127n) === 127n &&
-      BigInt.asIntN(128, huge) === -1n)) failure = 3; }
-catch (error) { failure = 13; }
-try { if (BigInt.prototype.valueOf.call(1n) !== 1n) failure = 41;
-      else if (!throws(TypeError, function() { BigInt.prototype.valueOf.call(1); })) failure = 42;
-      else { var radixError = 0; try { 1n.toString(1); } catch (error) {
-        radixError = error instanceof RangeError ? 1 : error instanceof TypeError ? 2 : 3;
-      } if (radixError !== 1) failure = 430 + radixError; }
-      if (failure === 0 && !throws(RangeError, function() { BigInt.asUintN(-1, 0n); })) failure = 44; }
-catch (error) { failure = 14; }
+      BigInt.asIntN(128, huge) === -1n)) failure = 3;
+if (!(BigInt.prototype.valueOf.call(1n) === 1n &&
+      throws(TypeError, function() { BigInt.prototype.valueOf.call(1); }) &&
+      throws(TypeError, function() { BigInt.prototype.toString(); }) &&
+      throws(RangeError, function() { 1n.toString(1); }) &&
+      throws(RangeError, function() { BigInt.asUintN(-1, 0n); }))) failure = 4;
 if (!(BigInt.asIntN.length === 2 && BigInt.asUintN.length === 2 &&
       BigInt.prototype.toString.length === 0 && BigInt.prototype.valueOf.length === 0 &&
       BigInt.prototype.constructor === BigInt)) failure = 5;

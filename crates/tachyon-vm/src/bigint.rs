@@ -240,6 +240,17 @@ impl BigIntValue {
         }
     }
 
+    /// Converts the mathematical integer to binary64 for the explicit Number(BigInt) exception.
+    #[inline]
+    fn to_f64(&self) -> f64 {
+        const LIMB_SCALE: f64 = 18_446_744_073_709_551_616.0;
+        let mut number = 0.0;
+        for &limb in self.limbs.iter().rev() {
+            number = number * LIMB_SCALE + limb as f64;
+        }
+        if self.negative { -number } else { number }
+    }
+
     #[inline(always)]
     fn is_zero(&self) -> bool {
         self.limbs.is_empty()
@@ -1166,6 +1177,23 @@ impl Isolate {
                 no_gc
                     .borrow(bigint, self.types.bigint)
                     .map(BigIntValue::modulo_u64)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Implements the Number constructor's deliberate BigInt-to-Number conversion exception.
+    pub(crate) fn bigint_to_number_value(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if let Some(small) = value.as_small_bigint() {
+            return Ok(Value::from_f64(small as f64));
+        }
+        let bigint = self.bigint_reference(value)?;
+        self.heap.with_running_scope(|scope| {
+            let bigint = scope.root(bigint).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(bigint, self.types.bigint)
+                    .map(|bigint| Value::from_f64(bigint.to_f64()))
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })

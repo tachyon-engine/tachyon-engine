@@ -194,7 +194,7 @@ impl Isolate {
     }
 
     /// Allocates the exact input/receiver state used by getter, call, and builtin branches.
-    fn allocate_regexp_exec_state(
+    pub(crate) fn allocate_regexp_exec_state(
         &mut self,
         receiver: Value,
         input: Value,
@@ -409,10 +409,7 @@ impl Isolate {
         slot: usize,
         value: Value,
     ) -> Result<(), ExecutionError> {
-        debug_assert!(matches!(
-            slot,
-            REGEXP_EXEC_RESULT | REGEXP_EXEC_GROUPS | REGEXP_EXEC_TEMPORARY
-        ));
+        debug_assert!(slot < 5);
         self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {

@@ -1012,6 +1012,7 @@ impl Isolate {
                 b"toLocaleUpperCase".as_slice(),
             ),
             (NativeFunction::StringSplit, b"split".as_slice()),
+            (NativeFunction::StringSearch, b"search".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
@@ -1099,6 +1100,23 @@ impl Isolate {
             split_key,
             DataPropertyDescriptor {
                 value: Some(regexp_split),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let regexp_search = allocate(self, NativeFunction::RegExpSearch)?;
+        let search_symbol = self
+            .realm
+            .well_known_symbols
+            .search
+            .expect("Symbol.search remains rooted during RegExp initialization");
+        let search_key = self.property_key(search_symbol)?;
+        self.define_data_property(
+            regexp_prototype,
+            search_key,
+            DataPropertyDescriptor {
+                value: Some(regexp_search),
                 writable: Some(true),
                 enumerable: Some(false),
                 configurable: Some(true),
@@ -1196,9 +1214,7 @@ impl Isolate {
         }
         let bigint = allocate(self, NativeFunction::BigIntConstructor)?;
         self.realm.bigint_constructor = Some(bigint);
-        let bigint_zero = Value::from_small_bigint(0).expect("zero fits SmallBigInt");
-        let bigint_prototype =
-            self.allocate_bigint_object(bigint_zero, object_prototype, AllocationSpace::Old)?;
+        let bigint_prototype = self.create_ordinary_object_with_prototype(object_prototype)?;
         self.realm.bigint_prototype = Some(bigint_prototype);
         self.set_function_prototype(bigint, bigint_prototype)?;
         self.set_intrinsic_data_property(bigint_prototype, constructor_atom, bigint, true)?;
@@ -1537,6 +1553,8 @@ impl Isolate {
                 self.realm.well_known_symbols.is_concat_spreadable = Some(symbol);
             } else if name == b"replace" {
                 self.realm.well_known_symbols.replace = Some(symbol);
+            } else if name == b"search" {
+                self.realm.well_known_symbols.search = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
             } else if name == b"split" {
@@ -1548,6 +1566,8 @@ impl Isolate {
                 self.realm.well_known_symbols.is_concat_spreadable.unwrap()
             } else if name == b"replace" {
                 self.realm.well_known_symbols.replace.unwrap()
+            } else if name == b"search" {
+                self.realm.well_known_symbols.search.unwrap()
             } else if name == b"species" {
                 self.realm.well_known_symbols.species.unwrap()
             } else if name == b"split" {

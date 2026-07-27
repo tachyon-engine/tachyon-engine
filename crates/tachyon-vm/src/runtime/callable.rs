@@ -341,6 +341,7 @@ pub(crate) enum NativeFunction {
     StringToLocaleLowerCase,
     StringToLocaleUpperCase,
     StringSplit,
+    StringSearch,
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
@@ -349,6 +350,7 @@ pub(crate) enum NativeFunction {
     RegExpTest,
     RegExpToString,
     RegExpSplit,
+    RegExpSearch,
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
@@ -1013,6 +1015,7 @@ impl NativeFunction {
             | Self::RegExpEscape
             | Self::RegExpExec
             | Self::RegExpTest
+            | Self::RegExpSearch
             | Self::RegExpToString
             | Self::StringCharAt
             | Self::StringCharCodeAt
@@ -1033,6 +1036,7 @@ impl NativeFunction {
             | Self::StringEndsWith
             | Self::StringConcat
             | Self::StringRepeat
+            | Self::StringSearch
             | Self::StringPadStart
             | Self::StringPadEnd
             | Self::StringTrim
@@ -1327,6 +1331,7 @@ impl NativeFunction {
             Self::RegExpTest => "test",
             Self::RegExpToString => "toString",
             Self::RegExpSplit => "[Symbol.split]",
+            Self::RegExpSearch => "[Symbol.search]",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
             Self::StringAt => "at",
@@ -1356,6 +1361,7 @@ impl NativeFunction {
             Self::StringToLocaleLowerCase => "toLocaleLowerCase",
             Self::StringToLocaleUpperCase => "toLocaleUpperCase",
             Self::StringSplit => "split",
+            Self::StringSearch => "search",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",

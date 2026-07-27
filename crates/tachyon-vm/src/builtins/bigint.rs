@@ -37,6 +37,9 @@ impl Isolate {
             None => 10,
             Some(value) if value.as_immediate() == Some(Immediate::Undefined) => 10,
             Some(value) => {
+                if self.is_bigint_value(value) {
+                    return Err(ExecutionError::NotObject(value));
+                }
                 let value = self.convert_to_number(value)?;
                 let number = numeric_value(value)
                     .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;

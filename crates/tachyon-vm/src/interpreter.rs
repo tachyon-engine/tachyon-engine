@@ -2291,6 +2291,18 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 1)
             }
+            NativeContinuationKind::RegExpSearch(stage) => {
+                if !matches!(
+                    stage,
+                    RegExpSearchStage::StringMethodCall
+                        | RegExpSearchStage::StringCreatedMethodCall
+                        | RegExpSearchStage::ExecCall
+                ) {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 1)
+            }
             NativeContinuationKind::StringSplit(stage) => {
                 if stage != StringSplitStage::SplitterCall {
                     return Err(ExecutionError::MissingNativeContinuation);
@@ -5541,6 +5553,9 @@ impl Isolate {
                     let result = self.regexp_split(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::StringSearch) => {
+                    return self.begin_string_search(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -5620,6 +5635,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpTest) => {
                     return self.begin_regexp_test(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpSearch) => {
+                    return self.begin_regexp_search(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpToString) => {
                     let result = self.regexp_to_string(site.this_value)?;
@@ -7662,6 +7680,9 @@ impl Isolate {
                 NativeContinuationKind::RegExpTest(stage) => {
                     self.resume_regexp_test(continuation, stage, value)
                 }
+                NativeContinuationKind::RegExpSearch(stage) => {
+                    self.resume_regexp_search(continuation, stage, value)
+                }
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)
                 }
@@ -7780,6 +7801,21 @@ impl Isolate {
                 return self.throw_native_error(kind, site.call_site);
             }
             if self.fiber.frames.len() != frame_depth {
+                return Ok(None);
+            }
+            if continuation.kind()
+                == NativeContinuationKind::RegExpSearch(RegExpSearchStage::ExecCall)
+                && self.fiber.completions.last_native().is_some_and(|parent| {
+                    matches!(
+                        parent.kind(),
+                        NativeContinuationKind::RegExpSearch(
+                            RegExpSearchStage::StringMethodCall
+                                | RegExpSearchStage::StringCreatedMethodCall
+                        )
+                    )
+                })
+            {
+                // The parent belongs to the enclosing @@search call frame, not this exec return.
                 return Ok(None);
             }
             let frame_completion_base = self

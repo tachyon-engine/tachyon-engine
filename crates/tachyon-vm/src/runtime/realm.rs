@@ -850,6 +850,7 @@ pub(crate) struct WellKnownSymbols {
     pub(crate) iterator: Option<Value>,
     pub(crate) is_concat_spreadable: Option<Value>,
     pub(crate) replace: Option<Value>,
+    pub(crate) search: Option<Value>,
     pub(crate) species: Option<Value>,
     pub(crate) split: Option<Value>,
     pub(crate) to_string_tag: Option<Value>,
@@ -862,6 +863,7 @@ impl Trace for WellKnownSymbols {
         self.iterator.trace(tracer);
         self.is_concat_spreadable.trace(tracer);
         self.replace.trace(tracer);
+        self.search.trace(tracer);
         self.species.trace(tracer);
         self.split.trace(tracer);
         self.to_string_tag.trace(tracer);

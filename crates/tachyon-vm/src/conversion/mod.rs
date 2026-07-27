@@ -37,6 +37,9 @@ pub(crate) use native_property_key::PendingNativePropertyKey;
 impl Isolate {
     /// Implements ToIndex for builtin view offsets and lengths without host-width wrapping.
     pub(crate) fn ecma_to_index(&mut self, value: Value) -> Result<usize, ExecutionError> {
+        if self.is_bigint_value(value) {
+            return Err(ExecutionError::NotObject(value));
+        }
         let number = numeric_value(self.convert_to_number(value)?)
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
         if number.is_nan() || number == 0.0 {
@@ -699,6 +702,26 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::RegExpSearchInput {
+                        return self.resume_regexp_search_input_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringSearchReceiver
+                            | ConversionConsumer::StringSearchPattern
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_search_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::RegExpExecInput {
                         return self.resume_regexp_exec_conversion(
                             continuation.site,
@@ -1285,6 +1308,11 @@ impl Isolate {
                 ConversionConsumer::RegExpTestInput => {
                     unreachable!("RegExp test conversion resumes inside its state machine")
                 }
+                ConversionConsumer::RegExpSearchInput
+                | ConversionConsumer::StringSearchReceiver
+                | ConversionConsumer::StringSearchPattern => {
+                    unreachable!("RegExp search conversion resumes inside its state machine")
+                }
                 ConversionConsumer::RegExpExecInput => {
                     unreachable!("RegExp exec conversion resumes inside its state machine")
                 }
@@ -1355,7 +1383,12 @@ impl Isolate {
                 self.create_string_iterator(string)
             }
             NativeFunction::NumberConstructor => {
-                let number = self.convert_to_number(argument.unwrap_or(Value::from_i32(0)))?;
+                let argument = argument.unwrap_or(Value::from_i32(0));
+                let number = if self.is_bigint_value(argument) {
+                    self.bigint_to_number_value(argument)?
+                } else {
+                    self.convert_to_number(argument)?
+                };
                 if matches!(consumer, ConversionConsumer::NativeConstruct(_)) {
                     self.box_number_from_constructor(number, receiver)
                 } else {

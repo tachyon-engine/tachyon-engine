@@ -57,6 +57,7 @@ mod proxy;
 mod realm;
 mod regexp;
 mod regexp_exec;
+mod regexp_search;
 mod runtime;
 mod string;
 mod string_split;
@@ -246,9 +247,9 @@ use runtime::{
         ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
-        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpTestStage,
-        SignalStateStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
-        TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
+        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
+        RegExpTestStage, SignalStateStage, StringSplitStage, SymbolAllocationRoots,
+        ToPrimitiveStage, TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
         TypedArraySubarrayStage, VmRoots, next_to_primitive_stage,
     },
     realm::{

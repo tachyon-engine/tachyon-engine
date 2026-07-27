@@ -269,6 +269,9 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     RegExpExecInput,
     RegExpTestInput,
+    RegExpSearchInput,
+    StringSearchReceiver,
+    StringSearchPattern,
     RegExpLastIndex,
     ArrayLength,
     ArraySearchIndex,
@@ -363,6 +366,9 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::RegExpExecInput
             | Self::RegExpTestInput
+            | Self::RegExpSearchInput
+            | Self::StringSearchReceiver
+            | Self::StringSearchPattern
             | Self::RegExpLastIndex
             | Self::ArrayLength
             | Self::ArraySearchIndex
@@ -455,6 +461,9 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
+                | Self::RegExpSearchInput
+                | Self::StringSearchReceiver
+                | Self::StringSearchPattern
                 | Self::ArrayToSortedLeftString
                 | Self::ArrayToSortedRightString
                 | Self::ArrayJoinSeparator
@@ -506,6 +515,9 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
+                | Self::RegExpSearchInput
+                | Self::StringSearchReceiver
+                | Self::StringSearchPattern
                 | Self::RegExpLastIndex
                 | Self::ArrayLength
                 | Self::ArrayJoinLength
@@ -1149,6 +1161,24 @@ pub(crate) enum RegExpTestStage {
     LastIndexSet,
 }
 
+/// Observable boundaries shared by String and RegExp search protocols.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum RegExpSearchStage {
+    StringMethodGet,
+    StringMethodCall,
+    StringCreatedMethodGet,
+    StringCreatedMethodCall,
+    PreviousLastIndexGet,
+    ZeroLastIndexSet,
+    ExecGet,
+    ExecCall,
+    BuiltinLastIndexSet,
+    CurrentLastIndexGet,
+    RestoreLastIndexSet,
+    ResultIndexGet,
+}
+
 /// Observable callback boundaries in source-based TypedArray construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1276,6 +1306,7 @@ pub(crate) enum NativeContinuationKind {
     ObjectToLocaleString(ObjectToLocaleStringStage),
     DateToJson(DateToJsonStage),
     RegExpTest(RegExpTestStage),
+    RegExpSearch(RegExpSearchStage),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
@@ -1449,6 +1480,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::RegExpTest(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots the fixed search state and active receiver across one observable boundary.
+    #[inline]
+    pub(crate) const fn regexp_search(
+        site: NativeContinuationSite,
+        stage: RegExpSearchStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::RegExpSearch(stage),
             first: state,
             second: receiver,
         }

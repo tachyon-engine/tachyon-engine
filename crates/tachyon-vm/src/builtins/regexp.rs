@@ -10,6 +10,56 @@ pub(crate) struct RegExpBuiltinOutcome {
 }
 
 impl Isolate {
+    /// Creates the RegExpCreate fallback used after String search has converted its pattern.
+    #[allow(dead_code, reason = "wired by the pending RegExp search integration")]
+    pub(crate) fn create_regexp_for_string_search(
+        &mut self,
+        pattern: Value,
+    ) -> Result<Value, ExecutionError> {
+        let (mut source, mut flags) = if self.is_object_value(pattern)
+            && let Ok((source, flags)) = self.regexp_data(pattern)
+        {
+            (source, flags)
+        } else {
+            let source = if pattern.as_immediate() == Some(Immediate::Undefined) {
+                self.allocate_runtime_string(
+                    JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+                )?
+            } else {
+                self.regexp_string_argument(Some(pattern))?
+            };
+            let (flags, source) = self.allocate_runtime_string_retaining(
+                JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
+                source,
+            )?;
+            (source, flags)
+        };
+        if self.regexp_string_units(source)?.is_empty() {
+            (source, flags) = self.allocate_runtime_string_retaining(
+                JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
+                flags,
+            )?;
+        }
+        let source_units = self.regexp_string_units(source)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        CompiledRegExp::compile_units_with_flags(&source_units, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let prototype = self
+            .realm
+            .regexp_prototype
+            .expect("RegExp prototype initializes before String.prototype.search");
+        let regexp = self.allocate_regexp_object(source, flags, prototype)?;
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        self.define_fresh_data_property(
+            regexp,
+            last_index,
+            Value::from_i32(0),
+            PropertyAttributes::data(true, false, false),
+        )?;
+        Ok(regexp)
+    }
+
     /// Implements `RegExp.escape` over code points while preserving exact UTF-16 output.
     pub(crate) fn regexp_escape(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let input = self
