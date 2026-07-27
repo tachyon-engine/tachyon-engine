@@ -1,4 +1,4 @@
-schema_version = 1
+schema_version = 2
 api_sha256 = "5245a0ae7aa51e51bd50c4b7810f989b479192c0c245849f2c92a9c780bf6786"
 api_surface = [
     "globalThis.Signal",
@@ -24,6 +24,10 @@ api_surface = [
     "Signal.subtle.unwatched",
 ]
 
+[coverage]
+test_files = 19
+test_definitions = 70
+
 [proposal]
 repository = "https://github.com/tc39/proposal-signals.git"
 commit = "9124ed91b24bb02ff7408b2fcf5abb6e18b095d7"
@@ -38,65 +42,168 @@ content_sha256 = "5a7107f394707ff0ffcedca91de7cc97022a9a389bb28427d71addc7f6f583
 [[cases]]
 id = "guards"
 path = "tests/proposal-signals/guards.js"
-source_sha256 = "6543a36dc87c1efd950b0e399bf48f52f483e08011f278738a7d3ca0c21c37e1"
+source_sha256 = "6392652c0c82c86d056b6e5c36a27bd4f92d51c73dc290591dcada14d246badc"
+expected_assertions = 17
 upstream = ["tests/behaviors/guards.test.ts", "src/public-api-types.ts"]
+definitions = [
+    { upstream = "tests/behaviors/guards.test.ts", line = 5, name = "should work with Signals" },
+    { upstream = "tests/behaviors/guards.test.ts", line = 15, name = "shouldn't error with values" },
+]
 
 [[cases]]
 id = "state-computed"
 path = "tests/proposal-signals/state-computed.js"
-source_sha256 = "90643e00cc864f105fa211e0cd7492f4c664c4efdeb3fe879379c4c8ef3787da"
+source_sha256 = "fd59a887a4b6d7591cde1bb6a463df6a7f578e7ff2affc9cd2a823273a4aae0f"
+expected_assertions = 9
 upstream = ["tests/Signal/state.test.ts", "tests/Signal/computed.test.ts"]
+definitions = [
+    { upstream = "tests/Signal/state.test.ts", line = 5, name = "should work" },
+    { upstream = "tests/Signal/state.test.ts", line = 15, name = "should cache State by Object.is" },
+    { upstream = "tests/Signal/state.test.ts", line = 30, name = "applies custom equality in State" },
+    { upstream = "tests/Signal/computed.test.ts", line = 5, name = "should work" },
+    { upstream = "tests/Signal/computed.test.ts", line = 22, name = "should track Computed by Object.is" },
+    { upstream = "tests/Signal/computed.test.ts", line = 46, name = "applies custom equality in Computed" },
+]
 
 [[cases]]
 id = "custom-equality-errors"
 path = "tests/proposal-signals/custom-equality-errors.js"
-source_sha256 = "819d64adbb8b90c5aec993158babb9879bdc2b94abd8ab6be5b2a9ac6c60394b"
+source_sha256 = "32264088f854fa46448f0150a5a6c54aa1fc13630a1804c5ce4aa81f8ecbda28"
+expected_assertions = 6
 upstream = ["tests/behaviors/custom-equality.test.ts", "tests/behaviors/errors.test.ts"]
+definitions = [
+    { upstream = "tests/behaviors/custom-equality.test.ts", line = 5, name = "works for State" },
+    { upstream = "tests/behaviors/custom-equality.test.ts", line = 34, name = "works for Computed" },
+    { upstream = "tests/behaviors/custom-equality.test.ts", line = 66, name = "does not leak tracking information" },
+    { upstream = "tests/behaviors/errors.test.ts", line = 5, name = "are cached by computed signals" },
+    { upstream = "tests/behaviors/errors.test.ts", line = 36, name = "are cached by computed signals when watched" },
+    { upstream = "tests/behaviors/errors.test.ts", line = 58, name = "are cached by computed signals when equals throws" },
+]
 
 [[cases]]
 id = "cycles-pruning"
 path = "tests/proposal-signals/cycles-pruning.js"
-source_sha256 = "4bdadd3bade8fc61d1182f6ec6ea17c2eae343aebfe564f8f11aad158264224f"
+source_sha256 = "17df30b00a782e1f6d6378a047d0ba91aaea1eaa3279958d625f9a7ec96c0dd2"
+expected_assertions = 6
 upstream = ["tests/behaviors/cycles.test.ts", "tests/behaviors/pruning.test.ts"]
+definitions = [
+    { upstream = "tests/behaviors/cycles.test.ts", line = 5, name = "detects trivial cycles" },
+    { upstream = "tests/behaviors/cycles.test.ts", line = 10, name = "detects slightly larger cycles" },
+    { upstream = "tests/behaviors/pruning.test.ts", line = 5, name = "only recalculates until things are equal" },
+    { upstream = "tests/behaviors/pruning.test.ts", line = 33, name = "does similar pruning for live signals" },
+]
 
 [[cases]]
 id = "dynamic-graph"
 path = "tests/proposal-signals/dynamic-graph.js"
-source_sha256 = "a8546162f75315ea302ebe9b191fee1dbf3f5a577d071dbc20753adaa73c8f64"
+source_sha256 = "3a1b37851e7d08f0f1dd3942639b839f7a06f878dbfbec4367cf251408cebd23"
+expected_assertions = 8
 upstream = ["tests/behaviors/dynamic-dependencies.test.ts", "tests/behaviors/graph.test.ts"]
+definitions = [
+    { upstream = "tests/behaviors/dynamic-dependencies.test.ts", line = 28, name = "works live" },
+    { upstream = "tests/behaviors/dynamic-dependencies.test.ts", line = 29, name = "works not live" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 37, name = "should only update every signal once (diamond graph)" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 224, name = "propagates in topological order" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 434, name = "updates on active dependencies" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 441, name = "does not update on inactive dependencies" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 448, name = "deactivates obsolete dependencies" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 458, name = "activates new dependencies" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 467, name = "ensures that new dependencies are updated before dependee" },
+]
 
 [[cases]]
 id = "watcher-liveness"
 path = "tests/proposal-signals/watcher-liveness.js"
-source_sha256 = "fc8f4ca53e5e88553b0fcd17ecf3dc2bf44a2e0bdf57a119294447149ff11844"
+source_sha256 = "915dc59a096dc55c6ff76c98b4db5873c044279db8cea0b9b9a7bc4ade274556"
+expected_assertions = 10
 upstream = ["tests/Signal/subtle/watcher.test.ts", "tests/Signal/subtle/watch-unwatch.test.ts", "tests/behaviors/liveness.test.ts"]
+definitions = [
+    { upstream = "tests/Signal/subtle/watcher.test.ts", line = 32, name = "should work" },
+    { upstream = "tests/Signal/subtle/watcher.test.ts", line = 152, name = "provides `this` to notify as normal function" },
+    { upstream = "tests/Signal/subtle/watcher.test.ts", line = 167, name = "can be closed in if needed in notify as an arrow function" },
+    { upstream = "tests/Signal/subtle/watcher.test.ts", line = 182, name = "should not break a computed signal to watch it before getting its value" },
+    { upstream = "tests/Signal/subtle/watch-unwatch.test.ts", line = 5, name = "handles multiple watchers well" },
+    { upstream = "tests/Signal/subtle/watch-unwatch.test.ts", line = 163, name = "can unwatch multiple signals" },
+    { upstream = "tests/behaviors/liveness.test.ts", line = 5, name = "only changes on first and last descendant" },
+    { upstream = "tests/behaviors/liveness.test.ts", line = 37, name = "is tracked well on computed signals" },
+]
 
 [[cases]]
 id = "receivers-frozen"
 path = "tests/proposal-signals/receivers-frozen.js"
-source_sha256 = "86822a5cdafade66f9093c4f3060aa810d8ed71954545dc7c19582f7690cd32c"
+source_sha256 = "669185f4dc943df1bd1a15e232fbda1af8d418f44351938697526d5a16b29d16"
+expected_assertions = 7
 upstream = ["tests/behaviors/receivers.test.ts", "tests/behaviors/prohibited-contexts.test.ts"]
+definitions = [
+    { upstream = "tests/behaviors/receivers.test.ts", line = 5, name = "is this for computed" },
+    { upstream = "tests/behaviors/receivers.test.ts", line = 13, name = "is this for watched/unwatched" },
+    { upstream = "tests/behaviors/receivers.test.ts", line = 32, name = "is this for equals" },
+    { upstream = "tests/behaviors/prohibited-contexts.test.ts", line = 5, name = "allows writes during computed" },
+    { upstream = "tests/behaviors/prohibited-contexts.test.ts", line = 21, name = "disallows reads and writes during watcher notify" },
+]
 
 [[cases]]
 id = "untrack-introspection-brands"
 path = "tests/proposal-signals/untrack-introspection-brands.js"
-source_sha256 = "981f70ad4af2b32d16618a8054a2247fb37cc967144baa08efb881373dcbd579"
+source_sha256 = "1c7365d637469cd9b311714c90a9a9f501b5cec25adac6a6d672e4afb54616f6"
+expected_assertions = 9
 upstream = ["tests/Signal/subtle/currentComputed.test.ts", "tests/Signal/subtle/untrack.test.ts", "tests/behaviors/type-checking.test.ts"]
+definitions = [
+    { upstream = "tests/Signal/subtle/currentComputed.test.ts", line = 5, name = "works" },
+    { upstream = "tests/Signal/subtle/untrack.test.ts", line = 5, name = "works" },
+    { upstream = "tests/Signal/subtle/untrack.test.ts", line = 13, name = "works differently without untrack" },
+    { upstream = "tests/behaviors/type-checking.test.ts", line = 5, name = "should be on the prototype" },
+    { upstream = "tests/behaviors/type-checking.test.ts", line = 16, name = "checks types in methods" },
+]
 
 [[cases]]
 id = "ported-graph-regressions"
 path = "tests/proposal-signals/ported-graph-regressions.js"
-source_sha256 = "8c7064666adb4ec22b7f894ce858ada693a4dcc49453de31a972989a434ab6aa"
+source_sha256 = "adf4e6066ecd60a7665ae4429deda6b4d6603e070a4b974951898264e2d4e7c2"
+expected_assertions = 13
 upstream = ["tests/Signal/ported/preact.test.ts", "tests/Signal/ported/vue.test.ts", "tests/behaviors/graph.test.ts"]
+definitions = [
+    { upstream = "tests/Signal/ported/preact.test.ts", line = 6, name = "should not leak errors raised by dependencies" },
+    { upstream = "tests/Signal/ported/preact.test.ts", line = 25, name = "should return updated value" },
+    { upstream = "tests/Signal/ported/preact.test.ts", line = 37, name = "should be lazily computed on demand" },
+    { upstream = "tests/Signal/ported/preact.test.ts", line = 53, name = "should be computed only when a dependency has changed at some point" },
+    { upstream = "tests/Signal/ported/preact.test.ts", line = 67, name = "should support lazy branches" },
+    { upstream = "tests/Signal/ported/vue.test.ts", line = 6, name = "should return updated value" },
+    { upstream = "tests/Signal/ported/vue.test.ts", line = 16, name = "should compute lazily" },
+    { upstream = "tests/Signal/ported/vue.test.ts", line = 45, name = "should work when chained(ref+computed)" },
+    { upstream = "tests/Signal/ported/vue.test.ts", line = 59, name = "should be recomputed without being affected by side effects" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 11, name = "should drop X->B->X updates" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 88, name = "should bail out if result is the same" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 192, name = "should ensure subs update even if two deps mark it clean" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 339, name = "does not trigger downstream computations unless changed" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 387, name = "updates downstream pending computations" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 548, name = "evaluates stale computations before dependees when trackers stay unchanged" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 612, name = "should not update a sub if all deps unmark it" },
+]
 
 [[cases]]
 id = "graph-convergence-order"
 path = "tests/proposal-signals/graph-convergence-order.js"
-source_sha256 = "9381158e21a935f5c0f758837ac23ad87ee9594fb821c87cd31fd056d108e991"
+source_sha256 = "84ed178886de8e926a2f147499851755c4fff2aa56f5d009d6638d8845e8e31b"
+expected_assertions = 14
 upstream = ["tests/behaviors/graph.test.ts"]
+definitions = [
+    { upstream = "tests/behaviors/graph.test.ts", line = 61, name = "should only update every signal once (diamond graph + tail)" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 111, name = "should only update every signal once (jagged diamond graph + tails)" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 166, name = "should ensure subs update even if one dep is static" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 265, name = "only propagates once with linear convergences" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 294, name = "only propagates once with exponential convergence" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 362, name = "applies updates to changed dependees in same order as new Signal.Computed" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 511, name = "does not update subsequent pending computations after stale invocations" },
+    { upstream = "tests/behaviors/graph.test.ts", line = 585, name = "correctly marks downstream computations as stale on change" },
+]
 
 [[cases]]
 id = "watcher-dynamic-dependencies"
 path = "tests/proposal-signals/watcher-dynamic-dependencies.js"
-source_sha256 = "eb2963492df453a80f6c88b3fb616aa2d5b0a1e20da0e3d5d921fc6b2764cf59"
+source_sha256 = "ede465548298f1437fa931c6a0b25dd598a77bd6eefa3a44736f730c4146b53f"
+expected_assertions = 15
 upstream = ["tests/Signal/subtle/watch-unwatch.test.ts"]
+definitions = [
+    { upstream = "tests/Signal/subtle/watch-unwatch.test.ts", line = 32, name = "understands dynamic dependency sets" },
+]

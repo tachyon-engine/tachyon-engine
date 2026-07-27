@@ -1,6 +1,6 @@
 //! Pinned TC39 Signals proposal suite orchestration.
 
-use std::{fs, path::Path, sync::Arc};
+use std::{collections::BTreeSet, fs, path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,10 +10,14 @@ use test262_runner::{
 };
 
 const CONFIG_PATH: &str = "signals_suite.toml";
+const PINNED_TEST_FILES: usize = 19;
+const PINNED_TEST_DEFINITIONS: usize = 70;
+const PINNED_ASSERTIONS: usize = 114;
 
 #[derive(Debug, Deserialize)]
 struct SuiteConfig {
     schema_version: u32,
+    coverage: CoverageContract,
     proposal: ProposalPin,
     reference_suite: SourcePin,
     api_surface: Vec<Box<str>>,
@@ -41,7 +45,22 @@ struct SuiteCase {
     id: Box<str>,
     path: Box<str>,
     source_sha256: Box<str>,
+    expected_assertions: usize,
     upstream: Vec<Box<str>>,
+    definitions: Vec<DefinitionCoverage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverageContract {
+    test_files: usize,
+    test_definitions: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct DefinitionCoverage {
+    upstream: Box<str>,
+    line: usize,
+    name: Box<str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +69,9 @@ struct SuiteReport<'a> {
     proposal: &'a ProposalPin,
     reference_suite: &'a SourcePin,
     api_sha256: &'a str,
+    test_files: usize,
+    test_definitions: usize,
+    assertions_expected: usize,
     total: usize,
     passed: usize,
     results: Vec<CaseResult<'a>>,
@@ -60,6 +82,8 @@ struct CaseResult<'a> {
     id: &'a str,
     path: &'a str,
     source_sha256: &'a str,
+    expected_assertions: usize,
+    definitions: usize,
     upstream: &'a [Box<str>],
     result: &'static str,
     message: Box<str>,
@@ -87,6 +111,13 @@ pub(super) fn run(workspace: &Path) -> Result<(), String> {
         proposal: &config.proposal,
         reference_suite: &config.reference_suite,
         api_sha256: &config.api_sha256,
+        test_files: config.coverage.test_files,
+        test_definitions: config.coverage.test_definitions,
+        assertions_expected: config
+            .cases
+            .iter()
+            .map(|case| case.expected_assertions)
+            .sum(),
         total: results.len(),
         passed,
         results,
@@ -106,7 +137,7 @@ pub(super) fn run(workspace: &Path) -> Result<(), String> {
 
 /// Rejects stale pins or API manifests before any semantic case is executed.
 fn validate_config(config: &SuiteConfig) -> Result<(), String> {
-    if config.schema_version != 1 {
+    if config.schema_version != 2 {
         return Err(format!(
             "unsupported Signals suite schema version {}",
             config.schema_version
@@ -145,6 +176,102 @@ fn validate_config(config: &SuiteConfig) -> Result<(), String> {
     if config.cases.is_empty() {
         return Err("Signals suite must contain at least one case".to_owned());
     }
+    validate_coverage(config)
+}
+
+/// Proves the checked-in fixture map names every pinned upstream test definition exactly once.
+fn validate_coverage(config: &SuiteConfig) -> Result<(), String> {
+    if config.coverage.test_files != PINNED_TEST_FILES
+        || config.coverage.test_definitions != PINNED_TEST_DEFINITIONS
+    {
+        return Err(format!(
+            "Signals pinned coverage contract is {PINNED_TEST_FILES}/{PINNED_TEST_DEFINITIONS} files/definitions"
+        ));
+    }
+    let declared_files = config
+        .cases
+        .iter()
+        .flat_map(|case| case.upstream.iter())
+        .filter(|upstream| upstream.ends_with(".test.ts"))
+        .map(Box::as_ref)
+        .collect::<BTreeSet<_>>();
+    let mut files = BTreeSet::new();
+    let mut definitions = BTreeSet::new();
+    let mut assertion_total = 0usize;
+    for case in &config.cases {
+        if case.expected_assertions == 0 {
+            return Err(format!(
+                "Signals case `{}` must execute at least one assertion",
+                case.id
+            ));
+        }
+        assertion_total = assertion_total
+            .checked_add(case.expected_assertions)
+            .ok_or("Signals assertion total overflow")?;
+        if case.definitions.is_empty() {
+            return Err(format!(
+                "Signals case `{}` must map at least one upstream test definition",
+                case.id
+            ));
+        }
+        for definition in &case.definitions {
+            validate_definition(case, definition)?;
+            files.insert(definition.upstream.as_ref());
+            if !definitions.insert((definition.upstream.as_ref(), definition.line)) {
+                return Err(format!(
+                    "duplicate Signals definition coverage: {}:{} `{}`",
+                    definition.upstream, definition.line, definition.name
+                ));
+            }
+        }
+    }
+    if files != declared_files {
+        return Err(
+            "Signals definition coverage does not match declared upstream test files".to_owned(),
+        );
+    }
+    if assertion_total != PINNED_ASSERTIONS {
+        return Err(format!(
+            "Signals pinned fixture assertion contract is {PINNED_ASSERTIONS}, got {assertion_total}"
+        ));
+    }
+    if files.len() != config.coverage.test_files
+        || definitions.len() != config.coverage.test_definitions
+    {
+        return Err(format!(
+            "Signals coverage mismatch: expected {}/{} files/definitions, got {}/{}",
+            config.coverage.test_files,
+            config.coverage.test_definitions,
+            files.len(),
+            definitions.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_definition(case: &SuiteCase, definition: &DefinitionCoverage) -> Result<(), String> {
+    if definition.line == 0 || definition.name.is_empty() {
+        return Err(format!(
+            "Signals case `{}` has an invalid definition entry",
+            case.id
+        ));
+    }
+    if !definition.upstream.ends_with(".test.ts") {
+        return Err(format!(
+            "Signals definition must reference a test file: {}",
+            definition.upstream
+        ));
+    }
+    if !case
+        .upstream
+        .iter()
+        .any(|upstream| upstream == &definition.upstream)
+    {
+        return Err(format!(
+            "Signals case `{}` definition `{}` is absent from its upstream file map",
+            case.id, definition.name
+        ));
+    }
     Ok(())
 }
 
@@ -181,7 +308,7 @@ fn run_case<'a>(workspace: &Path, case: &'a SuiteCase) -> Result<CaseResult<'a>,
     }
     let source = String::from_utf8(source)
         .map_err(|error| format!("Signals case `{}` is not UTF-8: {error}", case.id))?;
-    let test = composed_test(&case.path, Arc::from(source));
+    let test = composed_test(&case.path, Arc::from(source), case.expected_assertions)?;
     let response = TachyonAdapter.execute(ExecutionRequest {
         test: &test,
         can_block: false,
@@ -193,15 +320,36 @@ fn run_case<'a>(workspace: &Path, case: &'a SuiteCase) -> Result<CaseResult<'a>,
         id: &case.id,
         path: &case.path,
         source_sha256: &case.source_sha256,
+        expected_assertions: case.expected_assertions,
+        definitions: case.definitions.len(),
         upstream: &case.upstream,
         result,
         message,
     })
 }
 
-fn composed_test(path: &str, source: Arc<str>) -> ComposedTest {
+/// Appends a deterministic assertion-count oracle without changing the pinned fixture bytes.
+fn composed_test(
+    path: &str,
+    source: Arc<str>,
+    expected_assertions: usize,
+) -> Result<ComposedTest, String> {
+    let epilogue = format!(
+        "\nif (__tachyonSignalsAssertionCount !== {expected_assertions}) {{\n    throw new Error(\"Signals assertion count mismatch: expected {expected_assertions}, got \" + __tachyonSignalsAssertionCount);\n}}\n"
+    );
+    let capacity = source
+        .len()
+        .checked_add(epilogue.len())
+        .ok_or("Signals composed source capacity overflow")?;
+    let mut composed = String::new();
+    composed
+        .try_reserve_exact(capacity)
+        .map_err(|_| "Signals composed source allocation failed")?;
+    composed.push_str(&source);
+    composed.push_str(&epilogue);
+    let source: Arc<str> = Arc::from(composed);
     let source_sha256 = digest(source.as_bytes()).into_boxed_str();
-    ComposedTest {
+    Ok(ComposedTest {
         variant: TestVariant {
             kind: VariantKind::Raw,
             is_async: false,
@@ -214,7 +362,7 @@ fn composed_test(path: &str, source: Arc<str>) -> ComposedTest {
             source,
         },
         source_sha256,
-    }
+    })
 }
 
 fn describe_outcome(outcome: EngineOutcome) -> (&'static str, Box<str>) {

@@ -1,4 +1,6 @@
+var __tachyonSignalsAssertionCount = 0;
 function assert(value, message) {
+    __tachyonSignalsAssertionCount++;
     if (!value) throw new Error(message);
 }
 
@@ -42,7 +44,7 @@ source.set(1);
 assert(top.get() === 7 && stableCalls === 2 && middleCalls === 1 && topCalls === 1,
     "equal middle result prunes tail");
 
-if (false) {
+{
     var watcher = new Signal.subtle.Watcher(function() {});
     watcher.watch(top);
     source.set(2);

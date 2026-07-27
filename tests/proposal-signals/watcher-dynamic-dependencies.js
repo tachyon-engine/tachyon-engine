@@ -1,4 +1,6 @@
+var __tachyonSignalsAssertionCount = 0;
 function assert(value, message) {
+    __tachyonSignalsAssertionCount++;
     if (!value) throw new Error(message);
 }
 

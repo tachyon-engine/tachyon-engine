@@ -112,12 +112,29 @@ pub(super) fn assert_signal_behavior<const N: usize>(
     name: &'static str,
     forced_major: bool,
 ) {
+    assert_signal_behavior_with_collection::<N>(
+        source,
+        source_id,
+        name,
+        forced_major.then_some(ForcedCollectionMode::Major),
+    );
+}
+
+/// Executes one pinned fixture under an explicit collector policy.
+pub(super) fn assert_signal_behavior_with_collection<const N: usize>(
+    source: &'static str,
+    source_id: u32,
+    name: &'static str,
+    collection: Option<ForcedCollectionMode>,
+) {
     let module = compile_signal_source(source, source_id, name);
-    let mut isolate = signal_api_test_isolate();
-    if forced_major {
-        isolate
-            .heap
-            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let mut isolate = if collection == Some(ForcedCollectionMode::Minor) {
+        signal_minor_test_isolate()
+    } else {
+        signal_api_test_isolate()
+    };
+    if let Some(mode) = collection {
+        isolate.heap.set_forced_collection_mode(mode);
     }
     let outcome = isolate
         .execute_with_batch::<N>(
@@ -127,10 +144,14 @@ pub(super) fn assert_signal_behavior<const N: usize>(
                 quantum: 262_144,
             },
         )
-        .expect("Signal semantic fixture executes");
+        .unwrap_or_else(|error| {
+            panic!(
+                "Signal fixture {name}, dispatch batch {N}, collection={collection:?} failed: {error:?}"
+            )
+        });
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "Signal fixture {name}, dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        "Signal fixture {name}, dispatch batch {N}, collection={collection:?} returned {outcome:?}"
     );
 }
 

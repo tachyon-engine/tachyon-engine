@@ -1,5 +1,7 @@
 use super::*;
 
+const SIGNAL_MINOR_TEST_HEAP_SPANS: usize = 256;
+
 pub(super) fn assert_signal_forced_minor<const N: usize>() {
     let fixtures = [
         (SIGNAL_SOURCE, "signals-minor-core"),
@@ -26,10 +28,10 @@ pub(super) fn assert_signal_forced_minor<const N: usize>() {
 }
 
 /// Gives the forced-minor matrix enough bounded heap for descriptor-heavy fixtures.
-fn signal_minor_test_isolate() -> Isolate {
+pub(super) fn signal_minor_test_isolate() -> Isolate {
     Isolate::new(IsolateConfig::new(
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
-        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        HeapLimit::new(SIGNAL_MINOR_TEST_HEAP_SPANS * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
         RealmLimits::new(64, 1_024),
     ))

@@ -15,9 +15,9 @@ fn signal_namespace_is_installed_in_every_realm() {
     assert_ne!(child.signal_namespace, isolate.realm.signal_namespace);
 }
 
-/// Runs every pinned proposal fixture across all dispatch batches and a forced major collection.
+/// Runs every pinned proposal fixture across all dispatch batches and forced collectors.
 #[test]
-fn pinned_proposal_fixtures_cover_dispatch_and_forced_major() {
+fn pinned_proposal_fixtures_cover_dispatch_and_forced_gc() {
     for (index, (name, source)) in PINNED_PROPOSAL_FIXTURES.iter().enumerate() {
         let source_id = 9_000 + index as u32;
         assert_signal_behavior::<1>(source, source_id, name, false);
@@ -25,7 +25,18 @@ fn pinned_proposal_fixtures_cover_dispatch_and_forced_major() {
         assert_signal_behavior::<4>(source, source_id + 32, name, false);
         assert_signal_behavior::<8>(source, source_id + 48, name, false);
         assert_signal_behavior::<16>(source, source_id + 64, name, false);
-        assert_signal_behavior::<8>(source, source_id + 80, name, true);
+        assert_signal_behavior_with_collection::<8>(
+            source,
+            source_id + 80,
+            name,
+            Some(ForcedCollectionMode::Minor),
+        );
+        assert_signal_behavior_with_collection::<8>(
+            source,
+            source_id + 96,
+            name,
+            Some(ForcedCollectionMode::Major),
+        );
     }
 }
 
