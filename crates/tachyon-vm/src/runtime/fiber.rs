@@ -278,6 +278,11 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     JsonStringifyNumberSpace,
     JsonStringifyStringSpace,
+    JsonStringifyNumberValue,
+    JsonStringifyStringValue,
+    JsonStringifyArrayLength,
+    JsonStringifyPropertyListLength,
+    JsonStringifyPropertyListString,
     RegExpExecInput,
     RegExpTestInput,
     RegExpSearchInput,
@@ -380,6 +385,11 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::JsonStringifyNumberSpace
             | Self::JsonStringifyStringSpace
+            | Self::JsonStringifyNumberValue
+            | Self::JsonStringifyStringValue
+            | Self::JsonStringifyArrayLength
+            | Self::JsonStringifyPropertyListLength
+            | Self::JsonStringifyPropertyListString
             | Self::RegExpExecInput
             | Self::RegExpTestInput
             | Self::RegExpSearchInput
@@ -482,6 +492,8 @@ impl ConversionConsumer {
                 | Self::ErrorToStringMessage
                 | Self::DateToPrimitiveString
                 | Self::JsonStringifyStringSpace
+                | Self::JsonStringifyStringValue
+                | Self::JsonStringifyPropertyListString
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
@@ -539,6 +551,11 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::JsonStringifyNumberSpace
                 | Self::JsonStringifyStringSpace
+                | Self::JsonStringifyNumberValue
+                | Self::JsonStringifyStringValue
+                | Self::JsonStringifyArrayLength
+                | Self::JsonStringifyPropertyListLength
+                | Self::JsonStringifyPropertyListString
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
@@ -1266,6 +1283,21 @@ pub(crate) enum SignalStateStage {
     Equals,
 }
 
+/// Observable suspension points in the iterative JSON serialization pipeline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum JsonStringifyStage {
+    ValueGet,
+    ToJsonGet,
+    ToJsonCall,
+    ReplacerCall,
+    ReplacerLengthGet,
+    ReplacerElementGet,
+    ArrayLengthGet,
+    ObjectKeys,
+    ObjectDescriptor,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -1354,6 +1386,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySet(TypedArraySetStage),
     TypedArraySlice(TypedArraySliceStage),
     TypedArraySubarray(TypedArraySubarrayStage),
+    JsonStringify(JsonStringifyStage),
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
@@ -1387,6 +1420,21 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots the complete GC-owned JSON operation across one observable boundary.
+    #[inline]
+    pub(crate) const fn json_stringify(
+        site: NativeContinuationSite,
+        stage: JsonStringifyStage,
+        state: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::JsonStringify(stage),
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
     /// Roots the generator instance while its explicit bytecode frame executes.
     #[inline]
     pub(crate) const fn generator_resume(site: NativeContinuationSite, generator: Value) -> Self {

@@ -168,9 +168,9 @@ use array_static::PendingArrayStatic;
 use array_to_sorted::PendingArrayToSorted;
 use bigint::{BigIntValue, small_bigint_binary_hot, small_bigint_not_hot};
 use bound_function::BoundFunctionData;
-use builtins::PendingDateNumericArguments;
 use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
+use builtins::{PendingDateNumericArguments, PendingJsonStringify};
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
     PendingCollectionInitializer, PendingMapGetOrInsertComputed, SetObject,
@@ -246,7 +246,7 @@ use runtime::{
         ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
         DefinePropertiesStage, ErrorConstructorStage, ErrorStackSetterStage, ErrorToStringStage,
         EvalVarEnvironment, Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage,
-        NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        JsonStringifyStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
         PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
         PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
@@ -495,6 +495,7 @@ pub enum ExecutionError {
     UnsupportedStringValue(Value),
     UnsupportedPrimitiveStringConversion(Value),
     InvalidJsonText,
+    JsonSerializationDepthExceeded,
     InvalidEvalSource,
     InvalidRegExpFlags,
     InvalidRegExpPattern,

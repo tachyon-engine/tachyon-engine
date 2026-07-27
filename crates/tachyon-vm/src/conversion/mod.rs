@@ -392,6 +392,73 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::JsonStringifyNumberSpace
+                            | ConversionConsumer::JsonStringifyStringSpace
+                            | ConversionConsumer::JsonStringifyNumberValue
+                            | ConversionConsumer::JsonStringifyStringValue
+                            | ConversionConsumer::JsonStringifyArrayLength
+                            | ConversionConsumer::JsonStringifyPropertyListLength
+                            | ConversionConsumer::JsonStringifyPropertyListString
+                    ) {
+                        let state = self.pending_json_stringify_reference(continuation.receiver)?;
+                        return match continuation.consumer {
+                            ConversionConsumer::JsonStringifyNumberSpace => {
+                                let primitive = self.convert_to_number(value)?;
+                                self.resume_json_space_conversion(
+                                    continuation.site,
+                                    state,
+                                    primitive,
+                                )
+                            }
+                            ConversionConsumer::JsonStringifyStringSpace => {
+                                let primitive = self.primitive_string_value(Some(value))?;
+                                self.resume_json_space_conversion(
+                                    continuation.site,
+                                    state,
+                                    primitive,
+                                )
+                            }
+                            ConversionConsumer::JsonStringifyNumberValue => {
+                                let primitive = self.convert_to_number(value)?;
+                                self.resume_json_value_conversion(
+                                    continuation.site,
+                                    state,
+                                    primitive,
+                                )
+                            }
+                            ConversionConsumer::JsonStringifyStringValue => {
+                                let primitive = self.primitive_string_value(Some(value))?;
+                                self.resume_json_value_conversion(
+                                    continuation.site,
+                                    state,
+                                    primitive,
+                                )
+                            }
+                            ConversionConsumer::JsonStringifyArrayLength => self
+                                .resume_json_array_length_conversion(
+                                    continuation.site,
+                                    state,
+                                    value,
+                                ),
+                            ConversionConsumer::JsonStringifyPropertyListLength => self
+                                .resume_json_property_list_length_conversion(
+                                    continuation.site,
+                                    state,
+                                    value,
+                                ),
+                            ConversionConsumer::JsonStringifyPropertyListString => {
+                                let primitive = self.primitive_string_value(Some(value))?;
+                                self.resume_json_property_list_element_conversion(
+                                    continuation.site,
+                                    state,
+                                    primitive,
+                                )
+                            }
+                            _ => unreachable!("matched JSON conversion consumer"),
+                        };
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -1246,13 +1313,14 @@ impl Isolate {
                 ConversionConsumer::DateToJson => {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
                 }
-                ConversionConsumer::JsonStringifyNumberSpace => {
-                    let space = self.convert_to_number(argument)?;
-                    self.json_stringify_values(receiver, space)?
-                }
-                ConversionConsumer::JsonStringifyStringSpace => {
-                    let space = self.primitive_string_value(Some(argument))?;
-                    self.json_stringify_values(receiver, space)?
+                ConversionConsumer::JsonStringifyNumberSpace
+                | ConversionConsumer::JsonStringifyStringSpace
+                | ConversionConsumer::JsonStringifyNumberValue
+                | ConversionConsumer::JsonStringifyStringValue
+                | ConversionConsumer::JsonStringifyArrayLength
+                | ConversionConsumer::JsonStringifyPropertyListLength
+                | ConversionConsumer::JsonStringifyPropertyListString => {
+                    unreachable!("JSON conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArrayLength => {
                     unreachable!("Array length resumes inside the conversion state machine")

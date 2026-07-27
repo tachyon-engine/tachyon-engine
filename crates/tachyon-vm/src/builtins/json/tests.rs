@@ -37,6 +37,91 @@ JSON.stringify({a: 1}, null, -3.75) === '{"a":1}' &&
 })();
 "#;
 
+const RESUMABLE_JSON_SOURCE: &str = r#"
+(function () {
+  var order = [];
+  var marker = {};
+  var target = {
+    a: {
+      toJSON: function (key) {
+        order.push("toJSON:" + key);
+        return 3;
+      }
+    },
+    b: undefined,
+    c: 5
+  };
+  var proxy = new Proxy(target, {
+    ownKeys: function () { order.push("ownKeys"); return ["a", "b", "c"]; },
+    getOwnPropertyDescriptor: function (object, key) {
+      order.push("descriptor:" + key);
+      return Object.getOwnPropertyDescriptor(object, key);
+    },
+    get: function (object, key) { order.push("get:" + key); return object[key]; }
+  });
+  var text = JSON.stringify(proxy, function (key, value) {
+    order.push("replacer:" + key);
+    return key === "c" ? new Number(value + 1) : value;
+  });
+  if (text !== '{"a":3,"c":6}') return false;
+  if (order.join("|") !==
+      "get:toJSON|replacer:|ownKeys|descriptor:a|get:a|toJSON:a|replacer:a|" +
+      "descriptor:b|get:b|replacer:b|descriptor:c|get:c|replacer:c") return false;
+
+  var listLog = [];
+  var list = new Proxy([new String("a"), new Number(2), "a", undefined], {
+    get: function (object, key) { listLog.push(String(key)); return object[key]; }
+  });
+  if (JSON.stringify({a: 1, 2: 2, b: 3}, list) !== '{"a":1,"2":2}') return false;
+  if (listLog.join("|") !== "length|0|1|2|3") return false;
+  if (JSON.stringify([undefined, function () {}, Symbol("x")]) !== "[null,null,null]") {
+    return false;
+  }
+  var abrupt = { toJSON: function () { throw marker; } };
+  try { JSON.stringify({abrupt: abrupt}); }
+  catch (error) { return error === marker; }
+  return false;
+})()
+"#;
+
+const FORCED_JSON_SOURCE: &str = r#"
+(function () {
+  var order = [];
+  var target = {
+    a: {toJSON: function (key) { order.push("toJSON:" + key); return 4; }},
+    b: 2,
+    c: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  };
+  var proxy = new Proxy(target, {
+    ownKeys: function () { order.push("ownKeys"); return ["a", "b", "c"]; },
+    getOwnPropertyDescriptor: function (object, key) {
+      order.push("descriptor:" + key);
+      return Object.getOwnPropertyDescriptor(object, key);
+    },
+    get: function (object, key) { order.push("get:" + key); return object[key]; }
+  });
+  var text = JSON.stringify(proxy, function (key, value) {
+    order.push("replacer:" + key);
+    return value;
+  });
+  return text.indexOf('{"a":4,"b":2,"c":"xxxx') === 0 && text.length > 150 && order.length === 13;
+})()
+"#;
+
+const FORCED_PROPERTY_LIST_SOURCE: &str = r#"
+(function () {
+  var log = [];
+  var entries = [];
+  for (var i = 0; i < 12; i++) entries[i] = i % 3 === 0 ? new String("a") : i;
+  var list = new Proxy(entries, {
+    get: function (object, key) { log.push(String(key)); return object[key]; }
+  });
+  var text = JSON.stringify({a: 1, 1: 2, 2: 3, 4: 4, 5: 5, 7: 7, 8: 8, 10: 10, 11: 11}, list);
+  return text === '{"a":1,"1":2,"2":3,"4":4,"5":5,"7":7,"8":8,"10":10,"11":11}' &&
+    log.length === 13 && log[0] === "length" && log[12] === "11";
+})()
+"#;
+
 #[test]
 fn primitive_string_and_number_indentation_is_stable_for_every_dispatch_batch() {
     assert_pretty_json_batch::<1>(false);
@@ -49,6 +134,23 @@ fn primitive_string_and_number_indentation_is_stable_for_every_dispatch_batch() 
 #[test]
 fn primitive_string_and_number_indentation_survives_forced_major_collection() {
     assert_pretty_json_batch::<8>(true);
+}
+
+#[test]
+fn resumable_stringify_is_stable_for_every_dispatch_batch() {
+    assert_resumable_json_batch::<1>(None);
+    assert_resumable_json_batch::<2>(None);
+    assert_resumable_json_batch::<4>(None);
+    assert_resumable_json_batch::<8>(None);
+    assert_resumable_json_batch::<16>(None);
+}
+
+#[test]
+fn resumable_stringify_survives_forced_collections_and_growth() {
+    assert_resumable_json_batch::<8>(Some(ForcedCollectionMode::Minor));
+    assert_resumable_json_batch::<8>(Some(ForcedCollectionMode::Major));
+    assert_forced_property_list::<8>(ForcedCollectionMode::Minor);
+    assert_forced_property_list::<8>(ForcedCollectionMode::Major);
 }
 
 #[test]
@@ -95,5 +197,84 @@ fn assert_pretty_json_batch<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "JSON indentation batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Runs callback-heavy JSON serialization under one dispatch and collection policy.
+fn assert_resumable_json_batch<const N: usize>(forced: Option<ForcedCollectionMode>) {
+    let source = if forced.is_some() {
+        FORCED_JSON_SOURCE
+    } else {
+        RESUMABLE_JSON_SOURCE
+    };
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_000 + N as u32),
+                SourceName::new("json-resumable-stringify"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("resumable JSON fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(3, 4)),
+        HeapLimit::new(256 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("resumable JSON isolate initializes");
+    if let Some(mode) = forced {
+        isolate.heap.set_forced_collection_mode(mode);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("resumable JSON fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "resumable JSON batch {N}, forced={forced:?} returned {outcome:?}"
+    );
+}
+
+/// Runs Proxy/boxed/deduplicated property-list growth under forced collections.
+fn assert_forced_property_list<const N: usize>(forced: ForcedCollectionMode) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_100 + N as u32),
+                SourceName::new("json-forced-property-list"),
+                MediaType::JavaScript,
+                Arc::from(FORCED_PROPERTY_LIST_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("forced property-list fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(5, 6)),
+        HeapLimit::new(256 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("forced property-list isolate initializes");
+    isolate.heap.set_forced_collection_mode(forced);
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("forced property-list fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "forced property-list batch {N}, forced={forced:?} returned {outcome:?}"
     );
 }

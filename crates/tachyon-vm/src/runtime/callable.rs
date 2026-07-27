@@ -2228,6 +2228,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
     pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,
     pub(crate) pending_regexp_replace: GcType<PendingRegExpReplace>,
+    pub(crate) pending_json_stringify: GcType<PendingJsonStringify>,
     pub(crate) pending_map_get_or_insert_computed: GcType<PendingMapGetOrInsertComputed>,
     pub(crate) regexp_object: GcType<RegExpObject>,
     pub(crate) set_object: GcType<SetObject>,
@@ -2356,6 +2357,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::BigIntResultTooLarge
         | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
+        | ExecutionError::JsonSerializationDepthExceeded
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

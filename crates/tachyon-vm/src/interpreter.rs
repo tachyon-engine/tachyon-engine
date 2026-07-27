@@ -2375,6 +2375,9 @@ impl Isolate {
             NativeContinuationKind::TypedArraySubarray(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::JsonStringify(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
@@ -7865,6 +7868,9 @@ impl Isolate {
                 NativeContinuationKind::TypedArraySubarray(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_typed_array_subarray(continuation.site(), state, stage, value)
+                }
+                NativeContinuationKind::JsonStringify(stage) => {
+                    self.resume_json_stringify(continuation, stage, value)
                 }
                 NativeContinuationKind::SignalState(stage) => {
                     self.resume_signal_state(continuation, stage, value)

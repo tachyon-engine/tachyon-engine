@@ -590,6 +590,9 @@ impl Isolate {
             pending_regexp_replace: registry
                 .try_register("PendingRegExpReplace")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_json_stringify: registry
+                .try_register("PendingJsonStringify")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_map_get_or_insert_computed: registry
                 .try_register("PendingMapGetOrInsertComputed")
                 .map_err(IsolateCreationError::TypeRegistration)?,
