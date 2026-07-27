@@ -9,7 +9,7 @@ fn regexp_and_string_replace_basic_matrix() {
     let source = r#"
       var a = 'abc'.replace(/b/, 'X') === 'aXc';
       var b = 'ababa'.replace(/a/g, '<$&>') === '<a>b<a>b<a>';
-      var c = 'abc'.replace(/b/, '$`-$&-$\'') === 'aa-b-c';
+      var c = 'abc'.replace(/b/, '$`-$&-$\'') === 'aa-b-cc';
       var d = RegExp.prototype[Symbol.replace].call(/x/g, 'abc', 'y') === 'abc';
       a && b && c && d && String.prototype.replace.length === 2 &&
         RegExp.prototype[Symbol.replace].length === 2;
