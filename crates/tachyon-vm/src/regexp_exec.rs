@@ -130,6 +130,16 @@ impl Isolate {
                 }
                 self.write_regexp_test_boolean(continuation.site(), true)
             }
+            RegExpTestStage::LastIndexGet => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                self.root_regexp_exec_state(continuation.site(), state)?;
+                self.convert_regexp_last_index(continuation.site(), state, value)
+            }
+            RegExpTestStage::LastIndexSet => {
+                let state = self.native_call_state_reference(continuation.first())?;
+                self.root_regexp_exec_state(continuation.site(), state)?;
+                self.finish_regexp_builtin_output(continuation.site(), state)
+            }
         }
     }
 
@@ -180,12 +190,7 @@ impl Isolate {
         let site = continuation.site();
         self.write(site.caller_base, site.destination, continuation.first())?;
         let state = self.native_call_state_reference(continuation.first())?;
-        let pending = self.native_call_state_snapshot(state)?;
-        let matched = self.regexp_builtin_test(
-            pending.values[REGEXP_TEST_RECEIVER],
-            pending.values[REGEXP_TEST_INPUT],
-        )?;
-        self.write_regexp_test_boolean(site, matched)
+        self.begin_regexp_builtin(site, state)
     }
 
     /// Allocates the exact input/receiver state used by getter, call, and builtin branches.
@@ -234,8 +239,167 @@ impl Isolate {
             site.destination,
             Value::from_heap_ref(state.raw()),
         )?;
-        let result = self.regexp_builtin_exec(receiver, input, state)?;
+        self.begin_regexp_builtin(site, state)
+    }
+
+    /// Starts the mandatory observable `Get(R, "lastIndex")` for RegExpBuiltinExec.
+    fn begin_regexp_builtin(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let receiver = pending.values[REGEXP_TEST_RECEIVER];
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_regexp_exec_parent(site, state, RegExpTestStage::LastIndexGet, receiver)?;
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        if let Err(error) =
+            self.dispatch_proxy_aware_property_read(site, receiver, receiver, last_index.into())
+        {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_regexp_test(continuation, RegExpTestStage::LastIndexGet, value)
+    }
+
+    /// Resumes object ToPrimitive work for one observed lastIndex value.
+    pub(crate) fn resume_regexp_last_index_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        self.root_regexp_exec_state(site, state)?;
+        self.finish_regexp_last_index(site, state, primitive)
+    }
+
+    /// Converts a primitive immediately or dispatches resumable number-hint ToPrimitive.
+    fn convert_regexp_last_index(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_object_value(value) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::RegExpLastIndex,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                value,
+                site.call_site,
+            );
+        }
+        self.finish_regexp_last_index(site, state, value)
+    }
+
+    /// Applies ToLength, executes the backend, and performs a required strict write-back.
+    fn finish_regexp_last_index(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let last_index = regexp_to_length(self.convert_to_number(value)?)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let receiver = pending.values[REGEXP_TEST_RECEIVER];
+        let input = pending.values[REGEXP_TEST_INPUT];
+        let outcome = if pending.count == 0 {
+            self.regexp_builtin_exec(receiver, input, state, last_index)?
+        } else {
+            self.regexp_builtin_test(receiver, input, last_index)?
+        };
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, outcome.value)?;
+        let Some(last_index) = outcome.last_index else {
+            return self.finish_regexp_builtin_output(site, state);
+        };
+        self.dispatch_regexp_last_index_set(site, state, receiver, last_index)
+    }
+
+    /// Performs `Set(R, "lastIndex", value, true)` and resumes the rooted builtin state.
+    fn dispatch_regexp_last_index_set(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        receiver: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let completion_depth = self.fiber.completions.len();
+        let frame_depth = self.fiber.frames.len();
+        self.push_regexp_exec_parent(site, state, RegExpTestStage::LastIndexSet, value)?;
+        let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        if let Err(error) = self.dispatch_proxy_aware_property_write(
+            site,
+            receiver,
+            receiver,
+            last_index.into(),
+            value,
+            ProxySetMode::ObjectAssign,
+        ) {
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth
+            || self.fiber.completions.len() <= completion_depth
+        {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        self.resume_regexp_test(continuation, RegExpTestStage::LastIndexSet, value)
+    }
+
+    /// Returns either the materialized exec result or the test-only boolean from fixed state.
+    fn finish_regexp_builtin_output(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_TEMPORARY];
         self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Roots RegExp state across one nested observable property operation.
+    fn push_regexp_exec_parent(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        stage: RegExpTestStage,
+        retained: Value,
+    ) -> Result<(), ExecutionError> {
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::regexp_test(
+                site,
+                stage,
+                Value::from_heap_ref(state.raw()),
+                retained,
+            ))
+            .map_err(Isolate::completion_stack_error)
+    }
+
+    #[inline(always)]
+    fn root_regexp_exec_state(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )
     }
 
     /// Publishes one managed exec intermediate before any subsequent allocation can collect it.
@@ -281,4 +445,17 @@ impl Isolate {
             }),
         )
     }
+}
+
+/// Applies ECMAScript ToLength to an already numeric primitive.
+#[inline(always)]
+fn regexp_to_length(value: Value) -> Result<u64, ExecutionError> {
+    let number = numeric_value(value).ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+    if number.is_nan() || number <= 0.0 {
+        return Ok(0);
+    }
+    if !number.is_finite() || number >= MAX_SAFE_INTEGER as f64 {
+        return Ok(MAX_SAFE_INTEGER);
+    }
+    Ok(number.floor() as u64)
 }

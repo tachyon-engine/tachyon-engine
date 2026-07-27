@@ -88,6 +88,98 @@ impl BigIntValue {
         })
     }
 
+    /// Parses validated ASCII digits in one radix into canonical persistent limb storage.
+    fn from_radix_digits(
+        digits: &[u16],
+        radix: u32,
+        negative: bool,
+    ) -> Result<Self, BigIntBuildError> {
+        if digits.is_empty() {
+            return Err(BigIntBuildError::InvalidDecimal);
+        }
+        let bits_per_digit = match radix {
+            2 => 1,
+            8 => 3,
+            10 => 4,
+            16 => 4,
+            _ => return Err(BigIntBuildError::InvalidDecimal),
+        };
+        let estimated_limbs = digits
+            .len()
+            .checked_mul(bits_per_digit)
+            .and_then(|bits| bits.checked_add(63))
+            .map(|bits| bits / 64)
+            .ok_or(BigIntBuildError::AllocationFailed)?
+            .max(1);
+        let mut limbs = Vec::new();
+        limbs
+            .try_reserve_exact(estimated_limbs)
+            .map_err(|_| BigIntBuildError::AllocationFailed)?;
+        limbs.push(0_u64);
+        for &unit in digits {
+            let digit = ascii_radix_digit(unit, radix).ok_or(BigIntBuildError::InvalidDecimal)?;
+            let mut carry = u128::from(digit);
+            for limb in &mut limbs {
+                let product = u128::from(*limb) * u128::from(radix) + carry;
+                *limb = product as u64;
+                carry = product >> 64;
+            }
+            if carry != 0 {
+                limbs.push(carry as u64);
+            }
+        }
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+        Ok(Self {
+            negative: negative && !limbs.is_empty(),
+            limbs: limbs.into_boxed_slice(),
+        })
+    }
+
+    /// Decodes one integral binary64 value exactly, without decimal formatting or narrowing.
+    fn from_integral_f64(number: f64) -> Result<Self, BigIntBuildError> {
+        if !number.is_finite() || number.fract() != 0.0 {
+            return Err(BigIntBuildError::InvalidDecimal);
+        }
+        if number == 0.0 {
+            return Ok(Self::from_u64(0));
+        }
+        let bits = number.to_bits();
+        let negative = bits >> 63 != 0;
+        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023;
+        let significand = (bits & ((1_u64 << 52) - 1)) | (1_u64 << 52);
+        let shift = exponent - 52;
+        if shift < 0 {
+            let magnitude = significand >> (-shift as u32);
+            let mut result = Self::from_u64(magnitude);
+            result.negative = negative;
+            return Ok(result);
+        }
+        let word_shift =
+            usize::try_from(shift / 64).map_err(|_| BigIntBuildError::AllocationFailed)?;
+        let bit_shift = (shift % 64) as u32;
+        let limb_count = word_shift
+            .checked_add(1 + usize::from(bit_shift != 0 && significand >> (64 - bit_shift) != 0))
+            .ok_or(BigIntBuildError::AllocationFailed)?;
+        let mut limbs = Vec::new();
+        limbs
+            .try_reserve_exact(limb_count)
+            .map_err(|_| BigIntBuildError::AllocationFailed)?;
+        limbs.resize(word_shift, 0);
+        limbs.push(significand << bit_shift);
+        if bit_shift != 0 {
+            let high = significand >> (64 - bit_shift);
+            if high != 0 {
+                limbs.push(high);
+            }
+        }
+        Ok(Self {
+            negative,
+            limbs: limbs.into_boxed_slice(),
+        })
+    }
+
     /// Returns the immediate representation when the mathematical value fits signed 48 bits.
     pub(crate) fn small_value(&self) -> Option<i64> {
         let magnitude = match self.limbs.as_ref() {
@@ -262,6 +354,77 @@ impl Isolate {
             .map_err(ExecutionError::HeapAllocation)
     }
 
+    /// Implements NumberToBigInt by decoding the exact represented binary64 integer.
+    pub(crate) fn number_to_bigint(&mut self, number: f64) -> Result<Value, ExecutionError> {
+        let bigint = BigIntValue::from_integral_f64(number)
+            .map_err(|_| ExecutionError::InvalidBigIntNumber(Value::from_f64(number)))?;
+        self.allocate_bigint(bigint)
+    }
+
+    /// Implements primitive ToBigInt after any observable ToPrimitive work has completed.
+    pub(crate) fn primitive_to_bigint(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        if self.is_bigint_value(value) {
+            return Ok(value);
+        }
+        if let Some(immediate) = value.as_immediate() {
+            return match immediate {
+                Immediate::False => Ok(Value::from_small_bigint(0).expect("zero fits BigInt")),
+                Immediate::True => Ok(Value::from_small_bigint(1).expect("one fits BigInt")),
+                Immediate::Undefined
+                | Immediate::Null
+                | Immediate::Hole
+                | Immediate::Uninitialized => {
+                    Err(ExecutionError::UnsupportedBigIntConversion(value))
+                }
+            };
+        }
+        if numeric_value(value).is_some() || self.is_symbol_value(value) {
+            return Err(ExecutionError::UnsupportedBigIntConversion(value));
+        }
+        if self.is_string_value(value) {
+            return self.string_to_bigint(value);
+        }
+        Err(ExecutionError::UnsupportedBigIntConversion(value))
+    }
+
+    /// Implements the BigInt function's Number exception after one number-hint ToPrimitive.
+    pub(crate) fn bigint_constructor_primitive(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        if let Some(number) = numeric_value(value) {
+            return self.number_to_bigint(number);
+        }
+        self.primitive_to_bigint(value)
+    }
+
+    /// Copies one rooted string, parses StringIntegerLiteral, and publishes a canonical BigInt.
+    fn string_to_bigint(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedBigIntConversion(value))?;
+        let string = self
+            .heap
+            .checked_reference(raw, self.types.string)
+            .map_err(|_| ExecutionError::UnsupportedBigIntConversion(value))?;
+        let units = self.heap.with_running_scope(|scope| {
+            let string = scope.root(string).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let string = no_gc
+                    .borrow(string, self.types.string)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok::<_, ExecutionError>(match string.as_view() {
+                    JsStringView::Latin1(bytes) => {
+                        bytes.iter().map(|&byte| u16::from(byte)).collect()
+                    }
+                    JsStringView::Utf16(units) => units.to_vec(),
+                })
+            })
+        })?;
+        let bigint = parse_string_integer_literal(&units).map_err(bigint_build_error)?;
+        self.allocate_bigint(bigint)
+    }
+
     /// Decodes one 64-bit TypedArray element into the canonical primitive representation.
     pub(crate) fn allocate_bigint_bits(
         &mut self,
@@ -414,6 +577,71 @@ fn bigint_build_error(error: BigIntBuildError) -> ExecutionError {
     }
 }
 
+/// Parses the ECMAScript StringIntegerLiteral grammar after trimming String whitespace.
+fn parse_string_integer_literal(units: &[u16]) -> Result<BigIntValue, BigIntBuildError> {
+    let mut start = 0;
+    let mut end = units.len();
+    while start < end && is_ecmascript_whitespace(units[start]) {
+        start += 1;
+    }
+    while end > start && is_ecmascript_whitespace(units[end - 1]) {
+        end -= 1;
+    }
+    let text = &units[start..end];
+    if text.is_empty() {
+        return Ok(BigIntValue::from_u64(0));
+    }
+    let (negative, unsigned) = match text.first().copied() {
+        Some(unit) if unit == u16::from(b'+') => (false, &text[1..]),
+        Some(unit) if unit == u16::from(b'-') => (true, &text[1..]),
+        _ => (false, text),
+    };
+    if unsigned.is_empty() {
+        return Err(BigIntBuildError::InvalidDecimal);
+    }
+    let (radix, digits) = if !negative && unsigned.len() >= 2 && unsigned[0] == u16::from(b'0') {
+        match unsigned[1] {
+            unit if unit == u16::from(b'b') || unit == u16::from(b'B') => (2, &unsigned[2..]),
+            unit if unit == u16::from(b'o') || unit == u16::from(b'O') => (8, &unsigned[2..]),
+            unit if unit == u16::from(b'x') || unit == u16::from(b'X') => (16, &unsigned[2..]),
+            _ => (10, unsigned),
+        }
+    } else {
+        (10, unsigned)
+    };
+    if radix != 10 && text.first().is_some_and(|unit| *unit == u16::from(b'+')) {
+        return Err(BigIntBuildError::InvalidDecimal);
+    }
+    BigIntValue::from_radix_digits(digits, radix, negative)
+}
+
+#[inline(always)]
+fn ascii_radix_digit(unit: u16, radix: u32) -> Option<u32> {
+    let digit = match unit {
+        unit if (u16::from(b'0')..=u16::from(b'9')).contains(&unit) => {
+            u32::from(unit - u16::from(b'0'))
+        }
+        unit if (u16::from(b'a')..=u16::from(b'f')).contains(&unit) => {
+            u32::from(unit - u16::from(b'a')) + 10
+        }
+        unit if (u16::from(b'A')..=u16::from(b'F')).contains(&unit) => {
+            u32::from(unit - u16::from(b'A')) + 10
+        }
+        _ => return None,
+    };
+    (digit < radix).then_some(digit)
+}
+
+/// Covers the WhiteSpace and LineTerminator code points accepted by StringIntegerLiteral.
+#[inline(always)]
+fn is_ecmascript_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009 | 0x000a | 0x000b | 0x000c | 0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000
+            ..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+    )
+}
+
 /// Appends one base-1e9 chunk, padding non-leading chunks to exactly nine digits.
 fn append_decimal_chunk(output: &mut Vec<u8>, mut chunk: u32, padded: bool) {
     let mut digits = [b'0'; DECIMAL_CHUNK_DIGITS];
@@ -484,5 +712,53 @@ mod tests {
         let zero = BigIntValue::from_decimal("-000").unwrap();
         assert_eq!(zero.decimal_bytes().unwrap(), b"0");
         assert_eq!(zero.small_value(), Some(0));
+    }
+
+    #[test]
+    fn string_integer_literal_covers_radices_whitespace_and_invalid_signs() {
+        for (text, expected) in [
+            ("", "0"),
+            ("\u{00a0}\u{2028}123\u{3000}", "123"),
+            ("+42", "42"),
+            ("-42", "-42"),
+            ("0b1111", "15"),
+            ("0O70", "56"),
+            ("0xfffffffffffffffffff", "75557863725914323419135"),
+        ] {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let value = parse_string_integer_literal(&units).expect("fixture parses");
+            assert_eq!(value.decimal_bytes().unwrap(), expected.as_bytes());
+        }
+        for invalid in ["+0x1", "-0x1", "0x", "0b2", "00x1", "1_0", "10n"] {
+            let units: Vec<u16> = invalid.encode_utf16().collect();
+            assert_eq!(
+                parse_string_integer_literal(&units),
+                Err(BigIntBuildError::InvalidDecimal),
+                "{invalid} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn integral_binary64_conversion_preserves_the_represented_integer() {
+        for (number, expected) in [
+            (0.0, "0"),
+            (-0.0, "0"),
+            (9_007_199_254_740_994.0, "9007199254740994"),
+            (-9_007_199_254_740_994.0, "-9007199254740994"),
+            (
+                f64::from_bits(((1023 + 100) as u64) << 52),
+                "1267650600228229401496703205376",
+            ),
+        ] {
+            let value = BigIntValue::from_integral_f64(number).expect("integral fixture converts");
+            assert_eq!(value.decimal_bytes().unwrap(), expected.as_bytes());
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.5] {
+            assert_eq!(
+                BigIntValue::from_integral_f64(invalid),
+                Err(BigIntBuildError::InvalidDecimal)
+            );
+        }
     }
 }

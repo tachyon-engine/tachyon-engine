@@ -116,9 +116,10 @@ valuesOkay && metadataOkay && rejected === 9 && nonCallable &&
 const TYPED_ARRAY_CALLBACK_GC_SOURCE: &str = r#"
 var array = new Uint8Array([1, 2, 3, 4]);
 var seen = 0;
+var reflectOkay = true;
 var result = array.find(function(value, index, receiver) {
   seen += value + index;
-  receiver[index] = value + 1;
+  reflectOkay = Reflect.set(receiver, index, value + 1) && reflectOkay;
   return index === 2;
 });
 var detached = new Uint8Array([5, 6]);
@@ -150,10 +151,10 @@ var live = new Uint8Array([1, 2, 3]);
 var liveSeen = "";
 live.reduce(function(accumulator, value, index, receiver) {
   liveSeen += value;
-  if (index === 0) receiver[1] = 9;
+  if (index === 0) reflectOkay = Reflect.set(receiver, 1, 9) && reflectOkay;
   return accumulator;
 }, 0);
-result === 3 && seen === 9 && detachedCalls === 2 && detachedSecond === undefined &&
+result === 3 && seen === 9 && reflectOkay && detachedCalls === 2 && detachedSecond === undefined &&
   forEachDetachedSeen === "7;undefined;undefined;" &&
   reduceDetachedSeen === "10;undefined;undefined;" && reduceDetachedResult.rooted === true &&
   reducedObject.total === 13 && liveSeen === "193";
@@ -168,6 +169,47 @@ var result = array.reduce(function(accumulator, value, index, receiver) {
   return accumulator + (receiver === array && value === 0 && index < length ? 1 : 0);
 }, 0);
 result === length && calls === length;
+"#;
+
+const TYPED_ARRAY_REFLECT_SET_SOURCE: &str = r#"
+function throwsTypeError(callback) {
+  try { callback(); return false; }
+  catch (error) { return error instanceof TypeError; }
+}
+var array = new Uint8Array([1, 2]);
+var direct = Reflect.set(array, "0", 9) && array[0] === 9;
+var ordinaryKey = Reflect.set(array, "01", 17) && array["01"] === 17;
+var invalidKeys = ["-0", "-1", "NaN", "Infinity", "1.5", "4"];
+var invalidOkay = true;
+for (var i = 0; i < invalidKeys.length; i++) {
+  var key = invalidKeys[i];
+  invalidOkay = Reflect.set(array, key, 23) &&
+    Object.getOwnPropertyDescriptor(array, key) === undefined && invalidOkay;
+}
+var receiver = {};
+var receiverOkay = Reflect.set(array, "1", 31, receiver) &&
+  receiver[1] === 31 && array[1] === 2;
+var other = new Uint8Array(2);
+var typedReceiverOkay = Reflect.set(array, "1", 41, other) &&
+  other[1] === 41 && array[1] === 2;
+var boxedReceiver = new Float64Array(1);
+var boxedReceiverOkay = Reflect.set(array, "0", new Number(2.3), boxedReceiver) &&
+  boxedReceiver[0] === 2.3 && array[0] === 9;
+var shortReceiver = new Uint8Array(1);
+var shortReceiverOkay = Reflect.set(array, "1", 51, shortReceiver) === false &&
+  shortReceiver[1] === undefined;
+var invalidReceiver = {};
+var invalidTargetOkay = Reflect.set(array, "8", 61, invalidReceiver) &&
+  Object.getOwnPropertyDescriptor(invalidReceiver, "8") === undefined;
+var mismatch = throwsTypeError(function() { Reflect.set(array, "0", 1n); });
+var big = new BigInt64Array([1n]);
+var bigOkay = Reflect.set(big, "0", 7n) && big[0] === 7n &&
+  throwsTypeError(function() { Reflect.set(big, "0", 1); });
+var detached = new Uint8Array([1]);
+$262.detachArrayBuffer(detached.buffer);
+var detachedOkay = Reflect.set(detached, "0", 71) && detached[0] === undefined;
+direct && ordinaryKey && invalidOkay && receiverOkay && typedReceiverOkay && boxedReceiverOkay &&
+  shortReceiverOkay && invalidTargetOkay && mismatch && bigOkay && detachedOkay;
 "#;
 
 const BIGINT_TYPED_ARRAY_CALLBACK_SOURCE: &str = r#"
@@ -222,7 +264,7 @@ var explicitUndefined = new BigInt64Array([7n]).reduce(function(accumulator, val
 var live = new BigInt64Array([1n, 2n]);
 var liveOkay = true;
 live.forEach(function(value, index, receiver) {
-  if (index === 0) receiver[1] = 9n;
+  if (index === 0) liveOkay = Reflect.set(receiver, 1, 9n);
   else liveOkay = typeof value === "bigint" && value === 9n;
 });
 var detached = new BigUint64Array([5n, 6n]);
@@ -287,6 +329,16 @@ fn bigint_typed_array_callback_values_survive_forced_major_collection() {
     assert_bigint_typed_array_callbacks::<16>(true);
 }
 
+#[test]
+fn typed_array_reflect_set_obeys_integer_indexed_receiver_rules() {
+    assert_typed_array_reflect_set::<1>(false);
+    assert_typed_array_reflect_set::<2>(false);
+    assert_typed_array_reflect_set::<4>(false);
+    assert_typed_array_reflect_set::<8>(false);
+    assert_typed_array_reflect_set::<16>(false);
+    assert_typed_array_reflect_set::<8>(true);
+}
+
 /// Executes all callback modes, metadata, branding, and rooting under one policy.
 fn assert_typed_array_callbacks<const N: usize>(forced_major: bool) {
     let source = if forced_major {
@@ -344,6 +396,37 @@ fn assert_bigint_typed_array_callbacks<const N: usize>(forced_major: bool) {
             },
         )
         .expect("BigInt TypedArray callback fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        _ => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Exercises integer-indexed Reflect.set, alternate receivers, detach, and ContentType checks.
+fn assert_typed_array_reflect_set<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_callback_fixture(TYPED_ARRAY_REFLECT_SET_SOURCE);
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
+        .expect("detach host hook installs");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("TypedArray Reflect.set fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
         _ => None,

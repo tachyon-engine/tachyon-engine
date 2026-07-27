@@ -1,8 +1,13 @@
 //! RegExp construction and the first executable ECMAScript object slice.
 
 use super::super::*;
-use crate::regexp::backend::CompiledRegExp;
+use crate::regexp::backend::{CompiledRegExp, RegExpMatch};
 use crate::regexp_exec::{REGEXP_EXEC_GROUPS, REGEXP_EXEC_RESULT, REGEXP_EXEC_TEMPORARY};
+
+pub(crate) struct RegExpBuiltinOutcome {
+    pub(crate) value: Value,
+    pub(crate) last_index: Option<Value>,
+}
 
 impl Isolate {
     /// Implements `RegExp.escape` over code points while preserving exact UTF-16 output.
@@ -203,13 +208,14 @@ impl Isolate {
         Ok(regexp)
     }
 
-    /// Executes RegExpBuiltinExec after the caller has completed observable input conversion.
+    /// Matches and materializes RegExpBuiltinExec after observable lastIndex conversion.
     pub(crate) fn regexp_builtin_exec(
         &mut self,
         receiver: Value,
         input: Value,
         state: GcRef<NativeCallState>,
-    ) -> Result<Value, ExecutionError> {
+        observed_last_index: u64,
+    ) -> Result<RegExpBuiltinOutcome, ExecutionError> {
         let (source, flags) = self.regexp_data(receiver)?;
         let source = String::from_utf16(&self.regexp_string_units(source)?)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
@@ -217,31 +223,41 @@ impl Isolate {
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
         let input_units = self.regexp_string_units(input)?;
-        let last_index_atom = self.intern_intrinsic_name(b"lastIndex")?;
         let start = if flags.global || flags.sticky {
-            self.get_data_property(receiver, last_index_atom)?
-                .and_then(numeric_value)
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .map_or(0, |value| value.trunc() as usize)
+            usize::try_from(observed_last_index).ok()
         } else {
-            0
+            Some(0)
         };
         let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
-        let matched = program
-            .find_ucs2(&input_units, start)
-            .filter(|matched| !flags.sticky || matched.start == start);
+        let matched = start
+            .filter(|start| *start <= input_units.len())
+            .and_then(|start| program.find_ucs2(&input_units, start))
+            .filter(|matched| !flags.sticky || Some(matched.start) == start);
         let Some(matched) = matched else {
-            if flags.global || flags.sticky {
-                self.set_own_data_property(receiver, last_index_atom, Value::from_i32(0))?;
-            }
-            return Ok(Value::from_immediate(Immediate::Null));
+            return Ok(RegExpBuiltinOutcome {
+                value: Value::from_immediate(Immediate::Null),
+                last_index: (flags.global || flags.sticky).then(|| Value::from_i32(0)),
+            });
         };
-        if flags.global || flags.sticky {
-            let end =
-                i32::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?;
-            self.set_own_data_property(receiver, last_index_atom, Value::from_i32(end))?;
-        }
+        let end = safe_integer_value(
+            u64::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?,
+        );
+        let result = self.materialize_regexp_match(input, &input_units, matched, state)?;
+        Ok(RegExpBuiltinOutcome {
+            value: result,
+            last_index: (flags.global || flags.sticky).then_some(end),
+        })
+    }
+
+    /// Creates the exact match Array while publishing every managed intermediate before GC.
+    fn materialize_regexp_match(
+        &mut self,
+        input: Value,
+        input_units: &[u16],
+        matched: RegExpMatch,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Value, ExecutionError> {
         let prototype = self
             .realm
             .array_prototype
@@ -309,12 +325,13 @@ impl Isolate {
         Ok(result)
     }
 
-    /// Executes the branded test-only path without allocating a match result or capture strings.
+    /// Matches the branded test-only path without allocating a result Array or capture strings.
     pub(crate) fn regexp_builtin_test(
         &mut self,
         receiver: Value,
         input: Value,
-    ) -> Result<bool, ExecutionError> {
+        observed_last_index: u64,
+    ) -> Result<RegExpBuiltinOutcome, ExecutionError> {
         let (source, flags) = self.regexp_data(receiver)?;
         let source = String::from_utf16(&self.regexp_string_units(source)?)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
@@ -322,32 +339,30 @@ impl Isolate {
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
         let input_units = self.regexp_string_units(input)?;
-        let last_index_atom = self.intern_intrinsic_name(b"lastIndex")?;
         let start = if flags.global || flags.sticky {
-            self.get_data_property(receiver, last_index_atom)?
-                .and_then(numeric_value)
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .map_or(0, |value| value.trunc() as usize)
+            usize::try_from(observed_last_index).ok()
         } else {
-            0
+            Some(0)
         };
         let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
-        let matched = program
-            .find_ucs2(&input_units, start)
-            .filter(|matched| !flags.sticky || matched.start == start);
+        let matched = start
+            .filter(|start| *start <= input_units.len())
+            .and_then(|start| program.find_ucs2(&input_units, start))
+            .filter(|matched| !flags.sticky || Some(matched.start) == start);
         let Some(matched) = matched else {
-            if flags.global || flags.sticky {
-                self.set_own_data_property(receiver, last_index_atom, Value::from_i32(0))?;
-            }
-            return Ok(false);
+            return Ok(RegExpBuiltinOutcome {
+                value: Value::from_immediate(Immediate::False),
+                last_index: (flags.global || flags.sticky).then(|| Value::from_i32(0)),
+            });
         };
-        if flags.global || flags.sticky {
-            let end =
-                i32::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?;
-            self.set_own_data_property(receiver, last_index_atom, Value::from_i32(end))?;
-        }
-        Ok(true)
+        let end = safe_integer_value(
+            u64::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?,
+        );
+        Ok(RegExpBuiltinOutcome {
+            value: Value::from_immediate(Immediate::True),
+            last_index: (flags.global || flags.sticky).then_some(end),
+        })
     }
 
     /// Splits one primitive-coercible input through a genuine RegExp backend fast path.

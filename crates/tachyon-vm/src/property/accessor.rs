@@ -44,6 +44,31 @@ struct AccessorAllocationRoots<'a> {
     setter: Value,
 }
 
+const TYPED_ARRAY_INDEX_SET_TARGET: usize = 0;
+const TYPED_ARRAY_INDEX_SET_KEY: usize = 1;
+const TYPED_ARRAY_INDEX_SET_VALUE: usize = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayIndexSetMode {
+    Assignment,
+    Reflect,
+    ReflectReceiver,
+}
+
+struct TypedArrayIndexSetRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: NativeCallState,
+}
+
+impl Trace for TypedArrayIndexSetRoots<'_> {
+    #[inline]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
+
 impl Trace for AccessorAllocationRoots<'_> {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -55,7 +80,95 @@ impl Trace for AccessorAllocationRoots<'_> {
     }
 }
 
+#[inline(always)]
+fn typed_array_index_set_mode(count: u8) -> Result<TypedArrayIndexSetMode, ExecutionError> {
+    match count {
+        0 => Ok(TypedArrayIndexSetMode::Assignment),
+        1 => Ok(TypedArrayIndexSetMode::Reflect),
+        2 => Ok(TypedArrayIndexSetMode::ReflectReceiver),
+        _ => Err(ExecutionError::MissingNativeContinuation),
+    }
+}
+
 impl Isolate {
+    /// Restores one pending integer-indexed write after observable ToPrimitive completes.
+    pub(crate) fn resume_typed_array_index_set_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        let key = self.property_key(pending.values[TYPED_ARRAY_INDEX_SET_KEY])?;
+        let result = self
+            .typed_array_index_set(pending.values[TYPED_ARRAY_INDEX_SET_TARGET], key, value)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let output = match typed_array_index_set_mode(pending.count)? {
+            TypedArrayIndexSetMode::Assignment => pending.values[TYPED_ARRAY_INDEX_SET_VALUE],
+            TypedArrayIndexSetMode::Reflect => boolean_value(true),
+            TypedArrayIndexSetMode::ReflectReceiver => boolean_value(result),
+        };
+        self.write(site.caller_base, site.destination, output)
+    }
+
+    /// Roots one object-valued element write and starts ordinary number-hint ToPrimitive.
+    pub(crate) fn dispatch_typed_array_index_set_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        key: PropertyKey,
+        value: Value,
+        mode: TypedArrayIndexSetMode,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(self.is_object_value(value));
+        let atom = key
+            .atom()
+            .ok_or(ExecutionError::PrivatePropertyKeyEscaped)?;
+        let key_value = self.atom_string_value(atom)?;
+        let pending = NativeCallState {
+            values: [
+                target,
+                key_value,
+                value,
+                Value::from_immediate(Immediate::Undefined),
+                Value::from_immediate(Immediate::Undefined),
+            ],
+            count: mode as u8,
+        };
+        let (state, object) = {
+            let mut roots = TypedArrayIndexSetRoots {
+                vm: VmRoots {
+                    fiber: &mut self.fiber,
+                    finalization_jobs: &mut self.finalization_jobs,
+                    promise_jobs: &mut self.promise_jobs,
+                    realm: &mut self.realm,
+                    loaded_code: &mut self.loaded_code,
+                },
+                pending,
+            };
+            let state = self
+                .heap
+                .try_allocate_with_gc(
+                    self.types.native_call_state,
+                    0,
+                    0,
+                    roots.pending,
+                    AllocationSpace::Young,
+                    &mut roots,
+                )
+                .map_err(ExecutionError::HeapAllocation)?;
+            (state, roots.pending.values[TYPED_ARRAY_INDEX_SET_VALUE])
+        };
+        self.dispatch_object_primitive_conversion(
+            ConversionConsumer::TypedArrayIndexSet,
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+            object,
+            site.call_site,
+        )
+    }
+
     /// Detects strict ArgumentsObject `callee` access without exposing a thrower object.
     pub(crate) fn is_strict_arguments_restricted_property(
         &mut self,
@@ -485,8 +598,9 @@ impl Isolate {
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
         if let Some(written) = self.typed_array_index_set(receiver, key, value)? {
+            let _ = written;
             return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
-                written,
+                true,
             )));
         }
         if self.is_strict_arguments_restricted_property(receiver, key)? {
@@ -648,6 +762,35 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWriteResolution, ExecutionError> {
+        if self.is_typed_array_value(target) {
+            match self.typed_array_index(key)? {
+                crate::builtins::typed_array::TypedArrayIndex::NonNumeric => {}
+                crate::builtins::typed_array::TypedArrayIndex::Invalid => {
+                    if target == receiver {
+                        let _ = self.typed_array_index_set(target, key, value)?;
+                    }
+                    return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                        true,
+                    )));
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Valid(_) if target == receiver => {
+                    // TypedArray [[Set]] ignores the boolean returned by the element operation.
+                    // Conversion failures still propagate, while detached/out-of-range indices
+                    // are reported to Reflect.set as a successful internal-method invocation.
+                    let _ = self.typed_array_index_set(target, key, value)?;
+                    return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                        true,
+                    )));
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Valid(_) => {
+                    if self.typed_array_index_get(target, key)?.flatten().is_none() {
+                        return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                            true,
+                        )));
+                    }
+                }
+            }
+        }
         if let Some(raw) = target.as_heap_ref()
             && self
                 .heap
@@ -730,6 +873,11 @@ impl Isolate {
     ) -> Result<PropertyWrite, ExecutionError> {
         if !self.is_object_value(receiver) {
             return Ok(PropertyWrite::Complete(false));
+        }
+        if self.is_typed_array_value(receiver)
+            && let Some(success) = self.typed_array_index_set(receiver, key, value)?
+        {
+            return Ok(PropertyWrite::Complete(success));
         }
         match self.complete_own_property_descriptor(receiver, key)? {
             Some(PropertyDescriptor::Data(descriptor)) if !descriptor.writable.unwrap_or(false) => {

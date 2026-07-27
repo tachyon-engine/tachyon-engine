@@ -1229,10 +1229,8 @@ impl Isolate {
                 self.typed_array_write_element(array, index, number)
             }
             ContentType::BigInt => {
-                if !self.is_bigint_value(value) {
-                    return Err(ExecutionError::TypedArrayContentTypeMismatch);
-                }
-                let bits = self.bigint_modulo_u64(value)?;
+                let bigint = self.primitive_to_bigint(value)?;
+                let bits = self.bigint_modulo_u64(bigint)?;
                 self.typed_array_write_bigint_element(array, index, bits)
             }
         }

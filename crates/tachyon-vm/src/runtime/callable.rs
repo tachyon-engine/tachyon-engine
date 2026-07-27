@@ -367,6 +367,7 @@ pub(crate) enum NativeFunction {
     NumberToString,
     NumberToLocaleString,
     NumberValueOf,
+    BigIntConstructor,
     BooleanConstructor,
     BooleanToString,
     BooleanValueOf,
@@ -868,6 +869,7 @@ impl NativeFunction {
                 | Self::StringConstructor
                 | Self::RegExpConstructor
                 | Self::NumberConstructor
+                | Self::BigIntConstructor
                 | Self::BooleanConstructor
                 | Self::DateConstructor
                 | Self::FunctionConstructor
@@ -1031,6 +1033,7 @@ impl NativeFunction {
             | Self::StringTrimStart
             | Self::StringTrimEnd
             | Self::NumberConstructor
+            | Self::BigIntConstructor
             | Self::BooleanConstructor
             | Self::DateSetTime
             | Self::FunctionPrototypeCall
@@ -1364,6 +1367,7 @@ impl NativeFunction {
             Self::NumberToString => "toString",
             Self::NumberToLocaleString => "toLocaleString",
             Self::NumberValueOf => "valueOf",
+            Self::BigIntConstructor => "BigInt",
             Self::BooleanConstructor => "Boolean",
             Self::BooleanToString => "toString",
             Self::BooleanValueOf => "valueOf",
@@ -2140,6 +2144,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) finalization_registry: AtomId,
     pub(crate) symbol: AtomId,
     pub(crate) number: AtomId,
+    pub(crate) bigint: AtomId,
     pub(crate) boolean: AtomId,
     pub(crate) date: AtomId,
     pub(crate) function: AtomId,
@@ -2155,7 +2160,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 27
+    pub(crate) const BINDING_COUNT: usize = 28
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
@@ -2202,6 +2207,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::IncompatibleFinalizationRegistryReceiver(_)
         | ExecutionError::InvalidFinalizationRegistration(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
+        | ExecutionError::UnsupportedBigIntConversion(_)
         | ExecutionError::TypedArrayContentTypeMismatch
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
@@ -2212,12 +2218,13 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }
         | ExecutionError::InvalidJsonText
         | ExecutionError::InvalidEvalSource => Some(NativeErrorKind::Syntax),
-        ExecutionError::InvalidRegExpFlags | ExecutionError::InvalidRegExpPattern => {
-            Some(NativeErrorKind::Syntax)
-        }
+        ExecutionError::InvalidRegExpFlags
+        | ExecutionError::InvalidRegExpPattern
+        | ExecutionError::InvalidBigIntLiteral => Some(NativeErrorKind::Syntax),
         ExecutionError::InvalidNumberRadix(_)
         | ExecutionError::InvalidNumberPrecision(_)
         | ExecutionError::InvalidArrayLength
+        | ExecutionError::InvalidBigIntNumber(_)
         | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),

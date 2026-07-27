@@ -1194,6 +1194,8 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_constant_property(number, atom, value)?;
         }
+        let bigint = allocate(self, NativeFunction::BigIntConstructor)?;
+        self.realm.bigint_constructor = Some(bigint);
         let boolean = allocate(self, NativeFunction::BooleanConstructor)?;
         self.realm.boolean_constructor = Some(boolean);
         let boolean_prototype = self.allocate_boolean_object(
@@ -1677,6 +1679,7 @@ impl Isolate {
             finalization_registry: self.intern_intrinsic_name(b"FinalizationRegistry")?,
             symbol: self.intern_intrinsic_name(b"Symbol")?,
             number: self.intern_intrinsic_name(b"Number")?,
+            bigint: self.intern_intrinsic_name(b"BigInt")?,
             boolean: self.intern_intrinsic_name(b"Boolean")?,
             date: self.intern_intrinsic_name(b"Date")?,
             function: self.intern_intrinsic_name(b"Function")?,
@@ -3586,6 +3589,13 @@ impl Isolate {
             self.realm
                 .number_constructor
                 .expect("Number initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.bigint,
+            self.realm
+                .bigint_constructor
+                .expect("BigInt initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

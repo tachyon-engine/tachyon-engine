@@ -65,6 +65,10 @@ impl Isolate {
                 let argument = argument.unwrap_or(Value::from_i32(0));
                 self.convert_to_number(argument)
             }
+            NativeFunction::BigIntConstructor => {
+                let argument = argument.unwrap_or(Value::from_immediate(Immediate::Undefined));
+                self.bigint_constructor_primitive(argument)
+            }
             NativeFunction::BooleanConstructor => {
                 let argument = argument.unwrap_or(Value::from_immediate(Immediate::Undefined));
                 Ok(Value::from_immediate(if self.is_truthy_value(argument)? {
@@ -221,6 +225,7 @@ impl Isolate {
                     Value::from_immediate(Immediate::Undefined)
                 }
             }
+            NativeFunction::BigIntConstructor => Value::from_immediate(Immediate::Undefined),
             NativeFunction::GlobalIsFinite
             | NativeFunction::GlobalIsNaN
             | NativeFunction::GlobalParseFloat
@@ -483,6 +488,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::TypedArrayIndexSet {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_index_set_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::TypedArrayIncludesFromIndex {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_typed_array_includes_conversion(
@@ -644,6 +657,14 @@ impl Isolate {
                         return self.resume_regexp_exec_conversion(
                             continuation.site,
                             continuation.receiver,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::RegExpLastIndex {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_regexp_last_index_conversion(
+                            continuation.site,
+                            state,
                             value,
                         );
                     }
@@ -1207,10 +1228,16 @@ impl Isolate {
                 ConversionConsumer::RegExpExecInput => {
                     unreachable!("RegExp exec conversion resumes inside its state machine")
                 }
+                ConversionConsumer::RegExpLastIndex => {
+                    unreachable!("RegExp lastIndex conversion resumes inside its state machine")
+                }
                 ConversionConsumer::TypedArrayByteOffset
                 | ConversionConsumer::TypedArrayLength
                 | ConversionConsumer::TypedArrayElement => {
                     unreachable!("TypedArray conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayIndexSet => {
+                    unreachable!("TypedArray indexed set resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayAtIndex => {
                     unreachable!("TypedArray at conversion resumes inside its state machine")
@@ -1275,6 +1302,9 @@ impl Isolate {
                     Ok(number)
                 }
             }
+            NativeFunction::BigIntConstructor => self.bigint_constructor_primitive(
+                argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            ),
             NativeFunction::NumberToExponential => self.number_to_exponential(receiver, argument),
             NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
             NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),

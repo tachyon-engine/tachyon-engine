@@ -1,6 +1,7 @@
 //! Bytecode loading and explicit-fiber interpreter state machine.
 
 use super::*;
+use crate::property::TypedArrayIndexSetMode;
 
 #[inline(always)]
 pub(crate) fn environment_access_error(
@@ -1868,6 +1869,26 @@ impl Isolate {
         value: Value,
         call_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.is_object_value(value) && self.is_typed_array_value(receiver) {
+            match self.typed_array_index(key)? {
+                crate::builtins::typed_array::TypedArrayIndex::NonNumeric => {}
+                crate::builtins::typed_array::TypedArrayIndex::Invalid
+                | crate::builtins::typed_array::TypedArrayIndex::Valid(_) => {
+                    self.dispatch_typed_array_index_set_conversion(
+                        NativeContinuationSite {
+                            caller_base,
+                            destination: value_register,
+                            call_site,
+                        },
+                        receiver,
+                        key,
+                        value,
+                        TypedArrayIndexSetMode::Assignment,
+                    )?;
+                    return Ok(None);
+                }
+            }
+        }
         match self.resolve_property_write_until_proxy(receiver, key, value)? {
             PropertyWriteResolution::Proxy(proxy) => self.dispatch_proxy_aware_property_write(
                 NativeContinuationSite {
@@ -1911,6 +1932,33 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.is_object_value(value) && self.is_typed_array_value(target) {
+            let mode = match self.typed_array_index(key)? {
+                crate::builtins::typed_array::TypedArrayIndex::NonNumeric => None,
+                crate::builtins::typed_array::TypedArrayIndex::Invalid if target == receiver => {
+                    Some(TypedArrayIndexSetMode::Reflect)
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Invalid => None,
+                crate::builtins::typed_array::TypedArrayIndex::Valid(_) if target == receiver => {
+                    Some(TypedArrayIndexSetMode::Reflect)
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Valid(_)
+                    if self.is_typed_array_value(receiver)
+                        && self.typed_array_index_get(target, key)?.flatten().is_some()
+                        && self
+                            .typed_array_index_get(receiver, key)?
+                            .flatten()
+                            .is_some() =>
+                {
+                    Some(TypedArrayIndexSetMode::ReflectReceiver)
+                }
+                crate::builtins::typed_array::TypedArrayIndex::Valid(_) => None,
+            };
+            if let Some(mode) = mode {
+                self.dispatch_typed_array_index_set_conversion(site, receiver, key, value, mode)?;
+                return Ok(None);
+            }
+        }
         match self.resolve_reflect_property_write_until_proxy(target, receiver, key, value)? {
             PropertyWriteResolution::Proxy(proxy) => self.dispatch_proxy_aware_property_write(
                 site,
@@ -4494,6 +4542,9 @@ impl Isolate {
                     let object = self.box_boolean_from_constructor(value, site.new_target)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
+                FunctionExecutable::Native(NativeFunction::BigIntConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     return self.begin_date_constructor(&site);
                 }
@@ -5467,6 +5518,7 @@ impl Isolate {
                     | NativeFunction::NumberToPrecision
                     | NativeFunction::NumberToString
                     | NativeFunction::NumberConstructor
+                    | NativeFunction::BigIntConstructor
                     | NativeFunction::DateParse),
                 ) => return self.dispatch_conversion_native(native, &site, false),
                 FunctionExecutable::Native(NativeFunction::NumberToLocaleString) => {

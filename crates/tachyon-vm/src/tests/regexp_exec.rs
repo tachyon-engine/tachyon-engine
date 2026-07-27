@@ -126,6 +126,49 @@ callableProxyMatched && callableProxyThis && callableProxyArgument &&
 primitiveReceiverBeforeInput && !primitiveInputObserved;
 "#;
 
+const REGEXP_LAST_INDEX_SOURCE: &str = r#"
+var nonGlobalReads = 0;
+var nonGlobal = /a/;
+var retainedIndex = {
+  valueOf: function() { nonGlobalReads++; return 99; }
+};
+nonGlobal.lastIndex = retainedIndex;
+var nonGlobalResult = nonGlobal.exec("a");
+
+var globalReads = 0;
+var global = /a/g;
+global.lastIndex = {
+  valueOf: function() { globalReads++; return 0; }
+};
+var globalResult = global.exec("a");
+
+var failed = /a/g;
+failed.lastIndex = { valueOf: function() { return 42; } };
+var failedResult = failed.exec("x");
+
+var abruptMarker = {};
+var abrupt = /a/;
+abrupt.lastIndex = { valueOf: function() { throw abruptMarker; } };
+var abruptPreserved = false;
+try { abrupt.exec("a"); } catch (error) { abruptPreserved = error === abruptMarker; }
+
+var readOnly = /a/g;
+Object.defineProperty(readOnly, "lastIndex", { writable: false });
+var strictSet = false;
+try { readOnly.exec("a"); } catch (error) { strictSet = error instanceof TypeError; }
+
+var testOnly = /a/g;
+testOnly.exec = 1;
+testOnly.lastIndex = { valueOf: function() { return 0; } };
+var testMatched = testOnly.test("a");
+
+nonGlobalResult[0] === "a" && nonGlobalReads === 1 &&
+nonGlobal.lastIndex === retainedIndex && globalResult[0] === "a" &&
+global.lastIndex === 1 && globalReads === 1 && failedResult === null &&
+failed.lastIndex === 0 && abruptPreserved && strictSet && testMatched &&
+testOnly.lastIndex === 1;
+"#;
+
 #[test]
 fn regexp_exec_protocol_works_for_every_dispatch_batch() {
     assert_regexp_exec::<1>(false);
@@ -176,6 +219,58 @@ fn regexp_exec_state_survives_forced_major_collection() {
     {
         assert_forced_regexp_exec_slice(name, source, index as u32);
     }
+}
+
+#[test]
+fn regexp_last_index_protocol_works_for_every_dispatch_batch_and_major_gc() {
+    assert_regexp_last_index::<1>(false);
+    assert_regexp_last_index::<2>(false);
+    assert_regexp_last_index::<4>(false);
+    assert_regexp_last_index::<8>(false);
+    assert_regexp_last_index::<16>(false);
+    assert_regexp_last_index::<1>(true);
+    assert_regexp_last_index::<2>(true);
+    assert_regexp_last_index::<4>(true);
+    assert_regexp_last_index::<8>(true);
+    assert_regexp_last_index::<16>(true);
+}
+
+/// Runs observable lastIndex conversion and strict writes under one dispatch/GC policy.
+fn assert_regexp_last_index<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(7_950 + N as u32 + u32::from(forced_major) * 32),
+                SourceName::new("regexp-last-index-fixture"),
+                MediaType::JavaScript,
+                Arc::from(REGEXP_LAST_INDEX_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("RegExp lastIndex fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("RegExp lastIndex fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        _ => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
 }
 
 /// Executes one isolated protocol stage under forced major collection for precise rooting failures.

@@ -157,6 +157,7 @@ const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
 pub(crate) enum ConversionNativeFunction {
     StringConstructor,
     NumberConstructor,
+    BigIntConstructor,
     NumberToExponential,
     NumberToFixed,
     NumberToPrecision,
@@ -182,6 +183,7 @@ impl ConversionNativeFunction {
         match native {
             NativeFunction::StringConstructor => Some(Self::StringConstructor),
             NativeFunction::NumberConstructor => Some(Self::NumberConstructor),
+            NativeFunction::BigIntConstructor => Some(Self::BigIntConstructor),
             NativeFunction::NumberToExponential => Some(Self::NumberToExponential),
             NativeFunction::NumberToFixed => Some(Self::NumberToFixed),
             NativeFunction::NumberToPrecision => Some(Self::NumberToPrecision),
@@ -208,6 +210,7 @@ impl ConversionNativeFunction {
         match self {
             Self::StringConstructor => NativeFunction::StringConstructor,
             Self::NumberConstructor => NativeFunction::NumberConstructor,
+            Self::BigIntConstructor => NativeFunction::BigIntConstructor,
             Self::NumberToExponential => NativeFunction::NumberToExponential,
             Self::NumberToFixed => NativeFunction::NumberToFixed,
             Self::NumberToPrecision => NativeFunction::NumberToPrecision,
@@ -256,6 +259,7 @@ pub(crate) enum ConversionConsumer {
     DateToJson,
     RegExpExecInput,
     RegExpTestInput,
+    RegExpLastIndex,
     ArrayLength,
     ArraySearchIndex,
     ArrayJoinLength,
@@ -301,6 +305,7 @@ pub(crate) enum ConversionConsumer {
     TypedArrayByteOffset,
     TypedArrayLength,
     TypedArrayElement,
+    TypedArrayIndexSet,
     TypedArrayAtIndex,
     TypedArrayIncludesFromIndex,
     TypedArrayFillValue,
@@ -347,6 +352,7 @@ impl ConversionConsumer {
             | Self::DateToJson
             | Self::RegExpExecInput
             | Self::RegExpTestInput
+            | Self::RegExpLastIndex
             | Self::ArrayLength
             | Self::ArraySearchIndex
             | Self::ArrayJoinLength
@@ -392,6 +398,7 @@ impl ConversionConsumer {
             | Self::TypedArrayByteOffset
             | Self::TypedArrayLength
             | Self::TypedArrayElement
+            | Self::TypedArrayIndexSet
             | Self::TypedArrayAtIndex => None,
             Self::TypedArrayIncludesFromIndex
             | Self::TypedArrayFillValue
@@ -487,6 +494,7 @@ impl ConversionConsumer {
                 | Self::DateToJson
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
+                | Self::RegExpLastIndex
                 | Self::ArrayLength
                 | Self::ArrayJoinLength
                 | Self::ArrayJoinSeparator
@@ -515,6 +523,7 @@ impl ConversionConsumer {
                 | Self::TypedArrayByteOffset
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
+                | Self::TypedArrayIndexSet
                 | Self::TypedArrayAtIndex
                 | Self::TypedArrayIncludesFromIndex
                 | Self::TypedArraySearchFromIndex
@@ -1124,6 +1133,8 @@ pub(crate) enum StringSplitStage {
 pub(crate) enum RegExpTestStage {
     ExecGet,
     ExecCall,
+    LastIndexGet,
+    LastIndexSet,
 }
 
 /// Observable callback boundaries in source-based TypedArray construction.
