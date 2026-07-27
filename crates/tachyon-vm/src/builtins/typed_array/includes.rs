@@ -159,7 +159,7 @@ impl Isolate {
         self.write(site.caller_base, site.destination, boolean_value(found))
     }
 
-    /// Scans Number elements under one checked no-GC backing borrow with SameValueZero semantics.
+    /// Scans normalized Number or BigInt bits under one checked no-GC backing borrow.
     fn scan_typed_array_includes(
         &mut self,
         snapshot: TypedArraySnapshot,
@@ -167,7 +167,7 @@ impl Isolate {
         cursor: usize,
         search: Value,
     ) -> Result<bool, ExecutionError> {
-        let Some(search) = numeric_value(search) else {
+        let Some(search) = self.typed_array_search_needle(snapshot.kind, search)? else {
             return Ok(false);
         };
         let length = initial_length.min(snapshot.length);
@@ -194,13 +194,21 @@ impl Isolate {
                     let start = snapshot.byte_offset + index * width;
                     let mut bytes = [0_u8; 8];
                     bytes[..width].copy_from_slice(&data.bytes[start..start + width]);
-                    let element = numeric_value(data_view_decode(
-                        data_view_kind(snapshot.kind)?,
-                        bytes,
-                        true,
-                    ))
-                    .expect("Number TypedArray decoding always returns Number");
-                    if (search.is_nan() && element.is_nan()) || search == element {
+                    let equal = match search {
+                        TypedArraySearchNeedle::Number(search) => {
+                            let element = numeric_value(data_view_decode(
+                                data_view_kind(snapshot.kind)?,
+                                bytes,
+                                true,
+                            ))
+                            .expect("Number TypedArray decoding always returns Number");
+                            (search.is_nan() && element.is_nan()) || search == element
+                        }
+                        TypedArraySearchNeedle::BigInt(search) => {
+                            search == u64::from_le_bytes(bytes)
+                        }
+                    };
+                    if equal {
                         return Ok(true);
                     }
                 }

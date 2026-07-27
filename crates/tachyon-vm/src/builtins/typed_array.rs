@@ -1,4 +1,4 @@
-//! Fixed-buffer Number TypedArray construction and integer-indexed element access.
+//! Fixed-buffer TypedArray construction and integer-indexed element access.
 
 mod at;
 mod callback;
@@ -34,6 +34,12 @@ pub(crate) enum TypedArrayIndex {
     NonNumeric,
     Invalid,
     Valid(usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum TypedArraySearchNeedle {
+    Number(f64),
+    BigInt(u64),
 }
 
 /// GC-owned state for source collection and resumable element conversion.
@@ -1232,6 +1238,27 @@ impl Isolate {
                 let bigint = self.primitive_to_bigint(value)?;
                 let bits = self.bigint_modulo_u64(bigint)?;
                 self.typed_array_write_bigint_element(array, index, bits)
+            }
+        }
+    }
+
+    /// Normalizes one strict/SameValueZero search value without per-element BigInt allocation.
+    fn typed_array_search_needle(
+        &mut self,
+        kind: TypedArrayKind,
+        value: Value,
+    ) -> Result<Option<TypedArraySearchNeedle>, ExecutionError> {
+        match kind.content_type() {
+            ContentType::Number => Ok(numeric_value(value).map(TypedArraySearchNeedle::Number)),
+            ContentType::BigInt => {
+                if !self.is_bigint_value(value) {
+                    return Ok(None);
+                }
+                let bits = self.bigint_modulo_u64(value)?;
+                let canonical =
+                    self.allocate_bigint_bits(bits, kind == TypedArrayKind::BigInt64)?;
+                self.bigint_equal(value, canonical)
+                    .map(|equal| equal.then_some(TypedArraySearchNeedle::BigInt(bits)))
             }
         }
     }

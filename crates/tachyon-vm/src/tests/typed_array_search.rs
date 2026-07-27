@@ -41,6 +41,14 @@ strictArray[0] = 2;
 strictOkay = strictOkay && strictArray.indexOf(searchObject) === -1 &&
   strictArray.lastIndexOf(searchObject) === -1 && !searchCoerced;
 
+var signedBig = new BigInt64Array([-1n, 0n, 42n, -1n]);
+var unsignedBig = new BigUint64Array([0n, 42n, 18446744073709551615n]);
+var bigintOkay = signedBig.indexOf(-1n) === 0 && signedBig.lastIndexOf(-1n) === 3 &&
+  signedBig.indexOf(18446744073709551615n) === -1 &&
+  unsignedBig.indexOf(18446744073709551615n) === 2 &&
+  unsignedBig.lastIndexOf(42n) === 1 && unsignedBig.indexOf(-1n) === -1 &&
+  unsignedBig.indexOf(42) === -1;
+
 var callbackArray = new Uint8Array(4);
 callbackArray[0] = 1;
 callbackArray[1] = 2;
@@ -81,7 +89,7 @@ var metadataOkay = indexProperty.value.length === 1 &&
   lastProperty.writable === true && lastProperty.enumerable === false &&
   lastProperty.configurable === true;
 
-valuesOkay && strictOkay && forwardResult === 2 && forwardCalls === 1 &&
+valuesOkay && strictOkay && bigintOkay && forwardResult === 2 && forwardCalls === 1 &&
 reverseResult === 1 && reverseCalls === 1 && emptyOkay && !emptyConverted &&
 brandRejected === 2 && !brandConverted && metadataOkay;
 "#;
@@ -98,7 +106,14 @@ var forward = array.indexOf(9, {
 var reverse = array.lastIndexOf(8, {
   valueOf: function() { array[1] = 8; return 2; }
 });
-forward === 2 && reverse === 1;
+var big = new BigUint64Array([1n, 18446744073709551615n]);
+var bigForward = big.indexOf(18446744073709551615n, {
+  valueOf: function() { return 0; }
+});
+var bigReverse = big.lastIndexOf(18446744073709551615n, {
+  valueOf: function() { return 1; }
+});
+forward === 2 && reverse === 1 && bigForward === 1 && bigReverse === 1;
 "#;
 
 #[test]

@@ -28,6 +28,11 @@ for (var index = 0; index < constructors.length; index++) {
 var floatArray = new Float64Array([NaN, -0, Infinity]);
 var sameValueZeroOkay = floatArray.includes(NaN) &&
   floatArray.includes(0) && floatArray.includes(-0) && floatArray.includes(Infinity);
+var signedBig = new BigInt64Array([-1n, 0n, 42n]);
+var unsignedBig = new BigUint64Array([0n, 42n, 18446744073709551615n]);
+var bigintOkay = signedBig.includes(-1n) && !signedBig.includes(18446744073709551615n) &&
+  unsignedBig.includes(18446744073709551615n) && !unsignedBig.includes(-1n) &&
+  !unsignedBig.includes(42);
 var callbackArray = new Uint8Array([1, 2, 3]);
 var valueOfCalls = 0;
 var callbackResult = callbackArray.includes(9, {
@@ -59,7 +64,7 @@ var property = Object.getOwnPropertyDescriptor(typedArrayPrototype, "includes");
 var lengthProperty = Object.getOwnPropertyDescriptor(property.value, "length");
 var nameProperty = Object.getOwnPropertyDescriptor(property.value, "name");
 
-valuesOkay && sameValueZeroOkay && callbackResult && valueOfCalls === 1 &&
+valuesOkay && sameValueZeroOkay && bigintOkay && callbackResult && valueOfCalls === 1 &&
 emptyResult === false && !emptyConverted && symbolRejected &&
 brandRejected && !brandConverted && typeof property.value === "function" &&
 property.writable === true && property.enumerable === false &&
@@ -80,7 +85,11 @@ var result = array.includes(9, {
     return -1;
   }
 });
-result && calls === 1;
+var big = new BigUint64Array([1n, 18446744073709551615n]);
+var bigResult = big.includes(18446744073709551615n, {
+  valueOf: function() { return 1; }
+});
+result && calls === 1 && bigResult;
 "#;
 
 #[test]

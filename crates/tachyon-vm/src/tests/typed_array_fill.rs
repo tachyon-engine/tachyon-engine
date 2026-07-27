@@ -17,6 +17,21 @@ var constructors = [
 var valuesOkay = true;
 for (var i = 0; i < constructors.length; i++) valuesOkay = valuesOkay && verify(constructors[i]);
 
+function verifyBigIntFill(TA) {
+  var array = new TA([1n, 2n, 3n, 4n]);
+  var calls = 0;
+  var returned = array.fill({
+    valueOf: function() { calls++; return 18446744073709551615n; }
+  }, 1, -1);
+  return returned === array && calls === 1 && array[0] === 1n &&
+    array[1] === -1n && array[2] === -1n && array[3] === 4n;
+}
+var bigintValuesOkay = verifyBigIntFill(BigInt64Array);
+var unsigned = new BigUint64Array([0n, 0n]);
+unsigned.fill("18446744073709551615");
+bigintValuesOkay = bigintValuesOkay && unsigned[0] === 18446744073709551615n &&
+  unsigned[1] === 18446744073709551615n;
+
 var typedArrayPrototype = Object.getPrototypeOf(Int8Array).prototype;
 var property = Object.getOwnPropertyDescriptor(typedArrayPrototype, "fill");
 var metadataOkay = property.value.name === "fill" && property.value.length === 1 &&
@@ -42,7 +57,7 @@ try {
   );
 } catch (error) { abruptIdentity = error === abrupt; }
 
-valuesOkay && metadataOkay && rejected && order === "vseV" && conversions === 1 &&
+valuesOkay && bigintValuesOkay && metadataOkay && rejected && order === "vseV" && conversions === 1 &&
   ordered[0] === 0 && ordered[1] === 9 && ordered[2] === 9 && ordered[3] === 0 && abruptIdentity;
 "#;
 
@@ -76,7 +91,15 @@ try {
   }});
 } catch (error) { endThrew = error instanceof TypeError; }
 
-order === "vse" && threw && startThrew && endThrew;
+var big = new BigUint64Array([1n, 2n]);
+var bigCalls = 0;
+big.fill({ valueOf: function() {
+  bigCalls++;
+  return 18446744073709551615n;
+}}, { valueOf: function() { return 1; } });
+
+order === "vse" && threw && startThrew && endThrew && bigCalls === 1 &&
+  big[0] === 1n && big[1] === 18446744073709551615n;
 "#;
 
 const TYPED_ARRAY_FILL_LONG_SOURCE: &str = r#"

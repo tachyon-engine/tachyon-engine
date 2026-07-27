@@ -1,4 +1,4 @@
-//! Resumable fixed Number TypedArray `indexOf` and `lastIndexOf` search.
+//! Resumable fixed TypedArray `indexOf` and `lastIndexOf` search.
 
 use super::*;
 
@@ -161,7 +161,7 @@ impl Isolate {
         )
     }
 
-    /// Scans decoded Number elements under one checked no-GC borrow and strict equality.
+    /// Scans normalized Number or BigInt bits under one checked no-GC backing borrow.
     fn scan_typed_array_search(
         &mut self,
         snapshot: TypedArraySnapshot,
@@ -171,10 +171,10 @@ impl Isolate {
         search: Value,
         direction: TypedArraySearchDirection,
     ) -> Result<Option<usize>, ExecutionError> {
-        let Some(search) = numeric_value(search) else {
+        let Some(search) = self.typed_array_search_needle(snapshot.kind, search)? else {
             return Ok(None);
         };
-        if search.is_nan() {
+        if matches!(search, TypedArraySearchNeedle::Number(number) if number.is_nan()) {
             return Ok(None);
         }
         let length = initial_length.min(snapshot.length);
@@ -202,13 +202,21 @@ impl Isolate {
                     let start = snapshot.byte_offset + current * width;
                     let mut bytes = [0_u8; 8];
                     bytes[..width].copy_from_slice(&data.bytes[start..start + width]);
-                    let element = numeric_value(data_view_decode(
-                        data_view_kind(snapshot.kind)?,
-                        bytes,
-                        true,
-                    ))
-                    .expect("Number TypedArray decoding always returns Number");
-                    if search == element {
+                    let equal = match search {
+                        TypedArraySearchNeedle::Number(search) => {
+                            let element = numeric_value(data_view_decode(
+                                data_view_kind(snapshot.kind)?,
+                                bytes,
+                                true,
+                            ))
+                            .expect("Number TypedArray decoding always returns Number");
+                            search == element
+                        }
+                        TypedArraySearchNeedle::BigInt(search) => {
+                            search == u64::from_le_bytes(bytes)
+                        }
+                    };
+                    if equal {
                         return Ok(Some(current));
                     }
                     index = search_advance(direction, index);

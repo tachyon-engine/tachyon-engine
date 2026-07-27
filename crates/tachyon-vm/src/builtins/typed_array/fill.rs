@@ -1,4 +1,4 @@
-//! Resumable fixed Number `%TypedArray.prototype.fill%` implementation.
+//! Resumable fixed-buffer `%TypedArray.prototype.fill%` implementation.
 
 use super::*;
 
@@ -83,9 +83,13 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         match consumer {
             ConversionConsumer::TypedArrayFillValue => {
-                let number = self.convert_to_number(value)?;
-                self.set_typed_array_fill_value(state, FILL_VALUE, number)?;
-                let start = self.native_call_state_snapshot(state)?.values[FILL_START];
+                let pending = self.native_call_state_snapshot(state)?;
+                let kind = self
+                    .typed_array_snapshot(pending.values[FILL_RECEIVER])?
+                    .kind;
+                let converted = self.convert_typed_array_fill_element(kind, value)?;
+                self.set_typed_array_fill_value(state, FILL_VALUE, converted)?;
+                let start = pending.values[FILL_START];
                 self.convert_typed_array_fill_value(
                     site,
                     state,
@@ -137,8 +141,8 @@ impl Isolate {
         start: Value,
         end: Value,
     ) -> Result<(), ExecutionError> {
-        let number = numeric_value(self.convert_to_number(value)?)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        let kind = self.typed_array_snapshot(receiver)?.kind;
+        let converted = self.convert_typed_array_fill_element(kind, value)?;
         let relative_start = typed_array_fill_integer(self.convert_to_number(start)?)?;
         let start = typed_array_fill_relative_index(relative_start, length);
         let end = if end.as_immediate() == Some(Immediate::Undefined) {
@@ -147,7 +151,7 @@ impl Isolate {
             let relative_end = typed_array_fill_integer(self.convert_to_number(end)?)?;
             typed_array_fill_relative_index(relative_end, length)
         };
-        self.fill_typed_array_range(receiver, number, start, end)?;
+        self.fill_typed_array_range(receiver, converted, start, end)?;
         self.write(site.caller_base, site.destination, receiver)
     }
 
@@ -159,12 +163,9 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
         let receiver = pending.values[FILL_RECEIVER];
-        let number = numeric_value(pending.values[FILL_VALUE]).ok_or(
-            ExecutionError::UnsupportedNumberConversion(pending.values[FILL_VALUE]),
-        )?;
         let start = typed_array_fill_usize(pending.values[FILL_START])?;
         let end = typed_array_fill_usize(pending.values[FILL_END])?;
-        self.fill_typed_array_range(receiver, number, start, end)?;
+        self.fill_typed_array_range(receiver, pending.values[FILL_VALUE], start, end)?;
         self.write(site.caller_base, site.destination, receiver)
     }
 
@@ -172,7 +173,7 @@ impl Isolate {
     fn fill_typed_array_range(
         &mut self,
         receiver: Value,
-        number: f64,
+        value: Value,
         start: usize,
         end: usize,
     ) -> Result<(), ExecutionError> {
@@ -198,13 +199,7 @@ impl Isolate {
                     .ok_or(ExecutionError::InvalidArrayLength)?,
             )
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        let bytes = if snapshot.kind == TypedArrayKind::Uint8Clamped {
-            let mut bytes = [0_u8; 8];
-            bytes[0] = to_uint8_clamp(number);
-            bytes
-        } else {
-            data_view_encode(data_view_kind(snapshot.kind)?, number, true)
-        };
+        let bytes = self.encode_typed_array_fill_element(snapshot.kind, value)?;
         self.heap.with_running_scope(|scope| {
             let data = scope.root(data).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -220,6 +215,40 @@ impl Isolate {
                 Ok(())
             })
         })
+    }
+
+    /// Converts a fill value exactly once according to the receiver's element content type.
+    fn convert_typed_array_fill_element(
+        &mut self,
+        kind: TypedArrayKind,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        match kind.content_type() {
+            ContentType::Number => self.convert_to_number(value),
+            ContentType::BigInt => self.primitive_to_bigint(value),
+        }
+    }
+
+    /// Encodes an already-converted fill value into one reusable element-width bit pattern.
+    fn encode_typed_array_fill_element(
+        &mut self,
+        kind: TypedArrayKind,
+        value: Value,
+    ) -> Result<[u8; 8], ExecutionError> {
+        match kind.content_type() {
+            ContentType::BigInt => self.bigint_modulo_u64(value).map(u64::to_le_bytes),
+            ContentType::Number => {
+                let number = numeric_value(value)
+                    .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+                if kind == TypedArrayKind::Uint8Clamped {
+                    let mut bytes = [0_u8; 8];
+                    bytes[0] = to_uint8_clamp(number);
+                    Ok(bytes)
+                } else {
+                    Ok(data_view_encode(data_view_kind(kind)?, number, true))
+                }
+            }
+        }
     }
 
     /// Dispatches one object conversion while the complete fixed state remains traced.
