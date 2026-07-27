@@ -15,6 +15,7 @@ mod subarray;
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
+use crate::iterator::ArrayIterationKind;
 use crate::object::{ArrayBufferData, ContentType, TypedArrayKind, TypedArrayObject};
 use crate::property::array_index;
 use crate::runtime::callable::{
@@ -126,6 +127,17 @@ impl Trace for TypedArrayConstructionRoots<'_> {
 }
 
 impl Isolate {
+    /// Validates a fixed TypedArray before creating the shared ArrayIterator payload.
+    pub(crate) fn begin_typed_array_iterator(
+        &mut self,
+        site: &CallSite,
+        kind: ArrayIterationKind,
+    ) -> Result<Value, ExecutionError> {
+        let snapshot = self.typed_array_snapshot(site.this_value)?;
+        self.typed_array_backing(snapshot.buffer)?;
+        self.create_array_iterator(site.this_value, kind)
+    }
+
     /// Starts fixed Number TypedArray construction for every supported source category.
     pub(crate) fn begin_typed_array_from_site(
         &mut self,

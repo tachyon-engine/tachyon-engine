@@ -432,6 +432,7 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(name)?;
             self.set_intrinsic_data_property(base_prototype, atom, search, true)?;
         }
+        let mut typed_array_values_method: Option<Value> = None;
         for kind in [
             TypedArrayCallbackKind::Every,
             TypedArrayCallbackKind::Some,
@@ -455,6 +456,44 @@ impl Isolate {
             let atom = self.intern_intrinsic_name(kind.name().as_bytes())?;
             self.set_intrinsic_data_property(base_prototype, atom, callback, true)?;
         }
+        for (name, native) in [
+            (b"keys".as_slice(), NativeFunction::TypedArrayKeys),
+            (b"values".as_slice(), NativeFunction::TypedArrayValues),
+            (b"entries".as_slice(), NativeFunction::TypedArrayEntries),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(base_prototype, atom, function, true)?;
+            if native == NativeFunction::TypedArrayValues {
+                typed_array_values_method = Some(function);
+            }
+        }
+        let iterator_symbol = self
+            .realm
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before TypedArray");
+        let iterator_key = self.property_key(iterator_symbol)?;
+        let values_method =
+            typed_array_values_method.expect("TypedArray values initializes before iterator alias");
+        self.define_data_property(
+            base_prototype,
+            iterator_key,
+            DataPropertyDescriptor {
+                value: Some(values_method),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         let bytes_per_element = self.intern_intrinsic_name(b"BYTES_PER_ELEMENT")?;
         for kind in TypedArrayKind::ALL {
             let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {

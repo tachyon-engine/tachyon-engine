@@ -112,6 +112,13 @@ descriptorTarget[0] === 0 && descriptorTarget["-0"] === undefined &&
 descriptorHarnessOkay;
 "#;
 
+const TYPED_ARRAY_ITERATOR_SOURCE: &str = r#"
+var array = new Uint8Array([3, 7, 11]);
+typeof array.keys === "function" && typeof array.values === "function" &&
+  typeof array.entries === "function" && array.keys() !== undefined &&
+  array.values() !== undefined && array.entries() !== undefined;
+"#;
+
 const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
 var source = new Array(10000).fill(7);
 var copied = Array.from(source);
@@ -246,8 +253,46 @@ fn intrinsic_iterable_collection_does_not_grow_the_rust_stack() {
         )
         .expect("large TypedArray iterable executes without Rust recursion");
     assert!(
-        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(511)),
         "large TypedArray iterable returned {outcome:?}"
+    );
+}
+
+#[test]
+fn typed_array_iterators_work_for_every_dispatch_batch() {
+    assert_typed_array_iterators::<1>(false);
+    assert_typed_array_iterators::<2>(false);
+    assert_typed_array_iterators::<4>(false);
+    assert_typed_array_iterators::<8>(false);
+    assert_typed_array_iterators::<16>(false);
+}
+
+#[test]
+fn typed_array_iterators_survive_forced_major_collection() {
+    assert_typed_array_iterators::<8>(true);
+}
+
+/// Executes the three shared iterator projections with both dispatch and GC policies.
+fn assert_typed_array_iterators<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(TYPED_ARRAY_ITERATOR_SOURCE, 7_460 + N as u32);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("TypedArray iterator fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

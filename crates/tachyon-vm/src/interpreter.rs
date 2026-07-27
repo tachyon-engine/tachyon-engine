@@ -6360,6 +6360,20 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayCallback(kind)) => {
                     return self.begin_typed_array_callback(&site, kind);
                 }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::TypedArrayKeys
+                    | NativeFunction::TypedArrayValues
+                    | NativeFunction::TypedArrayEntries),
+                ) => {
+                    let kind = match native {
+                        NativeFunction::TypedArrayKeys => ArrayIterationKind::Key,
+                        NativeFunction::TypedArrayValues => ArrayIterationKind::Value,
+                        NativeFunction::TypedArrayEntries => ArrayIterationKind::KeyAndValue,
+                        _ => unreachable!("typed array iterator creator match is exhaustive"),
+                    };
+                    let iterator = self.begin_typed_array_iterator(&site, kind)?;
+                    return self.write(site.caller_base, site.destination, iterator);
+                }
                 FunctionExecutable::Native(NativeFunction::MapConstructor) => {
                     return self.begin_map_from_site(&site);
                 }

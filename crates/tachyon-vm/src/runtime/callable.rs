@@ -464,6 +464,9 @@ pub(crate) enum NativeFunction {
     TypedArraySubarray,
     TypedArraySearch(TypedArraySearchDirection),
     TypedArrayCallback(TypedArrayCallbackKind),
+    TypedArrayKeys,
+    TypedArrayValues,
+    TypedArrayEntries,
     ArrayIsArray,
     ArrayFrom,
     ArrayOf,
@@ -1237,6 +1240,9 @@ impl NativeFunction {
             | Self::DataViewByteOffset
             | Self::TypedArrayBaseConstructor
             | Self::TypedArrayGetter(_)
+            | Self::TypedArrayKeys
+            | Self::TypedArrayValues
+            | Self::TypedArrayEntries
             | Self::StringToLowerCase
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
@@ -1496,6 +1502,9 @@ impl NativeFunction {
             Self::TypedArraySubarray => "subarray",
             Self::TypedArraySearch(direction) => direction.name(),
             Self::TypedArrayCallback(kind) => kind.name(),
+            Self::TypedArrayKeys => "keys",
+            Self::TypedArrayValues => "values",
+            Self::TypedArrayEntries => "entries",
             Self::ArrayIsArray => "isArray",
             Self::ArrayFrom => "from",
             Self::ArrayOf => "of",
