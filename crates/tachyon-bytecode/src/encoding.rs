@@ -299,9 +299,19 @@ pub enum Opcode {
     CheckObject = 126,
     /// Forwards a delegated iterator result and resumes into adjacent value/kind registers.
     YieldDelegate = 127,
+    /// Calls with arguments materialized in an engine-private Array.
+    CallSpread = 128,
+    /// Tail-calls with arguments materialized in an engine-private Array.
+    TailCallSpread = 129,
+    /// Calls a receiver/callee pair with an engine-private argument Array.
+    CallSpreadWithReceiver = 130,
+    /// Tail-calls a receiver/callee pair with an engine-private argument Array.
+    TailCallSpreadWithReceiver = 131,
+    /// Performs syntactic direct eval with an engine-private argument Array.
+    DirectEvalSpread = 132,
 }
 
-pub(super) const OPCODE_COUNT: usize = 128;
+pub(super) const OPCODE_COUNT: usize = 133;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -431,10 +441,15 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // LoadIteratorSymbol
     1, // CheckObject
     3, // YieldDelegate
+    3, // CallSpread
+    3, // TailCallSpread
+    3, // CallSpreadWithReceiver
+    3, // TailCallSpreadWithReceiver
+    3, // DirectEvalSpread
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::YieldDelegate as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DirectEvalSpread as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -449,7 +464,7 @@ impl Opcode {
         if index < BASE_OPCODE_COUNT {
             Self::from_base(index as u8)
         } else {
-            Self::from_extended_base((index - BASE_OPCODE_COUNT) as u8)
+            Self::from_extended(index - BASE_OPCODE_COUNT)
         }
     }
 
@@ -542,8 +557,8 @@ impl Opcode {
         }
     }
 
-    const fn from_extended_base(base: u8) -> Option<Self> {
-        match base {
+    const fn from_extended(index: usize) -> Option<Self> {
+        match index {
             0 => Some(Self::DeleteById),
             1 => Some(Self::DeleteByValue),
             2 => Some(Self::CreateArray),
@@ -608,6 +623,11 @@ impl Opcode {
             61 => Some(Self::LoadIteratorSymbol),
             62 => Some(Self::CheckObject),
             63 => Some(Self::YieldDelegate),
+            64 => Some(Self::CallSpread),
+            65 => Some(Self::TailCallSpread),
+            66 => Some(Self::CallSpreadWithReceiver),
+            67 => Some(Self::TailCallSpreadWithReceiver),
+            68 => Some(Self::DirectEvalSpread),
             _ => None,
         }
     }
@@ -680,10 +700,12 @@ pub fn encode_instruction(opcode: Opcode, operands: &[u32]) -> Result<Vec<u32>, 
         });
     }
 
-    if (opcode as u8) >= 64 {
-        let extension = (opcode as u8) - 64;
+    if (opcode as usize) >= BASE_OPCODE_COUNT {
+        let extension = opcode as usize - BASE_OPCODE_COUNT;
+        let page = extension / BASE_OPCODE_COUNT;
+        let base = extension % BASE_OPCODE_COUNT;
         let mut words = Vec::with_capacity(1 + operands.len());
-        words.push(u32::from(ESCAPE_FORMAT | extension));
+        words.push(u32::from(ESCAPE_FORMAT | base as u8) | ((page as u32) << 8));
         words.extend_from_slice(operands);
         return Ok(words);
     }
@@ -738,7 +760,8 @@ pub fn decode_instruction(
     let format = raw & FORMAT_MASK;
 
     let opcode = if format == ESCAPE_FORMAT {
-        Opcode::from_extended_base(raw & OPCODE_MASK)
+        let page = (header >> 8) as usize;
+        Opcode::from_extended(page * BASE_OPCODE_COUNT + usize::from(raw & OPCODE_MASK))
     } else {
         Opcode::from_base(raw & OPCODE_MASK)
     }

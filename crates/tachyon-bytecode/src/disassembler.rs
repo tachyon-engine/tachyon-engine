@@ -242,6 +242,16 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             " r{}, receiver=r{}, argc={}",
             operands[0], operands[1], operands[2]
         )?,
+        Opcode::CallSpread | Opcode::TailCallSpread | Opcode::DirectEvalSpread => write!(
+            output,
+            " r{}, callee=r{}, arguments=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
+        Opcode::CallSpreadWithReceiver | Opcode::TailCallSpreadWithReceiver => write!(
+            output,
+            " r{}, receiver=r{}, arguments=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::CreateClosure => write!(output, " r{}, function={}", operands[0], operands[1])?,
         Opcode::CreateClass => write!(
             output,

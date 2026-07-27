@@ -149,6 +149,11 @@ impl Isolate {
         value: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let state = self.native_call_state_reference(continuation.first())?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            continuation.first(),
+        )?;
         match stage {
             ProxyGetStage::TrapGetter => {
                 self.continue_proxy_get_lookup(continuation.site(), state, value)

@@ -291,6 +291,39 @@ impl Isolate {
         })
     }
 
+    /// Snapshots only a fully packed dense backing for an engine-private spread-call fast path.
+    pub(crate) fn packed_array_values(
+        &mut self,
+        receiver: Value,
+    ) -> Result<Option<Vec<Value>>, ExecutionError> {
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(None);
+        };
+        let Ok(array) = self.heap.checked_reference(raw, self.types.array) else {
+            return Ok(None);
+        };
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            let elements = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.array)
+                    .map(|array| array.elements)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })?;
+            let Some(elements) = elements else {
+                return Ok(Some(Vec::new()));
+            };
+            let elements = scope.root(elements).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(elements, self.types.array_elements)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .copy_packed_values()
+                    .map_err(|_| ExecutionError::BoundArgumentAllocationFailed)
+            })
+        })
+    }
+
     /// Clears default dense properties after ordinary non-configurable length checks succeed.
     fn truncate_dense_array(&mut self, receiver: Value, length: u32) -> Result<(), ExecutionError> {
         let Some(raw) = receiver.as_heap_ref() else {

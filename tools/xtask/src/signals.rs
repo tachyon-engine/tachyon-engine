@@ -14,7 +14,7 @@ const CONFIG_PATH: &str = "signals_suite.toml";
 #[derive(Debug, Deserialize)]
 struct SuiteConfig {
     schema_version: u32,
-    proposal: SourcePin,
+    proposal: ProposalPin,
     reference_suite: SourcePin,
     api_surface: Vec<Box<str>>,
     api_sha256: Box<str>,
@@ -28,6 +28,14 @@ struct SourcePin {
     content_sha256: Box<str>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct ProposalPin {
+    repository: Box<str>,
+    commit: Box<str>,
+    content_sha256: Box<str>,
+    stage: u8,
+}
+
 #[derive(Debug, Deserialize)]
 struct SuiteCase {
     id: Box<str>,
@@ -39,7 +47,7 @@ struct SuiteCase {
 #[derive(Debug, Serialize)]
 struct SuiteReport<'a> {
     schema_version: u32,
-    proposal: &'a SourcePin,
+    proposal: &'a ProposalPin,
     reference_suite: &'a SourcePin,
     api_sha256: &'a str,
     total: usize,
@@ -104,8 +112,24 @@ fn validate_config(config: &SuiteConfig) -> Result<(), String> {
             config.schema_version
         ));
     }
-    validate_pin("proposal", &config.proposal)?;
-    validate_pin("reference suite", &config.reference_suite)?;
+    validate_pin(
+        "proposal",
+        &config.proposal.repository,
+        &config.proposal.commit,
+        &config.proposal.content_sha256,
+    )?;
+    if config.proposal.stage != 1 {
+        return Err(format!(
+            "Signals proposal stage mismatch: pinned revision is Stage 1, manifest declares Stage {}",
+            config.proposal.stage
+        ));
+    }
+    validate_pin(
+        "reference suite",
+        &config.reference_suite.repository,
+        &config.reference_suite.commit,
+        &config.reference_suite.content_sha256,
+    )?;
     let mut api = String::new();
     for entry in &config.api_surface {
         api.push_str(entry);
@@ -124,11 +148,16 @@ fn validate_config(config: &SuiteConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_pin(name: &str, pin: &SourcePin) -> Result<(), String> {
-    if !is_lower_hex(&pin.commit, 40) || !is_lower_hex(&pin.content_sha256, 64) {
+fn validate_pin(
+    name: &str,
+    repository: &str,
+    commit: &str,
+    content_sha256: &str,
+) -> Result<(), String> {
+    if !is_lower_hex(commit, 40) || !is_lower_hex(content_sha256, 64) {
         return Err(format!("Signals {name} pin must use full lowercase hashes"));
     }
-    if !pin.repository.starts_with("https://github.com/") {
+    if !repository.starts_with("https://github.com/") {
         return Err(format!(
             "Signals {name} repository must be an HTTPS GitHub URL"
         ));

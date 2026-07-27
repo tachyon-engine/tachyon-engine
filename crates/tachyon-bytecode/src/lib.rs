@@ -107,7 +107,12 @@ impl<'bytecode> VerifiedInstructionDecoder<'bytecode> {
         let header = unsafe { *self.words.get_unchecked(start) };
         let raw = header as u8;
         let format = raw & FORMAT_MASK;
-        let semantic_opcode = (raw & OPCODE_MASK) + if format == ESCAPE_FORMAT { 64 } else { 0 };
+        let semantic_opcode = (raw & OPCODE_MASK)
+            + if format == ESCAPE_FORMAT {
+                64 + ((header >> 8) as u8) * 64
+            } else {
+                0
+            };
         // SAFETY: verification rejected every base or extended opcode outside `Opcode`.
         let opcode = unsafe { core::mem::transmute::<u8, Opcode>(semantic_opcode) };
         let operand_count = opcode.operand_count();

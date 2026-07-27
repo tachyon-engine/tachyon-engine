@@ -432,6 +432,22 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::CallSpread { callee, arguments } => {
+            let mut count = expression_scope_name_count(callee)?;
+            for argument in arguments.iter() {
+                let expression = match argument {
+                    crate::hir::HirArrayExpressionPart::Element(expression)
+                    | crate::hir::HirArrayExpressionPart::Spread(expression) => expression,
+                    crate::hir::HirArrayExpressionPart::Elision => continue,
+                };
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(expression)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::SuperCall(arguments) => {
             let mut count = 0;
             for argument in arguments.iter() {
@@ -830,6 +846,22 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 count = checked_count_add(
                     count,
                     expression_literal_count(argument)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::CallSpread { callee, arguments } => {
+            let mut count = expression_literal_count(callee)?;
+            for argument in arguments.iter() {
+                let expression = match argument {
+                    crate::hir::HirArrayExpressionPart::Element(expression)
+                    | crate::hir::HirArrayExpressionPart::Spread(expression) => expression,
+                    crate::hir::HirArrayExpressionPart::Elision => continue,
+                };
+                count = checked_count_add(
+                    count,
+                    expression_literal_count(expression)?,
                     "bytecode constants",
                 )?;
             }

@@ -306,6 +306,18 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
             expression_suspend_point_count(callee)?,
             expression_list_count(arguments)?,
         ),
+        HirExpressionKind::CallSpread { callee, arguments } => {
+            let mut count = expression_suspend_point_count(callee)?;
+            for argument in arguments.iter() {
+                let expression = match argument {
+                    HirArrayExpressionPart::Element(expression)
+                    | HirArrayExpressionPart::Spread(expression) => expression,
+                    HirArrayExpressionPart::Elision => continue,
+                };
+                count = add(count, expression_suspend_point_count(expression)?)?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::SuperCall(arguments) => expression_list_count(arguments),
         HirExpressionKind::Number(_)
         | HirExpressionKind::BigInt(_)

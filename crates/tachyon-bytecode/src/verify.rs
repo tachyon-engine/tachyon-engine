@@ -1026,6 +1026,29 @@ fn verify_instruction(
                 });
             }
         }
+        Opcode::CallSpread
+        | Opcode::TailCallSpread
+        | Opcode::CallSpreadWithReceiver
+        | Opcode::TailCallSpreadWithReceiver
+        | Opcode::DirectEvalSpread => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            check_register(operands[2])?;
+            if matches!(
+                instruction.opcode,
+                Opcode::CallSpreadWithReceiver | Opcode::TailCallSpreadWithReceiver
+            ) && operands[1]
+                .checked_add(1)
+                .is_none_or(|callee| callee >= context.register_count)
+            {
+                return Err(VerifyError::InvalidCallArgumentWindow {
+                    offset,
+                    callee: operands[1].saturating_add(1),
+                    argument_count: 0,
+                    register_count: context.register_count,
+                });
+            }
+        }
         Opcode::Await | Opcode::Yield => {
             check_register(operands[0])?;
             check_register(operands[1])?;

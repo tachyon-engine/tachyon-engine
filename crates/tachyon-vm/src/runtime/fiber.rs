@@ -329,6 +329,8 @@ pub(crate) enum ConversionConsumer {
     TypedArrayElement,
     TypedArrayIndexSet,
     TypedArrayAtIndex,
+    TypedArrayWithIndex,
+    TypedArrayWithValue,
     TypedArrayIncludesFromIndex,
     TypedArrayFillValue,
     TypedArrayFillStart,
@@ -425,7 +427,9 @@ impl ConversionConsumer {
             | Self::TypedArrayLength
             | Self::TypedArrayElement
             | Self::TypedArrayIndexSet
-            | Self::TypedArrayAtIndex => None,
+            | Self::TypedArrayAtIndex
+            | Self::TypedArrayWithIndex
+            | Self::TypedArrayWithValue => None,
             Self::TypedArrayIncludesFromIndex
             | Self::TypedArrayFillValue
             | Self::TypedArrayFillStart
@@ -561,6 +565,8 @@ impl ConversionConsumer {
                 | Self::TypedArrayElement
                 | Self::TypedArrayIndexSet
                 | Self::TypedArrayAtIndex
+                | Self::TypedArrayWithIndex
+                | Self::TypedArrayWithValue
                 | Self::TypedArrayIncludesFromIndex
                 | Self::TypedArraySearchFromIndex
                 | Self::TypedArrayJoinSeparator
@@ -735,6 +741,7 @@ pub(crate) enum PromiseCatchStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum PromiseStaticResolveStage {
+    ConstructorPrototype,
     ResolveConstructor,
     ResolveCallback,
     RejectConstructor,
@@ -1973,6 +1980,23 @@ impl NativeContinuation {
             kind: NativeContinuationKind::PromiseExecutor,
             first: promise,
             second: arguments,
+        }
+    }
+
+    /// Roots Promise constructor inputs while `newTarget.prototype` executes user code.
+    #[inline]
+    pub(crate) const fn promise_constructor_prototype(
+        site: NativeContinuationSite,
+        state: Value,
+        new_target: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::PromiseStaticResolve(
+                PromiseStaticResolveStage::ConstructorPrototype,
+            ),
+            first: state,
+            second: new_target,
         }
     }
 

@@ -402,6 +402,17 @@ impl Isolate {
         )?;
         let to_sorted_atom = self.intern_intrinsic_name(b"toSorted")?;
         self.set_intrinsic_data_property(base_prototype, to_sorted_atom, to_sorted, true)?;
+        let with = self.allocate_native_function(
+            NativeFunction::TypedArrayWith,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let with_atom = self.intern_intrinsic_name(b"with")?;
+        self.set_intrinsic_data_property(base_prototype, with_atom, with, true)?;
         let set = self.allocate_native_function(
             NativeFunction::TypedArraySet,
             OrdinaryObject {
@@ -3610,6 +3621,13 @@ impl Isolate {
             NativeFunction::SignalComputedGet,
             function_prototype,
         )?;
+        for (name, native) in [
+            (b"isState".as_slice(), NativeFunction::SignalIsState),
+            (b"isComputed".as_slice(), NativeFunction::SignalIsComputed),
+            (b"isWatcher".as_slice(), NativeFunction::SignalIsWatcher),
+        ] {
+            self.install_signal_method(namespace, name, native, function_prototype)?;
+        }
         let watcher = self.install_signal_constructor(
             subtle,
             b"Watcher",

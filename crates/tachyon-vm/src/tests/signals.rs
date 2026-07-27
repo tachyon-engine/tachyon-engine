@@ -39,6 +39,9 @@ function builtinDescriptor(object, key, writable, configurable) {
 var globalDescriptor = builtinDescriptor(this, "Signal", true, true);
 var namespaceDescriptors = builtinDescriptor(Signal, "State", true, true) &&
     builtinDescriptor(Signal, "Computed", true, true) &&
+    builtinDescriptor(Signal, "isState", true, true) &&
+    builtinDescriptor(Signal, "isComputed", true, true) &&
+    builtinDescriptor(Signal, "isWatcher", true, true) &&
     builtinDescriptor(Signal, "subtle", true, true) &&
     builtinDescriptor(Signal.subtle, "Watcher", true, true) &&
     builtinDescriptor(Signal.subtle, "untrack", true, true) &&
@@ -65,6 +68,9 @@ var metadata = Signal.State.name === "State" && Signal.State.length === 1 &&
     Signal.State.prototype.set.name === "set" && Signal.State.prototype.set.length === 1 &&
     Signal.Computed.name === "Computed" && Signal.Computed.length === 1 &&
     Signal.Computed.prototype.get.length === 0 &&
+    Signal.isState.name === "isState" && Signal.isState.length === 1 &&
+    Signal.isComputed.name === "isComputed" && Signal.isComputed.length === 1 &&
+    Signal.isWatcher.name === "isWatcher" && Signal.isWatcher.length === 1 &&
     Signal.subtle.Watcher.name === "Watcher" && Signal.subtle.Watcher.length === 1 &&
     Signal.subtle.Watcher.prototype.watch.length === 0 &&
     Signal.subtle.Watcher.prototype.unwatch.length === 0 &&
@@ -102,6 +108,15 @@ try { new Signal.subtle.hasSources({}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 try { new Signal.subtle.hasSinks({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.isState({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.isComputed({}); newOnly = false; } catch (error) {
+    newOnly = newOnly && error instanceof TypeError;
+}
+try { new Signal.isWatcher({}); newOnly = false; } catch (error) {
     newOnly = newOnly && error instanceof TypeError;
 }
 var state = new Signal.State(1);
@@ -500,12 +515,17 @@ var identities = foreignSignal !== Signal && foreignSignal.State !== Signal.Stat
     foreignSignal.subtle.introspectSinks !== Signal.subtle.introspectSinks &&
     foreignSignal.subtle.hasSources !== Signal.subtle.hasSources &&
     foreignSignal.subtle.hasSinks !== Signal.subtle.hasSinks &&
+    foreignSignal.isState !== Signal.isState &&
+    foreignSignal.isComputed !== Signal.isComputed &&
+    foreignSignal.isWatcher !== Signal.isWatcher &&
     foreignSignal.subtle.watched !== Signal.subtle.watched &&
     foreignSignal.subtle.unwatched !== Signal.subtle.unwatched;
 var local = new Signal.State(2);
 var foreign = new foreignSignal.State(3);
 var crossBrand = Signal.State.prototype.get.call(foreign) === 3 &&
-    foreignSignal.State.prototype.get.call(local) === 2;
+    foreignSignal.State.prototype.get.call(local) === 2 &&
+    Signal.isState(foreign) && foreignSignal.isState(local) &&
+    !Signal.isComputed(foreign) && !foreignSignal.isWatcher(local);
 class ForeignStateSubclass extends foreignSignal.State {}
 var subclass = new ForeignStateSubclass(9);
 var subclassed = Object.getPrototypeOf(subclass) === ForeignStateSubclass.prototype &&
@@ -1281,6 +1301,10 @@ struct SignalResourceCase {
 }
 
 const PINNED_PROPOSAL_FIXTURES: &[(&str, &str)] = &[
+    (
+        "guards",
+        include_str!("../../../../tests/proposal-signals/guards.js"),
+    ),
     (
         "state-computed",
         include_str!("../../../../tests/proposal-signals/state-computed.js"),

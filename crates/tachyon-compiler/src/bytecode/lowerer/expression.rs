@@ -330,6 +330,11 @@ impl Lowerer<'_> {
                 let result = self.call_expression(callee, arguments, expression.span, true)?;
                 self.emit(Opcode::Return, &[result.index()], expression.span)
             }
+            HirExpressionKind::CallSpread { callee, arguments } => {
+                let result =
+                    self.call_spread_expression(callee, arguments, expression.span, true)?;
+                self.emit(Opcode::Return, &[result.index()], expression.span)
+            }
             HirExpressionKind::Sequence(expressions) if !expressions.is_empty() => {
                 for expression in &expressions[..expressions.len() - 1] {
                     self.expression(expression)?;
@@ -980,6 +985,9 @@ impl Lowerer<'_> {
             } => self.conditional(test, consequent, alternate, expression.span),
             HirExpressionKind::Call { callee, arguments } => {
                 self.call_expression(callee, arguments, expression.span, false)
+            }
+            HirExpressionKind::CallSpread { callee, arguments } => {
+                self.call_spread_expression(callee, arguments, expression.span, false)
             }
             HirExpressionKind::SuperCall(arguments) => {
                 self.super_call_expression(arguments, expression.span)
@@ -2216,6 +2224,159 @@ impl Lowerer<'_> {
             span,
         )?;
         Ok(destination)
+    }
+
+    /// Evaluates a receiver/callee before accumulating dynamic arguments and starting one call.
+    pub(in crate::bytecode) fn call_spread_expression(
+        &mut self,
+        callee: &HirExpression,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<RegisterId, CompileError> {
+        if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
+            let receiver_value = self.expression(object)?;
+            let receiver = self.register()?;
+            self.emit(
+                Opcode::Move,
+                &[receiver.index(), receiver_value.index()],
+                span,
+            )?;
+            let callee = self.register()?;
+            let property = self.scope_name(property)?;
+            self.emit(
+                Opcode::GetById,
+                &[callee.index(), receiver.index(), property],
+                span,
+            )?;
+            return self.emit_spread_call(receiver, arguments, span, tail);
+        }
+        if let HirExpressionKind::ComputedMember { object, property } = &callee.kind {
+            let receiver_value = self.expression(object)?;
+            let property = self.expression(property)?;
+            self.prepare_property_key(property, receiver_value, false, span)?;
+            let receiver = self.register()?;
+            self.emit(
+                Opcode::Move,
+                &[receiver.index(), receiver_value.index()],
+                span,
+            )?;
+            let callee = self.register()?;
+            self.emit(
+                Opcode::GetByValue,
+                &[callee.index(), receiver.index(), property.index()],
+                span,
+            )?;
+            return self.emit_spread_call(receiver, arguments, span, tail);
+        }
+        if let HirExpressionKind::PrivateMember { object, name } = &callee.kind {
+            let receiver_value = self.expression(object)?;
+            let key = self.load_private_name(name, span)?;
+            let receiver = self.register()?;
+            self.emit(
+                Opcode::Move,
+                &[receiver.index(), receiver_value.index()],
+                span,
+            )?;
+            let callee = self.register()?;
+            self.emit(
+                Opcode::GetPrivate,
+                &[callee.index(), receiver.index(), key.index()],
+                span,
+            )?;
+            return self.emit_spread_call(receiver, arguments, span, tail);
+        }
+        if let HirExpressionKind::SuperStaticMember(property) = &callee.kind {
+            return self.super_spread_call(Some(property), None, arguments, span, tail);
+        }
+        if let HirExpressionKind::SuperComputedMember(property) = &callee.kind {
+            return self.super_spread_call(None, Some(property), arguments, span, tail);
+        }
+        let direct_eval = matches!(
+            &callee.kind,
+            HirExpressionKind::Identifier(reference)
+                if reference.binding.is_none() && reference.name.as_ref() == "eval"
+        );
+        let callee = self.expression(callee)?;
+        let arguments = self.array_accumulation(arguments, span)?;
+        let destination = self.register()?;
+        let opcode = if direct_eval {
+            Opcode::DirectEvalSpread
+        } else if tail {
+            Opcode::TailCallSpread
+        } else {
+            Opcode::CallSpread
+        };
+        self.emit(
+            opcode,
+            &[destination.index(), callee.index(), arguments.index()],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Finishes one receiver-preserving spread call after its callee has been resolved.
+    fn emit_spread_call(
+        &mut self,
+        receiver: RegisterId,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<RegisterId, CompileError> {
+        let arguments = self.array_accumulation(arguments, span)?;
+        let destination = self.register()?;
+        let opcode = if tail {
+            Opcode::TailCallSpreadWithReceiver
+        } else {
+            Opcode::CallSpreadWithReceiver
+        };
+        self.emit(
+            opcode,
+            &[destination.index(), receiver.index(), arguments.index()],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Resolves a super property while retaining the active `this` for a spread call.
+    fn super_spread_call(
+        &mut self,
+        static_property: Option<&std::sync::Arc<str>>,
+        computed_property: Option<&HirExpression>,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<RegisterId, CompileError> {
+        let receiver_value = self.register()?;
+        self.emit(Opcode::LoadThis, &[receiver_value.index()], span)?;
+        let computed = if let Some(property) = computed_property {
+            let base = self.register()?;
+            self.emit(Opcode::LoadSuperBase, &[base.index()], span)?;
+            let property = self.expression(property)?;
+            self.prepare_property_key(property, base, false, span)?;
+            Some((base, property))
+        } else {
+            None
+        };
+        let receiver = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[receiver.index(), receiver_value.index()],
+            span,
+        )?;
+        let callee = self.register()?;
+        if let Some(property) = static_property {
+            let property = self.scope_name(property)?;
+            self.emit(Opcode::GetSuperById, &[callee.index(), property], span)?;
+        } else {
+            let (base, property) = computed.expect("computed super spread retains lookup state");
+            self.emit(
+                Opcode::GetSuperByValue,
+                &[callee.index(), base.index(), property.index()],
+                span,
+            )?;
+        }
+        self.emit_spread_call(receiver, arguments, span, tail)
     }
 
     /// Loads a super method with the active `this` as receiver and preserves argument order.

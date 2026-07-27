@@ -284,6 +284,9 @@ pub(crate) enum NativeFunction {
     SignalIntrospectSinks,
     SignalHasSources,
     SignalHasSinks,
+    SignalIsState,
+    SignalIsComputed,
+    SignalIsWatcher,
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -481,6 +484,7 @@ pub(crate) enum NativeFunction {
     TypedArrayToReversed,
     TypedArraySort,
     TypedArrayToSorted,
+    TypedArrayWith,
     TypedArraySet,
     TypedArrayJoin,
     TypedArraySlice,
@@ -960,7 +964,10 @@ impl NativeFunction {
             | Self::SignalIntrospectSources
             | Self::SignalIntrospectSinks
             | Self::SignalHasSources
-            | Self::SignalHasSinks => 1,
+            | Self::SignalHasSinks
+            | Self::SignalIsState
+            | Self::SignalIsComputed
+            | Self::SignalIsWatcher => 1,
             Self::SignalStateConstructor
             | Self::SignalComputedConstructor
             | Self::SignalWatcherConstructor => 1,
@@ -1128,6 +1135,7 @@ impl NativeFunction {
             | Self::TypedArraySlice
             | Self::TypedArraySubarray
             | Self::ArrayWith
+            | Self::TypedArrayWith
             | Self::ArrayToSpliced
             | Self::ArrayBufferSlice
             | Self::DataViewSet(_) => 2,
@@ -1325,6 +1333,9 @@ impl NativeFunction {
             Self::SignalIntrospectSinks => "introspectSinks",
             Self::SignalHasSources => "hasSources",
             Self::SignalHasSinks => "hasSinks",
+            Self::SignalIsState => "isState",
+            Self::SignalIsComputed => "isComputed",
+            Self::SignalIsWatcher => "isWatcher",
             Self::ObjectConstructor => "Object",
             Self::ObjectDefineProperty => "defineProperty",
             Self::ObjectDefineProperties => "defineProperties",
@@ -1544,6 +1555,7 @@ impl NativeFunction {
             Self::TypedArrayToReversed => "toReversed",
             Self::TypedArraySort => "sort",
             Self::TypedArrayToSorted => "toSorted",
+            Self::TypedArrayWith => "with",
             Self::TypedArraySet => "set",
             Self::TypedArrayJoin => "join",
             Self::TypedArraySlice => "slice",

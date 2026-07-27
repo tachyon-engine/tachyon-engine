@@ -1689,6 +1689,54 @@ impl Isolate {
                     call_site: instruction_offset,
                 })?;
             }
+            Opcode::CallSpread
+            | Opcode::TailCallSpread
+            | Opcode::DirectEvalSpread
+            | Opcode::CallSpreadWithReceiver
+            | Opcode::TailCallSpreadWithReceiver => {
+                let with_receiver = matches!(
+                    opcode,
+                    Opcode::CallSpreadWithReceiver | Opcode::TailCallSpreadWithReceiver
+                );
+                let receiver = if with_receiver {
+                    self.read(base, operands[1])?
+                } else {
+                    Value::from_immediate(Immediate::Undefined)
+                };
+                let callee_register = operands[1] + u32::from(with_receiver);
+                let callee = self.read(base, callee_register)?;
+                let argument_list = self.read(base, operands[2])?;
+                let operation = match opcode {
+                    Opcode::TailCallSpread | Opcode::TailCallSpreadWithReceiver => {
+                        ArgumentListOperation::TailCall
+                    }
+                    Opcode::DirectEvalSpread => ArgumentListOperation::DirectEval,
+                    _ => ArgumentListOperation::Call,
+                };
+                return self
+                    .begin_internal_spread_call(
+                        &CallSite {
+                            caller_base: base,
+                            destination: operands[0],
+                            callee,
+                            argument_base: 0,
+                            argument_source: None,
+                            argument_prefix: None,
+                            argument_prefix_offset: 0,
+                            argument_prefix_count: 0,
+                            argument_count: 0,
+                            this_value: receiver,
+                            new_target: Value::from_immediate(Immediate::Undefined),
+                            construct_receiver: None,
+                            call_site: instruction_offset,
+                        },
+                        argument_list,
+                        callee,
+                        receiver,
+                        operation,
+                    )
+                    .map(|_| None);
+            }
             Opcode::Construct => self.construct(
                 base,
                 operands[0],
@@ -2358,6 +2406,9 @@ impl Isolate {
             NativeContinuationKind::PromiseFinallyResolve => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::PromiseStaticResolve(
+                PromiseStaticResolveStage::ConstructorPrototype,
+            ) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::PromiseStaticResolve(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -4804,7 +4855,7 @@ impl Isolate {
 
     /// Replaces an eligible strict frame after resolving bound forwarding, otherwise calls normally.
     #[inline(never)]
-    fn tail_call(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
+    pub(crate) fn tail_call(&mut self, mut site: CallSite) -> Result<(), ExecutionError> {
         let frame = *self
             .fiber
             .frames
@@ -6297,6 +6348,22 @@ impl Isolate {
                     let result = self.signal_has_sinks(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::SignalIsState
+                    | NativeFunction::SignalIsComputed
+                    | NativeFunction::SignalIsWatcher),
+                ) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let result = match native {
+                        NativeFunction::SignalIsState => self.signal_is_state(value),
+                        NativeFunction::SignalIsComputed => self.signal_is_computed(value),
+                        NativeFunction::SignalIsWatcher => self.signal_is_watcher(value),
+                        _ => unreachable!("Signal guard dispatch only binds guard functions"),
+                    };
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);
@@ -6381,6 +6448,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayToSorted) => {
                     return self.begin_typed_array_to_sorted(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayWith) => {
+                    return self.begin_typed_array_with(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
                     return self.begin_typed_array_set(&site);
@@ -6967,7 +7037,7 @@ impl Isolate {
 
     /// Copies only callable dispatch metadata through a checked no-GC borrow on the hot path.
     #[inline(always)]
-    fn resolve_function_executable(
+    pub(crate) fn resolve_function_executable(
         &mut self,
         callee: Value,
     ) -> Result<FunctionExecutable, ExecutionError> {
@@ -7816,6 +7886,9 @@ impl Isolate {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.finish_promise_finally_resolved(continuation, state, value)
                 }
+                NativeContinuationKind::PromiseStaticResolve(
+                    PromiseStaticResolveStage::ConstructorPrototype,
+                ) => self.resume_promise_constructor(continuation, value),
                 NativeContinuationKind::PromiseStaticResolve(stage) => {
                     self.resume_generic_promise_resolve(continuation, stage, value)
                 }

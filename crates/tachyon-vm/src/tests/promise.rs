@@ -9,7 +9,7 @@ fn test_isolate() -> Isolate {
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
         HeapLimit::new(16 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
-        RealmLimits::new(64, 1_024).with_max_shapes(512),
+        RealmLimits::new(64, 1_024).with_max_shapes(2_048),
     ))
     .unwrap()
 }
@@ -476,6 +476,65 @@ if (result === returned) score += 32;
 score;
 "#;
 
+const PROMISE_CONSTRUCTOR_PROTOTYPE_SOURCE: &str = r#"
+var accessorTrace = "";
+var accessorPrototype = {};
+var accessorTarget = (function() {}).bind(undefined);
+Object.defineProperty(accessorTarget, "prototype", {
+  get: function() {
+    accessorTrace = accessorTrace + "g";
+    return accessorPrototype;
+  }
+});
+var accessorPromise = Reflect.construct(Promise, [function(resolve) {
+  accessorTrace = accessorTrace + "e";
+  resolve(1);
+}], accessorTarget);
+
+var proxyTrace = "";
+var proxyReceiver = false;
+var proxyPrototype = {};
+function ProxyTarget() {}
+var proxyTarget;
+proxyTarget = new Proxy(ProxyTarget, {
+  get: function(target, key, receiver) {
+    proxyTrace = proxyTrace + key;
+    proxyReceiver = receiver === proxyTarget;
+    return proxyPrototype;
+  }
+});
+var proxyPromise = Reflect.construct(Promise, [function(resolve) {
+  proxyTrace = proxyTrace + ":executor";
+  resolve(2);
+}], proxyTarget);
+
+var abruptSentinel = {};
+var abruptExecutorCalls = 0;
+var abruptIdentity = false;
+var abruptTarget = (function() {}).bind(undefined);
+Object.defineProperty(abruptTarget, "prototype", {
+  get: function() { throw abruptSentinel; }
+});
+try {
+  Reflect.construct(Promise, [function() { abruptExecutorCalls++; }], abruptTarget);
+} catch (error) {
+  abruptIdentity = error === abruptSentinel;
+}
+
+accessorTrace === "ge" && Object.getPrototypeOf(accessorPromise) === accessorPrototype &&
+  proxyTrace === "prototype:executor" && proxyReceiver &&
+  Object.getPrototypeOf(proxyPromise) === proxyPrototype &&
+  abruptIdentity && abruptExecutorCalls === 0;
+"#;
+
+const PROMISE_CONSTRUCTOR_CROSS_REALM_SOURCE: &str = r#"
+var crossRealmPromise = Reflect.construct(Promise, [function(resolve) {
+  resolve(3);
+}], foreignPromiseConstructor);
+globalThis.crossRealmPromiseResult = crossRealmPromise;
+crossRealmPromise !== undefined;
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -609,6 +668,86 @@ fn promise_catch_invokes_generic_then_with_exact_arguments() {
             RunOutcome::Completed(value) => value.as_i32(),
             _ => None,
         }
+    );
+}
+
+#[test]
+fn promise_constructor_prototype_get_is_resumable_for_every_batch_and_forced_major() {
+    assert_promise_constructor_prototype::<1>(5_961, false);
+    assert_promise_constructor_prototype::<2>(5_962, false);
+    assert_promise_constructor_prototype::<4>(5_964, false);
+    assert_promise_constructor_prototype::<8>(5_968, false);
+    assert_promise_constructor_prototype::<16>(5_976, false);
+    assert_promise_constructor_prototype::<8>(5_984, true);
+}
+
+/// Verifies non-object fallback selects `%Promise.prototype%` from newTarget's defining Realm.
+#[test]
+fn promise_constructor_non_object_prototype_uses_new_target_realm_fallback() {
+    let module = compile_promise_source(5_990, PROMISE_CONSTRUCTOR_CROSS_REALM_SOURCE);
+    let child_module = compile_promise_source(
+        5_991,
+        "var ForeignPromiseTarget = function() {}; ForeignPromiseTarget.prototype = 1;",
+    );
+    let mut isolate = test_isolate();
+    let (child_realm, _) = isolate.create_realm().expect("child Realm initializes");
+    let child_outcome = isolate
+        .execute_in_realm(
+            child_realm,
+            &child_module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("child Realm constructor fixture executes");
+    assert!(matches!(child_outcome, RunOutcome::Completed(_)));
+    let constructor_atom = isolate
+        .intern_intrinsic_name(b"ForeignPromiseTarget")
+        .unwrap();
+    let foreign_constructor = isolate
+        .inactive_realms
+        .iter()
+        .find(|(realm, _)| *realm == child_realm)
+        .and_then(|(_, realm)| {
+            realm
+                .resolve(constructor_atom)
+                .and_then(|slot| realm.get_slot(slot))
+        })
+        .expect("child Realm publishes constructor");
+    let foreign_prototype = isolate
+        .realm_intrinsic_prototype(child_realm, IntrinsicPrototypeKind::Promise)
+        .expect("child Realm publishes Promise prototype");
+    let foreign_atom = isolate
+        .intern_intrinsic_name(b"foreignPromiseConstructor")
+        .unwrap();
+    let global = isolate
+        .realm
+        .global_object
+        .expect("main global initializes");
+    isolate
+        .set_own_data_property(global, foreign_atom, foreign_constructor)
+        .unwrap();
+    isolate
+        .realm
+        .set(foreign_atom, foreign_constructor)
+        .unwrap();
+    let outcome = run_promise_module::<8>(&mut isolate, &module);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "cross-Realm Promise construction returned {outcome:?}"
+    );
+    let result_atom = isolate
+        .intern_intrinsic_name(b"crossRealmPromiseResult")
+        .unwrap();
+    let result = isolate
+        .get_data_property(global, result_atom)
+        .unwrap()
+        .expect("fixture publishes cross-Realm Promise");
+    assert_eq!(
+        isolate.object_prototype_of(result).unwrap(),
+        foreign_prototype,
+        "non-object prototype must fall back to newTarget Realm's Promise prototype"
     );
 }
 
@@ -794,6 +933,22 @@ fn assert_promise_try<const N: usize>(source_id: u32, forced_major: bool) {
     );
 }
 
+/// Covers accessor and Proxy prototype Get ordering, receiver identity, abruptness, and roots.
+fn assert_promise_constructor_prototype<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_promise_source(source_id, PROMISE_CONSTRUCTOR_PROTOTYPE_SOURCE);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = run_promise_module::<N>(&mut isolate, &module);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
 /// Compiles one Promise fixture while retaining no Oxc arena state.
 fn compile_promise_source(source_id: u32, source: &str) -> CompiledModule {
     Compiler
@@ -822,5 +977,5 @@ fn run_promise_module<const N: usize>(
                 quantum: 4_096,
             },
         )
-        .expect("Promise.all fixture executes")
+        .unwrap_or_else(|error| panic!("Promise fixture batch {N} executes: {error:?}"))
 }

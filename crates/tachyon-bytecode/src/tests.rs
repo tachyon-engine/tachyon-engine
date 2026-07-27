@@ -182,7 +182,17 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::InitializeEnvironment,
             ],
         ),
-        (3, &[Opcode::YieldDelegate]),
+        (
+            3,
+            &[
+                Opcode::YieldDelegate,
+                Opcode::CallSpread,
+                Opcode::TailCallSpread,
+                Opcode::CallSpreadWithReceiver,
+                Opcode::TailCallSpreadWithReceiver,
+                Opcode::DirectEvalSpread,
+            ],
+        ),
         (
             2,
             &[

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        ArrayExpressionElement, AssignmentTarget, Expression, ObjectPropertyKind, PropertyKey,
-        PropertyKind, SimpleAssignmentTarget,
+        Argument, ArrayExpressionElement, AssignmentTarget, Expression, ObjectPropertyKind,
+        PropertyKey, PropertyKind, SimpleAssignmentTarget,
     },
     semantic::Semantic,
     span::{GetSpan, Span},
@@ -254,6 +254,11 @@ pub enum HirExpressionKind {
     Call {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
+    },
+    /// A call whose ordered argument list contains at least one iterator spread.
+    CallSpread {
+        callee: Box<HirExpression>,
+        arguments: Arc<[HirArrayExpressionPart]>,
     },
     SuperCall(Arc<[HirExpression]>),
     New {
@@ -769,25 +774,50 @@ pub(super) fn lower_expression(
             HirExpressionKind::SuperCall(arguments.into())
         }
         Expression::CallExpression(expression) if !expression.optional => {
-            let mut arguments = Vec::with_capacity(expression.arguments.len());
-            for argument in &expression.arguments {
-                let argument = argument.as_expression().ok_or_else(|| {
-                    unsupported(
-                        source.name(),
-                        source_span(argument.span()),
-                        "spread argument",
-                    )
-                })?;
-                arguments.push(lower_expression(argument, source, semantic, functions)?);
-            }
-            HirExpressionKind::Call {
-                callee: Box::new(lower_expression(
-                    &expression.callee,
-                    source,
-                    semantic,
-                    functions,
-                )?),
-                arguments: arguments.into(),
+            let callee = Box::new(lower_expression(
+                &expression.callee,
+                source,
+                semantic,
+                functions,
+            )?);
+            if expression
+                .arguments
+                .iter()
+                .any(|argument| argument.is_spread())
+            {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    if let Some(expression) = argument.as_expression() {
+                        arguments.push(HirArrayExpressionPart::Element(lower_expression(
+                            expression, source, semantic, functions,
+                        )?));
+                    } else if let Argument::SpreadElement(spread) = argument {
+                        arguments.push(HirArrayExpressionPart::Spread(lower_expression(
+                            &spread.argument,
+                            source,
+                            semantic,
+                            functions,
+                        )?));
+                    } else {
+                        unreachable!("Oxc call arguments are expressions or spread elements");
+                    }
+                }
+                HirExpressionKind::CallSpread {
+                    callee,
+                    arguments: arguments.into(),
+                }
+            } else {
+                let mut arguments = Vec::with_capacity(expression.arguments.len());
+                for argument in &expression.arguments {
+                    let argument = argument
+                        .as_expression()
+                        .expect("non-spread call argument is an expression");
+                    arguments.push(lower_expression(argument, source, semantic, functions)?);
+                }
+                HirExpressionKind::Call {
+                    callee,
+                    arguments: arguments.into(),
+                }
             }
         }
         Expression::NewExpression(expression) if expression.type_arguments.is_none() => {

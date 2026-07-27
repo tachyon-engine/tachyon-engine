@@ -1,7 +1,7 @@
 //! Discovery of named class-expression environments across owned HIR trees.
 
 use crate::hir::HirPrivateName;
-use crate::hir::{HirForInLeft, HirObjectExpressionPart};
+use crate::hir::{HirArrayExpressionPart, HirForInLeft, HirObjectExpressionPart};
 use crate::{
     HirAssignmentTarget, HirBinding, HirExpression, HirExpressionKind, HirForInitializer,
     HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind, HirProgram,
@@ -301,6 +301,18 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnviro
             collect_expression(callee, bindings);
             for argument in arguments.iter() {
                 collect_expression(argument, bindings);
+            }
+        }
+        HirExpressionKind::CallSpread { callee, arguments } => {
+            collect_expression(callee, bindings);
+            for argument in arguments.iter() {
+                match argument {
+                    HirArrayExpressionPart::Element(expression)
+                    | HirArrayExpressionPart::Spread(expression) => {
+                        collect_expression(expression, bindings);
+                    }
+                    HirArrayExpressionPart::Elision => {}
+                }
             }
         }
         HirExpressionKind::SuperCall(arguments) => {

@@ -407,6 +407,11 @@ impl BytecodeBuilder {
                 )?;
                 return Ok(());
             }
+            Opcode::CallSpread
+            | Opcode::TailCallSpread
+            | Opcode::CallSpreadWithReceiver
+            | Opcode::TailCallSpreadWithReceiver
+            | Opcode::DirectEvalSpread => &[0, 1, 2],
             Opcode::YieldDelegate => {
                 for &index in &[0, 1] {
                     if let Some(&register) = operands.get(index) {

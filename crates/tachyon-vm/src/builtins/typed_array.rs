@@ -14,6 +14,7 @@ mod sort;
 mod subarray;
 mod to_reversed;
 mod to_sorted;
+mod with;
 
 use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};

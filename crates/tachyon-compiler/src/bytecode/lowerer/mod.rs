@@ -8,7 +8,7 @@ use tachyon_bytecode::{
     SuspendPointId,
 };
 
-use crate::hir::HirObjectExpressionPart;
+use crate::hir::{HirArrayExpressionPart, HirObjectExpressionPart};
 use crate::hir::{
     HirAssignmentOperator, HirAssignmentTarget, HirForInLeft, HirPattern, HirPatternKind,
 };

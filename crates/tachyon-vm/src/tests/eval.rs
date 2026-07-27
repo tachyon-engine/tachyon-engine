@@ -269,6 +269,19 @@ fn direct_eval_lexical_record_enforces_tdz_const_and_escaping_closure_capture() 
 }
 
 #[test]
+fn direct_eval_spread_retains_caller_scope_for_every_dispatch_batch() {
+    let module = compile_source(
+        "var value = 1; var trace = ''; function extra() { trace += 'e'; return 0; } eval(...['value = 7'], extra()); value === 7 && trace === 'e';",
+        1_172,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
 fn sloppy_arguments_indices_alias_simple_parameters() {
     let module = compile_source(
         "function foo(a, b, c) { a = 1; b = 'str'; c = 2.1; return arguments[0] === 1 && arguments[1] === 'str' && arguments[2] === 2.1; } function bar(a) { arguments[0] = 7; return a === 7; } foo(10, 'sss', 1) && bar(3);",

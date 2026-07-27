@@ -16,6 +16,9 @@ pub(crate) enum ArgumentListOperation {
     FunctionApply,
     ReflectApply,
     ReflectConstruct,
+    Call,
+    TailCall,
+    DirectEval,
 }
 
 /// GC-owned state retained while an observable `length` or indexed `Get` is executing.
@@ -63,6 +66,94 @@ struct ArgumentListSnapshot {
 }
 
 impl Isolate {
+    /// Fast-paths compiler-private packed Arrays and falls back to the resumable property walker.
+    pub(crate) fn begin_internal_spread_call(
+        &mut self,
+        site: &CallSite,
+        source: Value,
+        target: Value,
+        this_value: Value,
+        operation: ArgumentListOperation,
+    ) -> Result<(), ExecutionError> {
+        let Some(arguments) = self.packed_array_values(source)? else {
+            return self.begin_argument_list(
+                site,
+                source,
+                target,
+                this_value,
+                Value::from_immediate(Immediate::Undefined),
+                operation,
+            );
+        };
+        let length_atom = self.length_atom()?;
+        let length = self
+            .get_data_property(source, length_atom)?
+            .and_then(crate::numeric_value)
+            .filter(|length| length.is_finite() && *length >= 0.0 && length.fract() == 0.0)
+            .and_then(|length| usize::try_from(length as u64).ok());
+        if length != Some(arguments.len()) {
+            return self.begin_argument_list(
+                site,
+                source,
+                target,
+                this_value,
+                Value::from_immediate(Immediate::Undefined),
+                operation,
+            );
+        }
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.finish_internal_spread_call(
+            continuation_site,
+            target,
+            this_value,
+            arguments,
+            operation,
+        )
+    }
+
+    /// Freezes one packed argument snapshot in the existing immutable call-prefix representation.
+    fn finish_internal_spread_call(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+        operation: ArgumentListOperation,
+    ) -> Result<(), ExecutionError> {
+        if operation == ArgumentListOperation::DirectEval
+            && self.finish_direct_eval_argument_list(&site, target, &arguments)?
+        {
+            return Ok(());
+        }
+        let argument_count = u32::try_from(arguments.len())
+            .map_err(|_| ExecutionError::BoundArgumentCountOverflow)?;
+        let prefix = self.create_apply_argument_prefix(target, this_value, arguments)?;
+        let call_site = CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: target,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: argument_count,
+            argument_count,
+            this_value,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        };
+        match operation {
+            ArgumentListOperation::TailCall => self.tail_call(call_site),
+            ArgumentListOperation::Call | ArgumentListOperation::DirectEval => self.call(call_site),
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
     /// Starts `CreateListFromArrayLike`, publishing state before the observable `Get(length)`.
     pub(crate) fn begin_argument_list(
         &mut self,
@@ -241,6 +332,11 @@ impl Isolate {
         snapshot: ArgumentListSnapshot,
     ) -> Result<(), ExecutionError> {
         let arguments = self.copy_argument_list_values(state, snapshot.length)?;
+        if snapshot.operation == ArgumentListOperation::DirectEval
+            && self.finish_direct_eval_argument_list(&site, snapshot.target, &arguments)?
+        {
+            return Ok(());
+        }
         let prefix =
             self.create_apply_argument_prefix(snapshot.target, snapshot.this_value, arguments)?;
         let call_site = CallSite {
@@ -259,11 +355,53 @@ impl Isolate {
             call_site: site.call_site,
         };
         match snapshot.operation {
-            ArgumentListOperation::FunctionApply | ArgumentListOperation::ReflectApply => {
-                self.call(call_site).map(|_| ())
-            }
+            ArgumentListOperation::FunctionApply
+            | ArgumentListOperation::ReflectApply
+            | ArgumentListOperation::Call
+            | ArgumentListOperation::DirectEval => self.call(call_site).map(|_| ()),
+            ArgumentListOperation::TailCall => self.tail_call(call_site).map(|_| ()),
             ArgumentListOperation::ReflectConstruct => self.construct_site(call_site).map(|_| ()),
         }
+    }
+
+    /// Executes the direct-eval branch after every spread argument has already been evaluated.
+    fn finish_direct_eval_argument_list(
+        &mut self,
+        site: &NativeContinuationSite,
+        callee: Value,
+        arguments: &[Value],
+    ) -> Result<bool, ExecutionError> {
+        let is_current_eval = matches!(
+            self.resolve_function_executable(callee)?,
+            crate::FunctionExecutable::Native(crate::NativeFunction::HostEvalScript)
+        ) && self.realm_for_callable(callee)? == self.active_realm;
+        if !is_current_eval {
+            return Ok(false);
+        }
+        let source = arguments
+            .first()
+            .copied()
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_string_value(source) {
+            self.write(site.caller_base, site.destination, source)?;
+            return Ok(true);
+        }
+        let callback = self
+            .eval_script_callback
+            .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        let strict_caller = self
+            .fiber
+            .frames
+            .last()
+            .is_some_and(|frame| frame.strictness == crate::FunctionStrictness::Strict);
+        let result = callback(
+            self,
+            self.active_realm,
+            crate::EvalKind::Direct { strict_caller },
+            source,
+        )?;
+        self.write(site.caller_base, site.destination, result)?;
+        Ok(true)
     }
 
     pub(crate) fn pending_argument_list_reference(

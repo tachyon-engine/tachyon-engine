@@ -1,5 +1,5 @@
 schema_version = 1
-api_sha256 = "3d57737cbd87062e2f5ffa2833797a8caa666addb553938bed32ea01736251b8"
+api_sha256 = "5245a0ae7aa51e51bd50c4b7810f989b479192c0c245849f2c92a9c780bf6786"
 api_surface = [
     "globalThis.Signal",
     "Signal.State(value, options?)",
@@ -7,6 +7,9 @@ api_surface = [
     "Signal.State.prototype.set(value)",
     "Signal.Computed(callback, options?)",
     "Signal.Computed.prototype.get()",
+    "Signal.isState(value)",
+    "Signal.isComputed(value)",
+    "Signal.isWatcher(value)",
     "Signal.subtle.Watcher(notify)",
     "Signal.subtle.Watcher.prototype.watch(...signals)",
     "Signal.subtle.Watcher.prototype.unwatch(...signals)",
@@ -25,11 +28,18 @@ api_surface = [
 repository = "https://github.com/tc39/proposal-signals.git"
 commit = "9124ed91b24bb02ff7408b2fcf5abb6e18b095d7"
 content_sha256 = "505e7f1a4b75a5bdc6ef15fbcb937021767cfc02392cd545b8cf9d22797dc63c"
+stage = 1
 
 [reference_suite]
 repository = "https://github.com/proposal-signals/signal-polyfill.git"
 commit = "1c33f914806f0872229cba05a1c882a38c0def4f"
 content_sha256 = "5a7107f394707ff0ffcedca91de7cc97022a9a389bb28427d71addc7f6f583a1"
+
+[[cases]]
+id = "guards"
+path = "tests/proposal-signals/guards.js"
+source_sha256 = "6543a36dc87c1efd950b0e399bf48f52f483e08011f278738a7d3ca0c21c37e1"
+upstream = ["tests/behaviors/guards.test.ts", "src/public-api-types.ts"]
 
 [[cases]]
 id = "state-computed"

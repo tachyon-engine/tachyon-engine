@@ -342,6 +342,30 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined))
     }
 
+    #[inline(always)]
+    pub(crate) fn signal_is_state(&mut self, value: Value) -> Value {
+        Self::signal_brand_result(self.signal_state_reference(value).is_ok())
+    }
+
+    #[inline(always)]
+    pub(crate) fn signal_is_computed(&mut self, value: Value) -> Value {
+        Self::signal_brand_result(self.signal_computed_reference(value).is_ok())
+    }
+
+    #[inline(always)]
+    pub(crate) fn signal_is_watcher(&mut self, value: Value) -> Value {
+        Self::signal_brand_result(self.signal_watcher_reference(value).is_ok())
+    }
+
+    #[inline(always)]
+    fn signal_brand_result(matches: bool) -> Value {
+        Value::from_immediate(if matches {
+            Immediate::True
+        } else {
+            Immediate::False
+        })
+    }
+
     /// Returns a fresh ordered snapshot of the Computed or Watcher source edges.
     pub(crate) fn signal_introspect_sources(
         &mut self,

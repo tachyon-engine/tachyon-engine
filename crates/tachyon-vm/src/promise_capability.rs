@@ -191,6 +191,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         match stage {
+            PromiseStaticResolveStage::ConstructorPrototype => {
+                Err(ExecutionError::MissingNativeContinuation)
+            }
             PromiseStaticResolveStage::ResolveConstructor => {
                 self.finish_generic_static_constructor(continuation, value, false)
             }

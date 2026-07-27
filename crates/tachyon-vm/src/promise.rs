@@ -9,6 +9,22 @@ const FIN_REJECTED: usize = 3;
 const FIN_CONSTRUCTOR: usize = 4;
 const FIN_RESULT_ORIGINAL: usize = 0;
 const FIN_RESULT_REJECTED: usize = 2;
+const CONSTRUCTOR_EXECUTOR: usize = 0;
+const CONSTRUCTOR_NEW_TARGET: usize = 1;
+const CONSTRUCTOR_PROTOTYPE: usize = 2;
+
+struct PromiseConstructorRoots<'a> {
+    vm: VmRoots<'a>,
+    pending: NativeCallState,
+}
+
+impl Trace for PromiseConstructorRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.pending.trace(tracer);
+    }
+}
 
 impl Isolate {
     /// Allocates one Promise with its state/result initialized before publication.
@@ -171,24 +187,163 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         self.resolve_function_object(executor)?;
         let prototype_atom = self.prototype_atom()?;
-        let prototype = self
-            .get_data_property(site.new_target, prototype_atom)?
-            .filter(|prototype| self.is_object_value(*prototype))
-            .or_else(|| {
-                self.realm_for_callable(site.new_target)
-                    .ok()
-                    .and_then(|realm| {
-                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Promise)
-                    })
-            })
-            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        match self.resolve_property_read_until_proxy(site.new_target, prototype_atom.into())? {
+            PropertyReadResolution::Read(PropertyRead::Missing) => self.finish_promise_constructor(
+                site,
+                executor,
+                site.new_target,
+                Value::from_immediate(Immediate::Undefined),
+                None,
+            ),
+            PropertyReadResolution::Read(PropertyRead::Data(prototype)) => {
+                self.finish_promise_constructor(site, executor, site.new_target, prototype, None)
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.finish_promise_constructor(
+                    site,
+                    executor,
+                    site.new_target,
+                    Value::from_immediate(Immediate::Undefined),
+                    None,
+                )
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter)) => {
+                self.dispatch_promise_constructor_prototype(site, executor, Some(getter))
+            }
+            PropertyReadResolution::Proxy(_) => {
+                self.dispatch_promise_constructor_prototype(site, executor, None)
+            }
+        }
+    }
+
+    /// Publishes constructor inputs before the observable prototype Get can suspend or collect.
+    fn dispatch_promise_constructor_prototype(
+        &mut self,
+        site: &CallSite,
+        executor: Value,
+        getter: Option<Value>,
+    ) -> Result<(), ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_promise_constructor_state(NativeCallState {
+            values: [executor, site.new_target, undefined, undefined, undefined],
+            count: 0,
+        })?;
+        let state_value = Value::from_heap_ref(state.raw());
+        self.write(site.caller_base, site.destination, state_value)?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let continuation = NativeContinuation::promise_constructor_prototype(
+            native_site,
+            state_value,
+            site.new_target,
+        );
+        if let Some(getter) = getter {
+            self.dispatch_property_callback(continuation, getter)?;
+            return Ok(());
+        }
+
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Isolate::completion_stack_error)?;
+        let prototype_atom = self.prototype_atom()?;
+        if let Err(error) = self.dispatch_proxy_aware_property_read(
+            native_site,
+            site.new_target,
+            site.new_target,
+            prototype_atom.into(),
+        ) {
+            if self.fiber.completions.len() > depth {
+                self.pop_native_continuation()?;
+            }
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frames || self.fiber.completions.len() <= depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let prototype = self.read(site.caller_base, site.destination)?;
+        self.resume_promise_constructor(continuation, prototype)
+    }
+
+    /// Restores the managed state root, captures the prototype, and enters Promise allocation.
+    pub(crate) fn resume_promise_constructor(
+        &mut self,
+        continuation: NativeContinuation,
+        prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let state = self.native_call_state_reference(continuation.first())?;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            continuation.first(),
+        )?;
+        self.set_promise_constructor_value(state, CONSTRUCTOR_PROTOTYPE, prototype)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let site = CallSite {
+            caller_base: continuation.site().caller_base,
+            destination: continuation.site().destination,
+            callee: Value::from_immediate(Immediate::Undefined),
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: Value::from_immediate(Immediate::Undefined),
+            new_target: pending.values[CONSTRUCTOR_NEW_TARGET],
+            construct_receiver: None,
+            call_site: continuation.site().call_site,
+        };
+        self.finish_promise_constructor(
+            &site,
+            pending.values[CONSTRUCTOR_EXECUTOR],
+            pending.values[CONSTRUCTOR_NEW_TARGET],
+            pending.values[CONSTRUCTOR_PROTOTYPE],
+            Some(state),
+        )
+    }
+
+    /// Allocates the Promise and calls its executor after prototype selection has completed.
+    fn finish_promise_constructor(
+        &mut self,
+        site: &CallSite,
+        executor: Value,
+        new_target: Value,
+        candidate_prototype: Value,
+        state: Option<GcRef<NativeCallState>>,
+    ) -> Result<(), ExecutionError> {
+        let prototype = if self.is_object_value(candidate_prototype) {
+            candidate_prototype
+        } else {
+            self.realm_for_callable(new_target)
+                .ok()
+                .and_then(|realm| {
+                    self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Promise)
+                })
+                .ok_or(ExecutionError::MissingNativeContinuation)?
+        };
         let promise = self.create_promise_with_prototype(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
             prototype,
         )?;
-        self.write(site.caller_base, site.destination, promise)?;
+        if let Some(state) = state {
+            self.set_promise_constructor_value(state, CONSTRUCTOR_PROTOTYPE, promise)?;
+        } else {
+            self.write(site.caller_base, site.destination, promise)?;
+        }
         let arguments = self.create_promise_capability_arguments(promise)?;
+        if state.is_some() {
+            self.write(site.caller_base, site.destination, promise)?;
+        }
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
             destination: site.destination,
@@ -239,6 +394,56 @@ impl Isolate {
         let continuation = self.pop_native_continuation()?;
         debug_assert_eq!(continuation.kind(), NativeContinuationKind::PromiseExecutor);
         self.write(site.caller_base, site.destination, promise)
+    }
+
+    /// Allocates the fixed constructor state under the complete VM root set.
+    fn allocate_promise_constructor_state(
+        &mut self,
+        pending: NativeCallState,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let mut roots = PromiseConstructorRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            pending,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                roots.pending,
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Stores one constructor edge and applies the old-to-young write barrier.
+    fn set_promise_constructor_value(
+        &mut self,
+        state: GcRef<NativeCallState>,
+        index: usize,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.native_call_state)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .values[index] = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(state, value)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })
     }
 
     /// Claims one shared resolving-function cell before any observable resolution work.

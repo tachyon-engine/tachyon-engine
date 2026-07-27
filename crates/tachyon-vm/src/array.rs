@@ -85,6 +85,18 @@ impl ArrayElements {
         self.used - self.hole_count
     }
 
+    /// Copies a packed prefix exactly once, rejecting holey backing for caller fallback.
+    pub(crate) fn copy_packed_values(&self) -> Result<Option<Vec<Value>>, ()> {
+        if !self.is_packed() {
+            return Ok(None);
+        }
+        let length = self.used as usize;
+        let mut values = Vec::new();
+        values.try_reserve_exact(length).map_err(|_| ())?;
+        values.extend_from_slice(&self.slots[..length]);
+        Ok(Some(values))
+    }
+
     /// Stores one in-capacity index and maintains the packed/holey classification.
     pub(crate) fn set(&mut self, index: u32, value: Value) -> Result<(), ()> {
         let index = index as usize;

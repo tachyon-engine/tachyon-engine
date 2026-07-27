@@ -537,6 +537,19 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::TypedArrayWithIndex
+                            | ConversionConsumer::TypedArrayWithValue
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_with_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::TypedArrayIndexSet {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_typed_array_index_set_conversion(
@@ -1329,6 +1342,10 @@ impl Isolate {
                 }
                 ConversionConsumer::TypedArrayAtIndex => {
                     unreachable!("TypedArray at conversion resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayWithIndex
+                | ConversionConsumer::TypedArrayWithValue => {
+                    unreachable!("TypedArray with conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayIncludesFromIndex => {
                     unreachable!("TypedArray includes conversion resumes inside its state machine")
