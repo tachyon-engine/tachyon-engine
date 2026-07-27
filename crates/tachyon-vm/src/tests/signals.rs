@@ -960,6 +960,65 @@ branchWatcher.unwatch(branch);
 deduplicated && lifecycle && abrupt && invariant && recovered && switched;
 "#;
 
+const SIGNAL_GC_LIVENESS_SETUP_SOURCE: &str = r#"
+var gcHookTrace = "";
+var rootedSource = new Signal.State({ marker: 1 }, {
+    [Signal.subtle.watched]: function() { gcHookTrace += "w"; },
+    [Signal.subtle.unwatched]: function() { gcHookTrace += "u"; }
+});
+var transientWatcher = new Signal.subtle.Watcher(function() {});
+transientWatcher.watch(rootedSource);
+var weakWatcher = new WeakRef(transientWatcher);
+
+var coldComputed = new Signal.Computed(function() { return 1; });
+var weakColdComputed = new WeakRef(coldComputed);
+
+var cycleSource = new Signal.State(2, {
+    [Signal.subtle.watched]: function() { gcHookTrace += "c"; },
+    [Signal.subtle.unwatched]: function() { gcHookTrace += "x"; }
+});
+var cycleComputed = new Signal.Computed(function() { return cycleSource.get(); });
+cycleComputed.get();
+var cycleWatcher = new Signal.subtle.Watcher(function() {});
+cycleWatcher.watch(cycleComputed);
+var weakCycleSource = new WeakRef(cycleSource);
+var weakCycleComputed = new WeakRef(cycleComputed);
+var weakCycleWatcher = new WeakRef(cycleWatcher);
+gcHookTrace === "wc";
+"#;
+
+const SIGNAL_GC_LIVENESS_DROP_ROOTS_SOURCE: &str = r#"
+transientWatcher = null;
+coldComputed = null;
+cycleSource = null;
+cycleComputed = null;
+cycleWatcher = null;
+true;
+"#;
+
+const SIGNAL_GC_LIVENESS_AFTER_FIRST_MAJOR_SOURCE: &str = r#"
+var recoveredWatcher = weakWatcher.deref();
+var activeWatcherRetained = recoveredWatcher !== undefined;
+var coldComputedCollected = weakColdComputed.deref() === undefined;
+var cycleSourceCollected = weakCycleSource.deref() === undefined;
+var cycleComputedCollected = weakCycleComputed.deref() === undefined;
+var cycleWatcherCollected = weakCycleWatcher.deref() === undefined;
+var collectionSkippedHooks = gcHookTrace === "wc";
+recoveredWatcher.unwatch(rootedSource);
+recoveredWatcher = null;
+activeWatcherRetained && coldComputedCollected && cycleSourceCollected &&
+cycleComputedCollected && cycleWatcherCollected && collectionSkippedHooks && gcHookTrace === "wcu";
+"#;
+
+const SIGNAL_GC_LIVENESS_AFTER_UNWATCH_MAJOR_SOURCE: &str = r#"
+weakWatcher.deref() === undefined && rootedSource.get().marker === 1 && gcHookTrace === "wcu";
+"#;
+
+const SIGNAL_GC_LIVENESS_DROP_RECOVERED_SOURCE: &str = r#"
+recoveredWatcher = null;
+true;
+"#;
+
 const PINNED_PROPOSAL_FIXTURES: &[(&str, &str)] = &[
     (
         "state-computed",
@@ -1419,6 +1478,95 @@ fn signal_computed_lifecycle_hooks_work_for_every_dispatch_batch() {
         8_755,
         "signals-computed-hooks",
         true,
+    );
+}
+
+/// Exercises graph ownership across job boundaries and explicit major collections.
+#[test]
+fn signal_gc_liveness_contract_works_for_every_dispatch_batch() {
+    assert_signal_gc_liveness::<1>(8_800);
+    assert_signal_gc_liveness::<2>(8_810);
+    assert_signal_gc_liveness::<4>(8_820);
+    assert_signal_gc_liveness::<8>(8_830);
+    assert_signal_gc_liveness::<16>(8_840);
+}
+
+/// Runs setup, collection, detach, and collection as distinct ECMAScript jobs.
+fn assert_signal_gc_liveness<const N: usize>(source_id: u32) {
+    let mut isolate = signal_api_test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    assert_signal_job::<N>(
+        &mut isolate,
+        SIGNAL_GC_LIVENESS_SETUP_SOURCE,
+        source_id,
+        "signals-gc-liveness-setup",
+    );
+    assert_signal_job::<N>(
+        &mut isolate,
+        SIGNAL_GC_LIVENESS_DROP_ROOTS_SOURCE,
+        source_id + 1,
+        "signals-gc-liveness-drop-roots",
+    );
+    collect_signal_major_at_job_boundary(&mut isolate);
+    assert_signal_job::<N>(
+        &mut isolate,
+        SIGNAL_GC_LIVENESS_AFTER_FIRST_MAJOR_SOURCE,
+        source_id + 2,
+        "signals-gc-liveness-first-major",
+    );
+    assert_signal_job::<N>(
+        &mut isolate,
+        SIGNAL_GC_LIVENESS_DROP_RECOVERED_SOURCE,
+        source_id + 3,
+        "signals-gc-liveness-drop-recovered",
+    );
+    collect_signal_major_at_job_boundary(&mut isolate);
+    assert_signal_job::<N>(
+        &mut isolate,
+        SIGNAL_GC_LIVENESS_AFTER_UNWATCH_MAJOR_SOURCE,
+        source_id + 4,
+        "signals-gc-liveness-unwatch-major",
+    );
+}
+
+/// Clears the current-job kept-object set before tracing the complete VM root surface.
+fn collect_signal_major_at_job_boundary(isolate: &mut Isolate) {
+    isolate.heap.clear_kept_objects_at_job_boundary();
+    let mut roots = VmRoots {
+        fiber: &mut isolate.fiber,
+        finalization_jobs: &mut isolate.finalization_jobs,
+        promise_jobs: &mut isolate.promise_jobs,
+        realm: &mut isolate.realm,
+        loaded_code: &mut isolate.loaded_code,
+    };
+    isolate
+        .heap
+        .collect_major(&mut roots)
+        .expect("Signal graph major collection succeeds");
+}
+
+/// Compiles and executes one assertion-valued Signals job with a selected dispatch batch.
+fn assert_signal_job<const N: usize>(
+    isolate: &mut Isolate,
+    source: &'static str,
+    source_id: u32,
+    name: &'static str,
+) {
+    let module = compile_signal_source(source, source_id, name);
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("Signal GC liveness job executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "Signal GC liveness job {name}, dispatch batch {N} returned {outcome:?}"
     );
 }
 
