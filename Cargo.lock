@@ -2262,8 +2262,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "benchmark-runner",
+ "serde",
  "serde_json",
+ "sha2",
  "test262-runner",
+ "toml",
 ]
 
 [[package]]

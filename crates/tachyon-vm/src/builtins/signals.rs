@@ -1379,7 +1379,9 @@ impl Isolate {
             return self.write(site.caller_base, site.destination, snapshot.2);
         }
         if snapshot.0 == ComputedState::Computing {
-            return Err(ExecutionError::NotObject(receiver));
+            let error = self.create_native_error(NativeErrorKind::Type, None)?;
+            self.commit_signal_computed_completion(computed, error, true)?;
+            return Err(ExecutionError::HostThrown(error));
         }
         let pending = self.allocate_pending_signal_computed_pull(receiver)?;
         self.resume_signal_computed_pull(
@@ -1409,7 +1411,10 @@ impl Isolate {
                     self.pending_signal_computed_pull_pop(pending)?;
                 }
                 ComputedState::Computing => {
-                    return Err(ExecutionError::NotObject(frame.computed));
+                    let cycle = self.signal_computed_reference(frame.computed)?;
+                    let error = self.create_native_error(NativeErrorKind::Type, None)?;
+                    self.commit_signal_computed_completion(cycle, error, true)?;
+                    return Err(ExecutionError::HostThrown(error));
                 }
                 ComputedState::Dirty => {
                     return self.start_signal_computed_callback(site, pending, frame.computed);

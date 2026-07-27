@@ -21,6 +21,8 @@ use test262_runner::{
     RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
 };
 
+mod signals;
+
 const ENGINE_CRATES: [&str; 6] = [
     "tachyon-value",
     "tachyon-bytecode",
@@ -59,6 +61,9 @@ fn main() {
             check_architecture()
         }
         [command, subcommand] if command == "test262" && subcommand == "fetch" => fetch_test262(),
+        [command, subcommand] if command == "test" && subcommand == "signals" => {
+            signals::run(&workspace_root())
+        }
         [command, subcommand, rest @ ..] if command == "test262" && subcommand == "run" => {
             run_test262(rest)
         }
@@ -117,7 +122,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test signals\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
