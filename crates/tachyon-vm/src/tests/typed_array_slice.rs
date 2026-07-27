@@ -72,8 +72,24 @@ var bitsWords = new Uint32Array(bitsResult.buffer);
 var bitsOkay = bitsWords[0] === 0x12345678 && bitsWords[1] === 0x7ff80000 &&
   bitsWords[2] === 0x87654321 && bitsWords[3] === 0x7ff80000;
 
+var bigintSource = new BigInt64Array([-1n, 2n, 3n]);
+bigintSource.constructor = {};
+bigintSource.constructor[Symbol.species] = function(count) { return new BigUint64Array(count); };
+var bigintResult = bigintSource.slice(0, 2);
+var bigintOkay = bigintResult instanceof BigUint64Array &&
+  bigintResult[0] === 18446744073709551615n && bigintResult[1] === 2n;
+
+function rejectsContentType(source, Target) {
+  source.constructor = {};
+  source.constructor[Symbol.species] = function(count) { return new Target(count); };
+  try { source.slice(); } catch (error) { return error instanceof TypeError; }
+  return false;
+}
+var contentTypeMismatch = rejectsContentType(new BigInt64Array(0), Uint8Array) &&
+  rejectsContentType(new Uint8Array(0), BigInt64Array);
+
 constructorsOkay && metadataOkay && rejected && orderOkay && crossOkay &&
-  overlapOkay && shortTargetThrows && bitsOkay;
+  overlapOkay && shortTargetThrows && bitsOkay && bigintOkay && contentTypeMismatch;
 "#;
 
 const TYPED_ARRAY_SLICE_DETACH_SOURCE: &str = r#"

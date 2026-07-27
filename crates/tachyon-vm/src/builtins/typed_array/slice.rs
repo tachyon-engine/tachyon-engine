@@ -319,11 +319,14 @@ impl Isolate {
             return Err(ExecutionError::TypedArraySpeciesResultTooShort);
         }
         self.set_typed_array_slice_value(state, SLICE_RESULT, result)?;
+        let source_value = pending.values[SLICE_SOURCE];
+        let source = self.typed_array_snapshot(source_value)?;
+        if source.kind.content_type() != target.kind.content_type() {
+            return Err(ExecutionError::TypedArrayContentTypeMismatch);
+        }
         if requested == 0 {
             return self.write(site.caller_base, site.destination, result);
         }
-        let source_value = pending.values[SLICE_SOURCE];
-        let source = self.typed_array_snapshot(source_value)?;
         self.typed_array_backing(source.buffer)?;
         let start = typed_array_slice_usize(pending.values[SLICE_START])?;
         let count = requested.min(source.length.saturating_sub(start));
@@ -437,7 +440,7 @@ impl Isolate {
         })
     }
 
-    /// Converts different Number element kinds iteratively with integer-indexed semantics.
+    /// Converts different element kinds iteratively after their content types have agreed.
     fn copy_typed_array_slice_cross_kind(
         &mut self,
         source: TypedArraySnapshot,
@@ -447,9 +450,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         for index in 0..count {
             let value = self.typed_array_read_element(source, start + index)?;
-            let number = numeric_value(value)
-                .expect("fixed Number TypedArray decoding always returns Number");
-            self.typed_array_write_element(target, index, number)?;
+            self.typed_array_write_value(target, index, value)?;
         }
         Ok(())
     }
