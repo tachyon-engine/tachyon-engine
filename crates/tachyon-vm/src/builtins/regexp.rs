@@ -774,14 +774,9 @@ impl Isolate {
                 RegExpGetter::Source => self.allocate_runtime_string(
                     JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
                 ),
-                RegExpGetter::Flags => self.allocate_runtime_string(
-                    JsString::try_from_latin1(b"").map_err(ExecutionError::ConstantString)?,
-                ),
+                RegExpGetter::Flags => unreachable!("flags uses its resumable getter"),
                 _ => Ok(Value::from_immediate(Immediate::Undefined)),
             };
-        }
-        if getter == RegExpGetter::Flags {
-            return self.regexp_flags_getter(receiver);
         }
         if getter == RegExpGetter::Source {
             let (source, _) = self.regexp_data(receiver)?;
@@ -806,53 +801,6 @@ impl Isolate {
                 Immediate::False
             },
         ))
-    }
-
-    /// Builds flags in specification order, preserving own data-property overrides.
-    fn regexp_flags_getter(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
-        if !self.is_object_value(receiver) {
-            return Err(ExecutionError::NotObject(receiver));
-        }
-        let private_flags = self
-            .regexp_data(receiver)
-            .ok()
-            .and_then(|(_, value)| self.regexp_string_units(value).ok());
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(8)
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        for (name, flag) in [
-            (b"hasIndices".as_slice(), b'd'),
-            (b"global".as_slice(), b'g'),
-            (b"ignoreCase".as_slice(), b'i'),
-            (b"multiline".as_slice(), b'm'),
-            (b"dotAll".as_slice(), b's'),
-            (b"unicode".as_slice(), b'u'),
-            (b"unicodeSets".as_slice(), b'v'),
-            (b"sticky".as_slice(), b'y'),
-        ] {
-            let atom = self.intern_intrinsic_name(name)?;
-            let property = if private_flags.is_some() {
-                self.own_data_property_with_attributes(receiver, atom)?
-                    .map(|(value, _)| value)
-            } else {
-                self.get_data_property(receiver, atom)?
-            };
-            let enabled = if let Some(value) = property {
-                self.is_truthy_value(value)?
-            } else {
-                private_flags
-                    .as_ref()
-                    .is_some_and(|flags| flags.contains(&u16::from(flag)))
-            };
-            if enabled {
-                output.push(u16::from(flag));
-            }
-        }
-        self.allocate_runtime_string(
-            JsString::try_from_owned_code_units(output)
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )
     }
 
     /// Escapes pattern delimiters and line terminators for the observable `source` string.

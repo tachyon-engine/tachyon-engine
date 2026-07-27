@@ -1319,6 +1319,7 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     RegExpTest(RegExpTestStage),
     RegExpSearch(RegExpSearchStage),
+    RegExpFlags(u8),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
@@ -1508,6 +1509,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::RegExpSearch(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots the flags getter state and receiver across one observable property read.
+    #[inline]
+    pub(crate) const fn regexp_flags(
+        site: NativeContinuationSite,
+        index: u8,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::RegExpFlags(index),
             first: state,
             second: receiver,
         }

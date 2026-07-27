@@ -2304,6 +2304,7 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 1)
             }
+            NativeContinuationKind::RegExpFlags(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::StringSplit(stage) => {
                 if stage != StringSplitStage::SplitterCall {
                     return Err(ExecutionError::MissingNativeContinuation);
@@ -2382,6 +2383,7 @@ impl Isolate {
         };
         // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
         // reachable through the receiver's accessor pair (or descriptor state -> source chain).
+        let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
             .push_native(continuation)
@@ -2410,7 +2412,9 @@ impl Isolate {
             call_site: site.call_site,
         });
         if let Err(error) = call_result {
-            self.pop_native_continuation()?;
+            if self.fiber.completions.len() > completion_depth {
+                self.pop_native_continuation()?;
+            }
             return Err(error);
         }
         if self.fiber.frames.len() != frame_depth {
@@ -2421,6 +2425,9 @@ impl Isolate {
                 .expect("a suspended accessor callback publishes its callee frame");
             frame.return_register = None;
             frame.return_continuation = true;
+            return Ok(None);
+        }
+        if self.fiber.completions.len() <= completion_depth {
             return Ok(None);
         }
         let continuation = self.pop_native_continuation()?;
@@ -5676,6 +5683,9 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpGetter(getter)) => {
+                    if getter == RegExpGetter::Flags {
+                        return self.begin_regexp_flags(&site);
+                    }
                     let getter_realm = self.realm_for_callable(site.callee)?;
                     let result = self.regexp_getter(site.this_value, getter, getter_realm)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -7736,6 +7746,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::RegExpSearch(stage) => {
                     self.resume_regexp_search(continuation, stage, value)
+                }
+                NativeContinuationKind::RegExpFlags(index) => {
+                    self.resume_regexp_flags(continuation, index, value)
                 }
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)

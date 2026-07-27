@@ -21,11 +21,38 @@ var customFlags = flagsDescriptor.get.call({
   unicodeSets: 1,
   sticky: 42
 });
+var order = "";
+var observed = {};
+var observedNames = ["hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky"];
+for (var index = 0; index < observedNames.length; index++) {
+  (function(name) {
+    Object.defineProperty(observed, name, {
+      get: function() { order += name[0]; return true; }
+    });
+  })(observedNames[index]);
+}
+var observedFlags = flagsDescriptor.get.call(observed);
+var proxyOrder = "";
+var proxyFlags = flagsDescriptor.get.call(new Proxy({}, {
+  get: function(target, key) {
+    proxyOrder += key[0];
+    return key === "global" || key === "unicodeSets";
+  }
+}));
+var marker = {};
+var abruptOrder = "";
+var abruptReceiver = {};
+Object.defineProperty(abruptReceiver, "hasIndices", { get: function() { abruptOrder += "d"; return true; } });
+Object.defineProperty(abruptReceiver, "global", { get: function() { abruptOrder += "g"; throw marker; } });
+var abruptIdentity = false;
+try { flagsDescriptor.get.call(abruptReceiver); } catch (error) { abruptIdentity = error === marker; }
 sourceDescriptor.get.name === "get source" && sourceDescriptor.get.length === 0 &&
 flagsDescriptor.get.name === "get flags" && flagsDescriptor.get.length === 0 &&
 sourceDescriptor.enumerable === false && sourceDescriptor.configurable === true &&
 sourceDescriptor.set === undefined && !Object.prototype.hasOwnProperty.call(regexp, "source") &&
 regexp.source === "\\/\\n\\u2028" && regexp.flags === "gimsy" && customFlags === "dgimsuvy" &&
+observedFlags === "dgimsuvy" && order === "hgimduus" &&
+proxyFlags === "gv" && proxyOrder === "hgimduus" && abruptIdentity && abruptOrder === "dg" &&
 globalDescriptor.get.call(regexp) === true &&
 globalDescriptor.get.call(RegExp.prototype) === undefined && invalidSource;
 "#;

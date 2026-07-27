@@ -57,6 +57,7 @@ mod proxy;
 mod realm;
 mod regexp;
 mod regexp_exec;
+mod regexp_flags;
 mod regexp_match_all;
 mod regexp_search;
 mod runtime;
