@@ -821,7 +821,7 @@ impl Isolate {
     }
 
     /// Copies exact UTF-16 code units so backend offsets remain ECMAScript-visible positions.
-    fn regexp_string_units(&mut self, value: Value) -> Result<Vec<u16>, ExecutionError> {
+    pub(crate) fn regexp_string_units(&mut self, value: Value) -> Result<Vec<u16>, ExecutionError> {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::UnsupportedStringValue(value))?;
@@ -909,6 +909,43 @@ fn append_regexp_replacement(
             96 => output.extend_from_slice(&input[..matched.start]),
             39 => output.extend_from_slice(&input[matched.end..]),
             38 => output.extend_from_slice(&input[matched.start..matched.end]),
+            digit @ 48..=57 => {
+                let first = usize::from(digit - 48);
+                let second = replacement
+                    .get(index + 2)
+                    .copied()
+                    .filter(|unit| (48..=57).contains(unit))
+                    .map(|unit| usize::from(unit - 48));
+                let (capture, consumed) =
+                    regexp_replacement_capture(first, second, matched.captures.len());
+                let Some(capture) = capture else {
+                    output.push(u16::from(b'$'));
+                    index += 1;
+                    continue;
+                };
+                if let Some(range) = matched.captures[capture - 1].as_ref() {
+                    output.extend_from_slice(&input[range.clone()]);
+                }
+                index += consumed + 1;
+                continue;
+            }
+            60 if !matched.named_captures.is_empty() => {
+                let Some(relative_end) = replacement[index + 2..]
+                    .iter()
+                    .position(|unit| *unit == u16::from(b'>'))
+                else {
+                    output.push(u16::from(b'$'));
+                    index += 1;
+                    continue;
+                };
+                let name_end = index + 2 + relative_end;
+                let name = &replacement[index + 2..name_end];
+                if let Some(range) = regexp_named_capture(matched, name) {
+                    output.extend_from_slice(&input[range]);
+                }
+                index = name_end + 1;
+                continue;
+            }
             _ => {
                 output.push(u16::from(b'$'));
                 index += 1;
@@ -917,6 +954,38 @@ fn append_regexp_replacement(
         }
         index += 2;
     }
+}
+
+/// Chooses the longest valid one- or two-digit replacement capture reference.
+#[inline]
+fn regexp_replacement_capture(
+    first: usize,
+    second: Option<usize>,
+    capture_count: usize,
+) -> (Option<usize>, usize) {
+    if let Some(second) = second {
+        let two_digit = first * 10 + second;
+        if (1..=capture_count).contains(&two_digit) {
+            return (Some(two_digit), 2);
+        }
+    }
+    if (1..=capture_count).contains(&first) {
+        (Some(first), 1)
+    } else {
+        (None, 0)
+    }
+}
+
+/// Resolves a UTF-16 replacement name without allocating a temporary Rust string.
+fn regexp_named_capture(
+    matched: &RegExpMatch,
+    requested: &[u16],
+) -> Option<core::ops::Range<usize>> {
+    matched
+        .named_captures
+        .iter()
+        .find(|(name, _)| name.encode_utf16().eq(requested.iter().copied()))
+        .and_then(|(_, range)| range.clone())
 }
 
 /// Computes the exact output capacity using the same code-point boundaries as emission.
@@ -1090,7 +1159,7 @@ fn regexp_flag_text(flags: u8) -> Result<Vec<u8>, ExecutionError> {
 
 /// Advances one UTF-16 position, preserving surrogate pairs only in Unicode matching mode.
 #[inline(always)]
-fn advance_regexp_split_index(input: &[u16], index: usize, unicode: bool) -> usize {
+pub(crate) fn advance_regexp_split_index(input: &[u16], index: usize, unicode: bool) -> usize {
     if unicode
         && input
             .get(index)
