@@ -353,7 +353,7 @@ fn intrinsic_iterable_collection_does_not_grow_the_rust_stack() {
         )
         .expect("large TypedArray iterable executes without Rust recursion");
     assert!(
-        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(511)),
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "large TypedArray iterable returned {outcome:?}"
     );
 }
