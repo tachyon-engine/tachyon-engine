@@ -122,6 +122,14 @@ const FORCED_PROPERTY_LIST_SOURCE: &str = r#"
 })()
 "#;
 
+const LARGE_PROPERTY_LIST_SOURCE: &str = r#"
+(function () {
+  var replacer = [];
+  for (var i = 0; i < 4096; i++) replacer.push(i);
+  return JSON.stringify({"foopy": "FAIL", "4093": 17}, replacer) === '{"4093":17}';
+})()
+"#;
+
 #[test]
 fn primitive_string_and_number_indentation_is_stable_for_every_dispatch_batch() {
     assert_pretty_json_batch::<1>(false);
@@ -151,6 +159,21 @@ fn resumable_stringify_survives_forced_collections_and_growth() {
     assert_resumable_json_batch::<8>(Some(ForcedCollectionMode::Major));
     assert_forced_property_list::<8>(ForcedCollectionMode::Minor);
     assert_forced_property_list::<8>(ForcedCollectionMode::Major);
+}
+
+#[test]
+fn large_property_list_is_iterative_for_every_dispatch_batch() {
+    assert_large_property_list::<1>(None);
+    assert_large_property_list::<2>(None);
+    assert_large_property_list::<4>(None);
+    assert_large_property_list::<8>(None);
+    assert_large_property_list::<16>(None);
+}
+
+#[test]
+fn large_property_list_survives_forced_collections() {
+    assert_large_property_list::<8>(Some(ForcedCollectionMode::Minor));
+    assert_large_property_list::<8>(Some(ForcedCollectionMode::Major));
 }
 
 #[test]
@@ -276,5 +299,43 @@ fn assert_forced_property_list<const N: usize>(forced: ForcedCollectionMode) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "forced property-list batch {N}, forced={forced:?} returned {outcome:?}"
+    );
+}
+
+/// Runs the Test262-sized replacer list without relying on the native call stack.
+fn assert_large_property_list<const N: usize>(forced: Option<ForcedCollectionMode>) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_200 + N as u32),
+                SourceName::new("json-large-property-list"),
+                MediaType::JavaScript,
+                Arc::from(LARGE_PROPERTY_LIST_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("large property-list fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(8_192, 8 * 1024 * 1024, AtomHashSeed::new(7, 8)),
+        HeapLimit::new(8_192 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 8_192),
+    ))
+    .expect("large property-list isolate initializes");
+    if let Some(mode) = forced {
+        isolate.heap.set_forced_collection_mode(mode);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_000_000,
+                quantum: 1_000_000,
+            },
+        )
+        .expect("large property-list fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "large property-list batch {N}, forced={forced:?} returned {outcome:?}"
     );
 }

@@ -70,21 +70,39 @@ impl Isolate {
     pub(super) fn advance_json_property_list(
         &mut self,
         site: NativeContinuationSite,
-        state: GcRef<PendingJsonStringify>,
+        mut state: GcRef<PendingJsonStringify>,
     ) -> Result<(), ExecutionError> {
-        let snapshot = self.json_snapshot(state)?;
-        if snapshot.property_list_index >= snapshot.property_list_length {
-            return self.begin_json_after_property_list(site, state);
+        loop {
+            let snapshot = self.json_snapshot(state)?;
+            if snapshot.property_list_index >= snapshot.property_list_length {
+                return self.begin_json_after_property_list(site, state);
+            }
+            let key = self.safe_integer_property_atom(snapshot.property_list_index)?;
+            let dispatch = self.dispatch_json_property_read_once(
+                site,
+                state,
+                JsonStringifyStage::ReplacerElementGet,
+                snapshot.property_list_source,
+                snapshot.property_list_source,
+                key.into(),
+            )?;
+            let JsonPropertyReadDispatch::Returned(value) = dispatch else {
+                return Ok(());
+            };
+            let continuation = self.pop_native_continuation()?;
+            state = self.pending_json_stringify_reference(continuation.first())?;
+            self.set_json_temporary(state, value)?;
+            self.root_json_stringify_state(site, state)?;
+            let value = self.json_temporary(state)?;
+            if let Some(kind) = self.json_wrapper_kind(value)
+                && matches!(kind, JsonWrapperKind::Number | JsonWrapperKind::String)
+            {
+                return self.begin_json_property_list_element(site, state, value);
+            }
+            let accepted =
+                (numeric_value(value).is_some() || self.json_is_string(value)).then_some(value);
+            state = self.commit_json_property_list_element(site, state, accepted)?;
         }
-        let key = self.safe_integer_property_atom(snapshot.property_list_index)?;
-        self.dispatch_json_property_read(
-            site,
-            state,
-            JsonStringifyStage::ReplacerElementGet,
-            snapshot.property_list_source,
-            snapshot.property_list_source,
-            key.into(),
-        )
     }
 
     /// Converts, deduplicates, and appends one replacer property name.
@@ -119,6 +137,17 @@ impl Isolate {
         state: GcRef<PendingJsonStringify>,
         value: Option<Value>,
     ) -> Result<(), ExecutionError> {
+        let state = self.commit_json_property_list_element(site, state, value)?;
+        self.advance_json_property_list(site, state)
+    }
+
+    /// Records one element and returns the refreshed state without driving the next entry.
+    fn commit_json_property_list_element(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingJsonStringify>,
+        value: Option<Value>,
+    ) -> Result<GcRef<PendingJsonStringify>, ExecutionError> {
         if let Some(value) = value {
             let atom = self.property_key_atom(value)?;
             if !self.json_property_list_contains(state, atom)? {
@@ -128,6 +157,6 @@ impl Isolate {
         let state = self.refresh_json_state(site)?;
         self.advance_json_property_list_index(state)?;
         self.root_json_stringify_state(site, state)?;
-        self.advance_json_property_list(site, state)
+        Ok(state)
     }
 }

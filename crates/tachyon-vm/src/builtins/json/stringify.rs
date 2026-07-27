@@ -118,6 +118,12 @@ enum JsonWrapperKind {
     BigInt,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum JsonPropertyReadDispatch {
+    Suspended,
+    Returned(Value),
+}
+
 impl Isolate {
     /// Initializes the wrapper holder and publishes all serialization state before any callback.
     pub(crate) fn begin_json_stringify(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
@@ -510,24 +516,57 @@ impl Isolate {
     fn advance_json_container(
         &mut self,
         site: NativeContinuationSite,
-        state: GcRef<PendingJsonStringify>,
+        mut state: GcRef<PendingJsonStringify>,
     ) -> Result<(), ExecutionError> {
-        let frame = self
-            .json_top_frame_snapshot(state)?
-            .ok_or(ExecutionError::MissingNativeContinuation)?;
-        if frame.index >= frame.length {
-            return self.close_json_container(site, state, frame);
+        loop {
+            let frame = self
+                .json_top_frame_snapshot(state)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            if frame.index >= frame.length {
+                return self.close_json_container(site, state, frame);
+            }
+            let atom = match frame.kind {
+                JsonContainerKind::Array => self.safe_integer_property_atom(frame.index)?,
+                JsonContainerKind::Object => self
+                    .json_top_frame_key(state, frame.index as usize)?
+                    .ok_or(ExecutionError::MissingNativeContinuation)?,
+            };
+            if frame.descriptor_checks {
+                return self.dispatch_json_object_descriptor(site, state, frame.container, atom);
+            }
+            if frame.kind != JsonContainerKind::Object
+                || self.json_snapshot(state)?.replacer.as_immediate() != Some(Immediate::Undefined)
+            {
+                return self.begin_json_current_frame_property(site, state);
+            }
+            let key = self.atom_string_value(atom)?;
+            state = self.refresh_json_state(site)?;
+            let container = self
+                .json_top_frame_snapshot(state)?
+                .ok_or(ExecutionError::MissingNativeContinuation)?
+                .container;
+            self.set_json_current_property(state, container, key)?;
+            self.root_json_stringify_state(site, state)?;
+            let dispatch = self.dispatch_json_property_read_once(
+                site,
+                state,
+                JsonStringifyStage::ValueGet,
+                container,
+                container,
+                atom.into(),
+            )?;
+            let JsonPropertyReadDispatch::Returned(result) = dispatch else {
+                return Ok(());
+            };
+            let continuation = self.pop_native_continuation()?;
+            state = self.pending_json_stringify_reference(continuation.first())?;
+            self.set_json_value(state, result)?;
+            self.root_json_stringify_state(site, state)?;
+            if result.as_immediate() != Some(Immediate::Undefined) {
+                return self.begin_json_to_json_get(site, state);
+            }
+            self.advance_json_top_frame_index(state)?;
         }
-        let atom = match frame.kind {
-            JsonContainerKind::Array => self.safe_integer_property_atom(frame.index)?,
-            JsonContainerKind::Object => self
-                .json_top_frame_key(state, frame.index as usize)?
-                .ok_or(ExecutionError::MissingNativeContinuation)?,
-        };
-        if frame.descriptor_checks {
-            return self.dispatch_json_object_descriptor(site, state, frame.container, atom);
-        }
-        self.begin_json_current_frame_property(site, state)
     }
 
     /// Publishes the current frame's holder/key pair before its observable value Get.
@@ -691,6 +730,25 @@ impl Isolate {
         receiver: Value,
         key: PropertyKey,
     ) -> Result<(), ExecutionError> {
+        match self.dispatch_json_property_read_once(site, state, stage, target, receiver, key)? {
+            JsonPropertyReadDispatch::Suspended => Ok(()),
+            JsonPropertyReadDispatch::Returned(result) => {
+                let continuation = self.pop_native_continuation()?;
+                self.resume_json_stringify(continuation, stage, result)
+            }
+        }
+    }
+
+    /// Performs one Get and distinguishes an immediate result from a published JS frame.
+    fn dispatch_json_property_read_once(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingJsonStringify>,
+        stage: JsonStringifyStage,
+        target: Value,
+        receiver: Value,
+        key: PropertyKey,
+    ) -> Result<JsonPropertyReadDispatch, ExecutionError> {
         let completion_depth = self.fiber.completions.len();
         let frame_depth = self.fiber.frames.len();
         self.fiber
@@ -710,11 +768,10 @@ impl Isolate {
         if self.fiber.frames.len() != frame_depth
             || self.fiber.completions.len() == completion_depth
         {
-            return Ok(());
+            return Ok(JsonPropertyReadDispatch::Suspended);
         }
-        let continuation = self.pop_native_continuation()?;
         let result = self.read(site.caller_base, site.destination)?;
-        self.resume_json_stringify(continuation, stage, result)
+        Ok(JsonPropertyReadDispatch::Returned(result))
     }
 
     /// Calls `toJSON` or the replacer with an exact immutable argument prefix.
