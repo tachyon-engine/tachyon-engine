@@ -502,6 +502,9 @@ impl Isolate {
                 .expect("Number prototype initializes before primitive boxing");
             return self.allocate_number_object(value, prototype, AllocationSpace::Young);
         }
+        if self.is_bigint_value(value) {
+            return self.box_bigint(value);
+        }
         if self.is_symbol_value(value) {
             return self.box_symbol(value);
         }
@@ -1230,6 +1233,14 @@ impl Isolate {
                 .is_ok()
         }) {
             "[object Boolean]"
+        } else if self.is_bigint_value(value)
+            || value.as_heap_ref().is_some_and(|raw| {
+                self.heap
+                    .checked_reference(raw, self.types.bigint_object)
+                    .is_ok()
+            })
+        {
+            "[object BigInt]"
         } else if let Some(raw) = value.as_heap_ref()
             && self.heap.checked_reference(raw, self.types.string).is_ok()
         {

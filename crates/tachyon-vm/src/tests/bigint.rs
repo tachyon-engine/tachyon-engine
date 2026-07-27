@@ -121,6 +121,41 @@ if (!(throws(TypeError, function() { return 1n + 1; }) &&
 failure;
 "#;
 
+const BIGINT_WRAPPER_SOURCE: &str = r#"
+function throws(expected, callback) {
+  try { callback(); } catch (error) { return error instanceof expected; }
+  return false;
+}
+var huge = 340282366920938463463374607431768211455n;
+var boxed = Object(huge);
+var failure = 0;
+try { if (!(typeof boxed === "object" && boxed.valueOf() === huge &&
+      boxed.toString() === "340282366920938463463374607431768211455" &&
+      Object.prototype.toString.call(boxed) === "[object BigInt]")) failure = 1; }
+catch (error) { failure = 11; }
+try { if (!(huge.toString(16) === "ffffffffffffffffffffffffffffffff" &&
+      (-255n).toString(16) === "-ff" && 35n.toString(36) === "z" &&
+      huge.toLocaleString() === huge.toString())) failure = 2; }
+catch (error) { failure = 12; }
+try { if (!(BigInt.asUintN(0, -1n) === 0n && BigInt.asUintN(8, -1n) === 255n &&
+      BigInt.asUintN(64, -2n) === 18446744073709551614n &&
+      BigInt.asUintN(128, -1n) === huge &&
+      BigInt.asIntN(8, 128n) === -128n && BigInt.asIntN(8, 127n) === 127n &&
+      BigInt.asIntN(128, huge) === -1n)) failure = 3; }
+catch (error) { failure = 13; }
+try { if (BigInt.prototype.valueOf.call(1n) !== 1n) failure = 41;
+      else if (!throws(TypeError, function() { BigInt.prototype.valueOf.call(1); })) failure = 42;
+      else { var radixError = 0; try { 1n.toString(1); } catch (error) {
+        radixError = error instanceof RangeError ? 1 : error instanceof TypeError ? 2 : 3;
+      } if (radixError !== 1) failure = 430 + radixError; }
+      if (failure === 0 && !throws(RangeError, function() { BigInt.asUintN(-1, 0n); })) failure = 44; }
+catch (error) { failure = 14; }
+if (!(BigInt.asIntN.length === 2 && BigInt.asUintN.length === 2 &&
+      BigInt.prototype.toString.length === 0 && BigInt.prototype.valueOf.length === 0 &&
+      BigInt.prototype.constructor === BigInt)) failure = 5;
+failure;
+"#;
+
 #[test]
 fn bigint_primitives_execute_for_every_dispatch_batch() {
     assert_bigint_source::<1>(false);
@@ -173,6 +208,24 @@ fn bigint_arithmetic_survives_forced_major_collection() {
     assert_bigint_arithmetic::<4>(true);
     assert_bigint_arithmetic::<8>(true);
     assert_bigint_arithmetic::<16>(true);
+}
+
+#[test]
+fn bigint_wrappers_and_fixed_width_operations_execute_for_every_dispatch_batch() {
+    assert_bigint_wrapper::<1>(false);
+    assert_bigint_wrapper::<2>(false);
+    assert_bigint_wrapper::<4>(false);
+    assert_bigint_wrapper::<8>(false);
+    assert_bigint_wrapper::<16>(false);
+}
+
+#[test]
+fn bigint_wrappers_and_fixed_width_operations_survive_forced_major_collection() {
+    assert_bigint_wrapper::<1>(true);
+    assert_bigint_wrapper::<2>(true);
+    assert_bigint_wrapper::<4>(true);
+    assert_bigint_wrapper::<8>(true);
+    assert_bigint_wrapper::<16>(true);
 }
 
 /// Compiles and executes the primitive surface under one dispatch and collection policy.
@@ -239,7 +292,11 @@ fn assert_bigint_conversion<const N: usize>(forced_major: bool) {
         .expect("BigInt conversion fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(0)),
-        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, i32={:?}",
+        match outcome {
+            RunOutcome::Completed(value) => value.as_i32(),
+            _ => None,
+        }
     );
 }
 
@@ -274,5 +331,43 @@ fn assert_bigint_arithmetic<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(0)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Exercises branded wrappers, radix formatting, and fixed-width truncation under one VM policy.
+fn assert_bigint_wrapper<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_700 + N as u32 + u32::from(forced_major) * 32),
+                SourceName::new("bigint-wrapper-fixture"),
+                MediaType::JavaScript,
+                Arc::from(BIGINT_WRAPPER_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("BigInt wrapper fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("BigInt wrapper fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(0)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, i32={:?}",
+        match outcome {
+            RunOutcome::Completed(value) => value.as_i32(),
+            _ => None,
+        }
     );
 }

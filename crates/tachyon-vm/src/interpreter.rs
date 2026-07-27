@@ -5515,8 +5515,19 @@ impl Isolate {
                     | NativeFunction::NumberToString
                     | NativeFunction::NumberConstructor
                     | NativeFunction::BigIntConstructor
+                    | NativeFunction::BigIntAsIntN
+                    | NativeFunction::BigIntAsUintN
+                    | NativeFunction::BigIntToString
                     | NativeFunction::DateParse),
                 ) => return self.dispatch_conversion_native(native, &site, false),
+                FunctionExecutable::Native(NativeFunction::BigIntValueOf) => {
+                    let value = self.this_bigint_value(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::BigIntToLocaleString) => {
+                    let value = self.bigint_to_string(site.this_value, None)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
                 FunctionExecutable::Native(NativeFunction::NumberToLocaleString) => {
                     let receiver = self.this_number_value(site.this_value)?;
                     let value = self.number_to_string(receiver, None)?;

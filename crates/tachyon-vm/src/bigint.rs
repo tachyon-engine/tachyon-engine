@@ -591,6 +591,81 @@ impl BigIntValue {
         }
         Ok(output)
     }
+
+    /// Formats one canonical value in an ECMAScript BigInt radix without host narrowing.
+    fn radix_bytes(&self, radix: u8) -> Result<Vec<u8>, BigIntBuildError> {
+        debug_assert!((2..=36).contains(&radix));
+        if self.is_zero() {
+            return Ok(vec![b'0']);
+        }
+        let estimated_digits = self
+            .bit_length()
+            .checked_add(radix.ilog2() as usize)
+            .ok_or(BigIntBuildError::AllocationFailed)?;
+        let mut digits = Vec::new();
+        digits
+            .try_reserve_exact(estimated_digits)
+            .map_err(|_| BigIntBuildError::AllocationFailed)?;
+        let mut magnitude = self.limbs.to_vec();
+        while !magnitude.is_empty() {
+            let mut remainder = 0_u128;
+            for limb in magnitude.iter_mut().rev() {
+                let dividend = (remainder << 64) | u128::from(*limb);
+                *limb = (dividend / u128::from(radix)) as u64;
+                remainder = dividend % u128::from(radix);
+            }
+            while magnitude.last() == Some(&0) {
+                magnitude.pop();
+            }
+            let digit = remainder as u8;
+            digits.push(if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            });
+        }
+        if self.negative {
+            digits.push(b'-');
+        }
+        digits.reverse();
+        Ok(digits)
+    }
+
+    /// Returns this value modulo 2^bits, optionally interpreting the retained sign bit.
+    fn truncate_to_bits(&self, bits: usize, signed: bool) -> Result<Self, BigIntArithmeticError> {
+        if bits == 0 {
+            return Ok(Self::from_u64(0));
+        }
+        let limb_count = bits
+            .checked_add(63)
+            .map(|count| count / 64)
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        ensure_result_limbs(limb_count)?;
+        let mut residue = zeroed_limbs(limb_count)?;
+        let copied = self.limbs.len().min(limb_count);
+        residue[..copied].copy_from_slice(&self.limbs[..copied]);
+        if self.negative {
+            for limb in &mut residue {
+                *limb = !*limb;
+            }
+            add_one_in_place(&mut residue);
+        }
+        let retained_bits = bits % 64;
+        if retained_bits != 0 {
+            residue[limb_count - 1] &= (1_u64 << retained_bits) - 1;
+        }
+        let sign_set = signed && {
+            let sign_index = bits - 1;
+            residue[sign_index / 64] & (1_u64 << (sign_index % 64)) != 0
+        };
+        if !sign_set {
+            return Ok(Self::from_owned_limbs(false, residue));
+        }
+        let mut modulus = zeroed_limbs(limb_count + 1)?;
+        modulus[bits / 64] = 1_u64 << (bits % 64);
+        let magnitude = subtract_magnitudes(&modulus, &residue)?;
+        Ok(Self::from_owned_limbs(true, magnitude))
+    }
 }
 
 /// Adds unsigned little-endian magnitudes with exact capacity and one carry limb.
@@ -1053,6 +1128,30 @@ impl Isolate {
                     .map_err(bigint_build_error)
             })
         })
+    }
+
+    /// Returns canonical lower-case digits for either BigInt representation and radix 2..=36.
+    pub(crate) fn bigint_radix_bytes(
+        &mut self,
+        value: Value,
+        radix: u8,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        let bigint = self.bigint_value_snapshot(value)?;
+        bigint.radix_bytes(radix).map_err(bigint_build_error)
+    }
+
+    /// Implements BigInt.asIntN/asUintN after ToIndex and ToBigInt have completed.
+    pub(crate) fn bigint_as_n(
+        &mut self,
+        bits: usize,
+        value: Value,
+        signed: bool,
+    ) -> Result<Value, ExecutionError> {
+        let bigint = self.bigint_value_snapshot(value)?;
+        let result = bigint
+            .truncate_to_bits(bits, signed)
+            .map_err(bigint_arithmetic_error)?;
+        self.allocate_bigint(result)
     }
 
     /// Returns the low 64 bits required by BigInt typed-array and DataView encoders.

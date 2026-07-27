@@ -1196,6 +1196,47 @@ impl Isolate {
         }
         let bigint = allocate(self, NativeFunction::BigIntConstructor)?;
         self.realm.bigint_constructor = Some(bigint);
+        let bigint_zero = Value::from_small_bigint(0).expect("zero fits SmallBigInt");
+        let bigint_prototype =
+            self.allocate_bigint_object(bigint_zero, object_prototype, AllocationSpace::Old)?;
+        self.realm.bigint_prototype = Some(bigint_prototype);
+        self.set_function_prototype(bigint, bigint_prototype)?;
+        self.set_intrinsic_data_property(bigint_prototype, constructor_atom, bigint, true)?;
+        for (name, native) in [
+            (b"asIntN".as_slice(), NativeFunction::BigIntAsIntN),
+            (b"asUintN".as_slice(), NativeFunction::BigIntAsUintN),
+        ] {
+            self.install_collection_method(bigint, function_prototype, name, native)?;
+        }
+        for (name, native) in [
+            (b"toString".as_slice(), NativeFunction::BigIntToString),
+            (
+                b"toLocaleString".as_slice(),
+                NativeFunction::BigIntToLocaleString,
+            ),
+            (b"valueOf".as_slice(), NativeFunction::BigIntValueOf),
+        ] {
+            self.install_collection_method(bigint_prototype, function_prototype, name, native)?;
+        }
+        let to_string_tag = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before BigInt");
+        let to_string_tag = self.property_key(to_string_tag)?;
+        let bigint_tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"BigInt").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.define_data_property(
+            bigint_prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(bigint_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         let boolean = allocate(self, NativeFunction::BooleanConstructor)?;
         self.realm.boolean_constructor = Some(boolean);
         let boolean_prototype = self.allocate_boolean_object(

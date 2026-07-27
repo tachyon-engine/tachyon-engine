@@ -368,6 +368,11 @@ pub(crate) enum NativeFunction {
     NumberToLocaleString,
     NumberValueOf,
     BigIntConstructor,
+    BigIntAsIntN,
+    BigIntAsUintN,
+    BigIntToString,
+    BigIntToLocaleString,
+    BigIntValueOf,
     BooleanConstructor,
     BooleanToString,
     BooleanValueOf,
@@ -954,6 +959,7 @@ impl NativeFunction {
             | Self::ReflectGetOwnPropertyDescriptor
             | Self::ReflectHas => 2,
             Self::PromiseThen => 2,
+            Self::BigIntAsIntN | Self::BigIntAsUintN => 2,
             Self::PromiseFinally => 1,
             Self::ReflectGet => 2,
             Self::ReflectSet => 3,
@@ -1181,6 +1187,9 @@ impl NativeFunction {
             | Self::ErrorToString
             | Self::SymbolConstructor
             | Self::NumberValueOf
+            | Self::BigIntToString
+            | Self::BigIntToLocaleString
+            | Self::BigIntValueOf
             | Self::BooleanToString
             | Self::BooleanValueOf
             | Self::DateGetTime
@@ -1368,6 +1377,11 @@ impl NativeFunction {
             Self::NumberToLocaleString => "toLocaleString",
             Self::NumberValueOf => "valueOf",
             Self::BigIntConstructor => "BigInt",
+            Self::BigIntAsIntN => "asIntN",
+            Self::BigIntAsUintN => "asUintN",
+            Self::BigIntToString => "toString",
+            Self::BigIntToLocaleString => "toLocaleString",
+            Self::BigIntValueOf => "valueOf",
             Self::BooleanConstructor => "Boolean",
             Self::BooleanToString => "toString",
             Self::BooleanValueOf => "valueOf",
@@ -1823,6 +1837,7 @@ pub(crate) enum ObjectReceiver {
     Error(GcRef<ErrorObject>),
     Date(GcRef<DateObject>),
     Number(GcRef<NumberObject>),
+    BigInt(GcRef<BigIntObject>),
     Boolean(GcRef<BooleanObject>),
     String(GcRef<StringObject>),
     Symbol(GcRef<SymbolObject>),
@@ -1856,6 +1871,7 @@ impl ObjectReceiver {
             Self::Error(error) => Value::from_heap_ref(error.raw()),
             Self::Date(date) => Value::from_heap_ref(date.raw()),
             Self::Number(number) => Value::from_heap_ref(number.raw()),
+            Self::BigInt(bigint) => Value::from_heap_ref(bigint.raw()),
             Self::Boolean(boolean) => Value::from_heap_ref(boolean.raw()),
             Self::String(string) => Value::from_heap_ref(string.raw()),
             Self::Symbol(symbol) => Value::from_heap_ref(symbol.raw()),
@@ -2067,6 +2083,7 @@ pub(crate) struct VmTypes {
     pub(crate) date_object: GcType<DateObject>,
     pub(crate) proxy_object: GcType<ProxyObject>,
     pub(crate) number_object: GcType<NumberObject>,
+    pub(crate) bigint_object: GcType<BigIntObject>,
     pub(crate) boolean_object: GcType<BooleanObject>,
     pub(crate) string_object: GcType<StringObject>,
     pub(crate) symbol_object: GcType<SymbolObject>,

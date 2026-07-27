@@ -605,6 +605,14 @@ pub(crate) struct BooleanObject {
     pub(crate) ordinary: OrdinaryObject,
 }
 
+/// Ordinary wrapper carrying the specification's private `[[BigIntData]]` slot.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub(crate) struct BigIntObject {
+    pub(crate) bigint_data: Value,
+    pub(crate) ordinary: OrdinaryObject,
+}
+
 /// Ordinary wrapper carrying the specification's private `[[StringData]]` slot.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -839,6 +847,14 @@ impl Trace for BooleanObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.boolean_data.trace(tracer);
+        self.ordinary.trace(tracer);
+    }
+}
+
+impl Trace for BigIntObject {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.bigint_data.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

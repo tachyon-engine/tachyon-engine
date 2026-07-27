@@ -452,6 +452,9 @@ impl Isolate {
             number_object: registry
                 .try_register("NumberObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            bigint_object: registry
+                .try_register("BigIntObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             boolean_object: registry
                 .try_register("BooleanObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1268,6 +1271,42 @@ impl Isolate {
                 0,
                 NumberObject {
                     number_data,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype,
+                    },
+                },
+                space,
+                roots,
+            )
+            .map(|object| Value::from_heap_ref(object.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates one boxed BigInt while keeping its primitive data and prototype live.
+    pub(crate) fn allocate_bigint_object(
+        &mut self,
+        bigint_data: Value,
+        prototype: Value,
+        space: AllocationSpace,
+    ) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_bigint_value(bigint_data));
+        let roots = &mut VmRoots {
+            fiber: &mut self.fiber,
+            finalization_jobs: &mut self.finalization_jobs,
+            promise_jobs: &mut self.promise_jobs,
+            realm: &mut self.realm,
+            loaded_code: &mut self.loaded_code,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.bigint_object,
+                0,
+                0,
+                BigIntObject {
+                    bigint_data,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

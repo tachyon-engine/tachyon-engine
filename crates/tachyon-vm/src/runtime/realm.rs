@@ -226,6 +226,7 @@ pub(crate) struct Realm {
     pub(crate) number_to_string: Option<Value>,
     pub(crate) number_value_of: Option<Value>,
     pub(crate) bigint_constructor: Option<Value>,
+    pub(crate) bigint_prototype: Option<Value>,
     pub(crate) boolean_constructor: Option<Value>,
     pub(crate) boolean_prototype: Option<Value>,
     pub(crate) boolean_to_string: Option<Value>,
@@ -396,6 +397,7 @@ impl Realm {
             number_to_string: None,
             number_value_of: None,
             bigint_constructor: None,
+            bigint_prototype: None,
             boolean_constructor: None,
             boolean_prototype: None,
             boolean_to_string: None,
@@ -801,6 +803,7 @@ impl Trace for Realm {
         self.number_to_string.trace(tracer);
         self.number_value_of.trace(tracer);
         self.bigint_constructor.trace(tracer);
+        self.bigint_prototype.trace(tracer);
         self.boolean_constructor.trace(tracer);
         self.boolean_prototype.trace(tracer);
         self.boolean_to_string.trace(tracer);

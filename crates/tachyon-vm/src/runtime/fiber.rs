@@ -158,6 +158,9 @@ pub(crate) enum ConversionNativeFunction {
     StringConstructor,
     NumberConstructor,
     BigIntConstructor,
+    BigIntAsIntN,
+    BigIntAsUintN,
+    BigIntToString,
     NumberToExponential,
     NumberToFixed,
     NumberToPrecision,
@@ -184,6 +187,9 @@ impl ConversionNativeFunction {
             NativeFunction::StringConstructor => Some(Self::StringConstructor),
             NativeFunction::NumberConstructor => Some(Self::NumberConstructor),
             NativeFunction::BigIntConstructor => Some(Self::BigIntConstructor),
+            NativeFunction::BigIntAsIntN => Some(Self::BigIntAsIntN),
+            NativeFunction::BigIntAsUintN => Some(Self::BigIntAsUintN),
+            NativeFunction::BigIntToString => Some(Self::BigIntToString),
             NativeFunction::NumberToExponential => Some(Self::NumberToExponential),
             NativeFunction::NumberToFixed => Some(Self::NumberToFixed),
             NativeFunction::NumberToPrecision => Some(Self::NumberToPrecision),
@@ -211,6 +217,9 @@ impl ConversionNativeFunction {
             Self::StringConstructor => NativeFunction::StringConstructor,
             Self::NumberConstructor => NativeFunction::NumberConstructor,
             Self::BigIntConstructor => NativeFunction::BigIntConstructor,
+            Self::BigIntAsIntN => NativeFunction::BigIntAsIntN,
+            Self::BigIntAsUintN => NativeFunction::BigIntAsUintN,
+            Self::BigIntToString => NativeFunction::BigIntToString,
             Self::NumberToExponential => NativeFunction::NumberToExponential,
             Self::NumberToFixed => NativeFunction::NumberToFixed,
             Self::NumberToPrecision => NativeFunction::NumberToPrecision,
@@ -247,6 +256,7 @@ pub(crate) enum ConversionConsumer {
     RelationalLeft(Opcode),
     RelationalRight(Opcode),
     Equality(Opcode),
+    BigIntAsNValue(bool),
     ToPropertyKey,
     BuiltinPropertyKey(BuiltinPropertyKeyConsumer),
     ErrorConstructorMessage,
@@ -340,6 +350,7 @@ impl ConversionConsumer {
             | Self::RelationalLeft(_)
             | Self::RelationalRight(_)
             | Self::Equality(_)
+            | Self::BigIntAsNValue(_)
             | Self::ToPropertyKey
             | Self::BuiltinPropertyKey(_)
             | Self::ErrorConstructorMessage
@@ -482,6 +493,7 @@ impl ConversionConsumer {
                 | Self::RelationalLeft(_)
                 | Self::RelationalRight(_)
                 | Self::Equality(_)
+                | Self::BigIntAsNValue(_)
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
                 | Self::ErrorConstructorMessage

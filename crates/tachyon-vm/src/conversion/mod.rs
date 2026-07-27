@@ -226,6 +226,10 @@ impl Isolate {
                 }
             }
             NativeFunction::BigIntConstructor => Value::from_immediate(Immediate::Undefined),
+            NativeFunction::BigIntToString => self.this_bigint_value(site.this_value)?,
+            NativeFunction::BigIntAsIntN | NativeFunction::BigIntAsUintN => self
+                .call_argument(site, 1)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined)),
             NativeFunction::GlobalIsFinite
             | NativeFunction::GlobalIsNaN
             | NativeFunction::GlobalParseFloat
@@ -288,8 +292,47 @@ impl Isolate {
             };
             return self.advance_native_conversion(continuation, None);
         }
+        if let Some(native) = consumer.native()
+            && matches!(
+                native,
+                NativeFunction::BigIntAsIntN | NativeFunction::BigIntAsUintN
+            )
+        {
+            return self.resume_bigint_as_n_value(
+                NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                native == NativeFunction::BigIntAsIntN,
+                argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                receiver,
+            );
+        }
         let value = self.finish_conversion_consumer(consumer, receiver, argument)?;
         self.write(site.caller_base, site.destination, value)
+    }
+
+    /// Continues asIntN/asUintN with ToBigInt after the leading ToIndex has completed.
+    fn resume_bigint_as_n_value(
+        &mut self,
+        site: NativeContinuationSite,
+        signed: bool,
+        bits: Value,
+        bigint: Value,
+    ) -> Result<(), ExecutionError> {
+        if self.is_object_value(bigint) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::BigIntAsNValue(signed),
+                site.caller_base,
+                site.destination,
+                bits,
+                bigint,
+                site.call_site,
+            );
+        }
+        let result = self.finish_bigint_as_n(bits, bigint, signed)?;
+        self.write(site.caller_base, site.destination, result)
     }
 
     /// Starts a cold object conversion while tracing one optional pending operand.
@@ -907,6 +950,19 @@ impl Isolate {
                             value,
                         );
                     }
+                    if let Some(native) = continuation.consumer.native()
+                        && matches!(
+                            native,
+                            NativeFunction::BigIntAsIntN | NativeFunction::BigIntAsUintN
+                        )
+                    {
+                        return self.resume_bigint_as_n_value(
+                            continuation.site,
+                            native == NativeFunction::BigIntAsIntN,
+                            value,
+                            continuation.receiver,
+                        );
+                    }
                     let result = self.finish_conversion_consumer(
                         continuation.consumer,
                         continuation.receiver,
@@ -1125,6 +1181,9 @@ impl Isolate {
                         Immediate::False
                     })
                 }
+                ConversionConsumer::BigIntAsNValue(signed) => {
+                    self.finish_bigint_as_n(receiver, argument, signed)?
+                }
                 ConversionConsumer::ToPropertyKey => argument,
                 ConversionConsumer::BuiltinPropertyKey(_) => {
                     unreachable!("builtin property-key consumers finish inside the state machine")
@@ -1306,6 +1365,13 @@ impl Isolate {
             NativeFunction::BigIntConstructor => self.bigint_constructor_primitive(
                 argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
             ),
+            NativeFunction::BigIntToString => self.bigint_to_string(receiver, argument),
+            NativeFunction::BigIntAsIntN | NativeFunction::BigIntAsUintN => self
+                .finish_bigint_as_n(
+                    argument.unwrap_or(Value::from_immediate(Immediate::Undefined)),
+                    receiver,
+                    native == NativeFunction::BigIntAsIntN,
+                ),
             NativeFunction::NumberToExponential => self.number_to_exponential(receiver, argument),
             NativeFunction::NumberToFixed => self.number_to_fixed(receiver, argument),
             NativeFunction::NumberToPrecision => self.number_to_precision(receiver, argument),

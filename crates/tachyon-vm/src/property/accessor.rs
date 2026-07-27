@@ -522,6 +522,10 @@ impl Isolate {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
+        } else if self.is_bigint_value(target) {
+            self.realm
+                .bigint_prototype
+                .expect("BigInt prototype initializes before property access")
         } else if matches!(
             target.as_immediate(),
             Some(Immediate::True | Immediate::False)
@@ -659,6 +663,10 @@ impl Isolate {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
+        } else if self.is_bigint_value(receiver) {
+            self.realm
+                .bigint_prototype
+                .expect("BigInt prototype initializes before property access")
         } else if matches!(
             receiver.as_immediate(),
             Some(Immediate::True | Immediate::False)
@@ -913,7 +921,9 @@ impl Isolate {
             Err(ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_)) => {
                 Ok(PropertyWrite::Complete(false))
             }
-            Err(ExecutionError::NotObject(_)) if numeric_value(receiver).is_some() => {
+            Err(ExecutionError::NotObject(_))
+                if numeric_value(receiver).is_some() || self.is_bigint_value(receiver) =>
+            {
                 Ok(PropertyWrite::Complete(false))
             }
             Err(error) => Err(error),

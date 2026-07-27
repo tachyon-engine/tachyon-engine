@@ -56,6 +56,10 @@ impl Isolate {
             self.realm
                 .number_prototype
                 .expect("Number prototype initializes before property access")
+        } else if self.is_bigint_value(receiver) {
+            self.realm
+                .bigint_prototype
+                .expect("BigInt prototype initializes before property access")
         } else if matches!(
             receiver.as_immediate(),
             Some(Immediate::True | Immediate::False)

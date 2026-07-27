@@ -2,6 +2,7 @@
 
 mod array;
 mod array_buffer;
+mod bigint;
 mod boolean;
 mod collections;
 mod data_view;
