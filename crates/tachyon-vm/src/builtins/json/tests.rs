@@ -130,6 +130,58 @@ const LARGE_PROPERTY_LIST_SOURCE: &str = r#"
 })()
 "#;
 
+const DENSE_PRIMITIVE_JSON_SOURCE: &str = r#"
+(function () {
+  var object = {};
+  var replacer = [];
+  var objectExpected = "{";
+  for (var i = 0; i < 4096; i++) {
+    object[i] = i;
+    replacer.push(i);
+    if (i !== 0) objectExpected += ",";
+    objectExpected += '"' + i + '":' + i;
+  }
+  objectExpected += "}";
+  if (JSON.stringify(object, replacer) !== objectExpected) return false;
+
+  var array = [];
+  var arrayExpected = "[";
+  for (var j = 0; j < 4096; j++) {
+    var kind = j % 4;
+    var value = kind === 0 ? null : kind === 1 ? true : kind === 2 ? "v" : j;
+    array[j] = value;
+    if (j !== 0) arrayExpected += ",";
+    arrayExpected += kind === 0 ? "null" : kind === 1 ? "true" : kind === 2 ? '"v"' : String(j);
+  }
+  arrayExpected += "]";
+  return JSON.stringify(array) === arrayExpected;
+})()
+"#;
+
+const FORCED_DENSE_PRIMITIVE_JSON_SOURCE: &str = r#"
+(function () {
+  var object = {};
+  var replacer = [];
+  for (var i = 0; i < 4096; i++) {
+    object[i] = i;
+    replacer.push(i);
+  }
+  var objectText = JSON.stringify(object, replacer);
+  if (objectText.indexOf('{"0":0,"1":1') !== 0 ||
+      objectText.indexOf('"2048":2048') < 0 ||
+      objectText.indexOf('"4095":4095}') !== objectText.length - 12) return false;
+
+  var array = [];
+  for (var j = 0; j < 4096; j++) {
+    var kind = j % 4;
+    array[j] = kind === 0 ? null : kind === 1 ? true : kind === 2 ? "v" : j;
+  }
+  var arrayText = JSON.stringify(array);
+  return arrayText.indexOf('[null,true,"v",3') === 0 &&
+    arrayText.indexOf('null,true,"v",4095]') === arrayText.length - 19;
+})()
+"#;
+
 #[test]
 fn primitive_string_and_number_indentation_is_stable_for_every_dispatch_batch() {
     assert_pretty_json_batch::<1>(false);
@@ -174,6 +226,21 @@ fn large_property_list_is_iterative_for_every_dispatch_batch() {
 fn large_property_list_survives_forced_collections() {
     assert_large_property_list::<8>(Some(ForcedCollectionMode::Minor));
     assert_large_property_list::<8>(Some(ForcedCollectionMode::Major));
+}
+
+#[test]
+fn dense_primitive_json_is_iterative_for_every_dispatch_batch() {
+    assert_dense_primitive_json::<1>(None);
+    assert_dense_primitive_json::<2>(None);
+    assert_dense_primitive_json::<4>(None);
+    assert_dense_primitive_json::<8>(None);
+    assert_dense_primitive_json::<16>(None);
+}
+
+#[test]
+fn dense_primitive_json_survives_forced_collections() {
+    assert_dense_primitive_json::<8>(Some(ForcedCollectionMode::Minor));
+    assert_dense_primitive_json::<8>(Some(ForcedCollectionMode::Major));
 }
 
 #[test]
@@ -337,5 +404,48 @@ fn assert_large_property_list<const N: usize>(forced: Option<ForcedCollectionMod
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "large property-list batch {N}, forced={forced:?} returned {outcome:?}"
+    );
+}
+
+/// Runs dense Object and Array primitive serialization without native recursion.
+fn assert_dense_primitive_json<const N: usize>(forced: Option<ForcedCollectionMode>) {
+    let source = if forced.is_some() {
+        FORCED_DENSE_PRIMITIVE_JSON_SOURCE
+    } else {
+        DENSE_PRIMITIVE_JSON_SOURCE
+    };
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_300 + N as u32),
+                SourceName::new("json-dense-primitives"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("dense primitive JSON fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(8_192, 8 * 1024 * 1024, AtomHashSeed::new(9, 10)),
+        HeapLimit::new(16_384 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 8_192),
+    ))
+    .expect("dense primitive JSON isolate initializes");
+    if let Some(mode) = forced {
+        isolate.heap.set_forced_collection_mode(mode);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_000_000,
+                quantum: 4_000_000,
+            },
+        )
+        .expect("dense primitive JSON fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dense primitive JSON batch {N}, forced={forced:?} returned {outcome:?}"
     );
 }

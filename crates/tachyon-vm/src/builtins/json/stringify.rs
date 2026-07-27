@@ -534,9 +534,7 @@ impl Isolate {
             if frame.descriptor_checks {
                 return self.dispatch_json_object_descriptor(site, state, frame.container, atom);
             }
-            if frame.kind != JsonContainerKind::Object
-                || self.json_snapshot(state)?.replacer.as_immediate() != Some(Immediate::Undefined)
-            {
+            if self.json_snapshot(state)?.replacer.as_immediate() != Some(Immediate::Undefined) {
                 return self.begin_json_current_frame_property(site, state);
             }
             let key = self.atom_string_value(atom)?;
@@ -562,11 +560,80 @@ impl Isolate {
             state = self.pending_json_stringify_reference(continuation.first())?;
             self.set_json_value(state, result)?;
             self.root_json_stringify_state(site, state)?;
-            if result.as_immediate() != Some(Immediate::Undefined) {
-                return self.begin_json_to_json_get(site, state);
+            if let Some(next_state) = self.try_drain_json_primitive(site, state)? {
+                state = next_state;
+                continue;
             }
-            self.advance_json_top_frame_index(state)?;
+            return self.begin_json_to_json_get(site, state);
         }
+    }
+
+    /// Serializes one callback-free primitive and returns the state for the next loop turn.
+    fn try_drain_json_primitive(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingJsonStringify>,
+    ) -> Result<Option<GcRef<PendingJsonStringify>>, ExecutionError> {
+        const NULL: [u16; 4] = [b'n' as u16, b'u' as u16, b'l' as u16, b'l' as u16];
+        const TRUE: [u16; 4] = [b't' as u16, b'r' as u16, b'u' as u16, b'e' as u16];
+        const FALSE: [u16; 5] = [
+            b'f' as u16,
+            b'a' as u16,
+            b'l' as u16,
+            b's' as u16,
+            b'e' as u16,
+        ];
+        let value = self.json_snapshot(state)?.value;
+        if self.is_object_value(value) || self.is_bigint_value(value) {
+            return Ok(None);
+        }
+        if let Some(immediate) = value.as_immediate() {
+            let units = match immediate {
+                Immediate::Null => Some(NULL.as_slice()),
+                Immediate::True => Some(TRUE.as_slice()),
+                Immediate::False => Some(FALSE.as_slice()),
+                Immediate::Undefined => None,
+                Immediate::Hole | Immediate::Uninitialized => {
+                    return Err(ExecutionError::InvalidJsonText);
+                }
+            };
+            return self
+                .commit_json_primitive_units(site, state, units)
+                .map(Some);
+        }
+        if let Some(number) = numeric_value(value) {
+            let mut units = Vec::new();
+            if number.is_finite() {
+                self.append_primitive_string_units(value, &mut units)?;
+            } else {
+                units.extend(NULL);
+            }
+            return self
+                .commit_json_primitive_units(site, state, Some(&units))
+                .map(Some);
+        }
+        if self.json_is_string(value) {
+            let mut units = Vec::new();
+            self.json_quote_string(value, &mut units)?;
+            return self
+                .commit_json_primitive_units(site, state, Some(&units))
+                .map(Some);
+        }
+        self.commit_json_primitive_units(site, state, None)
+            .map(Some)
+    }
+
+    /// Appends one primitive result and advances its parent without re-entering the driver.
+    fn commit_json_primitive_units(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingJsonStringify>,
+        units: Option<&[u16]>,
+    ) -> Result<GcRef<PendingJsonStringify>, ExecutionError> {
+        let (state, _) = self.append_json_value_units(site, state, units)?;
+        self.advance_json_top_frame_index(state)?;
+        self.root_json_stringify_state(site, state)?;
+        Ok(state)
     }
 
     /// Publishes the current frame's holder/key pair before its observable value Get.
@@ -643,9 +710,20 @@ impl Isolate {
     fn finish_json_units(
         &mut self,
         site: NativeContinuationSite,
-        mut state: GcRef<PendingJsonStringify>,
+        state: GcRef<PendingJsonStringify>,
         units: Option<&[u16]>,
     ) -> Result<(), ExecutionError> {
+        let (state, serialized) = self.append_json_value_units(site, state, units)?;
+        self.complete_json_property(site, state, serialized)
+    }
+
+    /// Applies Array null substitution or Object omission and appends committed units.
+    fn append_json_value_units(
+        &mut self,
+        site: NativeContinuationSite,
+        mut state: GcRef<PendingJsonStringify>,
+        units: Option<&[u16]>,
+    ) -> Result<(GcRef<PendingJsonStringify>, bool), ExecutionError> {
         let parent = self.json_top_frame_snapshot(state)?;
         const NULL_UNITS: [u16; 4] = [b'n' as u16, b'u' as u16, b'l' as u16, b'l' as u16];
         let units = match (parent.map(|frame| frame.kind), units) {
@@ -656,7 +734,7 @@ impl Isolate {
             state = self.append_json_property_prefix(site, state)?;
             state = self.append_json_units(site, state, units)?;
         }
-        self.complete_json_property(site, state, units.is_some())
+        Ok((state, units.is_some()))
     }
 
     /// Finalizes the root or advances the parent cursor after one property completes.
