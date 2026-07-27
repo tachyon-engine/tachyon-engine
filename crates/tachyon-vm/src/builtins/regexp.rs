@@ -10,6 +10,72 @@ pub(crate) struct RegExpBuiltinOutcome {
 }
 
 impl Isolate {
+    /// Implements the branded RegExp `@@replace` fast path for string replacements.
+    pub(crate) fn regexp_replace(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let input_argument = self.call_argument(site, 0)?;
+        let input = self.regexp_string_argument(input_argument)?;
+        let replacement = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        self.regexp_replace_values(site.this_value, input, replacement)
+    }
+
+    /// Runs the non-observable branded replacement kernel for a verified RegExp receiver.
+    pub(crate) fn regexp_replace_values(
+        &mut self,
+        receiver: Value,
+        input: Value,
+        replacement: Value,
+    ) -> Result<Value, ExecutionError> {
+        let (source_value, flags_value) = self.regexp_data(receiver)?;
+        if self.is_callable_value(replacement)? {
+            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(
+                replacement,
+            ));
+        }
+        let replacement_units = self.primitive_string_units(replacement)?;
+        let input_units = self.regexp_string_units(input)?;
+        let source = self.regexp_string_units(source_value)?;
+        let flags = self.regexp_flags(flags_value)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        let program = CompiledRegExp::compile_units_with_flags(&source, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let unicode = flags.unicode || flags.unicode_sets;
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(input_units.len().saturating_add(replacement_units.len()))
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        let mut cursor = 0;
+        let mut search = 0;
+        let mut replaced = false;
+        while search <= input_units.len() {
+            let Some(matched) = program.find(&input_units, search, unicode) else {
+                break;
+            };
+            output.extend_from_slice(&input_units[cursor..matched.start]);
+            append_regexp_replacement(&mut output, &replacement_units, &input_units, &matched);
+            cursor = matched.end;
+            replaced = true;
+            if !flags.global {
+                break;
+            }
+            search = if matched.end == matched.start {
+                advance_regexp_split_index(&input_units, matched.end, unicode)
+            } else {
+                matched.end
+            };
+        }
+        if !replaced {
+            return Ok(input);
+        }
+        output.extend_from_slice(&input_units[cursor..]);
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Implements the branded `RegExp.prototype[Symbol.match]` operation.
     pub(crate) fn regexp_match(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let receiver = site.this_value;
@@ -821,6 +887,35 @@ impl Isolate {
     /// Validates flags once at construction even when the backend is not asked to execute yet.
     fn validate_regexp_flags(&mut self, value: Value) -> Result<(), ExecutionError> {
         self.regexp_flags(value).map(|_| ())
+    }
+}
+
+/// Expands the replacement grammar that does not require invoking user code.
+fn append_regexp_replacement(
+    output: &mut Vec<u16>,
+    replacement: &[u16],
+    input: &[u16],
+    matched: &RegExpMatch,
+) {
+    let mut index = 0;
+    while index < replacement.len() {
+        if replacement[index] != u16::from(b'$') || index + 1 >= replacement.len() {
+            output.push(replacement[index]);
+            index += 1;
+            continue;
+        }
+        match replacement[index + 1] {
+            36 => output.push(u16::from(b'$')),
+            96 => output.extend_from_slice(&input[..matched.start]),
+            39 => output.extend_from_slice(&input[matched.end..]),
+            38 => output.extend_from_slice(&input[matched.start..matched.end]),
+            _ => {
+                output.push(u16::from(b'$'));
+                index += 1;
+                continue;
+            }
+        }
+        index += 2;
     }
 }
 

@@ -1016,6 +1016,7 @@ impl Isolate {
             (NativeFunction::StringSplit, b"split".as_slice()),
             (NativeFunction::StringSearch, b"search".as_slice()),
             (NativeFunction::StringMatch, b"match".as_slice()),
+            (NativeFunction::StringReplace, b"replace".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
@@ -1137,6 +1138,23 @@ impl Isolate {
             match_key,
             DataPropertyDescriptor {
                 value: Some(regexp_match),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let regexp_replace = allocate(self, NativeFunction::RegExpReplace)?;
+        let replace_symbol = self
+            .realm
+            .well_known_symbols
+            .replace
+            .expect("Symbol.replace remains rooted during RegExp initialization");
+        let replace_key = self.property_key(replace_symbol)?;
+        self.define_data_property(
+            regexp_prototype,
+            replace_key,
+            DataPropertyDescriptor {
+                value: Some(regexp_replace),
                 writable: Some(true),
                 enumerable: Some(false),
                 configurable: Some(true),

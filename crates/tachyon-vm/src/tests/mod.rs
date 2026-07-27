@@ -60,6 +60,7 @@ mod proxy;
 mod realm_gc;
 mod regexp_escape;
 mod regexp_exec;
+mod regexp_replace;
 mod regexp_search;
 mod signals;
 mod string_case;

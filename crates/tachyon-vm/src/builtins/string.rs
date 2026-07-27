@@ -3,6 +3,46 @@
 use super::super::*;
 
 impl Isolate {
+    /// Implements String.prototype.replace for primitive strings and branded RegExp values.
+    pub(crate) fn string_replace(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let receiver = self.string_primitive_value(site.this_value)?;
+        let search = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let replacement = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_object_value(search) && self.regexp_data(search).is_ok() {
+            return self.regexp_replace_values(search, receiver, replacement);
+        }
+        if self.is_callable_value(replacement)? {
+            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(
+                replacement,
+            ));
+        }
+        let input_units = self.string_receiver_units(receiver)?;
+        let search_units = self.primitive_string_units(search)?;
+        let replacement_units = self.primitive_string_units(replacement)?;
+        let Some(index) = find_code_units(&input_units, &search_units) else {
+            return Ok(receiver);
+        };
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(
+                input_units
+                    .len()
+                    .saturating_add(replacement_units.len())
+                    .saturating_sub(search_units.len()),
+            )
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        output.extend_from_slice(&input_units[..index]);
+        output.extend_from_slice(&replacement_units);
+        output.extend_from_slice(&input_units[index + search_units.len()..]);
+        self.allocate_runtime_string(
+            JsString::try_from_owned_code_units(output)
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
     /// Implements String.prototype.match using the standard RegExp fallback.
     pub(crate) fn string_match(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let receiver = self.string_primitive_value(site.this_value)?;
@@ -735,6 +775,16 @@ impl Isolate {
         }
         Ok(number.trunc() as usize)
     }
+}
+
+/// Finds the first exact UTF-16 subsequence, including an empty search string.
+fn find_code_units(input: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    input
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Converts valid UTF-16 segments and preserves unpaired surrogate code units verbatim.

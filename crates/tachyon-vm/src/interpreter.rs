@@ -5560,6 +5560,10 @@ impl Isolate {
                     let result = self.string_match(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::StringReplace) => {
+                    let result = self.string_replace(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -5645,6 +5649,10 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpMatch) => {
                     let result = self.regexp_match(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpReplace) => {
+                    let result = self.regexp_replace(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpToString) => {

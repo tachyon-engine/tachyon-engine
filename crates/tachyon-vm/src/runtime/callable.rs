@@ -349,6 +349,7 @@ pub(crate) enum NativeFunction {
     StringSplit,
     StringSearch,
     StringMatch,
+    StringReplace,
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
@@ -359,6 +360,7 @@ pub(crate) enum NativeFunction {
     RegExpSplit,
     RegExpSearch,
     RegExpMatch,
+    RegExpReplace,
     SymbolConstructor,
     SymbolFor,
     SymbolKeyFor,
@@ -958,7 +960,9 @@ impl NativeFunction {
             Self::ProxyConstructor
             | Self::ProxyRevocable
             | Self::StringSplit
+            | Self::StringReplace
             | Self::RegExpSplit
+            | Self::RegExpReplace
             | Self::ArraySlice
             | Self::ArraySplice => 2,
             Self::ObjectAssign
@@ -1343,6 +1347,7 @@ impl NativeFunction {
             Self::RegExpSplit => "[Symbol.split]",
             Self::RegExpSearch => "[Symbol.search]",
             Self::RegExpMatch => "[Symbol.match]",
+            Self::RegExpReplace => "[Symbol.replace]",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
             Self::StringAt => "at",
@@ -1374,6 +1379,7 @@ impl NativeFunction {
             Self::StringSplit => "split",
             Self::StringSearch => "search",
             Self::StringMatch => "match",
+            Self::StringReplace => "replace",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",
