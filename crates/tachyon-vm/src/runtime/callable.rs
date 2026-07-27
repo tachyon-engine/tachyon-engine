@@ -924,6 +924,8 @@ impl NativeFunction {
         }
         match self {
             Self::SignalStateSet
+            | Self::StringMatch
+            | Self::RegExpMatch
             | Self::SignalUntrack
             | Self::SignalIntrospectSources
             | Self::SignalIntrospectSinks
