@@ -4,7 +4,7 @@ mod float16;
 
 use self::float16::{decode_float16, encode_float16};
 use super::super::*;
-use crate::object::{ArrayBufferData, DataViewObject};
+use crate::object::{ArrayBufferData, DataViewObject, ViewLengthMode};
 use crate::runtime::callable::DataViewElement;
 
 #[derive(Clone, Copy)]
@@ -49,19 +49,22 @@ impl Isolate {
         if offset > buffer_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
-        let byte_length = if let Some(value) = self.call_argument(site, 2)? {
+        let explicit_length = if let Some(value) = self.call_argument(site, 2)? {
             if value.as_immediate() == Some(Immediate::Undefined) {
-                buffer_length - offset
+                None
             } else {
-                self.ecma_to_index(value)?
+                Some(self.ecma_to_index(value)?)
             }
         } else {
-            buffer_length - offset
+            None
         };
+        let byte_length = explicit_length.unwrap_or(buffer_length - offset);
         if byte_length > buffer_length - offset {
             return Err(ExecutionError::InvalidArrayLength);
         }
         let byte_offset = u32::try_from(offset).map_err(|_| ExecutionError::InvalidArrayLength)?;
+        let tracking =
+            explicit_length.is_none() && self.data_view_array_buffer_is_resizable(buffer)?;
         let byte_length =
             u32::try_from(byte_length).map_err(|_| ExecutionError::InvalidArrayLength)?;
         let prototype = self.data_view_prototype_for_new_target(site.new_target)?;
@@ -82,6 +85,11 @@ impl Isolate {
                     buffer,
                     byte_offset,
                     byte_length,
+                    length_mode: if tracking {
+                        ViewLengthMode::Tracking
+                    } else {
+                        ViewLengthMode::Fixed
+                    },
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -211,16 +219,121 @@ impl Isolate {
             .heap
             .checked_reference(raw, self.types.data_view_object)
             .map_err(|_| ExecutionError::NotObject(value))?;
-        self.heap.with_running_scope(|scope| {
+        let metadata = self.heap.with_running_scope(|scope| {
             let view = scope.root(view).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(view, self.types.data_view_object)
-                    .map(|view| DataViewSnapshot {
-                        buffer: view.buffer,
-                        byte_offset: view.byte_offset as usize,
-                        byte_length: view.byte_length as usize,
+                    .map(|view| {
+                        (
+                            view.buffer,
+                            view.byte_offset as usize,
+                            view.byte_length,
+                            view.length_mode,
+                        )
                     })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let (buffer, byte_offset, encoded_length, length_mode) = metadata;
+        let current = match self.data_view_buffer_length(buffer) {
+            Ok(length) => length,
+            Err(ExecutionError::DetachedArrayBuffer) => {
+                return Ok(DataViewSnapshot {
+                    buffer,
+                    byte_offset,
+                    byte_length: encoded_length as usize,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        if length_mode == ViewLengthMode::Tracking {
+            let byte_length = current.saturating_sub(byte_offset);
+            return Ok(DataViewSnapshot {
+                buffer,
+                byte_offset: if byte_offset > current {
+                    0
+                } else {
+                    byte_offset
+                },
+                byte_length: if byte_offset > current {
+                    0
+                } else {
+                    byte_length
+                },
+            });
+        }
+        if byte_offset
+            .checked_add(encoded_length as usize)
+            .is_none_or(|end| end > current)
+        {
+            return Ok(DataViewSnapshot {
+                buffer,
+                byte_offset: 0,
+                byte_length: 0,
+            });
+        }
+        Ok(DataViewSnapshot {
+            buffer,
+            byte_offset,
+            byte_length: encoded_length as usize,
+        })
+    }
+
+    /// Checks the branded backing's resizable bit without retaining a borrow.
+    fn data_view_array_buffer_is_resizable(
+        &mut self,
+        buffer: Value,
+    ) -> Result<bool, ExecutionError> {
+        let raw = buffer
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(buffer))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(buffer))?;
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            let data = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(object, self.types.array_buffer_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .data
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
+            })?;
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.array_buffer_data)
+                    .map(|data| data.resizable)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Reads the current byte length of a branded, attached ArrayBuffer.
+    fn data_view_buffer_length(&mut self, buffer: Value) -> Result<usize, ExecutionError> {
+        let raw = buffer
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(buffer))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(buffer))?;
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            let data = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(object, self.types.array_buffer_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .data
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
+            })?;
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.array_buffer_data)
+                    .map(|data| data.byte_length)
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })

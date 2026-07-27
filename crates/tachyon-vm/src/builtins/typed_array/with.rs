@@ -125,7 +125,9 @@ impl Isolate {
         let target = self.create_fixed_typed_array_same_kind(snapshot.kind, original_length)?;
         self.copy_same_kind_typed_array(source, target)?;
         let target_snapshot = self.typed_array_snapshot(target)?;
-        self.typed_array_write_value(target_snapshot, index, pending.values[WITH_VALUE])?;
+        if index < target_snapshot.length {
+            self.typed_array_write_value(target_snapshot, index, pending.values[WITH_VALUE])?;
+        }
         self.write(site.caller_base, site.destination, target)
     }
 

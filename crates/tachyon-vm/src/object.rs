@@ -684,7 +684,16 @@ pub(crate) struct DataViewObject {
     pub(crate) buffer: Value,
     pub(crate) byte_offset: u32,
     pub(crate) byte_length: u32,
+    pub(crate) length_mode: ViewLengthMode,
     pub(crate) ordinary: OrdinaryObject,
+}
+
+/// Whether an ArrayBuffer view retains an explicit length or tracks its backing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ViewLengthMode {
+    Fixed,
+    Tracking,
 }
 
 impl Trace for DataViewObject {
@@ -784,6 +793,7 @@ pub(crate) struct TypedArrayObject {
     pub(crate) byte_offset: u32,
     pub(crate) length: u32,
     pub(crate) kind: TypedArrayKind,
+    pub(crate) length_mode: ViewLengthMode,
     pub(crate) ordinary: OrdinaryObject,
 }
 
@@ -999,7 +1009,7 @@ mod tests {
     fn extensibility_uses_existing_object_alignment_padding() {
         assert_eq!(size_of::<OrdinaryObject>(), 24);
         assert_eq!(size_of::<DateObject>(), 32);
-        assert_eq!(size_of::<DataViewObject>(), 40);
+        assert_eq!(size_of::<DataViewObject>(), 48);
         assert_eq!(size_of::<TypedArrayObject>(), 48);
     }
 }

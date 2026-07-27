@@ -10,11 +10,35 @@ var nested = JSON.stringify({a: [1, {b: 2}]}, null, "xy");
 var expected = "{\nxy\"a\": [\nxyxy1,\nxyxy{\nxyxyxy\"b\": 2\nxyxy}\nxy]\n}";
 nested === expected &&
 JSON.stringify({a: 1}, null, "0123456789ignored") ===
-  "{\n0123456789\"a\": 1\n}";
+  "{\n0123456789\"a\": 1\n}" &&
+JSON.stringify({a: 1}, null, 4.99) === "{\n    \"a\": 1\n}" &&
+JSON.stringify({a: 1}, null, 10) === JSON.stringify({a: 1}, null, 100) &&
+JSON.stringify({a: 1}, null, Infinity) === JSON.stringify({a: 1}, null, 10) &&
+JSON.stringify({a: 1}, null, NaN) === '{"a":1}' &&
+JSON.stringify({a: 1}, null, -Infinity) === '{"a":1}' &&
+JSON.stringify({a: 1}, null, -3.75) === '{"a":1}' &&
+(function () {
+  var numberSpace = new Number(1);
+  numberSpace.toString = function () { throw "number-toString"; };
+  numberSpace.valueOf = function () { return 3.9; };
+  if (JSON.stringify({a: 1}, null, numberSpace) !==
+      JSON.stringify({a: 1}, null, 3)) return false;
+  var stringSpace = new String("unused");
+  stringSpace.toString = function () { return "zz"; };
+  stringSpace.valueOf = function () { throw "string-valueOf"; };
+  if (JSON.stringify({a: 1}, null, stringSpace) !==
+      JSON.stringify({a: 1}, null, "zz")) return false;
+  var marker = {};
+  var abrupt = new Number(4);
+  abrupt.valueOf = function () { throw marker; };
+  try { JSON.stringify({root: {value: 1}}, null, abrupt); }
+  catch (error) { return error === marker; }
+  return false;
+})();
 "#;
 
 #[test]
-fn primitive_json_indentation_is_stable_for_every_dispatch_batch() {
+fn primitive_string_and_number_indentation_is_stable_for_every_dispatch_batch() {
     assert_pretty_json_batch::<1>(false);
     assert_pretty_json_batch::<2>(false);
     assert_pretty_json_batch::<4>(false);
@@ -23,7 +47,7 @@ fn primitive_json_indentation_is_stable_for_every_dispatch_batch() {
 }
 
 #[test]
-fn primitive_json_indentation_survives_forced_major_collection() {
+fn primitive_string_and_number_indentation_survives_forced_major_collection() {
     assert_pretty_json_batch::<8>(true);
 }
 

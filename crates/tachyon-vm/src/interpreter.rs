@@ -2315,6 +2315,9 @@ impl Isolate {
             NativeContinuationKind::ErrorToString(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ErrorStackSetter(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6184,6 +6187,13 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ErrorToString) => {
                     return self.begin_error_to_string(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::ErrorStackGetter) => {
+                    let result = self.error_stack_getter(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::ErrorStackSetter) => {
+                    return self.begin_error_stack_setter(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::ProxyConstructor) => {
                     return Err(ExecutionError::ProxyConstructorRequiresNew);
                 }
@@ -6888,8 +6898,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::JsonStringify) => {
-                    let value = self.json_stringify(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_json_stringify(&site);
                 }
                 FunctionExecutable::Native(native) if native.math_function().is_some() => {
                     let function = native
@@ -7812,6 +7821,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::ErrorToString(stage) => {
                     self.resume_error_to_string(continuation, stage, value)
+                }
+                NativeContinuationKind::ErrorStackSetter(stage) => {
+                    self.resume_error_stack_setter(continuation, stage, value)
                 }
                 NativeContinuationKind::ObjectIsPrototypeOf => self
                     .resume_object_is_prototype_of(continuation, value)

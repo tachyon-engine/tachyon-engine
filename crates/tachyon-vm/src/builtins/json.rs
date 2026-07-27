@@ -20,6 +20,16 @@ impl JsonIndentation {
         }
     }
 
+    /// Creates the bounded ASCII-space gap selected by a numeric `space` argument.
+    #[inline(always)]
+    fn spaces(length: usize) -> Self {
+        debug_assert!(length <= MAX_JSON_GAP_UNITS);
+        let mut indentation = Self::compact();
+        indentation.gap[..length].fill(u16::from(b' '));
+        indentation.gap_length = length;
+        indentation
+    }
+
     #[inline(always)]
     fn is_compact(self) -> bool {
         self.gap_length == 0
@@ -65,14 +75,34 @@ impl Isolate {
         }
     }
 
-    /// Serializes the synchronous primitive, Array, and ordinary-data-property JSON subset.
-    pub(crate) fn json_stringify(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    /// Starts serialization, suspending only when a boxed `space` must run primitive conversion.
+    pub(crate) fn begin_json_stringify(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let value = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let space = self
             .call_argument(site, 2)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if let Some(consumer) = self.json_boxed_space_consumer(space) {
+            return self.dispatch_object_primitive_conversion(
+                consumer,
+                site.caller_base,
+                site.destination,
+                value,
+                space,
+                site.call_site,
+            );
+        }
+        let result = self.json_stringify_values(value, space)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Serializes the synchronous primitive, Array, and ordinary-data-property JSON subset.
+    pub(crate) fn json_stringify_values(
+        &mut self,
+        value: Value,
+        space: Value,
+    ) -> Result<Value, ExecutionError> {
         let indentation = self.json_primitive_indentation(space)?;
         let mut output = Vec::new();
         let mut stack = Vec::new();
@@ -86,11 +116,36 @@ impl Isolate {
         self.allocate_runtime_string(string)
     }
 
-    /// Computes the JSON gap for a primitive String without invoking JavaScript.
+    /// Selects the specification conversion hint only for genuine boxed Number/String values.
+    fn json_boxed_space_consumer(&self, space: Value) -> Option<ConversionConsumer> {
+        let raw = space.as_heap_ref()?;
+        if self
+            .heap
+            .checked_reference(raw, self.types.number_object)
+            .is_ok()
+        {
+            return Some(ConversionConsumer::JsonStringifyNumberSpace);
+        }
+        self.heap
+            .checked_reference(raw, self.types.string_object)
+            .is_ok()
+            .then_some(ConversionConsumer::JsonStringifyStringSpace)
+    }
+
+    /// Computes the JSON gap for primitive Number and String values without invoking JavaScript.
     fn json_primitive_indentation(
         &mut self,
         space: Value,
     ) -> Result<JsonIndentation, ExecutionError> {
+        if let Some(number) = numeric_value(space) {
+            let integer = if number.is_nan() || number == 0.0 {
+                0.0
+            } else {
+                number.trunc()
+            };
+            let length = integer.clamp(0.0, MAX_JSON_GAP_UNITS as f64) as usize;
+            return Ok(JsonIndentation::spaces(length));
+        }
         let mut indentation = JsonIndentation::compact();
         if self.json_is_string(space) {
             let mut units = Vec::new();

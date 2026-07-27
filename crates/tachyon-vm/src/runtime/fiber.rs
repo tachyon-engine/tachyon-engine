@@ -276,6 +276,8 @@ pub(crate) enum ConversionConsumer {
     DateToPrimitiveString,
     DateToPrimitiveNumber,
     DateToJson,
+    JsonStringifyNumberSpace,
+    JsonStringifyStringSpace,
     RegExpExecInput,
     RegExpTestInput,
     RegExpSearchInput,
@@ -376,6 +378,8 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
+            | Self::JsonStringifyNumberSpace
+            | Self::JsonStringifyStringSpace
             | Self::RegExpExecInput
             | Self::RegExpTestInput
             | Self::RegExpSearchInput
@@ -477,6 +481,7 @@ impl ConversionConsumer {
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
                 | Self::DateToPrimitiveString
+                | Self::JsonStringifyStringSpace
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
@@ -532,6 +537,8 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
+                | Self::JsonStringifyNumberSpace
+                | Self::JsonStringifyStringSpace
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
@@ -1152,6 +1159,15 @@ pub(crate) enum ErrorToStringStage {
     MessageValue,
 }
 
+/// Observable steps in SetterThatIgnoresPrototypeProperties for Error stack.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum ErrorStackSetterStage {
+    GetOwn,
+    Define,
+    Set,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ObjectToLocaleStringStage {
@@ -1321,6 +1337,7 @@ pub(crate) enum NativeContinuationKind {
     InstanceOf,
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
+    ErrorStackSetter(ErrorStackSetterStage),
     ObjectIsPrototypeOf,
     ObjectLookupAccessor {
         stage: ObjectLookupAccessorStage,
@@ -1660,6 +1677,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::ErrorToString(stage),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots the receiver and assigned String across one observable stack-setter step.
+    #[inline]
+    pub(crate) const fn error_stack_setter(
+        site: NativeContinuationSite,
+        stage: ErrorStackSetterStage,
+        receiver: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ErrorStackSetter(stage),
+            first: receiver,
+            second: value,
         }
     }
 

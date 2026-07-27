@@ -16,6 +16,25 @@ rab.resize(8);
 rab.byteLength === 8 && rab.maxByteLength === 8 && rab.resizable;
 "#;
 
+const ARRAY_BUFFER_RAB_VIEW_SOURCE: &str = r#"
+var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+var ta = new Uint8Array(rab);
+var dv = new DataView(rab);
+ta[0] = 17;
+rab.resize(2);
+var shrunk = ta.length === 2 && ta.byteLength === 2 && ta[0] === 17 &&
+  dv.byteLength === 2 && dv.getUint8(0) === 17;
+rab.resize(8);
+var grown = ta.length === 8 && ta.byteLength === 8 && ta[0] === 17 &&
+  ta[2] === 0 && dv.byteLength === 8;
+rab.resize(0);
+var oob = ta.length === 0 && ta.byteLength === 0 && ta.byteOffset === 0 &&
+  dv.byteLength === 0 && dv.byteOffset === 0;
+rab.resize(4);
+var restored = ta.length === 4 && ta.byteLength === 4 && dv.byteLength === 4;
+shrunk && grown && oob && restored;
+"#;
+
 const ARRAY_BUFFER_DETACH_SOURCE: &str = r#"
 var buffer = new ArrayBuffer(16);
 var typed = new Uint8Array(buffer, 4, 4);
@@ -669,6 +688,25 @@ fn array_buffer_resizable_vertical_slice() {
             },
         )
         .expect("RAB fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "outcome: {outcome:?}"
+    );
+}
+
+#[test]
+fn array_buffer_resizable_view_tracking() {
+    let module = compile_source(ARRAY_BUFFER_RAB_VIEW_SOURCE, 7_412);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("RAB view fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "outcome: {outcome:?}"

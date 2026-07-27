@@ -1246,6 +1246,14 @@ impl Isolate {
                 ConversionConsumer::DateToJson => {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
                 }
+                ConversionConsumer::JsonStringifyNumberSpace => {
+                    let space = self.convert_to_number(argument)?;
+                    self.json_stringify_values(receiver, space)?
+                }
+                ConversionConsumer::JsonStringifyStringSpace => {
+                    let space = self.primitive_string_value(Some(argument))?;
+                    self.json_stringify_values(receiver, space)?
+                }
                 ConversionConsumer::ArrayLength => {
                     unreachable!("Array length resumes inside the conversion state machine")
                 }

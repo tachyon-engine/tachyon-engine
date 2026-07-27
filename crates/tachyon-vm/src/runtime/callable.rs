@@ -442,6 +442,8 @@ pub(crate) enum NativeFunction {
     ErrorConstructor(NativeErrorKind),
     ErrorIsError,
     ErrorToString,
+    ErrorStackGetter,
+    ErrorStackSetter,
     ProxyConstructor,
     ProxyRevocable,
     PromiseConstructor,
@@ -981,6 +983,7 @@ impl NativeFunction {
             Self::DateConstructor | Self::DateUtc => 7,
             Self::ArrayBufferResize => 1,
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
+            Self::ErrorStackSetter => 1,
             Self::DateNow => 0,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
             Self::DateLocalSetter(setter) | Self::DateUtcSetter(setter) => setter.length(),
@@ -1244,6 +1247,7 @@ impl NativeFunction {
             | Self::ObjectToString
             | Self::ObjectValueOf
             | Self::ErrorToString
+            | Self::ErrorStackGetter
             | Self::SymbolConstructor
             | Self::NumberValueOf
             | Self::BigIntToString
@@ -1511,6 +1515,8 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => "AggregateError",
             Self::ErrorIsError => "isError",
             Self::ErrorToString => "toString",
+            Self::ErrorStackGetter => "get stack",
+            Self::ErrorStackSetter => "set stack",
             Self::ProxyConstructor => "Proxy",
             Self::ProxyRevocable => "revocable",
             Self::PromiseConstructor => "Promise",

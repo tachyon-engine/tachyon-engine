@@ -58,6 +58,42 @@ var options = new Proxy({ get cause() { return 42; } }, { has(t, k) { return k i
 new TypeError(undefined, options).cause === 42;
 "#;
 
+const ERROR_STACK_ACCESSOR_SOURCE: &str = r#"
+var trace = "";
+var descriptor = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
+var firstTarget = {};
+var first = new Proxy(firstTarget, {
+  getOwnPropertyDescriptor(target, key) {
+    trace += "g";
+    return Object.getOwnPropertyDescriptor(target, key);
+  },
+  defineProperty(target, key, desc) {
+    trace += "d";
+    return Reflect.defineProperty(target, key, desc);
+  }
+});
+descriptor.set.call(first, "first");
+var secondTarget = { stack: "old" };
+var second = new Proxy(secondTarget, {
+  getOwnPropertyDescriptor(target, key) {
+    trace += "G";
+    return Object.getOwnPropertyDescriptor(target, key);
+  },
+  set(target, key, value) {
+    trace += "s";
+    target[key] = value;
+    return true;
+  }
+});
+descriptor.set.call(second, "second");
+var error = new TypeError("message");
+trace === "gdGs" &&
+firstTarget.stack === "first" && secondTarget.stack === "second" &&
+typeof descriptor.get.call(error) === "string" &&
+descriptor.get.call({}) === undefined &&
+!Object.prototype.hasOwnProperty.call(error, "stack");
+"#;
+
 #[test]
 fn error_constructor_and_to_string_resume_for_every_dispatch_batch() {
     assert_error_batch::<1>();
@@ -110,6 +146,20 @@ fn error_cause_only_survives_forced_major_collections() {
     assert_forced_major_source(ERROR_CAUSE_ONLY_SOURCE, 91);
 }
 
+#[test]
+fn error_stack_accessor_resumes_for_every_dispatch_batch() {
+    assert_source_batch::<1>(ERROR_STACK_ACCESSOR_SOURCE, 92, false);
+    assert_source_batch::<2>(ERROR_STACK_ACCESSOR_SOURCE, 93, false);
+    assert_source_batch::<4>(ERROR_STACK_ACCESSOR_SOURCE, 94, false);
+    assert_source_batch::<8>(ERROR_STACK_ACCESSOR_SOURCE, 95, false);
+    assert_source_batch::<16>(ERROR_STACK_ACCESSOR_SOURCE, 96, false);
+}
+
+#[test]
+fn error_stack_accessor_roots_survive_forced_major_collections() {
+    assert_source_batch::<8>(ERROR_STACK_ACCESSOR_SOURCE, 97, true);
+}
+
 /// Executes the nested Error continuation chain with one selected dispatch monomorphization.
 fn assert_error_batch<const N: usize>() {
     let module = compile_error_source(80 + N as u32);
@@ -135,24 +185,31 @@ fn compile_error_source(source_id: u32) -> CompiledModule {
 
 /// Runs one focused Error state-machine fixture with every allocation forcing a major collection.
 fn assert_forced_major_source(source: &str, source_id: u32) {
+    assert_source_batch::<8>(source, source_id, true);
+}
+
+/// Runs one Error fixture with a selected dispatch batch and collection policy.
+fn assert_source_batch<const N: usize>(source: &str, source_id: u32, forced_major: bool) {
     let module = compile_source(source, source_id);
     let mut isolate = test_isolate();
-    isolate
-        .heap
-        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
     let outcome = isolate
-        .execute_with_batch::<8>(
+        .execute_with_batch::<N>(
             &module,
             ExecutionBudget {
                 fuel: 4_096,
                 quantum: 4_096,
             },
         )
-        .expect("forced-major Error fixture executes");
-    assert!(matches!(
-        outcome,
-        RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)
-    ));
+        .expect("Error fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }
 
 fn compile_source(source: &str, source_id: u32) -> CompiledModule {

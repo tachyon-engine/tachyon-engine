@@ -2009,6 +2009,35 @@ impl Isolate {
                 )?;
                 let to_string_atom = self.intern_intrinsic_name(b"toString")?;
                 self.set_intrinsic_data_property(prototype, to_string_atom, to_string, true)?;
+                let stack_getter = self.allocate_native_function(
+                    NativeFunction::ErrorStackGetter,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                )?;
+                let stack_setter = self.allocate_native_function(
+                    NativeFunction::ErrorStackSetter,
+                    OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: function_prototype,
+                    },
+                )?;
+                let stack_atom = self.intern_intrinsic_name(b"stack")?;
+                self.define_property(
+                    prototype,
+                    PropertyKey::Atom(stack_atom),
+                    PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                        getter: Some(stack_getter),
+                        setter: Some(stack_setter),
+                        enumerable: Some(false),
+                        configurable: Some(true),
+                    }),
+                )?;
             }
         }
         Ok(())

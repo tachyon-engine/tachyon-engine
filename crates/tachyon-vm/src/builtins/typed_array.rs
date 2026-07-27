@@ -20,7 +20,9 @@ use super::super::*;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
 use crate::iterator::ArrayIterationKind;
-use crate::object::{ArrayBufferData, ContentType, TypedArrayKind, TypedArrayObject};
+use crate::object::{
+    ArrayBufferData, ContentType, TypedArrayKind, TypedArrayObject, ViewLengthMode,
+};
 use crate::property::array_index;
 use crate::runtime::callable::{
     DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
@@ -235,6 +237,7 @@ impl Isolate {
                     byte_offset,
                     length,
                     kind,
+                    length_mode: ViewLengthMode::Fixed,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -462,6 +465,8 @@ impl Isolate {
             }
             (buffer_length - offset) / snapshot.kind.byte_width()
         };
+        let auto_length =
+            explicit_length.is_none() && self.array_buffer_is_resizable(snapshot.source)?;
         let target = self.allocate_typed_array_view(
             snapshot.source,
             offset,
@@ -469,6 +474,9 @@ impl Isolate {
             snapshot.kind,
             snapshot.prototype,
         )?;
+        if auto_length {
+            self.set_typed_array_length_mode(target, ViewLengthMode::Tracking)?;
+        }
         self.write(site.caller_base, site.destination, target)
     }
 
@@ -746,8 +754,8 @@ impl Isolate {
         let source = self.typed_array_snapshot(source)?;
         let target = self.typed_array_snapshot(target)?;
         let width = source.kind.byte_width();
-        let byte_length = source
-            .length
+        let copy_length = source.length.min(target.length);
+        let byte_length = copy_length
             .checked_mul(width)
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let source_data = self.typed_array_backing(source.buffer)?;
@@ -1136,23 +1144,34 @@ impl Isolate {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(array, self.types.typed_array_object)
-                    .map(|array| TypedArraySnapshot {
-                        buffer: array.buffer,
-                        byte_offset: array.byte_offset as usize,
-                        length: array.length as usize,
-                        kind: array.kind,
+                    .map(|array| {
+                        (
+                            TypedArraySnapshot {
+                                buffer: array.buffer,
+                                byte_offset: array.byte_offset as usize,
+                                length: array.length as usize,
+                                kind: array.kind,
+                            },
+                            array.length_mode,
+                        )
                     })
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
+        let (snapshot, length_mode) = snapshot;
         let available = match self.array_buffer_length_for_view_value(snapshot.buffer) {
             Ok(length) => length,
             Err(ExecutionError::DetachedArrayBuffer) => 0,
             Err(error) => return Err(error),
         };
+        let effective_length = if length_mode == ViewLengthMode::Tracking {
+            available.saturating_sub(snapshot.byte_offset) / snapshot.kind.byte_width()
+        } else {
+            snapshot.length
+        };
         let required = snapshot
             .byte_offset
-            .checked_add(snapshot.length.saturating_mul(snapshot.kind.byte_width()))
+            .checked_add(effective_length.saturating_mul(snapshot.kind.byte_width()))
             .ok_or(ExecutionError::InvalidArrayLength)?;
         if required > available {
             return Ok(TypedArraySnapshot {
@@ -1160,7 +1179,66 @@ impl Isolate {
                 ..snapshot
             });
         }
-        Ok(snapshot)
+        Ok(TypedArraySnapshot {
+            length: effective_length,
+            ..snapshot
+        })
+    }
+
+    /// Publishes the length-tracking mode after a newly allocated view is fully rooted.
+    fn set_typed_array_length_mode(
+        &mut self,
+        value: Value,
+        mode: ViewLengthMode,
+    ) -> Result<(), ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        let array = self
+            .heap
+            .checked_reference(raw, self.types.typed_array_object)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(array, self.types.typed_array_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .length_mode = mode;
+                Ok(())
+            })
+        })
+    }
+
+    /// Returns whether the branded ArrayBuffer permits views to track growth.
+    pub(crate) fn array_buffer_is_resizable(
+        &mut self,
+        buffer: Value,
+    ) -> Result<bool, ExecutionError> {
+        let raw = buffer
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(buffer))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(buffer))?;
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            let data = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(object, self.types.array_buffer_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .data
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
+            })?;
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.array_buffer_data)
+                    .map(|data| data.resizable)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
     }
 
     /// Reads the current byte length through the ArrayBuffer edge for resize-aware views.

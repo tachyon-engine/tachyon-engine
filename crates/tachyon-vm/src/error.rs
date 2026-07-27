@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod stack;
+
 /// An Error instance has an unforgeable VM brand and shared ordinary property storage.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
