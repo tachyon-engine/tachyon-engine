@@ -484,9 +484,9 @@ impl Isolate {
                 self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
             self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
             self.set_own_data_property(result, groups_atom, groups)?;
-            for (name, range) in &matched.named_captures {
-                let atom = self.intern_intrinsic_name(name.as_bytes())?;
-                let value = match range {
+            for capture in &matched.named_captures {
+                let atom = self.intern_intrinsic_name(capture.name.as_bytes())?;
+                let value = match &capture.range {
                     Some(range) => self.allocate_runtime_string(
                         JsString::try_from_utf16(&input_units[range.clone()])
                             .map_err(ExecutionError::PropertyKeyString)?,
@@ -558,12 +558,32 @@ impl Isolate {
             self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
         self.set_own_data_property(indices, groups_atom, groups)?;
-        for (name, range) in &matched.named_captures {
-            let atom = self.intern_intrinsic_name(name.as_bytes())?;
-            let value = self.regexp_indices_pair(range.as_ref(), prototype, state)?;
+        for capture in &matched.named_captures {
+            let atom = self.intern_intrinsic_name(capture.name.as_bytes())?;
+            let value = self.regexp_named_indices_pair(indices, capture)?;
             self.set_own_data_property(groups, atom, value)?;
         }
         Ok(())
+    }
+
+    /// Reuses the numeric capture's pair so `indices.groups` preserves specified identity.
+    fn regexp_named_indices_pair(
+        &mut self,
+        indices: Value,
+        capture: &crate::regexp::backend::RegExpNamedCapture,
+    ) -> Result<Value, ExecutionError> {
+        if capture.range.is_none() {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        }
+        let property_index = capture
+            .capture_index
+            .checked_add(1)
+            .ok_or(ExecutionError::InvalidStringLength)?;
+        let key = self.property_key_atom(Value::from_i32(
+            i32::try_from(property_index).map_err(|_| ExecutionError::InvalidStringLength)?,
+        ))?;
+        self.get_data_property(indices, key)?
+            .ok_or(ExecutionError::InvalidRegExpPattern)
     }
 
     /// Allocates one `[start, end]` pair, or returns `undefined` for an unmatched capture.
@@ -1082,8 +1102,8 @@ fn regexp_named_capture(
     matched
         .named_captures
         .iter()
-        .find(|(name, _)| name.encode_utf16().eq(requested.iter().copied()))
-        .and_then(|(_, range)| range.clone())
+        .find(|capture| capture.name.encode_utf16().eq(requested.iter().copied()))
+        .and_then(|capture| capture.range.clone())
 }
 
 /// Computes the exact output capacity using the same code-point boundaries as emission.

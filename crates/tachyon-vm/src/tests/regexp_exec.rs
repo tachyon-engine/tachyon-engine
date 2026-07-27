@@ -169,6 +169,35 @@ failed.lastIndex === 0 && abruptPreserved && strictSet && testMatched &&
 testOnly.lastIndex === 1;
 "#;
 
+const REGEXP_INDICES_UNICODE_SOURCE: &str = r#"
+var result = /(?:(?<left>a)|(b))(?<tail>c)?/d.exec("ac");
+var plain = /(z)?/d.exec("");
+var duplicate = /(?:(?<x>a)|(?<x>b))/d.exec("b");
+var sameSpan = /((?<same>a))/d.exec("a");
+var unicode = /./dug;
+var unicodeResult = unicode.exec("\ud834\udf06");
+var hanU = /\p{Script=Han}/du.exec("\ud842\udfb7a");
+var hanV = /\p{Script=Han}/dv.exec("\ud842\udfb7a");
+
+result[0] === "ac" && result[1] === "a" && result[2] === undefined &&
+result[3] === "c" && result.index === 0 && result.input === "ac" &&
+Object.getPrototypeOf(result.groups) === null && result.groups.left === "a" &&
+result.groups.tail === "c" && result.indices.length === 4 &&
+result.indices[0][0] === 0 && result.indices[0][1] === 2 &&
+result.indices[1][0] === 0 && result.indices[1][1] === 1 &&
+result.indices[2] === undefined && result.indices[3][0] === 1 &&
+result.indices[3][1] === 2 && Object.getPrototypeOf(result.indices.groups) === null &&
+result.indices.groups.left === result.indices[1] &&
+result.indices.groups.tail === result.indices[3] && plain.groups === undefined &&
+plain.indices.groups === undefined && duplicate.groups.x === "b" &&
+duplicate.indices.groups.x === duplicate.indices[2] && unicodeResult[0].length === 2 &&
+sameSpan.indices.groups.same === sameSpan.indices[2] &&
+sameSpan.indices.groups.same !== sameSpan.indices[1] &&
+unicodeResult.indices[0][0] === 0 && unicodeResult.indices[0][1] === 2 &&
+unicode.lastIndex === 2 && hanU[0].length === 2 && hanU.indices[0][1] === 2 &&
+hanV[0].length === 2 && hanV.indices[0][1] === 2;
+"#;
+
 #[test]
 fn regexp_exec_protocol_works_for_every_dispatch_batch() {
     assert_regexp_exec::<1>(false);
@@ -233,6 +262,58 @@ fn regexp_last_index_protocol_works_for_every_dispatch_batch_and_major_gc() {
     assert_regexp_last_index::<4>(true);
     assert_regexp_last_index::<8>(true);
     assert_regexp_last_index::<16>(true);
+}
+
+#[test]
+fn regexp_indices_and_unicode_work_for_every_dispatch_batch_and_major_gc() {
+    assert_regexp_indices_unicode::<1>(false);
+    assert_regexp_indices_unicode::<2>(false);
+    assert_regexp_indices_unicode::<4>(false);
+    assert_regexp_indices_unicode::<8>(false);
+    assert_regexp_indices_unicode::<16>(false);
+    assert_regexp_indices_unicode::<1>(true);
+    assert_regexp_indices_unicode::<2>(true);
+    assert_regexp_indices_unicode::<4>(true);
+    assert_regexp_indices_unicode::<8>(true);
+    assert_regexp_indices_unicode::<16>(true);
+}
+
+/// Runs `d` result publication and full-Unicode matching under one VM policy.
+fn assert_regexp_indices_unicode<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(8_000 + N as u32 + u32::from(forced_major) * 32),
+                SourceName::new("regexp-indices-unicode-fixture"),
+                MediaType::JavaScript,
+                Arc::from(REGEXP_INDICES_UNICODE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("RegExp indices/Unicode fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("RegExp indices/Unicode fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(value) => isolate.native_error_kind(value).unwrap(),
+        _ => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
 }
 
 /// Runs observable lastIndex conversion and strict writes under one dispatch/GC policy.
