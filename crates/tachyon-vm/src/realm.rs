@@ -1125,6 +1125,23 @@ impl Isolate {
                 configurable: Some(true),
             },
         )?;
+        let regexp_match = allocate(self, NativeFunction::RegExpMatch)?;
+        let match_symbol = self
+            .realm
+            .well_known_symbols
+            .r#match
+            .expect("Symbol.match remains rooted during RegExp initialization");
+        let match_key = self.property_key(match_symbol)?;
+        self.define_data_property(
+            regexp_prototype,
+            match_key,
+            DataPropertyDescriptor {
+                value: Some(regexp_match),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         self.initialize_symbol_registry_functions(symbol_constructor, function_prototype)?;
         let number = allocate(self, NativeFunction::NumberConstructor)?;
         self.realm.number_constructor = Some(number);
