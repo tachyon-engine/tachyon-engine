@@ -202,10 +202,15 @@ impl Isolate {
         let prototype = if site.new_target.as_immediate() == Some(Immediate::Undefined) {
             intrinsic_prototype
         } else {
+            let fallback = self
+                .realm_for_callable(site.new_target)
+                .ok()
+                .and_then(|realm| self.error_prototype_in_realm(realm, kind))
+                .unwrap_or(intrinsic_prototype);
             let prototype_atom = self.prototype_atom()?;
             self.constructor_prototype_value(site.new_target, prototype_atom)?
                 .filter(|value| self.is_object_value(*value))
-                .unwrap_or(intrinsic_prototype)
+                .unwrap_or(fallback)
         };
         let error = self.allocate_native_error_with_prototype(kind, None, prototype)?;
         let state = self.allocate_error_constructor_state(error, options, errors)?;
@@ -638,16 +643,21 @@ impl Isolate {
         message: Option<Value>,
         realm: RealmId,
     ) -> Result<Value, ExecutionError> {
-        let prototype = if realm == self.active_realm {
-            self.realm.error_intrinsics.get(kind).prototype
-        } else {
-            self.inactive_realms
-                .iter()
-                .find(|(id, _)| *id == realm)
-                .and_then(|(_, realm)| realm.error_intrinsics.get(kind).prototype)
-        }
-        .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?;
+        let prototype = self
+            .error_prototype_in_realm(realm, kind)
+            .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?;
         self.allocate_native_error_with_prototype(kind, message, prototype)
+    }
+
+    /// Resolves one native Error prototype without switching the active Realm.
+    fn error_prototype_in_realm(&self, realm: RealmId, kind: NativeErrorKind) -> Option<Value> {
+        if realm == self.active_realm {
+            return self.realm.error_intrinsics.get(kind).prototype;
+        }
+        self.inactive_realms
+            .iter()
+            .find(|(id, _)| *id == realm)
+            .and_then(|(_, realm)| realm.error_intrinsics.get(kind).prototype)
     }
 
     fn allocate_native_error_with_prototype(
