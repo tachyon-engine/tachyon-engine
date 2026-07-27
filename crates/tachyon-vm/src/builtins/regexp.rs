@@ -107,8 +107,12 @@ impl Isolate {
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let unicode = flags.unicode || flags.unicode_sets;
         let mut output = Vec::new();
+        let initial_capacity = input_units
+            .len()
+            .checked_add(replacement_units.len())
+            .ok_or(ExecutionError::InvalidStringLength)?;
         output
-            .try_reserve_exact(input_units.len().saturating_add(replacement_units.len()))
+            .try_reserve_exact(initial_capacity)
             .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
         let mut cursor = 0;
         let mut search = 0;
@@ -117,8 +121,8 @@ impl Isolate {
             let Some(matched) = program.find(&input_units, search, unicode) else {
                 break;
             };
-            output.extend_from_slice(&input_units[cursor..matched.start]);
-            append_regexp_replacement(&mut output, &replacement_units, &input_units, &matched);
+            try_append_regexp_units(&mut output, &input_units[cursor..matched.start])?;
+            append_regexp_replacement(&mut output, &replacement_units, &input_units, &matched)?;
             cursor = matched.end;
             replaced = true;
             if !flags.global {
@@ -133,7 +137,7 @@ impl Isolate {
         if !replaced {
             return Ok(input);
         }
-        output.extend_from_slice(&input_units[cursor..]);
+        try_append_regexp_units(&mut output, &input_units[cursor..])?;
         self.allocate_runtime_string(
             JsString::try_from_owned_code_units(output)
                 .map_err(ExecutionError::PropertyKeyString)?,
@@ -1073,24 +1077,24 @@ impl Isolate {
 }
 
 /// Expands the replacement grammar that does not require invoking user code.
-fn append_regexp_replacement(
+pub(crate) fn append_regexp_replacement(
     output: &mut Vec<u16>,
     replacement: &[u16],
     input: &[u16],
     matched: &RegExpMatch,
-) {
+) -> Result<(), ExecutionError> {
     let mut index = 0;
     while index < replacement.len() {
         if replacement[index] != u16::from(b'$') || index + 1 >= replacement.len() {
-            output.push(replacement[index]);
+            try_append_regexp_unit(output, replacement[index])?;
             index += 1;
             continue;
         }
         match replacement[index + 1] {
-            36 => output.push(u16::from(b'$')),
-            96 => output.extend_from_slice(&input[..matched.start]),
-            39 => output.extend_from_slice(&input[matched.end..]),
-            38 => output.extend_from_slice(&input[matched.start..matched.end]),
+            36 => try_append_regexp_unit(output, u16::from(b'$'))?,
+            96 => try_append_regexp_units(output, &input[..matched.start])?,
+            39 => try_append_regexp_units(output, &input[matched.end..])?,
+            38 => try_append_regexp_units(output, &input[matched.start..matched.end])?,
             digit @ 48..=57 => {
                 let first = usize::from(digit - 48);
                 let second = replacement
@@ -1101,12 +1105,12 @@ fn append_regexp_replacement(
                 let (capture, consumed) =
                     regexp_replacement_capture(first, second, matched.captures.len());
                 let Some(capture) = capture else {
-                    output.push(u16::from(b'$'));
+                    try_append_regexp_unit(output, u16::from(b'$'))?;
                     index += 1;
                     continue;
                 };
                 if let Some(range) = matched.captures[capture - 1].as_ref() {
-                    output.extend_from_slice(&input[range.clone()]);
+                    try_append_regexp_units(output, &input[range.clone()])?;
                 }
                 index += consumed + 1;
                 continue;
@@ -1116,26 +1120,51 @@ fn append_regexp_replacement(
                     .iter()
                     .position(|unit| *unit == u16::from(b'>'))
                 else {
-                    output.push(u16::from(b'$'));
+                    try_append_regexp_unit(output, u16::from(b'$'))?;
                     index += 1;
                     continue;
                 };
                 let name_end = index + 2 + relative_end;
                 let name = &replacement[index + 2..name_end];
                 if let Some(range) = regexp_named_capture(matched, name) {
-                    output.extend_from_slice(&input[range]);
+                    try_append_regexp_units(output, &input[range])?;
                 }
                 index = name_end + 1;
                 continue;
             }
             _ => {
-                output.push(u16::from(b'$'));
+                try_append_regexp_unit(output, u16::from(b'$'))?;
                 index += 1;
                 continue;
             }
         }
         index += 2;
     }
+    Ok(())
+}
+
+/// Appends one code unit without permitting `Vec` to grow through its infallible path.
+#[inline]
+fn try_append_regexp_unit(output: &mut Vec<u16>, unit: u16) -> Result<(), ExecutionError> {
+    output
+        .try_reserve(1)
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    output.push(unit);
+    Ok(())
+}
+
+/// Appends a checked slice without permitting `Vec` to grow through its infallible path.
+#[inline]
+fn try_append_regexp_units(output: &mut Vec<u16>, units: &[u16]) -> Result<(), ExecutionError> {
+    output
+        .len()
+        .checked_add(units.len())
+        .ok_or(ExecutionError::InvalidStringLength)?;
+    output
+        .try_reserve(units.len())
+        .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+    output.extend_from_slice(units);
+    Ok(())
 }
 
 /// Chooses the longest valid one- or two-digit replacement capture reference.

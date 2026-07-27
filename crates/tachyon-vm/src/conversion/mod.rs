@@ -775,6 +775,21 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringReplaceAllFlags
+                            | ConversionConsumer::StringReplaceAllReceiver
+                            | ConversionConsumer::StringReplaceAllSearch
+                            | ConversionConsumer::StringReplaceAllReplacement
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_replace_all_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::RegExpTestInput {
                         return self.resume_regexp_test_conversion(
                             continuation.site,
@@ -1417,6 +1432,12 @@ impl Isolate {
                 | ConversionConsumer::StringSplitLimit
                 | ConversionConsumer::StringSplitSeparator => {
                     unreachable!("String split conversion resumes inside its state machine")
+                }
+                ConversionConsumer::StringReplaceAllFlags
+                | ConversionConsumer::StringReplaceAllReceiver
+                | ConversionConsumer::StringReplaceAllSearch
+                | ConversionConsumer::StringReplaceAllReplacement => {
+                    unreachable!("String replaceAll conversion resumes inside its state machine")
                 }
                 ConversionConsumer::RegExpTestInput => {
                     unreachable!("RegExp test conversion resumes inside its state machine")

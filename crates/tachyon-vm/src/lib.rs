@@ -63,6 +63,7 @@ mod regexp_replace;
 mod regexp_search;
 mod runtime;
 mod string;
+mod string_replace_all;
 mod string_split;
 mod tuning;
 mod weak_collection;
@@ -255,9 +256,9 @@ use runtime::{
         ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
         ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
         RegExpSearchStage, RegExpStringIteratorStage, RegExpTestStage, SignalStateStage,
-        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
-        TypedArraySetStage, TypedArraySliceStage, TypedArraySubarrayStage, VmRoots,
-        next_to_primitive_stage,
+        StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
+        TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
+        TypedArraySubarrayStage, VmRoots, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

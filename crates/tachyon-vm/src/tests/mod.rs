@@ -67,6 +67,7 @@ mod regexp_replace;
 mod regexp_search;
 mod signals;
 mod string_case;
+mod string_replace_all;
 mod string_split;
 mod typed_array;
 mod typed_array_at;

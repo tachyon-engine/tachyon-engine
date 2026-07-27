@@ -1102,6 +1102,7 @@ impl Isolate {
             (NativeFunction::StringMatch, b"match".as_slice()),
             (NativeFunction::StringMatchAll, b"matchAll".as_slice()),
             (NativeFunction::StringReplace, b"replace".as_slice()),
+            (NativeFunction::StringReplaceAll, b"replaceAll".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;

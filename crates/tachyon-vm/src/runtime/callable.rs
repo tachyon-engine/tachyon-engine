@@ -370,6 +370,7 @@ pub(crate) enum NativeFunction {
     StringMatch,
     StringMatchAll,
     StringReplace,
+    StringReplaceAll,
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
@@ -1001,6 +1002,7 @@ impl NativeFunction {
             | Self::ProxyRevocable
             | Self::StringSplit
             | Self::StringReplace
+            | Self::StringReplaceAll
             | Self::RegExpSplit
             | Self::RegExpReplace
             | Self::ArraySlice
@@ -1448,6 +1450,7 @@ impl NativeFunction {
             Self::StringMatch => "match",
             Self::StringMatchAll => "matchAll",
             Self::StringReplace => "replace",
+            Self::StringReplaceAll => "replaceAll",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",

@@ -2370,6 +2370,13 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
             }
+            NativeContinuationKind::StringReplaceAll(stage) => {
+                if stage != StringReplaceAllStage::ReplaceCall {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 2)
+            }
             NativeContinuationKind::TypedArrayConstruction(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5645,6 +5652,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::StringReplace) => {
                     return self.string_replace(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::StringReplaceAll) => {
+                    return self.begin_string_replace_all(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -7863,6 +7873,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)
+                }
+                NativeContinuationKind::StringReplaceAll(stage) => {
+                    self.resume_string_replace_all(continuation, stage, value)
                 }
                 NativeContinuationKind::TypedArrayConstruction(stage) => {
                     self.resume_typed_array_construction(continuation, stage, value)

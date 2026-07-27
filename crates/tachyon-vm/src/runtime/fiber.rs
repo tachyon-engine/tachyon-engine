@@ -334,6 +334,10 @@ pub(crate) enum ConversionConsumer {
     StringSplitReceiver,
     StringSplitLimit,
     StringSplitSeparator,
+    StringReplaceAllFlags,
+    StringReplaceAllReceiver,
+    StringReplaceAllSearch,
+    StringReplaceAllReplacement,
     TypedArrayByteOffset,
     TypedArrayLength,
     TypedArrayElement,
@@ -443,6 +447,10 @@ impl ConversionConsumer {
             | Self::StringSplitReceiver
             | Self::StringSplitLimit
             | Self::StringSplitSeparator
+            | Self::StringReplaceAllFlags
+            | Self::StringReplaceAllReceiver
+            | Self::StringReplaceAllSearch
+            | Self::StringReplaceAllReplacement
             | Self::TypedArrayByteOffset
             | Self::TypedArrayLength
             | Self::TypedArrayElement
@@ -513,6 +521,10 @@ impl ConversionConsumer {
                 | Self::TypedArrayJoinSeparator
                 | Self::StringSplitReceiver
                 | Self::StringSplitSeparator
+                | Self::StringReplaceAllFlags
+                | Self::StringReplaceAllReceiver
+                | Self::StringReplaceAllSearch
+                | Self::StringReplaceAllReplacement
         )
     }
 
@@ -596,6 +608,10 @@ impl ConversionConsumer {
                 | Self::StringSplitReceiver
                 | Self::StringSplitLimit
                 | Self::StringSplitSeparator
+                | Self::StringReplaceAllFlags
+                | Self::StringReplaceAllReceiver
+                | Self::StringReplaceAllSearch
+                | Self::StringReplaceAllReplacement
                 | Self::TypedArrayByteOffset
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
@@ -1215,6 +1231,16 @@ pub(crate) enum StringSplitStage {
     SplitterCall,
 }
 
+/// Observable boundaries in `String.prototype.replaceAll`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringReplaceAllStage {
+    MatchGet,
+    FlagsGet,
+    ReplaceGet,
+    ReplaceCall,
+}
+
 /// Observable callback boundaries in `RegExp.prototype.test`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1402,6 +1428,7 @@ pub(crate) enum NativeContinuationKind {
     RegExpReplace,
     RegExpFlags(u8),
     StringSplit(StringSplitStage),
+    StringReplaceAll(StringReplaceAllStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
     TypedArraySlice(TypedArraySliceStage),
@@ -1670,6 +1697,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::StringSplit(stage),
             first: state,
             second: separator,
+        }
+    }
+
+    /// Roots the replaceAll protocol state across one observable Get or Call.
+    #[inline]
+    pub(crate) const fn string_replace_all(
+        site: NativeContinuationSite,
+        stage: StringReplaceAllStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::StringReplaceAll(stage),
+            first: state,
+            second: receiver,
         }
     }
 
