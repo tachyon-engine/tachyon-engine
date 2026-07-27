@@ -3,6 +3,26 @@
 use super::super::*;
 
 impl Isolate {
+    /// Implements String.prototype.match using the standard RegExp fallback.
+    pub(crate) fn string_match(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let receiver = self.string_primitive_value(site.this_value)?;
+        let pattern = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let regexp = if self.is_object_value(pattern) && self.regexp_data(pattern).is_ok() {
+            pattern
+        } else {
+            self.create_regexp_for_string_search(pattern)?
+        };
+        let flags_value = self.regexp_data(regexp)?.1;
+        let flags = self.regexp_flags(flags_value)?;
+        if flags.global {
+            return self.regexp_match_values(regexp, receiver);
+        }
+        let state = self.allocate_regexp_exec_state(regexp, receiver, 0)?;
+        let outcome = self.regexp_builtin_exec(regexp, receiver, state, 0)?;
+        Ok(outcome.value)
+    }
     /// Returns the primitive String receiver required by String.prototype.toString and valueOf.
     pub(crate) fn string_primitive_value(
         &mut self,

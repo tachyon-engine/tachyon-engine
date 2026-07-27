@@ -1015,6 +1015,7 @@ impl Isolate {
             ),
             (NativeFunction::StringSplit, b"split".as_slice()),
             (NativeFunction::StringSearch, b"search".as_slice()),
+            (NativeFunction::StringMatch, b"match".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;
@@ -1557,6 +1558,8 @@ impl Isolate {
                 self.realm.well_known_symbols.replace = Some(symbol);
             } else if name == b"search" {
                 self.realm.well_known_symbols.search = Some(symbol);
+            } else if name == b"match" {
+                self.realm.well_known_symbols.r#match = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
             } else if name == b"split" {
@@ -1570,6 +1573,8 @@ impl Isolate {
                 self.realm.well_known_symbols.replace.unwrap()
             } else if name == b"search" {
                 self.realm.well_known_symbols.search.unwrap()
+            } else if name == b"match" {
+                self.realm.well_known_symbols.r#match.unwrap()
             } else if name == b"species" {
                 self.realm.well_known_symbols.species.unwrap()
             } else if name == b"split" {

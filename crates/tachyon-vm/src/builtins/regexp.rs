@@ -10,6 +10,65 @@ pub(crate) struct RegExpBuiltinOutcome {
 }
 
 impl Isolate {
+    /// Implements the branded `RegExp.prototype[Symbol.match]` operation.
+    pub(crate) fn regexp_match(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+        let receiver = site.this_value;
+        let argument = self.call_argument(site, 0)?;
+        let input = self.regexp_string_argument(argument)?;
+        self.regexp_match_values(receiver, input)
+    }
+
+    pub(crate) fn regexp_match_values(
+        &mut self,
+        receiver: Value,
+        input: Value,
+    ) -> Result<Value, ExecutionError> {
+        let (source, flags_value) = self.regexp_data(receiver)?;
+        let source_units = self.regexp_string_units(source)?;
+        let flags = self.regexp_flags(flags_value)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        let input_units = self.regexp_string_units(input)?;
+        let program = CompiledRegExp::compile_units_with_flags(&source_units, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        if !flags.global {
+            let state = self.allocate_regexp_exec_state(receiver, input, 0)?;
+            let outcome = self.regexp_builtin_exec(receiver, input, state, 0)?;
+            return Ok(outcome.value);
+        }
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before RegExp match");
+        let result = self.create_array_object_with_prototype(prototype)?;
+        let unicode = flags.unicode || flags.unicode_sets;
+        let mut search = 0;
+        let mut index = 0_i32;
+        while search <= input_units.len() {
+            let Some(matched) = program.find(&input_units, search, unicode) else {
+                break;
+            };
+            let value = self.allocate_runtime_string(
+                JsString::try_from_utf16(&input_units[matched.start..matched.end])
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let key = self.property_key_atom(Value::from_i32(index))?;
+            self.set_own_data_property(result, key, value)?;
+            index = index.saturating_add(1);
+            search = if matched.end == matched.start {
+                advance_regexp_split_index(&input_units, matched.end, unicode)
+            } else {
+                matched.end
+            };
+        }
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(result, length, Value::from_i32(index))?;
+        if index == 0 {
+            return Ok(Value::from_immediate(Immediate::Null));
+        }
+        Ok(result)
+    }
+
     /// Creates the RegExpCreate fallback used after String search has converted its pattern.
     #[allow(dead_code, reason = "wired by the pending RegExp search integration")]
     pub(crate) fn create_regexp_for_string_search(
@@ -723,7 +782,7 @@ impl Isolate {
     }
 
     /// Parses duplicate-sensitive flag characters and retains only execution-state flags for now.
-    fn regexp_flags(&mut self, value: Value) -> Result<RegExpFlags, ExecutionError> {
+    pub(crate) fn regexp_flags(&mut self, value: Value) -> Result<RegExpFlags, ExecutionError> {
         let mut flags = RegExpFlags {
             value,
             global: false,
@@ -888,9 +947,9 @@ const fn is_ascii_alphanumeric_unit(unit: u16) -> bool {
     matches!(unit, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a)
 }
 
-struct RegExpFlags {
+pub(crate) struct RegExpFlags {
     value: Value,
-    global: bool,
+    pub(crate) global: bool,
     sticky: bool,
     indices: bool,
     ignore_case: bool,

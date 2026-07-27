@@ -5556,6 +5556,10 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::StringSearch) => {
                     return self.begin_string_search(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::StringMatch) => {
+                    let result = self.string_match(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -5638,6 +5642,10 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpSearch) => {
                     return self.begin_regexp_search(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpMatch) => {
+                    let result = self.regexp_match(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpToString) => {
                     let result = self.regexp_to_string(site.this_value)?;
