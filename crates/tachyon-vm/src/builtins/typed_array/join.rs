@@ -92,7 +92,14 @@ impl Isolate {
             Err(ExecutionError::DetachedArrayBuffer) => false,
             Err(error) => return Err(error),
         };
-        let effective_length = length.min(snapshot.length);
+        // A separator conversion may detach the backing. Integer-indexed Get then
+        // yields `undefined` for each element, but the length captured before
+        // conversion still determines the number of separators in the result.
+        let effective_length = if attached {
+            length.min(snapshot.length)
+        } else {
+            length
+        };
         let mut output_length = separator
             .len()
             .checked_mul(effective_length.saturating_sub(1))

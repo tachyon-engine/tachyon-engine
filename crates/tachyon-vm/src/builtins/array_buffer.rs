@@ -68,8 +68,55 @@ impl Isolate {
         if length > MAX_ARRAY_BUFFER_BYTES {
             return Err(ExecutionError::InvalidArrayLength);
         }
+        let mut max_byte_length = length;
+        let options = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_object_value(options) {
+            let max_atom = self.intern_intrinsic_name(b"maxByteLength")?;
+            if let Some(value) = self.get_data_property(options, max_atom)? {
+                max_byte_length = self.ecma_to_index(value)?;
+                if max_byte_length < length {
+                    return Err(ExecutionError::InvalidArrayLength);
+                }
+            }
+        }
         let prototype = self.array_buffer_prototype_for_new_target(site.new_target)?;
-        self.allocate_array_buffer_object(length, length, false, prototype)
+        self.allocate_array_buffer_object(
+            length,
+            max_byte_length,
+            max_byte_length != length,
+            prototype,
+        )
+    }
+
+    /// Resizes a resizable ArrayBuffer in place while preserving its backing identity.
+    pub(crate) fn resize_array_buffer(
+        &mut self,
+        receiver: Value,
+        new_length: Value,
+    ) -> Result<Value, ExecutionError> {
+        let target = self.ecma_to_index(new_length)?;
+        if target > MAX_ARRAY_BUFFER_BYTES {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        let snapshot = self
+            .array_buffer_data_snapshot(receiver)?
+            .ok_or(ExecutionError::DetachedArrayBuffer)?;
+        if !snapshot.resizable || target > snapshot.max_byte_length {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        self.heap.with_running_scope(|scope| {
+            let data = scope.root(snapshot.data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let data = no_gc
+                    .borrow_mut(data, self.types.array_buffer_data)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                data.byte_length = target;
+                Ok::<(), ExecutionError>(())
+            })
+        })?;
+        Ok(Value::from_immediate(Immediate::Undefined))
     }
 
     /// Selects a constructor prototype while preserving the ordinary cross-realm fallback.

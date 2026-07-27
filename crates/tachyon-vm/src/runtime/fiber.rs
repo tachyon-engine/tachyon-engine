@@ -279,6 +279,7 @@ pub(crate) enum ConversionConsumer {
     RegExpExecInput,
     RegExpTestInput,
     RegExpSearchInput,
+    RegExpReplaceResult,
     StringSearchReceiver,
     StringSearchPattern,
     RegExpLastIndex,
@@ -378,6 +379,7 @@ impl ConversionConsumer {
             | Self::RegExpExecInput
             | Self::RegExpTestInput
             | Self::RegExpSearchInput
+            | Self::RegExpReplaceResult
             | Self::StringSearchReceiver
             | Self::StringSearchPattern
             | Self::RegExpLastIndex
@@ -478,6 +480,7 @@ impl ConversionConsumer {
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
+                | Self::RegExpReplaceResult
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
                 | Self::ArrayToSortedLeftString
@@ -532,6 +535,7 @@ impl ConversionConsumer {
                 | Self::RegExpExecInput
                 | Self::RegExpTestInput
                 | Self::RegExpSearchInput
+                | Self::RegExpReplaceResult
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
                 | Self::RegExpLastIndex
@@ -1326,6 +1330,7 @@ pub(crate) enum NativeContinuationKind {
     DateToJson(DateToJsonStage),
     RegExpTest(RegExpTestStage),
     RegExpSearch(RegExpSearchStage),
+    RegExpReplace,
     RegExpFlags(u8),
     StringSplit(StringSplitStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
@@ -1518,6 +1523,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::RegExpSearch(stage),
             first: state,
             second: receiver,
+        }
+    }
+
+    /// Roots the dedicated functional replacement state while one callback executes.
+    #[inline]
+    pub(crate) const fn regexp_replace(
+        site: NativeContinuationSite,
+        state: Value,
+        replacer: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::RegExpReplace,
+            first: state,
+            second: replacer,
         }
     }
 

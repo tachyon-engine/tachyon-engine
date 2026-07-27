@@ -587,6 +587,9 @@ impl Isolate {
             pending_collection_for_each: registry
                 .try_register("PendingCollectionForEach")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_regexp_replace: registry
+                .try_register("PendingRegExpReplace")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_map_get_or_insert_computed: registry
                 .try_register("PendingMapGetOrInsertComputed")
                 .map_err(IsolateCreationError::TypeRegistration)?,

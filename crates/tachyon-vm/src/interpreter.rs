@@ -2431,6 +2431,9 @@ impl Isolate {
             NativeContinuationKind::GeneratorResume => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::RegExpReplace => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
         };
         // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
         // reachable through the receiver's accessor pair (or descriptor state -> source chain).
@@ -5627,8 +5630,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::StringReplace) => {
-                    let result = self.string_replace(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.string_replace(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
@@ -5726,8 +5728,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpReplace) => {
-                    let result = self.regexp_replace(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.regexp_replace(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpToString) => {
                     let result = self.regexp_to_string(site.this_value)?;
@@ -6395,6 +6396,13 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::ArrayBufferTransferToFixedLength) => {
                     return self.begin_array_buffer_transfer(&site, true);
+                }
+                FunctionExecutable::Native(NativeFunction::ArrayBufferResize) => {
+                    let argument = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    let value = self.resize_array_buffer(site.this_value, argument)?;
+                    return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::ArrayBufferByteLength
@@ -7822,6 +7830,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::RegExpSearch(stage) => {
                     self.resume_regexp_search(continuation, stage, value)
+                }
+                NativeContinuationKind::RegExpReplace => {
+                    self.resume_regexp_replace_callback(continuation, value)
                 }
                 NativeContinuationKind::RegExpFlags(index) => {
                     self.resume_regexp_flags(continuation, index, value)

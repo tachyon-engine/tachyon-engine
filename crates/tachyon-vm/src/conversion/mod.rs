@@ -722,6 +722,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::RegExpReplaceResult {
+                        let state = self.pending_regexp_replace_reference(continuation.receiver)?;
+                        return self.resume_regexp_replace_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::StringSearchReceiver
@@ -1322,6 +1330,7 @@ impl Isolate {
                     unreachable!("RegExp test conversion resumes inside its state machine")
                 }
                 ConversionConsumer::RegExpSearchInput
+                | ConversionConsumer::RegExpReplaceResult
                 | ConversionConsumer::StringSearchReceiver
                 | ConversionConsumer::StringSearchPattern => {
                     unreachable!("RegExp search conversion resumes inside its state machine")

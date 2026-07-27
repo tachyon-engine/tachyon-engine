@@ -269,7 +269,7 @@ impl Isolate {
             }
             return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
         }
-        if self.dense_array_value(receiver, key)?.is_some() {
+        if let Some(current_value) = self.dense_array_value(receiver, key)? {
             match descriptor {
                 PropertyDescriptor::Data(data)
                     if data.writable != Some(false)
@@ -290,6 +290,7 @@ impl Isolate {
                     return Ok(());
                 }
                 descriptor => {
+                    let descriptor = preserve_dense_property_fields(descriptor, current_value);
                     self.define_missing_property_raw(receiver, key, descriptor)?;
                     let removed = self.delete_dense_array_value(receiver, key)?;
                     debug_assert!(removed, "published descriptor replaces one dense property");
@@ -872,5 +873,37 @@ impl Isolate {
                 })
             }
         }))
+    }
+}
+
+/// Completes a descriptor against an existing dense element whose attributes are all true.
+#[inline(always)]
+fn preserve_dense_property_fields(
+    descriptor: PropertyDescriptor,
+    current_value: Value,
+) -> PropertyDescriptor {
+    match descriptor {
+        PropertyDescriptor::Generic(descriptor) => {
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(current_value),
+                writable: Some(true),
+                enumerable: Some(descriptor.enumerable.unwrap_or(true)),
+                configurable: Some(descriptor.configurable.unwrap_or(true)),
+            })
+        }
+        PropertyDescriptor::Data(descriptor) => PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(descriptor.value.unwrap_or(current_value)),
+            writable: Some(descriptor.writable.unwrap_or(true)),
+            enumerable: Some(descriptor.enumerable.unwrap_or(true)),
+            configurable: Some(descriptor.configurable.unwrap_or(true)),
+        }),
+        PropertyDescriptor::Accessor(descriptor) => {
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: descriptor.getter,
+                setter: descriptor.setter,
+                enumerable: Some(descriptor.enumerable.unwrap_or(true)),
+                configurable: Some(descriptor.configurable.unwrap_or(true)),
+            })
+        }
     }
 }

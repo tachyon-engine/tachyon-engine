@@ -11,13 +11,81 @@ pub(crate) struct RegExpBuiltinOutcome {
 
 impl Isolate {
     /// Implements the branded RegExp `@@replace` fast path for string replacements.
-    pub(crate) fn regexp_replace(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    pub(crate) fn regexp_replace(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let input_argument = self.call_argument(site, 0)?;
         let input = self.regexp_string_argument(input_argument)?;
         let replacement = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        self.regexp_replace_values(site.this_value, input, replacement)
+        if self.is_callable_value(replacement)? {
+            let (input_units, matches) =
+                self.regexp_functional_replace_matches(site.this_value, input)?;
+            return self.begin_regexp_functional_replace(
+                NativeContinuationSite {
+                    caller_base: site.caller_base,
+                    destination: site.destination,
+                    call_site: site.call_site,
+                },
+                site.this_value,
+                input,
+                replacement,
+                input_units,
+                matches,
+            );
+        }
+        let result = self.regexp_replace_values(site.this_value, input, replacement)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Compiles once and precomputes the exact branded match ranges retained across callbacks.
+    pub(crate) fn regexp_functional_replace_matches(
+        &mut self,
+        receiver: Value,
+        input: Value,
+    ) -> Result<(Vec<u16>, Vec<RegExpMatch>), ExecutionError> {
+        let (source_value, flags_value) = self.regexp_data(receiver)?;
+        let input_units = self.regexp_string_units(input)?;
+        let source = self.regexp_string_units(source_value)?;
+        let flags = self.regexp_flags(flags_value)?;
+        let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
+            .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
+        let program = CompiledRegExp::compile_units_with_flags(&source, &backend_flags)
+            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let unicode = flags.unicode || flags.unicode_sets;
+        let estimated_matches = if flags.global {
+            input_units
+                .len()
+                .checked_div(4)
+                .unwrap_or(0)
+                .saturating_add(1)
+        } else {
+            1
+        };
+        let mut matches = Vec::new();
+        matches
+            .try_reserve_exact(estimated_matches)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        let mut search = 0;
+        while search <= input_units.len() {
+            let Some(matched) = program.find(&input_units, search, unicode) else {
+                break;
+            };
+            let empty = matched.start == matched.end;
+            let end = matched.end;
+            matches
+                .try_reserve(1)
+                .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+            matches.push(matched);
+            if !flags.global {
+                break;
+            }
+            search = if empty {
+                advance_regexp_split_index(&input_units, end, unicode)
+            } else {
+                end
+            };
+        }
+        Ok((input_units, matches))
     }
 
     /// Runs the non-observable branded replacement kernel for a verified RegExp receiver.
@@ -28,11 +96,7 @@ impl Isolate {
         replacement: Value,
     ) -> Result<Value, ExecutionError> {
         let (source_value, flags_value) = self.regexp_data(receiver)?;
-        if self.is_callable_value(replacement)? {
-            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(
-                replacement,
-            ));
-        }
+        debug_assert!(!self.is_callable_value(replacement)?);
         let replacement_units = self.primitive_string_units(replacement)?;
         let input_units = self.regexp_string_units(input)?;
         let source = self.regexp_string_units(source_value)?;

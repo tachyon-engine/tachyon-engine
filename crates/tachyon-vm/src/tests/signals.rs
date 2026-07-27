@@ -1860,6 +1860,58 @@ fn signal_resource_failures_restore_agent_state_for_every_dispatch_batch() {
     assert_signal_resource_restoration::<8>(true);
 }
 
+/// Runs the allocation-heavy Signals entry points with a minor collection at every young allocation.
+#[test]
+fn signal_forced_minor_allocation_matrix_works_for_every_dispatch_batch() {
+    for batch in [1, 2, 4, 8, 16] {
+        match batch {
+            1 => assert_signal_forced_minor::<1>(),
+            2 => assert_signal_forced_minor::<2>(),
+            4 => assert_signal_forced_minor::<4>(),
+            8 => assert_signal_forced_minor::<8>(),
+            16 => assert_signal_forced_minor::<16>(),
+            _ => unreachable!("matrix only contains supported dispatch batches"),
+        }
+    }
+}
+
+/// Covers constructor/get/set/recompute/notify/watch-unwatch and introspection under forced minor GC.
+fn assert_signal_forced_minor<const N: usize>() {
+    let fixtures = [
+        (SIGNAL_SOURCE, "signals-minor-core"),
+        (SIGNAL_NOTIFY_SOURCE, "signals-minor-notify"),
+        (SIGNAL_WATCHER_STATE_SOURCE, "signals-minor-watcher"),
+        (
+            SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+            "signals-minor-recompute",
+        ),
+        (SIGNAL_INTROSPECTION_SOURCE, "signals-minor-introspection"),
+    ];
+    for (index, (source, name)) in fixtures.into_iter().enumerate() {
+        let mut isolate = signal_minor_test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Minor);
+        assert_signal_job::<N>(
+            &mut isolate,
+            source,
+            9_500 + (N as u32) * 16 + index as u32,
+            name,
+        );
+    }
+}
+
+/// Gives the forced-minor matrix enough bounded heap for descriptor-heavy fixtures.
+fn signal_minor_test_isolate() -> Isolate {
+    Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("Signal forced-minor isolate initializes")
+}
+
 /// Exercises graph ownership across job boundaries and explicit major collections.
 #[test]
 fn signal_gc_liveness_contract_works_for_every_dispatch_batch() {

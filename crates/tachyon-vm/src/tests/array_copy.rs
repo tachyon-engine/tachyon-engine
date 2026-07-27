@@ -46,9 +46,21 @@ var spliceSemantics = order === "02" && spliced.length === 4 &&
   noArgs.length === 3 && noArgs[2] === 3 && startOnly.length === 1 && startOnly[0] === 1 &&
   explicitUndefined.length === 4 && explicitUndefined[1] === 9 && explicitUndefined[2] === 2;
 
+var frozen = Object.freeze([0, 1, 2]).with(1, 3);
+var frozenCopy = frozen[0] === 0 && frozen[1] === 3 && frozen[2] === 2;
+Array.prototype[4] = 5;
+var shrinking = Object.defineProperty([0, 1, 2, 3, 4], "1", {
+  get: function() { shrinking.length = 1; return 1; }
+});
+var shrunk = shrinking.with(2, 7);
+var descriptorMigration = shrunk[0] === 0 && shrunk[1] === 1 && shrunk[2] === 7 &&
+  shrunk[3] === undefined && shrunk[4] === 5;
+delete Array.prototype[4];
+
 descending + 2 * denseHoles + 4 * replacementSkippedGet +
   8 * (negative[0] === 1 && negative[1] === 2 && negative[2] === 9) +
-  16 * range + 32 * hugeOrder + 64 * spliceSemantics;
+  16 * range + 32 * hugeOrder + 64 * spliceSemantics +
+  128 * (frozenCopy && descriptorMigration);
 "#;
 
 #[test]
@@ -93,5 +105,5 @@ fn assert_array_copy_source<const N: usize>(source: &str, source_id: u32, forced
             },
         )
         .expect("array copy fixture must execute");
-    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(127)));
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(255)));
 }

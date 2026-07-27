@@ -59,6 +59,7 @@ mod regexp;
 mod regexp_exec;
 mod regexp_flags;
 mod regexp_match_all;
+mod regexp_replace;
 mod regexp_search;
 mod runtime;
 mod string;
@@ -214,6 +215,7 @@ use proxy::{
     PendingProxyDefine, ProxyObject,
 };
 use regexp_match_all::RegExpStringIteratorObject;
+use regexp_replace::PendingRegExpReplace;
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{

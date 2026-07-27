@@ -10,6 +10,12 @@ b.byteLength === 8 && b.maxByteLength === 8 && !b.resizable && !b.detached &&
   Object.prototype.toString.call(b) === "[object ArrayBuffer]";
 "#;
 
+const ARRAY_BUFFER_RAB_SOURCE: &str = r#"
+var rab = new ArrayBuffer(4, { maxByteLength: 8 });
+rab.resize(8);
+rab.byteLength === 8 && rab.maxByteLength === 8 && rab.resizable;
+"#;
+
 const ARRAY_BUFFER_DETACH_SOURCE: &str = r#"
 var buffer = new ArrayBuffer(16);
 var typed = new Uint8Array(buffer, 4, 4);
@@ -648,6 +654,25 @@ fn unused_dynamic_function_callback(
 /// Compiles the shared fixture independently of dispatch and collection policy.
 fn compile_array_buffer_fixture() -> CompiledModule {
     compile_source(ARRAY_BUFFER_SOURCE, 7_410)
+}
+
+#[test]
+fn array_buffer_resizable_vertical_slice() {
+    let module = compile_source(ARRAY_BUFFER_RAB_SOURCE, 7_411);
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<4>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("RAB fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "outcome: {outcome:?}"
+    );
 }
 
 /// Compiles one ArrayBuffer fixture independently of dispatch and collection policy.

@@ -108,6 +108,7 @@ impl Isolate {
                 b"transferToFixedLength".as_slice(),
                 NativeFunction::ArrayBufferTransferToFixedLength,
             ),
+            (b"resize".as_slice(), NativeFunction::ArrayBufferResize),
         ] {
             let function = self.allocate_native_function(
                 native,

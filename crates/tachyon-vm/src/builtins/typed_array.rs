@@ -1131,7 +1131,7 @@ impl Isolate {
             .heap
             .checked_reference(raw, self.types.typed_array_object)
             .map_err(|_| ExecutionError::NotObject(value))?;
-        self.heap.with_running_scope(|scope| {
+        let snapshot = self.heap.with_running_scope(|scope| {
             let array = scope.root(array).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
@@ -1142,6 +1142,53 @@ impl Isolate {
                         length: array.length as usize,
                         kind: array.kind,
                     })
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let available = match self.array_buffer_length_for_view_value(snapshot.buffer) {
+            Ok(length) => length,
+            Err(ExecutionError::DetachedArrayBuffer) => 0,
+            Err(error) => return Err(error),
+        };
+        let required = snapshot
+            .byte_offset
+            .checked_add(snapshot.length.saturating_mul(snapshot.kind.byte_width()))
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        if required > available {
+            return Ok(TypedArraySnapshot {
+                length: 0,
+                ..snapshot
+            });
+        }
+        Ok(snapshot)
+    }
+
+    /// Reads the current byte length through the ArrayBuffer edge for resize-aware views.
+    fn array_buffer_length_for_view_value(
+        &mut self,
+        buffer: Value,
+    ) -> Result<usize, ExecutionError> {
+        let raw = buffer
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(buffer))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(buffer))?;
+        self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            let data = scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(object, self.types.array_buffer_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .data
+                    .ok_or(ExecutionError::DetachedArrayBuffer)
+            })?;
+            let data = scope.root(data).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(data, self.types.array_buffer_data)
+                    .map(|data| data.byte_length)
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })

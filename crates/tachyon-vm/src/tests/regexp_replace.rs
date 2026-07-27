@@ -99,3 +99,58 @@ fn assert_regexp_replace_captures<const N: usize>(source: &str, forced_major: bo
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
+
+#[test]
+fn functional_replace_resumes_for_every_dispatch_batch_and_major_gc() {
+    let source = r#"
+      var order = "";
+      var regexp = "ab".replace(/(?<left>a)(z)?/g,
+        function(match, left, absent, index, input, groups) {
+          "use strict";
+          order += match + left + (absent === undefined) + index + input +
+            groups.left + (this === undefined);
+          return { toString() { order += "T"; return "X"; } };
+        });
+      var plain = "abc".replace("b", function(match, index, input) {
+        return match + index + input;
+      });
+      var emptyCalls = "";
+      var empty = "ab".replace(/(?:)/g, function(match, index) {
+        emptyCalls += index;
+        return "-";
+      });
+      regexp === "Xb" && order === "aatrue0abatrueT" &&
+        plain === "ab1abcc" && empty === "-a-b-" && emptyCalls === "012";
+    "#;
+    assert_regexp_replace_captures::<1>(source, false);
+    assert_regexp_replace_captures::<2>(source, false);
+    assert_regexp_replace_captures::<4>(source, false);
+    assert_regexp_replace_captures::<8>(source, false);
+    assert_regexp_replace_captures::<16>(source, false);
+    assert_regexp_replace_captures::<4>(source, true);
+}
+
+#[test]
+fn functional_replace_preserves_many_captures_and_exception_identity() {
+    let source = r#"
+      var many = "abcdefghijkl".replace(
+        /(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)/,
+        function(m, a, b, c, d, e, f, g, h, i, j, k, l, index, input) {
+          return l + a + index + input.length;
+        });
+      var thrown = {};
+      var callbackIdentity = false;
+      try { "x".replace(/x/, function() { throw thrown; }); }
+      catch (error) { callbackIdentity = error === thrown; }
+      var conversionThrown = {};
+      var conversionIdentity = false;
+      try {
+        "x".replace(/x/, function() {
+          return { toString() { throw conversionThrown; } };
+        });
+      } catch (error) { conversionIdentity = error === conversionThrown; }
+      many === "la012" && callbackIdentity && conversionIdentity;
+    "#;
+    assert_regexp_replace_captures::<4>(source, false);
+    assert_regexp_replace_captures::<4>(source, true);
+}

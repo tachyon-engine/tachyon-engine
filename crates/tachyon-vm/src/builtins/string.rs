@@ -4,7 +4,7 @@ use super::super::*;
 
 impl Isolate {
     /// Implements String.prototype.replace for primitive strings and branded RegExp values.
-    pub(crate) fn string_replace(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    pub(crate) fn string_replace(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let receiver = self.string_primitive_value(site.this_value)?;
         let search = self
             .call_argument(site, 0)?
@@ -13,19 +13,44 @@ impl Isolate {
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         if self.is_object_value(search) && self.regexp_data(search).is_ok() {
-            return self.regexp_replace_values(search, receiver, replacement);
-        }
-        if self.is_callable_value(replacement)? {
-            return Err(ExecutionError::UnsupportedPrimitiveStringConversion(
-                replacement,
-            ));
+            if self.is_callable_value(replacement)? {
+                let (input_units, matches) =
+                    self.regexp_functional_replace_matches(search, receiver)?;
+                return self.begin_regexp_functional_replace(
+                    NativeContinuationSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        call_site: site.call_site,
+                    },
+                    search,
+                    receiver,
+                    replacement,
+                    input_units,
+                    matches,
+                );
+            }
+            let result = self.regexp_replace_values(search, receiver, replacement)?;
+            return self.write(site.caller_base, site.destination, result);
         }
         let input_units = self.string_receiver_units(receiver)?;
         let search_units = self.primitive_string_units(search)?;
-        let replacement_units = self.primitive_string_units(replacement)?;
         let Some(index) = find_code_units(&input_units, &search_units) else {
-            return Ok(receiver);
+            return self.write(site.caller_base, site.destination, receiver);
         };
+        if self.is_callable_value(replacement)? {
+            let end = index
+                .checked_add(search_units.len())
+                .ok_or(ExecutionError::InvalidStringLength)?;
+            return self.begin_string_functional_replace(
+                site,
+                receiver,
+                replacement,
+                input_units,
+                index,
+                end,
+            );
+        }
+        let replacement_units = self.primitive_string_units(replacement)?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(
@@ -38,10 +63,11 @@ impl Isolate {
         output.extend_from_slice(&input_units[..index]);
         output.extend_from_slice(&replacement_units);
         output.extend_from_slice(&input_units[index + search_units.len()..]);
-        self.allocate_runtime_string(
+        let result = self.allocate_runtime_string(
             JsString::try_from_owned_code_units(output)
                 .map_err(ExecutionError::PropertyKeyString)?,
-        )
+        )?;
+        self.write(site.caller_base, site.destination, result)
     }
     /// Implements String.prototype.match using the standard RegExp fallback.
     pub(crate) fn string_match(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
