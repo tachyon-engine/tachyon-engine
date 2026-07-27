@@ -282,7 +282,14 @@ impl Isolate {
                 ) {
                     return self.reject_promise_combinator(site, state, pending.current);
                 }
-                self.resolve_function_object(value)?;
+                // IteratorClose suppresses a non-callable `return` error when the
+                // original completion was already abrupt, and forwards that
+                // original reason to the aggregate capability.  Checking here
+                // keeps the synchronous property-read path on that rejection
+                // route instead of leaking a native TypeError.
+                if !self.is_callable_value(value)? {
+                    return self.reject_promise_combinator(site, state, pending.current);
+                }
                 self.call_promise_combinator(
                     site,
                     state,
