@@ -1382,6 +1382,21 @@ impl Isolate {
                 let string = self.primitive_string_value(argument)?;
                 self.create_string_iterator(string)
             }
+            NativeFunction::StringTrim => self.string_trim(
+                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                true,
+                true,
+            ),
+            NativeFunction::StringTrimStart => self.string_trim(
+                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                true,
+                false,
+            ),
+            NativeFunction::StringTrimEnd => self.string_trim(
+                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                false,
+                true,
+            ),
             NativeFunction::NumberConstructor => {
                 let argument = argument.unwrap_or(Value::from_i32(0));
                 let number = if self.is_bigint_value(argument) {

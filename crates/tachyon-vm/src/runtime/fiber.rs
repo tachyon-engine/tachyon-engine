@@ -169,6 +169,9 @@ pub(crate) enum ConversionNativeFunction {
     StringToUpperCase,
     StringToLocaleLowerCase,
     StringToLocaleUpperCase,
+    StringTrim,
+    StringTrimStart,
+    StringTrimEnd,
     StringIterator,
     GlobalIsFinite,
     GlobalIsNaN,
@@ -198,6 +201,9 @@ impl ConversionNativeFunction {
             NativeFunction::StringToUpperCase => Some(Self::StringToUpperCase),
             NativeFunction::StringToLocaleLowerCase => Some(Self::StringToLocaleLowerCase),
             NativeFunction::StringToLocaleUpperCase => Some(Self::StringToLocaleUpperCase),
+            NativeFunction::StringTrim => Some(Self::StringTrim),
+            NativeFunction::StringTrimStart => Some(Self::StringTrimStart),
+            NativeFunction::StringTrimEnd => Some(Self::StringTrimEnd),
             NativeFunction::StringIterator => Some(Self::StringIterator),
             NativeFunction::GlobalIsFinite => Some(Self::GlobalIsFinite),
             NativeFunction::GlobalIsNaN => Some(Self::GlobalIsNaN),
@@ -228,6 +234,9 @@ impl ConversionNativeFunction {
             Self::StringToUpperCase => NativeFunction::StringToUpperCase,
             Self::StringToLocaleLowerCase => NativeFunction::StringToLocaleLowerCase,
             Self::StringToLocaleUpperCase => NativeFunction::StringToLocaleUpperCase,
+            Self::StringTrim => NativeFunction::StringTrim,
+            Self::StringTrimStart => NativeFunction::StringTrimStart,
+            Self::StringTrimEnd => NativeFunction::StringTrimEnd,
             Self::StringIterator => NativeFunction::StringIterator,
             Self::GlobalIsFinite => NativeFunction::GlobalIsFinite,
             Self::GlobalIsNaN => NativeFunction::GlobalIsNaN,
@@ -445,6 +454,9 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::StringToUpperCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToLocaleLowerCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToLocaleUpperCase)
+                | Self::NativeCall(ConversionNativeFunction::StringTrim)
+                | Self::NativeCall(ConversionNativeFunction::StringTrimStart)
+                | Self::NativeCall(ConversionNativeFunction::StringTrimEnd)
                 | Self::NativeCall(ConversionNativeFunction::StringIterator)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseFloat)
                 | Self::NativeCall(ConversionNativeFunction::GlobalParseInt)

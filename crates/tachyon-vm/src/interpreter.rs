@@ -5492,16 +5492,18 @@ impl Isolate {
                     return self.begin_string_split(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringTrim) => {
-                    let value = self.string_trim(site.this_value, true, true)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .dispatch_string_receiver_conversion(NativeFunction::StringTrim, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringTrimStart) => {
-                    let value = self.string_trim(site.this_value, true, false)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.dispatch_string_receiver_conversion(
+                        NativeFunction::StringTrimStart,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringTrimEnd) => {
-                    let value = self.string_trim(site.this_value, false, true)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .dispatch_string_receiver_conversion(NativeFunction::StringTrimEnd, &site);
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringToLowerCase
