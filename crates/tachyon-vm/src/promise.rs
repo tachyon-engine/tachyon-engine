@@ -174,11 +174,14 @@ impl Isolate {
         let prototype = self
             .get_data_property(site.new_target, prototype_atom)?
             .filter(|prototype| self.is_object_value(*prototype))
-            .unwrap_or(
-                self.realm
-                    .promise_prototype
-                    .expect("Promise prototype initializes before construction"),
-            );
+            .or_else(|| {
+                self.realm_for_callable(site.new_target)
+                    .ok()
+                    .and_then(|realm| {
+                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Promise)
+                    })
+            })
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
         let promise = self.create_promise_with_prototype(
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
@@ -1492,6 +1495,25 @@ impl Isolate {
             .last_mut()
             .ok_or(ExecutionError::MissingEnvironment)?
             .pc = continuation.site().call_site;
+        Ok(())
+    }
+
+    /// Rejects an abruptly completed Promise executor through its shared one-shot cell.
+    pub(crate) fn reject_promise_executor(
+        &mut self,
+        continuation: NativeContinuation,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let arguments = self.native_call_state_reference(continuation.second())?;
+        let reject = self.native_call_state_snapshot(arguments)?.values[1];
+        let FunctionExecutable::PromiseResolver { cell, reject: true } =
+            self.resolve_function_object(reject)?.executable
+        else {
+            return Err(ExecutionError::MissingNativeContinuation);
+        };
+        if let Some(promise) = self.claim_promise_resolver(cell)? {
+            self.settle_promise(promise, PromiseState::Rejected, reason)?;
+        }
         Ok(())
     }
 }

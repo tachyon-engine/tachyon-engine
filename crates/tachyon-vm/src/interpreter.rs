@@ -8085,7 +8085,7 @@ impl Isolate {
                     continue;
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
-                    self.settle_promise(continuation.first(), PromiseState::Rejected, value)?;
+                    self.reject_promise_executor(continuation, value)?;
                     let site = continuation.site();
                     self.write(site.caller_base, site.destination, continuation.first())?;
                     return Ok(None);

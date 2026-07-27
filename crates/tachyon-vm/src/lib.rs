@@ -146,6 +146,7 @@ pub(crate) enum IntrinsicPrototypeKind {
     SignalComputed,
     SignalWatcher,
     String,
+    Promise,
 }
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};

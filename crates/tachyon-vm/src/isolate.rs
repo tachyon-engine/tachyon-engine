@@ -95,6 +95,7 @@ impl Isolate {
             IntrinsicPrototypeKind::SignalComputed => realm.signal_computed_prototype,
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
             IntrinsicPrototypeKind::String => realm.string_prototype,
+            IntrinsicPrototypeKind::Promise => realm.promise_prototype,
         };
         if realm == self.active_realm {
             return lookup(&self.realm);
