@@ -82,6 +82,8 @@ pub(crate) enum DataViewElement {
     Uint32,
     Float32,
     Float64,
+    BigInt64,
+    BigUint64,
 }
 
 impl DataViewElement {
@@ -91,7 +93,7 @@ impl DataViewElement {
             Self::Int8 | Self::Uint8 => 1,
             Self::Int16 | Self::Uint16 | Self::Float16 => 2,
             Self::Int32 | Self::Uint32 | Self::Float32 => 4,
-            Self::Float64 => 8,
+            Self::Float64 | Self::BigInt64 | Self::BigUint64 => 8,
         }
     }
 
@@ -116,6 +118,10 @@ impl DataViewElement {
             (true, Self::Uint32) => "setUint32",
             (true, Self::Float32) => "setFloat32",
             (true, Self::Float64) => "setFloat64",
+            (false, Self::BigInt64) => "getBigInt64",
+            (false, Self::BigUint64) => "getBigUint64",
+            (true, Self::BigInt64) => "setBigInt64",
+            (true, Self::BigUint64) => "setBigUint64",
         }
     }
 }

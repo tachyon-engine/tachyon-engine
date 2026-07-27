@@ -205,6 +205,8 @@ impl Isolate {
             DataViewElement::Float16,
             DataViewElement::Float32,
             DataViewElement::Float64,
+            DataViewElement::BigInt64,
+            DataViewElement::BigUint64,
         ] {
             for native in [
                 NativeFunction::DataViewGet(element),

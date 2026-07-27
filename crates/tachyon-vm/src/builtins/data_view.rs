@@ -130,6 +130,17 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let little_endian = self.is_truthy_value(endian_value)?;
         let bytes = self.data_view_read_bytes(snapshot, offset, element.byte_width())?;
+        if matches!(
+            element,
+            DataViewElement::BigInt64 | DataViewElement::BigUint64
+        ) {
+            let bits = if little_endian {
+                u64::from_le_bytes(bytes)
+            } else {
+                u64::from_be_bytes(bytes)
+            };
+            return self.allocate_bigint_bits(bits, element == DataViewElement::BigInt64);
+        }
         Ok(data_view_decode(element, bytes, little_endian))
     }
 
@@ -147,13 +158,26 @@ impl Isolate {
         let input = self
             .call_argument(site, 1)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let number = numeric_value(self.convert_to_number(input)?)
-            .ok_or(ExecutionError::UnsupportedNumberConversion(input))?;
         let endian_value = self
             .call_argument(site, 2)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let little_endian = self.is_truthy_value(endian_value)?;
-        let encoded = data_view_encode(element, number, little_endian);
+        let encoded = if matches!(
+            element,
+            DataViewElement::BigInt64 | DataViewElement::BigUint64
+        ) {
+            let bigint = self.primitive_to_bigint(input)?;
+            let bits = self.bigint_modulo_u64(bigint)?;
+            if little_endian {
+                bits.to_le_bytes()
+            } else {
+                bits.to_be_bytes()
+            }
+        } else {
+            let number = numeric_value(self.convert_to_number(input)?)
+                .ok_or(ExecutionError::UnsupportedNumberConversion(input))?;
+            data_view_encode(element, number, little_endian)
+        };
         self.data_view_write_bytes(snapshot, offset, element.byte_width(), encoded)?;
         Ok(Value::from_immediate(Immediate::Undefined))
     }
@@ -332,6 +356,9 @@ pub(super) fn data_view_decode(element: DataViewElement, bytes: [u8; 8], little:
             Value::from_f64(f32::from_bits(order4([bytes[0], bytes[1], bytes[2], bytes[3]])) as f64)
         }
         DataViewElement::Float64 => Value::from_f64(f64::from_bits(order8(bytes))),
+        DataViewElement::BigInt64 | DataViewElement::BigUint64 => {
+            unreachable!("BigInt DataView elements decode through the BigInt path")
+        }
     }
 }
 
@@ -343,6 +370,9 @@ pub(super) fn data_view_encode(element: DataViewElement, number: f64, little: bo
         DataViewElement::Float16 => u64::from(encode_float16(number)),
         DataViewElement::Float32 => (number as f32).to_bits() as u64,
         DataViewElement::Float64 => number.to_bits(),
+        DataViewElement::BigInt64 | DataViewElement::BigUint64 => {
+            unreachable!("BigInt DataView elements encode through the BigInt path")
+        }
         _ => to_uint32(number) as u64,
     };
     let width = element.byte_width();
