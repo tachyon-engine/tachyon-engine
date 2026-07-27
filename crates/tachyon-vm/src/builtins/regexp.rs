@@ -107,10 +107,8 @@ impl Isolate {
             source,
         )?;
         self.validate_regexp_flags(flags)?;
-        let source_text =
-            String::from_utf16(pattern).map_err(|_| ExecutionError::InvalidRegExpPattern)?;
-        CompiledRegExp::compile_with_flags(
-            &source_text,
+        CompiledRegExp::compile_units_with_flags(
+            pattern,
             core::str::from_utf8(&flag_text).expect("RegExp flags are ASCII"),
         )
         .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
@@ -176,12 +174,10 @@ impl Isolate {
             )?;
         }
         let source_units = self.regexp_string_units(pattern)?;
-        let source =
-            String::from_utf16(&source_units).map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         self.validate_regexp_flags(flags)?;
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
-        CompiledRegExp::compile_with_flags(&source, &backend_flags)
+        CompiledRegExp::compile_units_with_flags(&source_units, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let prototype = if self.is_object_value(site.new_target) {
             let prototype_atom = self.prototype_atom()?;
@@ -217,8 +213,7 @@ impl Isolate {
         observed_last_index: u64,
     ) -> Result<RegExpBuiltinOutcome, ExecutionError> {
         let (source, flags) = self.regexp_data(receiver)?;
-        let source = String::from_utf16(&self.regexp_string_units(source)?)
-            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let source = self.regexp_string_units(source)?;
         let flags = self.regexp_flags(flags)?;
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
@@ -228,11 +223,13 @@ impl Isolate {
         } else {
             Some(0)
         };
-        let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
+        let program = CompiledRegExp::compile_units_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let matched = start
             .filter(|start| *start <= input_units.len())
-            .and_then(|start| program.find_ucs2(&input_units, start))
+            .and_then(|start| {
+                program.find(&input_units, start, flags.unicode || flags.unicode_sets)
+            })
             .filter(|matched| !flags.sticky || Some(matched.start) == start);
         let Some(matched) = matched else {
             return Ok(RegExpBuiltinOutcome {
@@ -243,7 +240,8 @@ impl Isolate {
         let end = safe_integer_value(
             u64::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?,
         );
-        let result = self.materialize_regexp_match(input, &input_units, matched, state)?;
+        let result =
+            self.materialize_regexp_match(input, &input_units, matched, flags.indices, state)?;
         Ok(RegExpBuiltinOutcome {
             value: result,
             last_index: (flags.global || flags.sticky).then_some(end),
@@ -256,6 +254,7 @@ impl Isolate {
         input: Value,
         input_units: &[u16],
         matched: RegExpMatch,
+        has_indices: bool,
         state: GcRef<NativeCallState>,
     ) -> Result<Value, ExecutionError> {
         let prototype = self
@@ -304,16 +303,17 @@ impl Isolate {
         )?;
         let input_atom = self.intern_intrinsic_name(b"input")?;
         self.set_own_data_property(result, input_atom, input)?;
+        let groups_atom = self.intern_intrinsic_name(b"groups")?;
         if !matched.named_captures.is_empty() {
-            let groups = self.create_ordinary_object()?;
+            let groups =
+                self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
             self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
-            let groups_atom = self.intern_intrinsic_name(b"groups")?;
             self.set_own_data_property(result, groups_atom, groups)?;
-            for (name, range) in matched.named_captures {
+            for (name, range) in &matched.named_captures {
                 let atom = self.intern_intrinsic_name(name.as_bytes())?;
                 let value = match range {
                     Some(range) => self.allocate_runtime_string(
-                        JsString::try_from_utf16(&input_units[range])
+                        JsString::try_from_utf16(&input_units[range.clone()])
                             .map_err(ExecutionError::PropertyKeyString)?,
                     )?,
                     None => Value::from_immediate(Immediate::Undefined),
@@ -321,8 +321,98 @@ impl Isolate {
                 self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
                 self.set_own_data_property(groups, atom, value)?;
             }
+        } else {
+            self.set_own_data_property(
+                result,
+                groups_atom,
+                Value::from_immediate(Immediate::Undefined),
+            )?;
+        }
+        if has_indices {
+            self.materialize_regexp_indices(result, &matched, groups_atom, state)?;
         }
         Ok(result)
+    }
+
+    /// Builds the `d` result graph, publishing each Array before another allocation can occur.
+    fn materialize_regexp_indices(
+        &mut self,
+        result: Value,
+        matched: &RegExpMatch,
+        groups_atom: AtomId,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before RegExp indices construction");
+        let indices_atom = self.intern_intrinsic_name(b"indices")?;
+        let indices = self.create_array_object_with_prototype(prototype)?;
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, indices)?;
+        self.set_own_data_property(result, indices_atom, indices)?;
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(matched.captures.len() + 1)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        ranges.push(Some(matched.start..matched.end));
+        ranges.extend(matched.captures.iter().cloned());
+        for (index, range) in ranges.iter().enumerate() {
+            let key = self.property_key_atom(Value::from_i32(
+                i32::try_from(index).map_err(|_| ExecutionError::InvalidStringLength)?,
+            ))?;
+            let value = self.regexp_indices_pair(range.as_ref(), prototype, state)?;
+            self.set_own_data_property(indices, key, value)?;
+        }
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(
+            indices,
+            length,
+            Value::from_i32(
+                i32::try_from(ranges.len()).map_err(|_| ExecutionError::InvalidStringLength)?,
+            ),
+        )?;
+        if matched.named_captures.is_empty() {
+            self.set_own_data_property(
+                indices,
+                groups_atom,
+                Value::from_immediate(Immediate::Undefined),
+            )?;
+            return Ok(());
+        }
+        let groups =
+            self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
+        self.set_own_data_property(indices, groups_atom, groups)?;
+        for (name, range) in &matched.named_captures {
+            let atom = self.intern_intrinsic_name(name.as_bytes())?;
+            let value = self.regexp_indices_pair(range.as_ref(), prototype, state)?;
+            self.set_own_data_property(groups, atom, value)?;
+        }
+        Ok(())
+    }
+
+    /// Allocates one `[start, end]` pair, or returns `undefined` for an unmatched capture.
+    fn regexp_indices_pair(
+        &mut self,
+        range: Option<&core::ops::Range<usize>>,
+        prototype: Value,
+        state: GcRef<NativeCallState>,
+    ) -> Result<Value, ExecutionError> {
+        let Some(range) = range else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        let pair = self.create_array_object_with_prototype(prototype)?;
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, pair)?;
+        for (index, offset) in [range.start, range.end].into_iter().enumerate() {
+            let key = self.property_key_atom(Value::from_i32(index as i32))?;
+            let value = Value::from_i32(
+                i32::try_from(offset).map_err(|_| ExecutionError::InvalidStringLength)?,
+            );
+            self.set_own_data_property(pair, key, value)?;
+        }
+        let length = self.intern_intrinsic_name(b"length")?;
+        self.set_own_data_property(pair, length, Value::from_i32(2))?;
+        Ok(pair)
     }
 
     /// Matches the branded test-only path without allocating a result Array or capture strings.
@@ -333,8 +423,7 @@ impl Isolate {
         observed_last_index: u64,
     ) -> Result<RegExpBuiltinOutcome, ExecutionError> {
         let (source, flags) = self.regexp_data(receiver)?;
-        let source = String::from_utf16(&self.regexp_string_units(source)?)
-            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let source = self.regexp_string_units(source)?;
         let flags = self.regexp_flags(flags)?;
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
@@ -344,11 +433,13 @@ impl Isolate {
         } else {
             Some(0)
         };
-        let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
+        let program = CompiledRegExp::compile_units_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let matched = start
             .filter(|start| *start <= input_units.len())
-            .and_then(|start| program.find_ucs2(&input_units, start))
+            .and_then(|start| {
+                program.find(&input_units, start, flags.unicode || flags.unicode_sets)
+            })
             .filter(|matched| !flags.sticky || Some(matched.start) == start);
         let Some(matched) = matched else {
             return Ok(RegExpBuiltinOutcome {
@@ -371,12 +462,11 @@ impl Isolate {
         let input_argument = self.call_argument(site, 0)?;
         let input = self.regexp_string_argument(input_argument)?;
         let input_units = self.regexp_string_units(input)?;
-        let source = String::from_utf16(&self.regexp_string_units(source_value)?)
-            .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let source = self.regexp_string_units(source_value)?;
         let flags = self.regexp_flags(flags_value)?;
         let backend_flags = String::from_utf16(&self.regexp_string_units(flags.value)?)
             .map_err(|_| ExecutionError::InvalidRegExpFlags)?;
-        let program = CompiledRegExp::compile_with_flags(&source, &backend_flags)
+        let program = CompiledRegExp::compile_units_with_flags(&source, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
         let limit_argument = self.call_argument(site, 1)?;
         let limit = self.regexp_split_limit(limit_argument)?;
@@ -389,8 +479,9 @@ impl Isolate {
         if limit == 0 {
             return Ok(result);
         }
+        let full_unicode = flags.unicode || flags.unicode_sets;
         if input_units.is_empty() {
-            if program.find_ucs2(&input_units, 0).is_none() {
+            if program.find(&input_units, 0, full_unicode).is_none() {
                 self.string_split_push_value(result, 0, input)?;
             }
             return self.read(site.caller_base, site.destination);
@@ -400,22 +491,14 @@ impl Isolate {
         let mut search = 0;
         while search < input_units.len() {
             let matched = program
-                .find_ucs2(&input_units, search)
+                .find(&input_units, search, full_unicode)
                 .filter(|matched| matched.start == search);
             let Some(matched) = matched else {
-                search = advance_regexp_split_index(
-                    &input_units,
-                    search,
-                    flags.unicode || flags.unicode_sets,
-                );
+                search = advance_regexp_split_index(&input_units, search, full_unicode);
                 continue;
             };
             if matched.end == segment_start {
-                search = advance_regexp_split_index(
-                    &input_units,
-                    search,
-                    flags.unicode || flags.unicode_sets,
-                );
+                search = advance_regexp_split_index(&input_units, search, full_unicode);
                 continue;
             }
             self.string_split_push_units(
