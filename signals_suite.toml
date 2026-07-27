@@ -34,41 +34,41 @@ content_sha256 = "5a7107f394707ff0ffcedca91de7cc97022a9a389bb28427d71addc7f6f583
 [[cases]]
 id = "state-computed"
 path = "tests/proposal-signals/state-computed.js"
-source_sha256 = "17f5c25ac1a4c90818231da602adb58f31fb7694e35ef2143f76cbe2edb104c7"
+source_sha256 = "90643e00cc864f105fa211e0cd7492f4c664c4efdeb3fe879379c4c8ef3787da"
 upstream = ["tests/Signal/state.test.ts", "tests/Signal/computed.test.ts"]
 
 [[cases]]
 id = "custom-equality-errors"
 path = "tests/proposal-signals/custom-equality-errors.js"
-source_sha256 = "962886b2c0d45daaf8a0c25a3e8d8ee47edb4fae02a9eee5182671fff5895bb8"
+source_sha256 = "819d64adbb8b90c5aec993158babb9879bdc2b94abd8ab6be5b2a9ac6c60394b"
 upstream = ["tests/behaviors/custom-equality.test.ts", "tests/behaviors/errors.test.ts"]
 
 [[cases]]
 id = "cycles-pruning"
 path = "tests/proposal-signals/cycles-pruning.js"
-source_sha256 = "cc99eb375796769ad65be00d62c8f1ae483f29f372f168046d6d4ab6533c5ebf"
+source_sha256 = "4bdadd3bade8fc61d1182f6ec6ea17c2eae343aebfe564f8f11aad158264224f"
 upstream = ["tests/behaviors/cycles.test.ts", "tests/behaviors/pruning.test.ts"]
 
 [[cases]]
 id = "dynamic-graph"
 path = "tests/proposal-signals/dynamic-graph.js"
-source_sha256 = "765dfc56c59b1f6e96e2e0e8128a5e673c8f1f893fdf7fe50eb58998d270be32"
+source_sha256 = "a8546162f75315ea302ebe9b191fee1dbf3f5a577d071dbc20753adaa73c8f64"
 upstream = ["tests/behaviors/dynamic-dependencies.test.ts", "tests/behaviors/graph.test.ts"]
 
 [[cases]]
 id = "watcher-liveness"
 path = "tests/proposal-signals/watcher-liveness.js"
-source_sha256 = "c5f69744bd215944d6e4140ffa6204143191484a39c63d6f88535e6c4fcd7651"
+source_sha256 = "fc8f4ca53e5e88553b0fcd17ecf3dc2bf44a2e0bdf57a119294447149ff11844"
 upstream = ["tests/Signal/subtle/watcher.test.ts", "tests/Signal/subtle/watch-unwatch.test.ts", "tests/behaviors/liveness.test.ts"]
 
 [[cases]]
 id = "receivers-frozen"
 path = "tests/proposal-signals/receivers-frozen.js"
-source_sha256 = "a36d22950bf9f75ed457d8f7687b4ea6d720c760fb128b0c4c9243ee6995eea7"
+source_sha256 = "86822a5cdafade66f9093c4f3060aa810d8ed71954545dc7c19582f7690cd32c"
 upstream = ["tests/behaviors/receivers.test.ts", "tests/behaviors/prohibited-contexts.test.ts"]
 
 [[cases]]
 id = "untrack-introspection-brands"
 path = "tests/proposal-signals/untrack-introspection-brands.js"
-source_sha256 = "7c5eb3b7d89a839f50bba233996a1e630e4627b495020f5f3fbb5c362f13f658"
+source_sha256 = "981f70ad4af2b32d16618a8054a2247fb37cc967144baa08efb881373dcbd579"
 upstream = ["tests/Signal/subtle/currentComputed.test.ts", "tests/Signal/subtle/untrack.test.ts", "tests/behaviors/type-checking.test.ts"]

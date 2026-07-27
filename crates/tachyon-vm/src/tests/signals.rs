@@ -960,6 +960,37 @@ branchWatcher.unwatch(branch);
 deduplicated && lifecycle && abrupt && invariant && recovered && switched;
 "#;
 
+const PINNED_PROPOSAL_FIXTURES: &[(&str, &str)] = &[
+    (
+        "state-computed",
+        include_str!("../../../../tests/proposal-signals/state-computed.js"),
+    ),
+    (
+        "custom-equality-errors",
+        include_str!("../../../../tests/proposal-signals/custom-equality-errors.js"),
+    ),
+    (
+        "cycles-pruning",
+        include_str!("../../../../tests/proposal-signals/cycles-pruning.js"),
+    ),
+    (
+        "dynamic-graph",
+        include_str!("../../../../tests/proposal-signals/dynamic-graph.js"),
+    ),
+    (
+        "watcher-liveness",
+        include_str!("../../../../tests/proposal-signals/watcher-liveness.js"),
+    ),
+    (
+        "receivers-frozen",
+        include_str!("../../../../tests/proposal-signals/receivers-frozen.js"),
+    ),
+    (
+        "untrack-introspection-brands",
+        include_str!("../../../../tests/proposal-signals/untrack-introspection-brands.js"),
+    ),
+];
+
 #[test]
 fn signal_namespace_is_installed_in_every_realm() {
     let mut isolate = test_isolate();
@@ -973,6 +1004,20 @@ fn signal_namespace_is_installed_in_every_realm() {
         .expect("child realm remains registered");
     assert!(child.signal_namespace.is_some());
     assert_ne!(child.signal_namespace, isolate.realm.signal_namespace);
+}
+
+/// Runs every pinned proposal fixture across all dispatch batches and a forced major collection.
+#[test]
+fn pinned_proposal_fixtures_cover_dispatch_and_forced_major() {
+    for (index, (name, source)) in PINNED_PROPOSAL_FIXTURES.iter().enumerate() {
+        let source_id = 9_000 + index as u32;
+        assert_signal_behavior::<1>(source, source_id, name, false);
+        assert_signal_behavior::<2>(source, source_id + 16, name, false);
+        assert_signal_behavior::<4>(source, source_id + 32, name, false);
+        assert_signal_behavior::<8>(source, source_id + 48, name, false);
+        assert_signal_behavior::<16>(source, source_id + 64, name, false);
+        assert_signal_behavior::<8>(source, source_id + 80, name, true);
+    }
 }
 
 #[test]
