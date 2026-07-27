@@ -57,6 +57,7 @@ mod proxy;
 mod realm;
 mod regexp;
 mod regexp_exec;
+mod regexp_match_all;
 mod regexp_search;
 mod runtime;
 mod string;
@@ -210,6 +211,7 @@ use proxy::{
     PROXY_ACTIVE_OBJECT, PROXY_DEFINE_HANDLER, PROXY_DELETE_ACTIVE, PROXY_GET_ACTIVE,
     PendingProxyDefine, ProxyObject,
 };
+use regexp_match_all::RegExpStringIteratorObject;
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{
@@ -492,6 +494,7 @@ pub enum ExecutionError {
     InvalidEvalSource,
     InvalidRegExpFlags,
     InvalidRegExpPattern,
+    RegExpMatchAllRequiresGlobal,
     InvalidJsonCircularStructure,
     UnsupportedDynamicFunctionConstructor,
     ProxyConstructorRequiresNew,

@@ -119,6 +119,25 @@ typeof array.keys === "function" && typeof array.values === "function" &&
   array.values() !== undefined && array.entries() !== undefined;
 "#;
 
+const TYPED_ARRAY_SORT_SOURCE: &str = r#"
+var signed = new Int8Array([3, -1, 2, -8]);
+var unsigned = new Uint32Array([9, 1, 4294967295, 4]);
+var floats = new Float64Array([NaN, 0, -0, 4.5, -2]);
+var bigints = new BigInt64Array([3n, -1n, 2n, -8n]);
+var identity = signed.sort() === signed;
+unsigned.sort();
+floats.sort();
+bigints.sort();
+var compareThrows = false;
+try { signed.sort(1); } catch (error) { compareThrows = error instanceof TypeError; }
+identity && signed.join(",") === "-8,-1,2,3" &&
+  unsigned.join(",") === "1,4,9,4294967295" &&
+  floats[0] === -2 && 1 / floats[1] === -Infinity &&
+  1 / floats[2] === Infinity && floats[3] === 4.5 && Number.isNaN(floats[4]) &&
+  bigints[0] === -8n && bigints[1] === -1n && bigints[2] === 2n && bigints[3] === 3n &&
+  compareThrows && Int8Array.prototype.sort.length === 1;
+"#;
+
 const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
 var source = new Array(10000).fill(7);
 var copied = Array.from(source);
@@ -270,6 +289,44 @@ fn typed_array_iterators_work_for_every_dispatch_batch() {
 #[test]
 fn typed_array_iterators_survive_forced_major_collection() {
     assert_typed_array_iterators::<8>(true);
+}
+
+#[test]
+fn typed_array_default_sort_works_for_every_dispatch_batch() {
+    assert_typed_array_sort::<1>(false);
+    assert_typed_array_sort::<2>(false);
+    assert_typed_array_sort::<4>(false);
+    assert_typed_array_sort::<8>(false);
+    assert_typed_array_sort::<16>(false);
+}
+
+#[test]
+fn typed_array_default_sort_survives_forced_major_collection() {
+    assert_typed_array_sort::<8>(true);
+}
+
+/// Executes default numeric ordering under one dispatch and collection policy.
+fn assert_typed_array_sort<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(TYPED_ARRAY_SORT_SOURCE, 7_500 + N as u32);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("TypedArray sort fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }
 
 /// Executes the three shared iterator projections with both dispatch and GC policies.

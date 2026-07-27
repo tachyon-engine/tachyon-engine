@@ -24,3 +24,4 @@ mod weak_collections;
 mod weak_ref;
 
 pub(crate) use date::PendingDateNumericArguments;
+pub(crate) use regexp::advance_regexp_split_index;

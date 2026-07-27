@@ -1119,8 +1119,8 @@ pub(crate) struct RegExpFlags {
     ignore_case: bool,
     multiline: bool,
     dot_all: bool,
-    unicode: bool,
-    unicode_sets: bool,
+    pub(crate) unicode: bool,
+    pub(crate) unicode_sets: bool,
 }
 
 /// Reconstructs canonical flag order from Oxc's stable bit encoding.

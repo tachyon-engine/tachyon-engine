@@ -25,6 +25,23 @@ struct WeakCollectionAllocationRoots<'a> {
     storage: Option<GcRef<WeakCollection>>,
 }
 
+struct RegExpAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    source: Value,
+    flags: Value,
+    prototype: Value,
+}
+
+impl Trace for RegExpAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.source.trace(tracer);
+        self.flags.trace(tracer);
+        self.prototype.trace(tracer);
+    }
+}
+
 impl Trace for WeakCollectionAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -388,6 +405,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             array_iterator: registry
                 .try_register("ArrayIteratorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            regexp_string_iterator: registry
+                .try_register("RegExpStringIteratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             collection_iterator: registry
                 .try_register("CollectionIteratorObject")
@@ -1474,12 +1494,17 @@ impl Isolate {
         flags: Value,
         prototype: Value,
     ) -> Result<Value, ExecutionError> {
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            promise_jobs: &mut self.promise_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
+        let mut roots = RegExpAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+            },
+            source,
+            flags,
+            prototype,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1487,17 +1512,17 @@ impl Isolate {
                 0,
                 0,
                 RegExpObject {
-                    source,
-                    flags,
+                    source: roots.source,
+                    flags: roots.flags,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
                         storage: None,
-                        prototype,
+                        prototype: roots.prototype,
                     },
                 },
                 AllocationSpace::Young,
-                roots,
+                &mut roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
             .map_err(ExecutionError::HeapAllocation)

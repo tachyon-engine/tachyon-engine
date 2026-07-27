@@ -212,6 +212,8 @@ pub(crate) struct Realm {
     pub(crate) string_prototype: Option<Value>,
     pub(crate) regexp_constructor: Option<Value>,
     pub(crate) regexp_prototype: Option<Value>,
+    pub(crate) regexp_string_iterator_prototype: Option<Value>,
+    pub(crate) regexp_string_iterator_next: Option<Value>,
     pub(crate) symbol_constructor: Option<Value>,
     pub(crate) symbol_prototype: Option<Value>,
     pub(crate) number_constructor: Option<Value>,
@@ -383,6 +385,8 @@ impl Realm {
             string_prototype: None,
             regexp_constructor: None,
             regexp_prototype: None,
+            regexp_string_iterator_prototype: None,
+            regexp_string_iterator_next: None,
             symbol_constructor: None,
             symbol_prototype: None,
             number_constructor: None,
@@ -789,6 +793,8 @@ impl Trace for Realm {
         self.string_prototype.trace(tracer);
         self.regexp_constructor.trace(tracer);
         self.regexp_prototype.trace(tracer);
+        self.regexp_string_iterator_prototype.trace(tracer);
+        self.regexp_string_iterator_next.trace(tracer);
         self.symbol_constructor.trace(tracer);
         self.symbol_prototype.trace(tracer);
         self.number_constructor.trace(tracer);
@@ -852,6 +858,7 @@ pub(crate) struct WellKnownSymbols {
     pub(crate) replace: Option<Value>,
     pub(crate) search: Option<Value>,
     pub(crate) r#match: Option<Value>,
+    pub(crate) match_all: Option<Value>,
     pub(crate) species: Option<Value>,
     pub(crate) split: Option<Value>,
     pub(crate) to_string_tag: Option<Value>,
@@ -866,6 +873,7 @@ impl Trace for WellKnownSymbols {
         self.replace.trace(tracer);
         self.search.trace(tracer);
         self.r#match.trace(tracer);
+        self.match_all.trace(tracer);
         self.species.trace(tracer);
         self.split.trace(tracer);
         self.to_string_tag.trace(tracer);

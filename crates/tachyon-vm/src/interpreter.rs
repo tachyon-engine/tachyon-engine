@@ -5562,6 +5562,10 @@ impl Isolate {
                     let result = self.string_match(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::StringMatchAll) => {
+                    let result = self.string_match_all(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(NativeFunction::StringReplace) => {
                     let result = self.string_replace(&site)?;
                     return self.write(site.caller_base, site.destination, result);
@@ -5651,6 +5655,14 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpMatch) => {
                     let result = self.regexp_match(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpMatchAll) => {
+                    let result = self.regexp_match_all(&site)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::Native(NativeFunction::RegExpStringIteratorNext) => {
+                    let result = self.regexp_string_iterator_next(&site)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpReplace) => {
@@ -6343,6 +6355,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayReverse) => {
                     return self.begin_typed_array_reverse(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArraySort) => {
+                    return self.begin_typed_array_sort(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
                     return self.begin_typed_array_set(&site);

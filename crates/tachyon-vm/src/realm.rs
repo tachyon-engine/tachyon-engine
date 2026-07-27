@@ -369,6 +369,17 @@ impl Isolate {
         )?;
         let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
         self.set_intrinsic_data_property(base_prototype, reverse_atom, reverse, true)?;
+        let sort = self.allocate_native_function(
+            NativeFunction::TypedArraySort,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let sort_atom = self.intern_intrinsic_name(b"sort")?;
+        self.set_intrinsic_data_property(base_prototype, sort_atom, sort, true)?;
         let set = self.allocate_native_function(
             NativeFunction::TypedArraySet,
             OrdinaryObject {
@@ -1055,6 +1066,7 @@ impl Isolate {
             (NativeFunction::StringSplit, b"split".as_slice()),
             (NativeFunction::StringSearch, b"search".as_slice()),
             (NativeFunction::StringMatch, b"match".as_slice()),
+            (NativeFunction::StringMatchAll, b"matchAll".as_slice()),
             (NativeFunction::StringReplace, b"replace".as_slice()),
         ] {
             let method = allocate(self, native)?;
@@ -1177,6 +1189,23 @@ impl Isolate {
             match_key,
             DataPropertyDescriptor {
                 value: Some(regexp_match),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        let regexp_match_all = allocate(self, NativeFunction::RegExpMatchAll)?;
+        let match_all_symbol = self
+            .realm
+            .well_known_symbols
+            .match_all
+            .expect("Symbol.matchAll remains rooted during RegExp initialization");
+        let match_all_key = self.property_key(match_all_symbol)?;
+        self.define_data_property(
+            regexp_prototype,
+            match_all_key,
+            DataPropertyDescriptor {
+                value: Some(regexp_match_all),
                 writable: Some(true),
                 enumerable: Some(false),
                 configurable: Some(true),
@@ -1634,6 +1663,8 @@ impl Isolate {
                 self.realm.well_known_symbols.search = Some(symbol);
             } else if name == b"match" {
                 self.realm.well_known_symbols.r#match = Some(symbol);
+            } else if name == b"matchAll" {
+                self.realm.well_known_symbols.match_all = Some(symbol);
             } else if name == b"species" {
                 self.realm.well_known_symbols.species = Some(symbol);
             } else if name == b"split" {
@@ -1649,6 +1680,8 @@ impl Isolate {
                 self.realm.well_known_symbols.search.unwrap()
             } else if name == b"match" {
                 self.realm.well_known_symbols.r#match.unwrap()
+            } else if name == b"matchAll" {
+                self.realm.well_known_symbols.match_all.unwrap()
             } else if name == b"species" {
                 self.realm.well_known_symbols.species.unwrap()
             } else if name == b"split" {
@@ -1992,6 +2025,7 @@ impl Isolate {
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_intrinsic_data_property(prototype, length_atom, Value::from_i32(0), false)?;
         self.initialize_array_iterator_intrinsics(prototype, function_prototype)?;
+        self.initialize_regexp_string_iterator_intrinsics(function_prototype)?;
         let concat = self.allocate_native_function(
             NativeFunction::ArrayConcat,
             OrdinaryObject {
@@ -2433,6 +2467,56 @@ impl Isolate {
             iterator_prototype,
             function_prototype,
             iterator_key,
+        )
+    }
+
+    /// Builds `%RegExpStringIteratorPrototype%` above the shared Iterator prototype.
+    fn initialize_regexp_string_iterator_intrinsics(
+        &mut self,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let iterator_prototype = self
+            .realm
+            .iterator_prototype
+            .expect("Iterator prototype initializes before RegExp String Iterator");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        self.realm.regexp_string_iterator_prototype = Some(prototype);
+        let next = self.allocate_native_function(
+            NativeFunction::RegExpStringIteratorNext,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.regexp_string_iterator_next = Some(next);
+        let next_atom = self.intern_intrinsic_name(b"next")?;
+        self.set_intrinsic_data_property(prototype, next_atom, next, true)?;
+        let tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"RegExp String Iterator")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let tag_symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before RegExp String Iterator");
+        let tag_key = self.property_key(tag_symbol)?;
+        self.define_data_property(
+            prototype,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
         )
     }
 

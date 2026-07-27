@@ -10,6 +10,7 @@ mod reverse;
 mod search;
 mod set;
 mod slice;
+mod sort;
 mod subarray;
 
 use super::super::*;

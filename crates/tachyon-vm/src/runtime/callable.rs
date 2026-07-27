@@ -349,6 +349,7 @@ pub(crate) enum NativeFunction {
     StringSplit,
     StringSearch,
     StringMatch,
+    StringMatchAll,
     StringReplace,
     StringIterator,
     StringIteratorNext,
@@ -360,6 +361,8 @@ pub(crate) enum NativeFunction {
     RegExpSplit,
     RegExpSearch,
     RegExpMatch,
+    RegExpMatchAll,
+    RegExpStringIteratorNext,
     RegExpReplace,
     SymbolConstructor,
     SymbolFor,
@@ -458,6 +461,7 @@ pub(crate) enum NativeFunction {
     TypedArrayFill,
     TypedArrayCopyWithin,
     TypedArrayReverse,
+    TypedArraySort,
     TypedArraySet,
     TypedArrayJoin,
     TypedArraySlice,
@@ -930,7 +934,9 @@ impl NativeFunction {
         match self {
             Self::SignalStateSet
             | Self::StringMatch
+            | Self::StringMatchAll
             | Self::RegExpMatch
+            | Self::RegExpMatchAll
             | Self::SignalUntrack
             | Self::SignalIntrospectSources
             | Self::SignalIntrospectSinks
@@ -1095,6 +1101,7 @@ impl NativeFunction {
             | Self::ArrayLastIndexOf
             | Self::ArrayFlatMap
             | Self::ArraySort
+            | Self::TypedArraySort
             | Self::ArrayToSorted => 1,
             Self::ArrayCopyWithin
             | Self::TypedArrayCopyWithin
@@ -1248,7 +1255,8 @@ impl NativeFunction {
             | Self::StringToLocaleLowerCase
             | Self::StringToLocaleUpperCase
             | Self::StringIterator
-            | Self::StringIteratorNext => 0,
+            | Self::StringIteratorNext
+            | Self::RegExpStringIteratorNext => 0,
             Self::ArrayKeys
             | Self::ArrayValues
             | Self::ArrayEntries
@@ -1353,6 +1361,8 @@ impl NativeFunction {
             Self::RegExpSplit => "[Symbol.split]",
             Self::RegExpSearch => "[Symbol.search]",
             Self::RegExpMatch => "[Symbol.match]",
+            Self::RegExpMatchAll => "[Symbol.matchAll]",
+            Self::RegExpStringIteratorNext => "next",
             Self::RegExpReplace => "[Symbol.replace]",
             Self::StringCharAt => "charAt",
             Self::StringCharCodeAt => "charCodeAt",
@@ -1385,6 +1395,7 @@ impl NativeFunction {
             Self::StringSplit => "split",
             Self::StringSearch => "search",
             Self::StringMatch => "match",
+            Self::StringMatchAll => "matchAll",
             Self::StringReplace => "replace",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
@@ -1496,6 +1507,7 @@ impl NativeFunction {
             Self::TypedArrayFill => "fill",
             Self::TypedArrayCopyWithin => "copyWithin",
             Self::TypedArrayReverse => "reverse",
+            Self::TypedArraySort => "sort",
             Self::TypedArraySet => "set",
             Self::TypedArrayJoin => "join",
             Self::TypedArraySlice => "slice",
@@ -1884,6 +1896,7 @@ pub(crate) enum ObjectReceiver {
     FinalizationRegistry(GcRef<FinalizationRegistryObject>),
     ArrayIterator(GcRef<ArrayIteratorObject>),
     CollectionIterator(GcRef<CollectionIteratorObject>),
+    RegExpStringIterator(GcRef<RegExpStringIteratorObject>),
 }
 
 impl ObjectReceiver {
@@ -1918,6 +1931,7 @@ impl ObjectReceiver {
             Self::FinalizationRegistry(registry) => Value::from_heap_ref(registry.raw()),
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
+            Self::RegExpStringIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
 }
@@ -2095,6 +2109,7 @@ pub(crate) struct VmTypes {
     pub(crate) array_elements: GcType<ArrayElements>,
     pub(crate) arguments_object: GcType<ArgumentsObject>,
     pub(crate) array_iterator: GcType<ArrayIteratorObject>,
+    pub(crate) regexp_string_iterator: GcType<RegExpStringIteratorObject>,
     pub(crate) collection_iterator: GcType<CollectionIteratorObject>,
     pub(crate) bound_function: GcType<BoundFunctionData>,
     pub(crate) class_constructor_data: GcType<ClassConstructorData>,
@@ -2264,7 +2279,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::TypedArraySpeciesResultTooShort
-        | ExecutionError::DetachedArrayBuffer => Some(NativeErrorKind::Type),
+        | ExecutionError::DetachedArrayBuffer
+        | ExecutionError::RegExpMatchAllRequiresGlobal => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)
         | ExecutionError::GlobalLexicalAlreadyInitialized(_)
         | ExecutionError::EnvironmentBindingAlreadyInitialized { .. }

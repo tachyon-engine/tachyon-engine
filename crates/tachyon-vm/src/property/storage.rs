@@ -1213,6 +1213,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::RegExp(regexp), ordinary));
         }
+        if let Ok(iterator) = self
+            .heap
+            .checked_reference(raw, self.types.regexp_string_iterator)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(iterator, self.types.regexp_string_iterator)
+                        .map(|iterator| iterator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::RegExpStringIterator(iterator), ordinary));
+        }
         if let Ok(promise) = self.heap.checked_reference(raw, self.types.promise_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let promise = scope.root(promise).map_err(ExecutionError::Root)?;
@@ -1570,6 +1585,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::RegExpStringIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(iterator, self.types.regexp_string_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .extensible = extensible;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
                 let promise = scope.root(promise).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -1889,6 +1917,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::RegExpStringIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(iterator, self.types.regexp_string_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .shape = shape;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
                 let promise = scope.root(promise).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2358,6 +2399,29 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::RegExpStringIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    let storage_local = storage
+                        .map(|storage| scope.root(storage))
+                        .transpose()
+                        .map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        let iterator = no_gc
+                            .borrow_mut(iterator, self.types.regexp_string_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?;
+                        iterator.ordinary.shape = shape;
+                        iterator.ordinary.storage = storage;
+                        Ok::<(), ExecutionError>(())
+                    })?;
+                    if let Some(storage) = storage_local {
+                        scope
+                            .write_barrier(iterator, storage)
+                            .map_err(ExecutionError::HeapReference)?;
+                    }
+                    Ok(())
+                })
+            }
             ObjectReceiver::Promise(promise) => self.heap.with_running_scope(|scope| {
                 let promise = scope.root(promise).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -2653,6 +2717,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.regexp_object)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.regexp_string_iterator)
                 .is_ok()
             || self
                 .heap

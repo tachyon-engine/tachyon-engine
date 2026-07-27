@@ -446,7 +446,7 @@ impl Isolate {
 
 /// Applies ECMAScript ToLength to an already numeric primitive.
 #[inline(always)]
-fn regexp_to_length(value: Value) -> Result<u64, ExecutionError> {
+pub(crate) fn regexp_to_length(value: Value) -> Result<u64, ExecutionError> {
     let number = numeric_value(value).ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
     if number.is_nan() || number <= 0.0 {
         return Ok(0);
