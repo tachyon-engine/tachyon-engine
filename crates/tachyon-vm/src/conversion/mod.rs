@@ -398,7 +398,7 @@ impl Isolate {
                         );
                     }
                     if let ConversionConsumer::BinaryLeft(opcode) = continuation.consumer {
-                        let left = self.convert_to_number(value)?;
+                        let left = value;
                         let right = continuation.receiver;
                         if self.is_object_value(right) {
                             continuation.consumer = ConversionConsumer::BinaryRight(opcode);
@@ -407,8 +407,8 @@ impl Isolate {
                             continuation.stage = ToPrimitiveStage::Exotic;
                             continue;
                         }
-                        let right = self.convert_to_number(right)?;
-                        let result = numeric_binary_operation(opcode, left, right);
+                        let result =
+                            self.numeric_primitive_binary_operation(opcode, left, right)?;
                         return self.write(
                             continuation.site.caller_base,
                             continuation.site.destination,
@@ -416,8 +416,11 @@ impl Isolate {
                         );
                     }
                     if let ConversionConsumer::BinaryRight(opcode) = continuation.consumer {
-                        let right = self.convert_to_number(value)?;
-                        let result = numeric_binary_operation(opcode, continuation.receiver, right);
+                        let result = self.numeric_primitive_binary_operation(
+                            opcode,
+                            continuation.receiver,
+                            value,
+                        )?;
                         return self.write(
                             continuation.site.caller_base,
                             continuation.site.destination,
@@ -1103,10 +1106,8 @@ impl Isolate {
             };
             return Ok(match consumer {
                 ConversionConsumer::ToNumber => self.convert_to_number(argument)?,
-                ConversionConsumer::Negate => numeric_negate(self.convert_to_number(argument)?),
-                ConversionConsumer::BitwiseNot => {
-                    numeric_bitwise_not(self.convert_to_number(argument)?)
-                }
+                ConversionConsumer::Negate => self.numeric_primitive_negate(argument)?,
+                ConversionConsumer::BitwiseNot => self.numeric_primitive_bitwise_not(argument)?,
                 ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
                     unreachable!("binary consumers finish inside the conversion state machine")
                 }
@@ -1519,9 +1520,7 @@ impl Isolate {
                 .map_err(ExecutionError::PropertyKeyString)?;
             return self.allocate_runtime_string(string);
         }
-        let left = self.convert_to_number(left)?;
-        let right = self.convert_to_number(right)?;
-        Ok(numeric_binary(Opcode::Add, left, right))
+        self.numeric_primitive_binary_operation(Opcode::Add, left, right)
     }
 
     /// Compares two primitive strings by exact ECMAScript UTF-16 code-unit ordering.

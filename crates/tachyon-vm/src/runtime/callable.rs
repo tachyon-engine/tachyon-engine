@@ -2208,6 +2208,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidFinalizationRegistration(_)
         | ExecutionError::UnsupportedPrimitiveStringConversion(_)
         | ExecutionError::UnsupportedBigIntConversion(_)
+        | ExecutionError::BigIntUnsignedRightShift
+        | ExecutionError::BigIntMixedTypes
         | ExecutionError::TypedArrayContentTypeMismatch
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
@@ -2225,6 +2227,9 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidNumberPrecision(_)
         | ExecutionError::InvalidArrayLength
         | ExecutionError::InvalidBigIntNumber(_)
+        | ExecutionError::BigIntDivisionByZero
+        | ExecutionError::BigIntNegativeExponent
+        | ExecutionError::BigIntResultTooLarge
         | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
         | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),

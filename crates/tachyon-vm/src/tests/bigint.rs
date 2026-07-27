@@ -84,6 +84,43 @@ if (!(throws(TypeError, function() { new BigInt(1); }) &&
 failure;
 "#;
 
+const BIGINT_ARITHMETIC_SOURCE: &str = r#"
+function throws(expected, callback) {
+  try { callback(); } catch (error) { return error instanceof expected; }
+  return false;
+}
+var huge = 18446744073709551616n;
+var mask = 18446744073709551615n;
+var trace = "";
+var left = { [Symbol.toPrimitive]() { trace += "l"; return huge; } };
+var right = { valueOf() { trace += "r"; return 3n; } };
+var resumed = left * right;
+var failure = 0;
+if (!(huge + mask === 36893488147419103231n &&
+      huge - mask === 1n && mask - huge === -1n &&
+      huge * mask === 340282366920938463444927863358058659840n)) failure = 1;
+if (!((huge * mask) / huge === mask && (huge * mask) % huge === 0n &&
+      (-((huge * mask) + 1n)) % huge === -1n)) failure = 2;
+if (!(3n ** 100n === 515377520732011331036461129765621272702107522001n &&
+      0n ** 0n === 1n && (-1n) ** 101n === -1n)) failure = 3;
+if (!((huge & mask) === 0n && (huge | mask) === 36893488147419103231n &&
+      (huge ^ mask) === 36893488147419103231n && ~huge === -18446744073709551617n &&
+      ~(-huge) === 18446744073709551615n)) failure = 4;
+if (!((0x123456789abcdef0fedcba9876543210n << 64n) ===
+        0x123456789abcdef0fedcba98765432100000000000000000n &&
+      (0x123456789abcdef0fedcba9876543210n >> 64n) === 0x123456789abcdef0n &&
+      (-5n >> 2n) === -2n && (-5n << -2n) === -2n &&
+      (5n >> -3n) === 40n)) failure = 5;
+if (!(resumed === 55340232221128654848n && trace === "lr")) failure = 6;
+if (!(throws(TypeError, function() { return 1n + 1; }) &&
+      throws(TypeError, function() { return 1 * 1n; }) &&
+      throws(TypeError, function() { return 1n >>> 0n; }) &&
+      throws(RangeError, function() { return 1n / 0n; }) &&
+      throws(RangeError, function() { return 1n % 0n; }) &&
+      throws(RangeError, function() { return 2n ** -1n; }))) failure = 7;
+failure;
+"#;
+
 #[test]
 fn bigint_primitives_execute_for_every_dispatch_batch() {
     assert_bigint_source::<1>(false);
@@ -118,6 +155,24 @@ fn bigint_conversion_callbacks_survive_forced_major_collection() {
     assert_bigint_conversion::<4>(true);
     assert_bigint_conversion::<8>(true);
     assert_bigint_conversion::<16>(true);
+}
+
+#[test]
+fn bigint_arithmetic_executes_for_every_dispatch_batch() {
+    assert_bigint_arithmetic::<1>(false);
+    assert_bigint_arithmetic::<2>(false);
+    assert_bigint_arithmetic::<4>(false);
+    assert_bigint_arithmetic::<8>(false);
+    assert_bigint_arithmetic::<16>(false);
+}
+
+#[test]
+fn bigint_arithmetic_survives_forced_major_collection() {
+    assert_bigint_arithmetic::<1>(true);
+    assert_bigint_arithmetic::<2>(true);
+    assert_bigint_arithmetic::<4>(true);
+    assert_bigint_arithmetic::<8>(true);
+    assert_bigint_arithmetic::<16>(true);
 }
 
 /// Compiles and executes the primitive surface under one dispatch and collection policy.
@@ -182,6 +237,40 @@ fn assert_bigint_conversion<const N: usize>(forced_major: bool) {
             },
         )
         .expect("BigInt conversion fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(0)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Exercises every BigInt arithmetic family under one dispatch and collection policy.
+fn assert_bigint_arithmetic<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_600 + N as u32 + u32::from(forced_major) * 32),
+                SourceName::new("bigint-arithmetic-fixture"),
+                MediaType::JavaScript,
+                Arc::from(BIGINT_ARITHMETIC_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("BigInt arithmetic fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("BigInt arithmetic fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(0)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

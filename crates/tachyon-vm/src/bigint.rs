@@ -11,6 +11,14 @@ pub(crate) enum BigIntBuildError {
     AllocationFailed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BigIntArithmeticError {
+    AllocationFailed,
+    DivisionByZero,
+    NegativeExponent,
+    ResultTooLarge,
+}
+
 /// Canonical sign-magnitude BigInt with little-endian fixed-capacity limbs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BigIntValue {
@@ -19,6 +27,18 @@ pub(crate) struct BigIntValue {
 }
 
 impl BigIntValue {
+    /// Canonicalizes one owned magnitude before it becomes published GC payload.
+    #[inline]
+    fn from_owned_limbs(negative: bool, mut limbs: Vec<u64>) -> Self {
+        while limbs.last() == Some(&0) {
+            limbs.pop();
+        }
+        Self {
+            negative: negative && !limbs.is_empty(),
+            limbs: limbs.into_boxed_slice(),
+        }
+    }
+
     /// Builds one canonical unsigned magnitude without decimal parsing.
     #[inline(always)]
     fn from_u64(value: u64) -> Self {
@@ -220,6 +240,296 @@ impl BigIntValue {
         }
     }
 
+    #[inline(always)]
+    fn is_zero(&self) -> bool {
+        self.limbs.is_empty()
+    }
+
+    #[inline(always)]
+    fn is_one(&self) -> bool {
+        !self.negative && self.limbs.as_ref() == [1]
+    }
+
+    #[inline(always)]
+    fn bit_length(&self) -> usize {
+        self.limbs.last().map_or(0, |high| {
+            (self.limbs.len() - 1) * u64::BITS as usize
+                + (u64::BITS - high.leading_zeros()) as usize
+        })
+    }
+
+    #[inline(always)]
+    fn magnitude_cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.limbs
+            .len()
+            .cmp(&other.limbs.len())
+            .then_with(|| self.limbs.iter().rev().cmp(other.limbs.iter().rev()))
+    }
+
+    /// Adds two canonical values with one exact result-capacity allocation.
+    fn add(&self, other: &Self) -> Result<Self, BigIntArithmeticError> {
+        if self.negative == other.negative {
+            return add_magnitudes(&self.limbs, &other.limbs)
+                .map(|limbs| Self::from_owned_limbs(self.negative, limbs));
+        }
+        match self.magnitude_cmp(other) {
+            core::cmp::Ordering::Greater => subtract_magnitudes(&self.limbs, &other.limbs)
+                .map(|limbs| Self::from_owned_limbs(self.negative, limbs)),
+            core::cmp::Ordering::Less => subtract_magnitudes(&other.limbs, &self.limbs)
+                .map(|limbs| Self::from_owned_limbs(other.negative, limbs)),
+            core::cmp::Ordering::Equal => Ok(Self::from_u64(0)),
+        }
+    }
+
+    #[inline]
+    fn subtract(&self, other: &Self) -> Result<Self, BigIntArithmeticError> {
+        self.add(&other.clone().negate())
+    }
+
+    /// Multiplies canonical magnitudes with checked exact capacity and sign publication.
+    fn multiply(&self, other: &Self) -> Result<Self, BigIntArithmeticError> {
+        if self.is_zero() || other.is_zero() {
+            return Ok(Self::from_u64(0));
+        }
+        let limb_count = self
+            .limbs
+            .len()
+            .checked_add(other.limbs.len())
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        ensure_result_limbs(limb_count)?;
+        let mut limbs = zeroed_limbs(limb_count)?;
+        for (left_index, &left) in self.limbs.iter().enumerate() {
+            let mut carry = 0_u128;
+            for (right_index, &right) in other.limbs.iter().enumerate() {
+                let index = left_index + right_index;
+                let product =
+                    u128::from(left) * u128::from(right) + u128::from(limbs[index]) + carry;
+                limbs[index] = product as u64;
+                carry = product >> 64;
+            }
+            limbs[left_index + other.limbs.len()] = carry as u64;
+        }
+        Ok(Self::from_owned_limbs(
+            self.negative != other.negative,
+            limbs,
+        ))
+    }
+
+    /// Computes truncating quotient and dividend-signed remainder without host integer narrowing.
+    fn divide_or_remainder(
+        &self,
+        other: &Self,
+        remainder: bool,
+    ) -> Result<Self, BigIntArithmeticError> {
+        if other.is_zero() {
+            return Err(BigIntArithmeticError::DivisionByZero);
+        }
+        if self.is_zero() {
+            return Ok(Self::from_u64(0));
+        }
+        let ordering = self.magnitude_cmp(other);
+        if ordering == core::cmp::Ordering::Less {
+            return if remainder {
+                Ok(self.clone())
+            } else {
+                Ok(Self::from_u64(0))
+            };
+        }
+        if other.limbs.len() == 1 {
+            let (quotient, residual) = divide_magnitude_by_limb(&self.limbs, other.limbs[0])?;
+            return if remainder {
+                Ok(Self::from_owned_limbs(self.negative, vec![residual]))
+            } else {
+                Ok(Self::from_owned_limbs(
+                    self.negative != other.negative,
+                    quotient,
+                ))
+            };
+        }
+        let (quotient, residual) = divide_magnitudes(&self.limbs, &other.limbs)?;
+        if remainder {
+            Ok(Self::from_owned_limbs(self.negative, residual))
+        } else {
+            Ok(Self::from_owned_limbs(
+                self.negative != other.negative,
+                quotient,
+            ))
+        }
+    }
+
+    /// Raises one value by a non-negative exponent using checked squaring and a result-bit cap.
+    fn exponentiate(&self, exponent: &Self) -> Result<Self, BigIntArithmeticError> {
+        if exponent.negative {
+            return Err(BigIntArithmeticError::NegativeExponent);
+        }
+        if exponent.is_zero() {
+            return Ok(Self::from_u64(1));
+        }
+        if self.is_zero() || self.is_one() {
+            return Ok(self.clone());
+        }
+        if self.negative && self.limbs.as_ref() == [1] {
+            return Ok(Self::from_i64(if exponent.limbs[0] & 1 == 0 {
+                1
+            } else {
+                -1
+            }));
+        }
+        let exponent = exponent.as_bounded_usize(tuning::bigints::MAX_RESULT_BITS)?;
+        let estimated_bits = self
+            .bit_length()
+            .checked_mul(exponent)
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        if estimated_bits > tuning::bigints::MAX_RESULT_BITS {
+            return Err(BigIntArithmeticError::ResultTooLarge);
+        }
+        let mut power = self.clone();
+        let mut result = Self::from_u64(1);
+        let mut remaining = exponent;
+        while remaining != 0 {
+            if remaining & 1 != 0 {
+                result = result.multiply(&power)?;
+            }
+            remaining >>= 1;
+            if remaining != 0 {
+                power = power.multiply(&power)?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Applies an infinite two's-complement binary operation through one explicit sign limb.
+    fn bitwise(&self, other: &Self, opcode: Opcode) -> Result<Self, BigIntArithmeticError> {
+        let width = self
+            .limbs
+            .len()
+            .max(other.limbs.len())
+            .checked_add(1)
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        ensure_result_limbs(width)?;
+        let left = self.twos_complement(width)?;
+        let right = other.twos_complement(width)?;
+        let mut result = zeroed_limbs(width)?;
+        for index in 0..width {
+            result[index] = match opcode {
+                Opcode::BitwiseAnd => left[index] & right[index],
+                Opcode::BitwiseOr => left[index] | right[index],
+                Opcode::BitwiseXor => left[index] ^ right[index],
+                _ => unreachable!("BigInt bitwise dispatch only supplies binary bitwise opcodes"),
+            };
+        }
+        from_twos_complement(result)
+    }
+
+    /// Implements `~x` as `-x - 1`, avoiding a second temporary published BigInt.
+    fn bitwise_not(&self) -> Result<Self, BigIntArithmeticError> {
+        let one = Self::from_u64(1);
+        self.add(&one)?.negate_checked()
+    }
+
+    #[inline]
+    fn negate_checked(self) -> Result<Self, BigIntArithmeticError> {
+        Ok(self.negate())
+    }
+
+    /// Applies signed BigInt shift counts, reversing direction for negative counts.
+    fn shift(&self, count: &Self, left: bool) -> Result<Self, BigIntArithmeticError> {
+        if self.is_zero() || count.is_zero() {
+            return Ok(self.clone());
+        }
+        let effective_left = left != count.negative;
+        if effective_left {
+            let shift = count.as_bounded_usize(tuning::bigints::MAX_RESULT_BITS)?;
+            return self.shift_left_magnitude(shift);
+        }
+        let Some(shift) = count.as_usize_if_fits() else {
+            return Ok(Self::from_i64(if self.negative { -1 } else { 0 }));
+        };
+        self.shift_right_arithmetic(shift)
+    }
+
+    /// Materializes a bounded positive magnitude as usize for loop/allocation control.
+    fn as_bounded_usize(&self, maximum: usize) -> Result<usize, BigIntArithmeticError> {
+        let value = self
+            .as_usize_if_fits()
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        if value > maximum {
+            return Err(BigIntArithmeticError::ResultTooLarge);
+        }
+        Ok(value)
+    }
+
+    #[inline(always)]
+    fn as_usize_if_fits(&self) -> Option<usize> {
+        match self.limbs.as_ref() {
+            [] => Some(0),
+            [value] => usize::try_from(*value).ok(),
+            _ => None,
+        }
+    }
+
+    /// Converts canonical sign-magnitude to fixed-width two's-complement limbs.
+    fn twos_complement(&self, width: usize) -> Result<Vec<u64>, BigIntArithmeticError> {
+        let mut result = zeroed_limbs(width)?;
+        result[..self.limbs.len()].copy_from_slice(&self.limbs);
+        if self.negative {
+            for limb in &mut result {
+                *limb = !*limb;
+            }
+            add_one_in_place(&mut result);
+        }
+        Ok(result)
+    }
+
+    /// Shifts one sign-magnitude value left with exact limb capacity.
+    fn shift_left_magnitude(&self, shift: usize) -> Result<Self, BigIntArithmeticError> {
+        let result_bits = self
+            .bit_length()
+            .checked_add(shift)
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        if result_bits > tuning::bigints::MAX_RESULT_BITS {
+            return Err(BigIntArithmeticError::ResultTooLarge);
+        }
+        let word_shift = shift / 64;
+        let bit_shift = shift % 64;
+        let limb_count = self
+            .limbs
+            .len()
+            .checked_add(word_shift)
+            .and_then(|count| count.checked_add(usize::from(bit_shift != 0)))
+            .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+        let mut limbs = zeroed_limbs(limb_count)?;
+        for (index, &limb) in self.limbs.iter().enumerate() {
+            limbs[index + word_shift] |= limb << bit_shift;
+            if bit_shift != 0 {
+                limbs[index + word_shift + 1] |= limb >> (64 - bit_shift);
+            }
+        }
+        Ok(Self::from_owned_limbs(self.negative, limbs))
+    }
+
+    /// Arithmetic-right-shifts sign magnitude, rounding negative values toward minus infinity.
+    fn shift_right_arithmetic(&self, shift: usize) -> Result<Self, BigIntArithmeticError> {
+        if shift >= self.bit_length() {
+            return Ok(Self::from_i64(if self.negative { -1 } else { 0 }));
+        }
+        let word_shift = shift / 64;
+        let bit_shift = shift % 64;
+        let output_len = self.limbs.len() - word_shift;
+        let mut limbs = zeroed_limbs(output_len)?;
+        for (index, output) in limbs.iter_mut().enumerate() {
+            let source = index + word_shift;
+            *output = self.limbs[source] >> bit_shift;
+            if bit_shift != 0 && source + 1 < self.limbs.len() {
+                *output |= self.limbs[source + 1] << (64 - bit_shift);
+            }
+        }
+        if self.negative && discarded_bits_nonzero(&self.limbs, shift) {
+            add_one_in_place(&mut limbs);
+        }
+        Ok(Self::from_owned_limbs(self.negative, limbs))
+    }
+
     /// Compares against one signed immediate without allocating a temporary magnitude.
     pub(crate) fn equals_small(&self, value: i64) -> bool {
         if value == 0 {
@@ -281,6 +591,187 @@ impl BigIntValue {
         }
         Ok(output)
     }
+}
+
+/// Adds unsigned little-endian magnitudes with exact capacity and one carry limb.
+fn add_magnitudes(left: &[u64], right: &[u64]) -> Result<Vec<u64>, BigIntArithmeticError> {
+    let common = left.len().max(right.len());
+    let capacity = common
+        .checked_add(1)
+        .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+    ensure_result_limbs(capacity)?;
+    let mut result = zeroed_limbs(capacity)?;
+    let mut carry = 0_u128;
+    for (index, output) in result.iter_mut().take(common).enumerate() {
+        let sum = u128::from(left.get(index).copied().unwrap_or(0))
+            + u128::from(right.get(index).copied().unwrap_or(0))
+            + carry;
+        *output = sum as u64;
+        carry = sum >> 64;
+    }
+    result[common] = carry as u64;
+    Ok(result)
+}
+
+/// Subtracts unsigned magnitudes after the caller proves `left >= right`.
+fn subtract_magnitudes(left: &[u64], right: &[u64]) -> Result<Vec<u64>, BigIntArithmeticError> {
+    debug_assert!(magnitude_slice_cmp(left, right) != core::cmp::Ordering::Less);
+    let mut result = zeroed_limbs(left.len())?;
+    let mut borrow = 0_u128;
+    for (index, &left_limb) in left.iter().enumerate() {
+        let subtrahend = u128::from(right.get(index).copied().unwrap_or(0)) + borrow;
+        let minuend = u128::from(left_limb);
+        result[index] = minuend.wrapping_sub(subtrahend) as u64;
+        borrow = u128::from(minuend < subtrahend);
+    }
+    debug_assert_eq!(borrow, 0);
+    Ok(result)
+}
+
+/// Divides an unsigned magnitude by one non-zero limb in a single high-to-low pass.
+fn divide_magnitude_by_limb(
+    dividend: &[u64],
+    divisor: u64,
+) -> Result<(Vec<u64>, u64), BigIntArithmeticError> {
+    debug_assert_ne!(divisor, 0);
+    let mut quotient = zeroed_limbs(dividend.len())?;
+    let mut residual = 0_u128;
+    for index in (0..dividend.len()).rev() {
+        let current = (residual << 64) | u128::from(dividend[index]);
+        quotient[index] = (current / u128::from(divisor)) as u64;
+        residual = current % u128::from(divisor);
+    }
+    Ok((quotient, residual as u64))
+}
+
+/// Uses allocation-bounded binary long division for the multi-limb exact kernel.
+///
+/// The representation stays canonical at each subtraction, so no signed temporary or f64 path is
+/// introduced. A future Knuth/Burnikel-Ziegler kernel can replace this function behind the same
+/// contract without changing published payloads or VM dispatch.
+fn divide_magnitudes(
+    dividend: &[u64],
+    divisor: &[u64],
+) -> Result<(Vec<u64>, Vec<u64>), BigIntArithmeticError> {
+    debug_assert!(divisor.len() > 1);
+    debug_assert!(magnitude_slice_cmp(dividend, divisor) != core::cmp::Ordering::Less);
+    let mut quotient = zeroed_limbs(dividend.len())?;
+    let residual_capacity = divisor
+        .len()
+        .checked_add(1)
+        .ok_or(BigIntArithmeticError::ResultTooLarge)?;
+    let mut residual = Vec::new();
+    residual
+        .try_reserve_exact(residual_capacity)
+        .map_err(|_| BigIntArithmeticError::AllocationFailed)?;
+    let high = *dividend.last().expect("non-zero dividend has a high limb");
+    let bit_length = (dividend.len() - 1) * 64 + (64 - high.leading_zeros() as usize);
+    for bit_index in (0..bit_length).rev() {
+        shift_magnitude_left_one(&mut residual);
+        if dividend[bit_index / 64] & (1_u64 << (bit_index % 64)) != 0 {
+            if residual.is_empty() {
+                residual.push(1);
+            } else {
+                residual[0] |= 1;
+            }
+        }
+        if magnitude_slice_cmp(&residual, divisor) != core::cmp::Ordering::Less {
+            subtract_magnitude_in_place(&mut residual, divisor);
+            quotient[bit_index / 64] |= 1_u64 << (bit_index % 64);
+        }
+    }
+    Ok((quotient, residual))
+}
+
+#[inline(always)]
+fn magnitude_slice_cmp(left: &[u64], right: &[u64]) -> core::cmp::Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.iter().rev().cmp(right.iter().rev()))
+}
+
+/// Shifts one canonical scratch magnitude left by one without exceeding reserved capacity.
+fn shift_magnitude_left_one(limbs: &mut Vec<u64>) {
+    let mut carry = 0_u64;
+    for limb in limbs.iter_mut() {
+        let next = *limb >> 63;
+        *limb = (*limb << 1) | carry;
+        carry = next;
+    }
+    if carry != 0 {
+        limbs.push(carry);
+    }
+}
+
+/// Subtracts a smaller canonical magnitude from scratch storage and trims high zero limbs.
+fn subtract_magnitude_in_place(left: &mut Vec<u64>, right: &[u64]) {
+    let mut borrow = 0_u128;
+    for (index, limb) in left.iter_mut().enumerate() {
+        let subtrahend = u128::from(right.get(index).copied().unwrap_or(0)) + borrow;
+        let minuend = u128::from(*limb);
+        *limb = minuend.wrapping_sub(subtrahend) as u64;
+        borrow = u128::from(minuend < subtrahend);
+    }
+    debug_assert_eq!(borrow, 0);
+    while left.last() == Some(&0) {
+        left.pop();
+    }
+}
+
+/// Converts fixed-width two's-complement scratch limbs back to canonical sign magnitude.
+fn from_twos_complement(mut limbs: Vec<u64>) -> Result<BigIntValue, BigIntArithmeticError> {
+    let negative = limbs.last().is_some_and(|limb| limb >> 63 != 0);
+    if negative {
+        for limb in &mut limbs {
+            *limb = !*limb;
+        }
+        add_one_in_place(&mut limbs);
+    }
+    Ok(BigIntValue::from_owned_limbs(negative, limbs))
+}
+
+#[inline(always)]
+fn add_one_in_place(limbs: &mut [u64]) {
+    for limb in limbs {
+        let (next, overflow) = limb.overflowing_add(1);
+        *limb = next;
+        if !overflow {
+            break;
+        }
+    }
+}
+
+/// Reports whether arithmetic-right-shift rounding must increment the retained magnitude.
+fn discarded_bits_nonzero(limbs: &[u64], shift: usize) -> bool {
+    let whole_limbs = shift / 64;
+    if limbs.iter().take(whole_limbs).any(|limb| *limb != 0) {
+        return true;
+    }
+    let partial = shift % 64;
+    partial != 0
+        && limbs
+            .get(whole_limbs)
+            .is_some_and(|limb| limb & ((1_u64 << partial) - 1) != 0)
+}
+
+#[inline]
+fn zeroed_limbs(length: usize) -> Result<Vec<u64>, BigIntArithmeticError> {
+    ensure_result_limbs(length)?;
+    let mut limbs = Vec::new();
+    limbs
+        .try_reserve_exact(length)
+        .map_err(|_| BigIntArithmeticError::AllocationFailed)?;
+    limbs.resize(length, 0);
+    Ok(limbs)
+}
+
+#[inline(always)]
+fn ensure_result_limbs(length: usize) -> Result<(), BigIntArithmeticError> {
+    let maximum = tuning::bigints::MAX_RESULT_BITS.div_ceil(64);
+    if length > maximum {
+        return Err(BigIntArithmeticError::ResultTooLarge);
+    }
+    Ok(())
 }
 
 impl Trace for BigIntValue {
@@ -471,6 +962,44 @@ impl Isolate {
         self.allocate_bigint(bigint.negate())
     }
 
+    /// Applies one BigInt binary opcode after ToNumeric has classified both operands as BigInt.
+    pub(crate) fn bigint_binary_operation(
+        &mut self,
+        opcode: Opcode,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, ExecutionError> {
+        if opcode == Opcode::ShiftRightUnsigned {
+            return Err(ExecutionError::BigIntUnsignedRightShift);
+        }
+        let left = self.bigint_value_snapshot(left)?;
+        let right = self.bigint_value_snapshot(right)?;
+        let result = match opcode {
+            Opcode::Add => left.add(&right),
+            Opcode::Sub => left.subtract(&right),
+            Opcode::Mul => left.multiply(&right),
+            Opcode::Div => left.divide_or_remainder(&right, false),
+            Opcode::Remainder => left.divide_or_remainder(&right, true),
+            Opcode::Exponentiate => left.exponentiate(&right),
+            Opcode::BitwiseAnd | Opcode::BitwiseOr | Opcode::BitwiseXor => {
+                left.bitwise(&right, opcode)
+            }
+            Opcode::ShiftLeft => left.shift(&right, true),
+            Opcode::ShiftRight => left.shift(&right, false),
+            Opcode::ShiftRightUnsigned => unreachable!("unsigned shift rejects before snapshot"),
+            _ => unreachable!("BigInt binary dispatch received a non-arithmetic opcode"),
+        }
+        .map_err(bigint_arithmetic_error)?;
+        self.allocate_bigint(result)
+    }
+
+    /// Complements one BigInt using the same canonical payload and allocation boundary.
+    pub(crate) fn bigint_bitwise_not(&mut self, value: Value) -> Result<Value, ExecutionError> {
+        let value = self.bigint_value_snapshot(value)?;
+        let result = value.bitwise_not().map_err(bigint_arithmetic_error)?;
+        self.allocate_bigint(result)
+    }
+
     #[inline(always)]
     pub(crate) fn is_bigint_value(&self, value: Value) -> bool {
         value.as_small_bigint().is_some()
@@ -568,6 +1097,23 @@ impl Isolate {
             .checked_reference(raw, self.types.bigint)
             .map_err(|_| ExecutionError::InvalidBigIntValue(value))
     }
+
+    /// Copies either primitive representation into one unrooted canonical arithmetic operand.
+    fn bigint_value_snapshot(&mut self, value: Value) -> Result<BigIntValue, ExecutionError> {
+        if let Some(small) = value.as_small_bigint() {
+            return Ok(BigIntValue::from_i64(small));
+        }
+        let bigint = self.bigint_reference(value)?;
+        self.heap.with_running_scope(|scope| {
+            let bigint = scope.root(bigint).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(bigint, self.types.bigint)
+                    .cloned()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
 }
 
 fn bigint_build_error(error: BigIntBuildError) -> ExecutionError {
@@ -575,6 +1121,67 @@ fn bigint_build_error(error: BigIntBuildError) -> ExecutionError {
         BigIntBuildError::InvalidDecimal => ExecutionError::InvalidBigIntLiteral,
         BigIntBuildError::AllocationFailed => ExecutionError::BigIntAllocationFailed,
     }
+}
+
+#[inline(always)]
+fn bigint_arithmetic_error(error: BigIntArithmeticError) -> ExecutionError {
+    match error {
+        BigIntArithmeticError::AllocationFailed => ExecutionError::BigIntAllocationFailed,
+        BigIntArithmeticError::DivisionByZero => ExecutionError::BigIntDivisionByZero,
+        BigIntArithmeticError::NegativeExponent => ExecutionError::BigIntNegativeExponent,
+        BigIntArithmeticError::ResultTooLarge => ExecutionError::BigIntResultTooLarge,
+    }
+}
+
+/// Executes allocation-free SmallBigInt success cases inside the verified hot kernel.
+///
+/// `None` deliberately covers semantic errors and canonical heap fallback, ending the unsafe
+/// register epoch before error construction or GC allocation.
+#[inline(always)]
+pub(crate) fn small_bigint_binary_hot(opcode: Opcode, left: Value, right: Value) -> Option<Value> {
+    let left = left.as_small_bigint()?;
+    let right = right.as_small_bigint()?;
+    let result = match opcode {
+        Opcode::Add => left.checked_add(right),
+        Opcode::Sub => left.checked_sub(right),
+        Opcode::Mul => left.checked_mul(right),
+        Opcode::Div => left.checked_div(right),
+        Opcode::Remainder if right != 0 => Some(left % right),
+        Opcode::Exponentiate if right >= 0 => u32::try_from(right)
+            .ok()
+            .and_then(|exponent| left.checked_pow(exponent)),
+        Opcode::BitwiseAnd => Some(left & right),
+        Opcode::BitwiseOr => Some(left | right),
+        Opcode::BitwiseXor => Some(left ^ right),
+        Opcode::ShiftLeft => small_bigint_shift(left, right, true),
+        Opcode::ShiftRight => small_bigint_shift(left, right, false),
+        Opcode::ShiftRightUnsigned => None,
+        _ => None,
+    }?;
+    Value::from_small_bigint(result)
+}
+
+#[inline(always)]
+pub(crate) fn small_bigint_not_hot(value: Value) -> Option<Value> {
+    Value::from_small_bigint(!value.as_small_bigint()?)
+}
+
+/// Applies BigInt shift-direction reversal while retaining only immediate results.
+#[inline(always)]
+fn small_bigint_shift(value: i64, count: i64, left: bool) -> Option<i64> {
+    let effective_left = left != count.is_negative();
+    let magnitude = count.unsigned_abs();
+    if !effective_left {
+        return Some(if magnitude >= 64 {
+            if value.is_negative() { -1 } else { 0 }
+        } else {
+            value >> magnitude as u32
+        });
+    }
+    let shift = u32::try_from(magnitude).ok()?;
+    1_i64
+        .checked_shl(shift)
+        .and_then(|factor| value.checked_mul(factor))
 }
 
 /// Parses the ECMAScript StringIntegerLiteral grammar after trimming String whitespace.
@@ -760,5 +1367,105 @@ mod tests {
                 Err(BigIntBuildError::InvalidDecimal)
             );
         }
+    }
+
+    #[test]
+    fn arithmetic_covers_signed_multi_limb_results_and_canonical_boundaries() {
+        let left = decimal("340282366920938463463374607431768211455");
+        let right = decimal("18446744073709551617");
+        assert_decimal(
+            left.add(&right).unwrap(),
+            "340282366920938463481821351505477763072",
+        );
+        assert_decimal(
+            left.subtract(&right).unwrap(),
+            "340282366920938463444927863358058659838",
+        );
+        let product = right.multiply(&decimal("18446744073709551616")).unwrap();
+        assert_decimal(product.clone(), "340282366920938463481821351505477763072");
+        assert_decimal(
+            product.divide_or_remainder(&right, false).unwrap(),
+            "18446744073709551616",
+        );
+        assert_decimal(product.divide_or_remainder(&right, true).unwrap(), "0");
+        assert_decimal(
+            decimal("-340282366920938463481821351505477763073")
+                .divide_or_remainder(&right, true)
+                .unwrap(),
+            "-1",
+        );
+        assert_decimal(
+            decimal("140737488355327").add(&decimal("1")).unwrap(),
+            "140737488355328",
+        );
+    }
+
+    #[test]
+    fn bitwise_shift_and_power_follow_infinite_twos_complement() {
+        let value = decimal("24197857203266734881846307747534221840");
+        assert_decimal(
+            value.shift(&decimal("64"), true).unwrap(),
+            "446371678960830626602075884953218503817583381441874493440",
+        );
+        assert_decimal(
+            value.shift(&decimal("-64"), true).unwrap(),
+            "1311768467463790320",
+        );
+        assert_decimal(decimal("-5").shift(&decimal("2"), false).unwrap(), "-2");
+        assert_decimal(decimal("-5").shift(&decimal("-3"), false).unwrap(), "-40");
+        assert_decimal(decimal("-1").bitwise_not().unwrap(), "0");
+        assert_decimal(decimal("0").bitwise_not().unwrap(), "-1");
+        let mask = decimal("18446744073709551615");
+        let high = decimal("340282366920938463444927863358058659840");
+        assert_decimal(high.bitwise(&mask, Opcode::BitwiseAnd).unwrap(), "0");
+        assert_decimal(
+            high.bitwise(&mask, Opcode::BitwiseOr).unwrap(),
+            "340282366920938463463374607431768211455",
+        );
+        assert_decimal(
+            decimal("-18446744073709551616")
+                .bitwise(&mask, Opcode::BitwiseXor)
+                .unwrap(),
+            "-1",
+        );
+        assert_decimal(
+            decimal("3").exponentiate(&decimal("100")).unwrap(),
+            "515377520732011331036461129765621272702107522001",
+        );
+    }
+
+    #[test]
+    fn arithmetic_reports_spec_errors_and_resource_limits() {
+        assert_eq!(
+            decimal("1").divide_or_remainder(&decimal("0"), false),
+            Err(BigIntArithmeticError::DivisionByZero)
+        );
+        assert_eq!(
+            decimal("2").exponentiate(&decimal("-1")),
+            Err(BigIntArithmeticError::NegativeExponent)
+        );
+        assert_eq!(
+            decimal("2").shift(&decimal("16777216"), true),
+            Err(BigIntArithmeticError::ResultTooLarge)
+        );
+        assert_decimal(
+            decimal("-2")
+                .shift(&decimal("18446744073709551616"), false)
+                .unwrap(),
+            "-1",
+        );
+    }
+
+    fn decimal(text: &str) -> BigIntValue {
+        BigIntValue::from_decimal(text).expect("arithmetic fixture parses")
+    }
+
+    fn assert_decimal(value: BigIntValue, expected: &str) {
+        assert_eq!(value.decimal_bytes().unwrap(), expected.as_bytes());
+        assert_eq!(
+            value.negative,
+            value.limbs.last().is_some() && expected.starts_with('-')
+        );
+        assert!(value.limbs.last().is_none_or(|limb| *limb != 0));
     }
 }

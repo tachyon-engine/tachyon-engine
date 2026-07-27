@@ -804,8 +804,8 @@ impl Isolate {
                         instruction_offset,
                     )?;
                 } else {
-                    let number = self.convert_to_number(input)?;
-                    self.write(base, operands[0], numeric_bitwise_not(number))?;
+                    let value = self.numeric_primitive_bitwise_not(input)?;
+                    self.write(base, operands[0], value)?;
                 }
             }
             Opcode::Add => {
@@ -859,7 +859,6 @@ impl Isolate {
                         instruction_offset,
                     )?;
                 } else {
-                    let left = self.convert_to_number(left)?;
                     if self.is_object_value(right) {
                         self.dispatch_object_primitive_conversion(
                             ConversionConsumer::BinaryRight(opcode),
@@ -870,12 +869,9 @@ impl Isolate {
                             instruction_offset,
                         )?;
                     } else {
-                        let right = self.convert_to_number(right)?;
-                        self.write(
-                            base,
-                            operands[0],
-                            numeric_binary_operation(opcode, left, right),
-                        )?;
+                        let result =
+                            self.numeric_primitive_binary_operation(opcode, left, right)?;
+                        self.write(base, operands[0], result)?;
                     }
                 }
             }
@@ -8469,6 +8465,12 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
                     registers.write(operands[0], value);
                     return HotControl::Continue;
                 }
+                if instruction.opcode == Opcode::BitwiseNot
+                    && let Some(value) = small_bigint_not_hot(input)
+                {
+                    registers.write(operands[0], value);
+                    return HotControl::Continue;
+                }
                 if numeric_value(input).is_none() {
                     return HotControl::Slow;
                 }
@@ -8493,7 +8495,9 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
             Opcode::Add => {
                 let left = registers.read(operands[1]);
                 let right = registers.read(operands[2]);
-                let Some(value) = numeric_binary_hot(Opcode::Add, left, right) else {
+                let Some(value) = numeric_binary_hot(Opcode::Add, left, right)
+                    .or_else(|| small_bigint_binary_hot(Opcode::Add, left, right))
+                else {
                     return HotControl::Slow;
                 };
                 registers.write(operands[0], value);
@@ -8502,7 +8506,9 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
             Opcode::Sub | Opcode::Mul | Opcode::Div => {
                 let left = registers.read(operands[1]);
                 let right = registers.read(operands[2]);
-                let Some(value) = numeric_binary_hot(instruction.opcode, left, right) else {
+                let Some(value) = numeric_binary_hot(instruction.opcode, left, right)
+                    .or_else(|| small_bigint_binary_hot(instruction.opcode, left, right))
+                else {
                     return HotControl::Slow;
                 };
                 registers.write(operands[0], value);
@@ -8518,13 +8524,17 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
             | Opcode::Exponentiate => {
                 let left = registers.read(operands[1]);
                 let right = registers.read(operands[2]);
-                if numeric_value(left).is_none() || numeric_value(right).is_none() {
-                    return HotControl::Slow;
+                if numeric_value(left).is_some() && numeric_value(right).is_some() {
+                    registers.write(
+                        operands[0],
+                        numeric_binary_operation(instruction.opcode, left, right),
+                    );
+                    return HotControl::Continue;
                 }
-                registers.write(
-                    operands[0],
-                    numeric_binary_operation(instruction.opcode, left, right),
-                );
+                let Some(value) = small_bigint_binary_hot(instruction.opcode, left, right) else {
+                    return HotControl::Slow;
+                };
+                registers.write(operands[0], value);
                 HotControl::Continue
             }
             Opcode::LessThan | Opcode::GreaterThan | Opcode::LessEqual | Opcode::GreaterEqual => {

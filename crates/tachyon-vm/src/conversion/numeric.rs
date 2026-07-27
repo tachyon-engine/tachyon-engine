@@ -3,6 +3,52 @@
 use super::super::*;
 
 impl Isolate {
+    /// Applies ToNumeric's primitive type agreement before selecting Number or BigInt arithmetic.
+    pub(crate) fn numeric_primitive_binary_operation(
+        &mut self,
+        opcode: Opcode,
+        left: Value,
+        right: Value,
+    ) -> Result<Value, ExecutionError> {
+        let left_bigint = self.is_bigint_value(left);
+        let right_bigint = self.is_bigint_value(right);
+        if left_bigint != right_bigint {
+            return Err(ExecutionError::BigIntMixedTypes);
+        }
+        if left_bigint {
+            return self.bigint_binary_operation(opcode, left, right);
+        }
+        let left = self.convert_to_number(left)?;
+        let right = self.convert_to_number(right)?;
+        Ok(if opcode == Opcode::Add {
+            numeric_binary(opcode, left, right)
+        } else {
+            numeric_binary_operation(opcode, left, right)
+        })
+    }
+
+    /// Applies unary ToNumeric for bitwise complement without routing BigInt through ToNumber.
+    pub(crate) fn numeric_primitive_bitwise_not(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_bigint_value(value) {
+            return self.bigint_bitwise_not(value);
+        }
+        Ok(numeric_bitwise_not(self.convert_to_number(value)?))
+    }
+
+    /// Applies unary ToNumeric negation for resumed object-to-primitive conversion.
+    pub(crate) fn numeric_primitive_negate(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_bigint_value(value) {
+            return self.negate_bigint(value);
+        }
+        Ok(numeric_negate(self.convert_to_number(value)?))
+    }
+
     /// Implements the shared thisNumberValue brand check for Number prototype methods.
     pub(crate) fn this_number_value(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
         if numeric_value(receiver).is_some() {
