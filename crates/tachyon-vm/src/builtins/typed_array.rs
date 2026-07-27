@@ -12,6 +12,7 @@ mod set;
 mod slice;
 mod sort;
 mod subarray;
+mod to_reversed;
 mod to_sorted;
 
 use super::super::*;

@@ -369,6 +369,17 @@ impl Isolate {
         )?;
         let reverse_atom = self.intern_intrinsic_name(b"reverse")?;
         self.set_intrinsic_data_property(base_prototype, reverse_atom, reverse, true)?;
+        let to_reversed = self.allocate_native_function(
+            NativeFunction::TypedArrayToReversed,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let to_reversed_atom = self.intern_intrinsic_name(b"toReversed")?;
+        self.set_intrinsic_data_property(base_prototype, to_reversed_atom, to_reversed, true)?;
         let sort = self.allocate_native_function(
             NativeFunction::TypedArraySort,
             OrdinaryObject {
@@ -3430,6 +3441,25 @@ impl Isolate {
         self.install_species_accessor(constructor, function_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        let to_string_tag_symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Promise");
+        let to_string_tag = self.property_key(to_string_tag_symbol)?;
+        let promise_name = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"Promise").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        self.define_data_property(
+            prototype,
+            to_string_tag,
+            DataPropertyDescriptor {
+                value: Some(promise_name),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
         for (name, native) in [
             (b"resolve".as_slice(), NativeFunction::PromiseResolve),
             (b"reject".as_slice(), NativeFunction::PromiseReject),

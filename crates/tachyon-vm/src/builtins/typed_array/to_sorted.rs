@@ -31,7 +31,7 @@ impl Isolate {
     }
 
     /// Allocates the default active-Realm fixed TypedArray for one kind and element length.
-    fn create_fixed_typed_array_same_kind(
+    pub(super) fn create_fixed_typed_array_same_kind(
         &mut self,
         kind: TypedArrayKind,
         length: usize,
@@ -42,11 +42,11 @@ impl Isolate {
         let buffer_prototype = self
             .realm
             .array_buffer_prototype
-            .expect("ArrayBuffer prototype initializes before TypedArray toSorted");
+            .expect("ArrayBuffer prototype initializes before TypedArray copy methods");
         let buffer =
             self.allocate_array_buffer_object(byte_length, byte_length, false, buffer_prototype)?;
         let prototype = self.realm.typed_array_prototypes[kind.index()]
-            .expect("TypedArray prototype initializes before toSorted");
+            .expect("TypedArray prototype initializes before copy methods");
         self.allocate_typed_array_view(buffer, 0, length, kind, prototype)
     }
 }

@@ -478,6 +478,7 @@ pub(crate) enum NativeFunction {
     TypedArrayFill,
     TypedArrayCopyWithin,
     TypedArrayReverse,
+    TypedArrayToReversed,
     TypedArraySort,
     TypedArrayToSorted,
     TypedArraySet,
@@ -1136,6 +1137,7 @@ impl NativeFunction {
             | Self::ArrayShift
             | Self::ArrayReverse
             | Self::TypedArrayReverse
+            | Self::TypedArrayToReversed
             | Self::ArrayToReversed
             | Self::ArrayBufferTransfer
             | Self::ArrayBufferTransferToFixedLength
@@ -1539,6 +1541,7 @@ impl NativeFunction {
             Self::TypedArrayFill => "fill",
             Self::TypedArrayCopyWithin => "copyWithin",
             Self::TypedArrayReverse => "reverse",
+            Self::TypedArrayToReversed => "toReversed",
             Self::TypedArraySort => "sort",
             Self::TypedArrayToSorted => "toSorted",
             Self::TypedArraySet => "set",

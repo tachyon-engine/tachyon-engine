@@ -534,8 +534,87 @@ crossIntrospection = foreignSources.length === 1 && foreignSources[0] === local 
     foreignSignal.subtle.hasSources(localComputed) && Signal.subtle.hasSources(crossWatcher) &&
     Signal.subtle.hasSinks(localComputed);
 crossWatcher.unwatch(localComputed);
+var stateTrace = "";
+var stateHookThis = false;
+var stateOptions = {};
+Object.defineProperty(stateOptions, "equals", { get: function() {
+    stateTrace += "e";
+    return undefined;
+} });
+Object.defineProperty(stateOptions, Signal.subtle.watched, { get: function() {
+    stateTrace += "x";
+    throw 101;
+} });
+Object.defineProperty(stateOptions, foreignSignal.subtle.watched, { get: function() {
+    stateTrace += "w";
+    return function() { stateTrace += "W"; stateHookThis = this === foreignHookedState; };
+} });
+Object.defineProperty(stateOptions, foreignSignal.subtle.unwatched, { get: function() {
+    stateTrace += "u";
+    return function() { stateTrace += "U"; stateHookThis = stateHookThis && this === foreignHookedState; };
+} });
+var foreignHookedState = new ForeignStateSubclass(5, stateOptions);
+var localWatcher = new Signal.subtle.Watcher(function() {});
+localWatcher.watch(foreignHookedState);
+localWatcher.unwatch(foreignHookedState);
+var foreignStateOptions = stateTrace === "ewuWU" && stateHookThis;
+
+var computedTrace = "";
+var computedHookThis = false;
+var computedOptions = {};
+Object.defineProperty(computedOptions, "equals", { get: function() {
+    computedTrace += "e";
+    return undefined;
+} });
+Object.defineProperty(computedOptions, Signal.subtle.watched, { get: function() {
+    computedTrace += "x";
+    throw 103;
+} });
+Object.defineProperty(computedOptions, foreignSignal.subtle.watched, { get: function() {
+    computedTrace += "w";
+    return function() { computedTrace += "W"; computedHookThis = this === foreignHookedComputed; };
+} });
+Object.defineProperty(computedOptions, foreignSignal.subtle.unwatched, { get: function() {
+    computedTrace += "u";
+    return function() {
+        computedTrace += "U";
+        computedHookThis = computedHookThis && this === foreignHookedComputed;
+    };
+} });
+var hookSource = new Signal.State(6);
+var foreignHookedComputed = new ForeignComputedSubclass(function() {
+    return hookSource.get();
+}, computedOptions);
+localWatcher.watch(foreignHookedComputed);
+foreignHookedComputed.get();
+localWatcher.unwatch(foreignHookedComputed);
+var foreignComputedOptions = computedTrace === "ewuWU" && computedHookThis;
+
+var cycleGate = new Signal.State(true);
+var foreignCycle;
+foreignCycle = new ForeignComputedSubclass(function() {
+    return cycleGate.get() ? foreignCycle.get() : 42;
+});
+var cycleFirst;
+var cycleCached;
+try { foreignCycle.get(); } catch (error) { cycleFirst = error; }
+try { foreignCycle.get(); } catch (error) { cycleCached = error; }
+cycleGate.set(false);
+var cycleRecovery = cycleFirst instanceof TypeError && cycleCached === cycleFirst &&
+    foreignCycle.get() === 42;
+
+class ForeignWatcherSubclass extends foreignSignal.subtle.Watcher {}
+var notifyMarker = {};
+var notifyState = new Signal.State(0);
+var foreignSubclassWatcher = new ForeignWatcherSubclass(function() { throw notifyMarker; });
+foreignSubclassWatcher.watch(notifyState);
+var notifyIdentity = false;
+try { notifyState.set(1); } catch (error) { notifyIdentity = error === notifyMarker; }
+var watcherSubclass = Object.getPrototypeOf(foreignSubclassWatcher) ===
+    ForeignWatcherSubclass.prototype && notifyIdentity;
 identities && crossBrand && subclassed && foreignComputedValue && callbackReceiver === computed &&
-foreignUntrack && localComputed.get() === 2 && foreignCurrent && crossIntrospection;
+foreignUntrack && localComputed.get() === 2 && foreignCurrent && crossIntrospection &&
+foreignStateOptions && foreignComputedOptions && cycleRecovery && watcherSubclass;
 "#;
 
 const SIGNAL_OPTIONS_SOURCE: &str = r#"
@@ -1291,11 +1370,12 @@ fn signal_api_contract_survives_forced_major_collection() {
 
 #[test]
 fn signal_cross_realm_identity_and_calls_work_for_every_dispatch_batch() {
-    assert_signal_cross_realm::<1>();
-    assert_signal_cross_realm::<2>();
-    assert_signal_cross_realm::<4>();
-    assert_signal_cross_realm::<8>();
-    assert_signal_cross_realm::<16>();
+    assert_signal_cross_realm::<1>(false);
+    assert_signal_cross_realm::<2>(false);
+    assert_signal_cross_realm::<4>(false);
+    assert_signal_cross_realm::<8>(false);
+    assert_signal_cross_realm::<16>(false);
+    assert_signal_cross_realm::<8>(true);
 }
 
 #[test]
@@ -2076,8 +2156,8 @@ fn signal_api_test_isolate() -> Isolate {
     .expect("Signal API test isolate initializes")
 }
 
-/// Injects one child Realm namespace and exercises foreign constructors and branded methods.
-fn assert_signal_cross_realm<const N: usize>() {
+/// Exercises foreign constructors, subclasses, options keys, brands, cycles, and exceptions.
+fn assert_signal_cross_realm<const N: usize>(forced_major: bool) {
     let module = compile_signal_source(
         SIGNAL_CROSS_REALM_SOURCE,
         8_500 + N as u32,
@@ -2085,6 +2165,11 @@ fn assert_signal_cross_realm<const N: usize>() {
     );
     let mut isolate = test_isolate();
     let (_, child_global) = isolate.create_realm().expect("child Realm initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
     let signal_atom = isolate.intern_intrinsic_name(b"Signal").unwrap();
     let foreign_signal = isolate
         .get_data_property(child_global, signal_atom)
@@ -2110,7 +2195,7 @@ fn assert_signal_cross_realm<const N: usize>() {
         .expect("cross-Realm Signal contract executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "cross-Realm dispatch batch {N} returned {outcome:?}"
+        "cross-Realm dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

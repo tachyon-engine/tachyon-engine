@@ -6373,6 +6373,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayReverse) => {
                     return self.begin_typed_array_reverse(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayToReversed) => {
+                    return self.begin_typed_array_to_reversed(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArraySort) => {
                     return self.begin_typed_array_sort(&site);
                 }

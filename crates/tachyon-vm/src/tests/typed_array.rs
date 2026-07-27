@@ -219,6 +219,42 @@ independent && source.join(",") === "7,2,5,4,3,6,1" &&
   detachedResult.join(",") === "1,2,3,4";
 "#;
 
+const TYPED_ARRAY_TO_REVERSED_SOURCE: &str = r#"
+var constructors = [
+  Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+  Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array
+];
+var allKinds = true;
+for (var index = 0; index < constructors.length; index++) {
+  var TA = constructors[index];
+  var width = TA.BYTES_PER_ELEMENT;
+  var buffer = new ArrayBuffer(width * 5);
+  var source = new TA(buffer, width, 3);
+  var bigint = TA === BigInt64Array || TA === BigUint64Array;
+  source[0] = bigint ? 1n : 1;
+  source[1] = bigint ? 2n : 2;
+  source[2] = bigint ? 3n : 3;
+  var reversed = source.toReversed();
+  allKinds = allKinds && reversed !== source && reversed.buffer !== source.buffer &&
+    Object.getPrototypeOf(reversed) === TA.prototype && reversed.length === 3 &&
+    reversed.byteOffset === 0 && reversed[0] === (bigint ? 3n : 3) &&
+    reversed[1] === (bigint ? 2n : 2) && reversed[2] === (bigint ? 1n : 1) &&
+    source.byteOffset === width && source[0] === (bigint ? 1n : 1) &&
+    source[1] === (bigint ? 2n : 2) && source[2] === (bigint ? 3n : 3);
+}
+
+var detachedThrows = false;
+var detached = new Uint8Array([1, 2, 3]);
+detached.buffer.transfer();
+try { detached.toReversed(); } catch (error) {
+  detachedThrows = error instanceof TypeError;
+}
+var descriptor = Object.getOwnPropertyDescriptor(Uint8Array.prototype.toReversed, "length");
+allKinds && detachedThrows && Uint8Array.prototype.toReversed.length === 0 &&
+  descriptor.value === 0 && !descriptor.writable && !descriptor.enumerable &&
+  descriptor.configurable;
+"#;
+
 const LARGE_TYPED_ARRAY_SOURCE: &str = r#"
 var source = new Array(10000).fill(7);
 var copied = Array.from(source);
@@ -422,6 +458,24 @@ fn typed_array_to_sorted_survives_forced_major_collection() {
     assert_typed_array_to_sorted::<16>(true);
 }
 
+#[test]
+fn typed_array_to_reversed_works_for_every_dispatch_batch() {
+    assert_typed_array_to_reversed::<1>(false);
+    assert_typed_array_to_reversed::<2>(false);
+    assert_typed_array_to_reversed::<4>(false);
+    assert_typed_array_to_reversed::<8>(false);
+    assert_typed_array_to_reversed::<16>(false);
+}
+
+#[test]
+fn typed_array_to_reversed_survives_forced_major_collection() {
+    assert_typed_array_to_reversed::<1>(true);
+    assert_typed_array_to_reversed::<2>(true);
+    assert_typed_array_to_reversed::<4>(true);
+    assert_typed_array_to_reversed::<8>(true);
+    assert_typed_array_to_reversed::<16>(true);
+}
+
 /// Executes default numeric ordering under one dispatch and collection policy.
 fn assert_typed_array_sort<const N: usize>(forced_major: bool) {
     let module = compile_typed_array_source(TYPED_ARRAY_SORT_SOURCE, 7_500 + N as u32);
@@ -500,6 +554,36 @@ fn assert_typed_array_to_sorted<const N: usize>(forced_major: bool) {
             },
         )
         .expect("TypedArray toSorted fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes all eleven same-kind copy kernels under one VM policy.
+fn assert_typed_array_to_reversed<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(TYPED_ARRAY_TO_REVERSED_SOURCE, 7_590 + N as u32);
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(18 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("TypedArray toReversed isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("TypedArray toReversed fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"

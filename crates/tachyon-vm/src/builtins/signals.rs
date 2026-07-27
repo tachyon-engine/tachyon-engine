@@ -119,6 +119,8 @@ const COMPUTED_OPTIONS_EQUALS_SLOT: usize = 2;
 const COMPUTED_OPTIONS_WATCHED_SLOT: usize = 3;
 const COMPUTED_OPTIONS_UNWATCHED_SLOT: usize = 4;
 const COMPUTED_OPTIONS_RECORD_COUNT: u8 = 5;
+const SIGNAL_OPTIONS_WATCHED_KEY_SLOT: usize = 3;
+const SIGNAL_OPTIONS_UNWATCHED_KEY_SLOT: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct SignalComputedCallbacks {
@@ -731,13 +733,14 @@ impl Isolate {
         if is_nullish(options) {
             return self.write(site.caller_base, site.destination, state);
         }
+        let (watched_symbol, unwatched_symbol) = self.signal_option_symbols(site.callee)?;
         let pending = self.allocate_signal_state_call_state(NativeCallState {
             values: [
                 state,
                 options,
                 Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
+                watched_symbol,
+                unwatched_symbol,
             ],
             count: 2,
         })?;
@@ -867,16 +870,12 @@ impl Isolate {
             SignalStateStage::ComputedOptionsEquals => {
                 self.intern_intrinsic_name(b"equals")?.into()
             }
-            SignalStateStage::OptionsWatched => self.property_key(
-                self.realm
-                    .signal_watched_symbol
-                    .expect("Signal.subtle.watched initializes before construction"),
-            )?,
-            SignalStateStage::OptionsUnwatched => self.property_key(
-                self.realm
-                    .signal_unwatched_symbol
-                    .expect("Signal.subtle.unwatched initializes before construction"),
-            )?,
+            SignalStateStage::OptionsWatched => {
+                self.property_key(snapshot.values[SIGNAL_OPTIONS_WATCHED_KEY_SLOT])?
+            }
+            SignalStateStage::OptionsUnwatched => {
+                self.property_key(snapshot.values[SIGNAL_OPTIONS_UNWATCHED_KEY_SLOT])?
+            }
             SignalStateStage::Equals => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -1009,13 +1008,14 @@ impl Isolate {
         if is_nullish(options) {
             return self.write(site.caller_base, site.destination, computed);
         }
+        let (watched_symbol, unwatched_symbol) = self.signal_option_symbols(site.callee)?;
         let pending = self.allocate_signal_state_call_state(NativeCallState {
             values: [
                 computed,
                 options,
                 Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
+                watched_symbol,
+                unwatched_symbol,
             ],
             count: COMPUTED_OPTIONS_RECORD_COUNT,
         })?;
@@ -2758,6 +2758,31 @@ impl Isolate {
             .ok()
             .and_then(|realm| self.realm_intrinsic_prototype(realm, kind))
             .unwrap_or(fallback))
+    }
+
+    /// Resolves proposal option keys from the constructor's defining Realm.
+    fn signal_option_symbols(
+        &mut self,
+        constructor: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let realm_id = self.realm_for_callable(constructor)?;
+        let realm = if realm_id == self.active_realm {
+            &self.realm
+        } else {
+            self.inactive_realms
+                .iter()
+                .find(|(id, _)| *id == realm_id)
+                .map(|(_, realm)| realm)
+                .ok_or(ExecutionError::MissingNativeContinuation)?
+        };
+        Ok((
+            realm
+                .signal_watched_symbol
+                .ok_or(ExecutionError::MissingNativeContinuation)?,
+            realm
+                .signal_unwatched_symbol
+                .ok_or(ExecutionError::MissingNativeContinuation)?,
+        ))
     }
 
     fn signal_state_reference(

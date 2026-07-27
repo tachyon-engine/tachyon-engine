@@ -524,18 +524,14 @@ impl Isolate {
 
     /// Implements the current intrinsic catch path through the shared reaction substrate.
     pub(crate) fn promise_catch(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
-        let on_rejected = self
-            .call_argument(site, 0)?
-            .filter(|value| self.resolve_function_object(*value).is_ok());
-        if !self.is_object_value(site.this_value) {
-            return Err(ExecutionError::NotObject(site.this_value));
-        }
+        let on_rejected = self.call_argument(site, 0)?;
+        let receiver = self.coerce_to_object(site.this_value)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let state = self.allocate_promise_then_state(NativeCallState {
             values: [
                 site.this_value,
                 on_rejected.unwrap_or(undefined),
-                undefined,
+                receiver,
                 undefined,
                 undefined,
             ],
@@ -565,7 +561,7 @@ impl Isolate {
             .map_err(Isolate::completion_stack_error)?;
         let outcome = self.dispatch_proxy_aware_property_read(
             continuation_site,
-            site.this_value,
+            receiver,
             site.this_value,
             then_atom.into(),
         );
@@ -595,8 +591,9 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         match stage {
             PromiseCatchStage::Then => {
-                self.resolve_function_object(value)
-                    .map_err(|_| ExecutionError::NonCallable(value))?;
+                if !self.is_callable_value(value)? {
+                    return Err(ExecutionError::NonCallable(value));
+                }
                 let pending = self.native_call_state_snapshot(state)?;
                 let undefined = Value::from_immediate(Immediate::Undefined);
                 let arguments = self.allocate_promise_then_state(NativeCallState {

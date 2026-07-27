@@ -114,6 +114,28 @@ fn promise_species_accessor_descriptor_round_trips() {
         .unwrap();
 }
 
+#[test]
+fn promise_to_string_tag_descriptor_is_standard() {
+    let mut isolate = test_isolate();
+    let prototype = isolate.realm.promise_prototype.unwrap();
+    let symbol = isolate.realm.well_known_symbols.to_string_tag.unwrap();
+    let key = isolate.property_key(symbol).unwrap();
+    let descriptor = isolate
+        .complete_own_property_descriptor(prototype, key)
+        .unwrap()
+        .unwrap();
+    let PropertyDescriptor::Data(data) = descriptor else {
+        panic!("Promise @@toStringTag must remain a data property")
+    };
+    assert_eq!(
+        isolate.string_value_to_utf16(data.value.unwrap()).unwrap(),
+        "Promise".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(data.writable, Some(false));
+    assert_eq!(data.enumerable, Some(false));
+    assert_eq!(data.configurable, Some(true));
+}
+
 const PROMISE_ALL_SETUP: &str = r#"
 var allTrace = 0;
 var allReject = 0;
@@ -427,6 +449,33 @@ function RejectCapability(executor) {
 Promise.try.call(RejectCapability, function() { throw 11; });
 "#;
 
+const PROMISE_CATCH_INVOKE_SOURCE: &str = r#"
+var target = {};
+var returned = {};
+var calls = 0;
+var receiver;
+var count;
+var first;
+var second;
+target.then = function(a, b) {
+  calls++;
+  receiver = this;
+  count = arguments.length;
+  first = a;
+  second = b;
+  return returned;
+};
+var result = Promise.prototype.catch.call(target, 1, 2, 3);
+var score = 0;
+if (calls === 1) score += 1;
+if (receiver === target) score += 2;
+if (count === 2) score += 4;
+if (first === undefined) score += 8;
+if (second === 1) score += 16;
+if (result === returned) score += 32;
+score;
+"#;
+
 #[test]
 fn promise_all_intrinsic_path_is_stable_for_every_dispatch_batch() {
     assert_promise_all_source::<1>(5_101);
@@ -546,6 +595,21 @@ fn promise_try_is_stable_for_every_dispatch_batch_and_forced_major() {
     assert_promise_try::<8>(5_907, false);
     assert_promise_try::<16>(5_909, false);
     assert_promise_try::<8>(5_911, true);
+}
+
+#[test]
+fn promise_catch_invokes_generic_then_with_exact_arguments() {
+    let module = compile_promise_source(5_950, PROMISE_CATCH_INVOKE_SOURCE);
+    let mut isolate = test_isolate();
+    let outcome = run_promise_module::<8>(&mut isolate, &module);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(63)),
+        "generic Promise.catch returned {outcome:?}, score={:?}",
+        match outcome {
+            RunOutcome::Completed(value) => value.as_i32(),
+            _ => None,
+        }
+    );
 }
 
 /// Executes the setup and probe under one interpreter dispatch batch.
