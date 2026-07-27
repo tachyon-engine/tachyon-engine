@@ -292,6 +292,46 @@ pub(crate) struct SignalRuntime {
 }
 
 impl Isolate {
+    /// Rolls back agent-wide Signal state before a terminal host error discards the active Fiber.
+    pub(crate) fn cancel_signal_execution(&mut self) -> Result<(), ExecutionError> {
+        for index in (0..self.fiber.completions.len()).rev() {
+            let Some(continuation) = self.fiber.completions.native_at(index) else {
+                continue;
+            };
+            match continuation.kind() {
+                NativeContinuationKind::SignalWatcherHook => {
+                    let pending = self.pending_signal_watcher_reference(continuation.first())?;
+                    if self.pending_signal_watcher_kind(pending)?
+                        == SignalWatcherOperationKind::Notify
+                    {
+                        self.set_signal_watcher_waiting(continuation.second())?;
+                    }
+                    self.signal_runtime.frozen = false;
+                }
+                NativeContinuationKind::SignalComputed => {
+                    let pending = self.pending_signal_watcher_reference(continuation.first())?;
+                    let receiver = self
+                        .pending_signal_computed_pull_top(pending)?
+                        .ok_or(ExecutionError::MissingNativeContinuation)?
+                        .computed;
+                    let computed = self.signal_computed_reference(receiver)?;
+                    self.restore_failed_signal_computed_start(
+                        computed,
+                        pending,
+                        signal_previous_computing(continuation.second()),
+                    )?;
+                }
+                NativeContinuationKind::SignalUntrack => {
+                    self.restore_signal_untrack_owner(continuation);
+                }
+                _ => {}
+            }
+        }
+        self.signal_runtime.computing = None;
+        self.signal_runtime.frozen = false;
+        Ok(())
+    }
+
     /// Returns the current dependency owner without exposing its graph payload.
     #[inline(always)]
     pub(crate) fn signal_current_computed(&self) -> Value {
@@ -2015,8 +2055,7 @@ impl Isolate {
                 if let Some(watcher) = snapshot.argument {
                     self.pending_signal_watcher_advance_argument(pending)?;
                     let callback = self.signal_watcher_notify_value(watcher)?;
-                    self.signal_runtime.frozen = true;
-                    self.dispatch_property_callback(
+                    self.dispatch_frozen_signal_callback(
                         NativeContinuation::signal_watcher_hook(
                             site,
                             Value::from_heap_ref(pending.raw()),
@@ -2034,8 +2073,7 @@ impl Isolate {
                 if is_nullish(callback) {
                     continue;
                 }
-                self.signal_runtime.frozen = true;
-                self.dispatch_property_callback(
+                self.dispatch_frozen_signal_callback(
                     NativeContinuation::signal_watcher_hook(
                         site,
                         Value::from_heap_ref(pending.raw()),
@@ -2073,6 +2111,22 @@ impl Isolate {
             }
             self.finish_signal_watcher_operation(site, snapshot.watcher, snapshot.kind)?;
             return Ok(());
+        }
+    }
+
+    /// Freezes graph access until the callback continuation settles or dispatch itself fails.
+    fn dispatch_frozen_signal_callback(
+        &mut self,
+        continuation: NativeContinuation,
+        callback: Value,
+    ) -> Result<(), ExecutionError> {
+        self.signal_runtime.frozen = true;
+        match self.dispatch_property_callback(continuation, callback) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.signal_runtime.frozen = false;
+                Err(error)
+            }
         }
     }
 

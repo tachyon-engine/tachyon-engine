@@ -601,6 +601,7 @@ impl Isolate {
                         let Some(kind) = execution_error_kind(&error) else {
                             #[cfg(feature = "opcode-profile")]
                             self.execution_profile.record_fault_slow_exit();
+                            self.cancel_signal_execution()?;
                             return Err(error);
                         };
                         match self.throw_native_error(kind, instruction_offset) {
@@ -3514,6 +3515,7 @@ impl Isolate {
         if self.stack_limits.max_frames == 0 {
             return Err(ExecutionError::CallStackLimit { limit: 0 });
         }
+        self.cancel_signal_execution()?;
         self.fiber.frames.clear();
         self.fiber.argument_objects.clear();
         self.fiber.argument_sources.clear();

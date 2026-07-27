@@ -1019,6 +1019,92 @@ recoveredWatcher = null;
 true;
 "#;
 
+const SIGNAL_NOTIFY_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceNotifyState = new Signal.State(0);
+var resourceNotifyCalls = 0;
+var resourceNotifyWatcher = new Signal.subtle.Watcher(function() { resourceNotifyCalls++; });
+resourceNotifyWatcher.watch(resourceNotifyState);
+true;
+"#;
+
+const SIGNAL_NOTIFY_RESOURCE_FAIL_SOURCE: &str = "resourceNotifyState.set(1);";
+
+const SIGNAL_NOTIFY_RESOURCE_RECOVER_SOURCE: &str = r#"
+resourceNotifyWatcher.watch();
+resourceNotifyState.set(2);
+resourceNotifyCalls === 1 && resourceNotifyState.get() === 2;
+"#;
+
+const SIGNAL_COMPUTED_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceComputedState = new Signal.State(1);
+var resourceComputedCalls = 0;
+var resourceComputed = new Signal.Computed(function() {
+    resourceComputedCalls++;
+    return resourceComputedState.get() + 1;
+});
+true;
+"#;
+
+const SIGNAL_COMPUTED_RESOURCE_FAIL_SOURCE: &str = "resourceComputed.get();";
+
+const SIGNAL_COMPUTED_RESOURCE_RECOVER_SOURCE: &str = r#"
+resourceComputed.get() === 2 && resourceComputedCalls === 1 &&
+Signal.subtle.currentComputed() === undefined;
+"#;
+
+const SIGNAL_EQUALS_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceEqualsState = new Signal.State(1);
+var resourceEqualsComputations = 0;
+var resourceEqualsCalls = 0;
+var resourceEqualsRead = Signal.State.prototype.get.bind(resourceEqualsState);
+var resourceEquals = new Signal.Computed(function() {
+    resourceEqualsComputations++;
+    return resourceEqualsRead();
+}, { equals: function(oldValue, newValue) {
+    resourceEqualsCalls++;
+    return oldValue === newValue;
+} });
+resourceEquals.get() === 1;
+"#;
+
+const SIGNAL_EQUALS_RESOURCE_DIRTY_SOURCE: &str = "resourceEqualsState.set(2); true;";
+const SIGNAL_EQUALS_RESOURCE_FAIL_SOURCE: &str = "resourceEquals.get();";
+
+const SIGNAL_EQUALS_RESOURCE_RECOVER_SOURCE: &str = r#"
+resourceEquals.get() === 2 && resourceEqualsComputations === 2 && resourceEqualsCalls === 1 &&
+Signal.subtle.currentComputed() === undefined;
+"#;
+
+const SIGNAL_UNTRACK_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceUntrackCalls = 0;
+var resourceUntrackOwner = false;
+var resourceUntrack = new Signal.Computed(function() {
+    resourceUntrackCalls++;
+    resourceUntrackOwner = Signal.subtle.currentComputed() === resourceUntrack;
+    return Signal.subtle.untrack(function() { return 7; });
+});
+true;
+"#;
+
+const SIGNAL_UNTRACK_RESOURCE_FAIL_SOURCE: &str = "resourceUntrack.get();";
+
+const SIGNAL_UNTRACK_RESOURCE_RECOVER_SOURCE: &str = r#"
+resourceUntrack.get() === 7 && resourceUntrackCalls === 2 && resourceUntrackOwner &&
+Signal.subtle.currentComputed() === undefined;
+"#;
+
+#[derive(Clone, Copy)]
+struct SignalResourceCase {
+    setup: &'static str,
+    failure: &'static str,
+    recovery: &'static str,
+    dirty: Option<&'static str>,
+    completion_limit: u32,
+    expects_stack_limit: bool,
+    source_id: u32,
+    name: &'static str,
+}
+
 const PINNED_PROPOSAL_FIXTURES: &[(&str, &str)] = &[
     (
         "state-computed",
@@ -1481,6 +1567,17 @@ fn signal_computed_lifecycle_hooks_work_for_every_dispatch_batch() {
     );
 }
 
+/// Covers every Signals callback boundary where completion quota failure must restore agent state.
+#[test]
+fn signal_resource_failures_restore_agent_state_for_every_dispatch_batch() {
+    assert_signal_resource_restoration::<1>(false);
+    assert_signal_resource_restoration::<2>(false);
+    assert_signal_resource_restoration::<4>(false);
+    assert_signal_resource_restoration::<8>(false);
+    assert_signal_resource_restoration::<16>(false);
+    assert_signal_resource_restoration::<8>(true);
+}
+
 /// Exercises graph ownership across job boundaries and explicit major collections.
 #[test]
 fn signal_gc_liveness_contract_works_for_every_dispatch_batch() {
@@ -1568,6 +1665,111 @@ fn assert_signal_job<const N: usize>(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "Signal GC liveness job {name}, dispatch batch {N} returned {outcome:?}"
     );
+}
+
+/// Injects completion quota failures without allocator globals, then proves the isolate remains usable.
+fn assert_signal_resource_restoration<const N: usize>(forced_major: bool) {
+    for case in [
+        SignalResourceCase {
+            setup: SIGNAL_NOTIFY_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_NOTIFY_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_NOTIFY_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 0,
+            expects_stack_limit: true,
+            source_id: 9_200,
+            name: "notify",
+        },
+        SignalResourceCase {
+            setup: SIGNAL_COMPUTED_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_COMPUTED_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_COMPUTED_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 0,
+            expects_stack_limit: false,
+            source_id: 9_210,
+            name: "computed",
+        },
+        SignalResourceCase {
+            setup: SIGNAL_EQUALS_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_EQUALS_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_EQUALS_RESOURCE_RECOVER_SOURCE,
+            dirty: Some(SIGNAL_EQUALS_RESOURCE_DIRTY_SOURCE),
+            completion_limit: 0,
+            expects_stack_limit: false,
+            source_id: 9_220,
+            name: "equals",
+        },
+        SignalResourceCase {
+            setup: SIGNAL_UNTRACK_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_UNTRACK_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_UNTRACK_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 1,
+            expects_stack_limit: true,
+            source_id: 9_230,
+            name: "untrack",
+        },
+    ] {
+        assert_signal_resource_case::<N>(forced_major, case);
+    }
+}
+
+/// Runs setup, a quota-terminated callback dispatch, and a fresh recovery job on one isolate.
+fn assert_signal_resource_case<const N: usize>(forced_major: bool, case: SignalResourceCase) {
+    let mut isolate = signal_api_test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    assert_signal_job::<N>(
+        &mut isolate,
+        case.setup,
+        case.source_id,
+        "signals-resource-setup",
+    );
+    if let Some(dirty) = case.dirty {
+        assert_signal_job::<N>(
+            &mut isolate,
+            dirty,
+            case.source_id + 1,
+            "signals-resource-dirty",
+        );
+    }
+    isolate.stack_limits = StackLimits::new(64, 4_096).with_max_completions(case.completion_limit);
+    let failure =
+        compile_signal_source(case.failure, case.source_id + 2, "signals-resource-failure");
+    let error = isolate
+        .execute_with_batch::<N>(
+            &failure,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect_err("Signal callback dispatch must hit the injected completion quota");
+    let expected_error = if case.expects_stack_limit {
+        matches!(error, ExecutionError::CompletionStackLimit { .. })
+    } else {
+        error == ExecutionError::CompletionAllocationFailed
+    };
+    assert!(
+        expected_error,
+        "dispatch batch {N}, forced_major={forced_major} returned {error:?}"
+    );
+    assert!(
+        !isolate.signal_runtime.frozen,
+        "{} left Signals frozen",
+        case.name
+    );
+    assert!(
+        isolate.signal_runtime.computing.is_none(),
+        "{} leaked its dependency owner",
+        case.name
+    );
+    isolate.stack_limits = StackLimits::new(64, 4_096);
+    assert_signal_job::<N>(&mut isolate, case.recovery, case.source_id + 3, case.name);
 }
 
 /// Executes one Signals semantic fixture under a selected dispatch and collection policy.
