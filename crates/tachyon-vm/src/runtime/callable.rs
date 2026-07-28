@@ -1327,7 +1327,7 @@ impl NativeFunction {
             | Self::SymbolDescription
             | Self::NumberToLocaleString => 0,
             Self::SymbolToPrimitive => 1,
-            Self::JsonParse => 1,
+            Self::JsonParse => 2,
             Self::JsonStringify => 3,
             Self::HostCreateRealm => 0,
             Self::HostEvalScript => 1,
