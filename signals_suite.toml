@@ -114,8 +114,8 @@ definitions = [
 [[cases]]
 id = "watcher-liveness"
 path = "tests/proposal-signals/watcher-liveness.js"
-source_sha256 = "915dc59a096dc55c6ff76c98b4db5873c044279db8cea0b9b9a7bc4ade274556"
-expected_assertions = 10
+source_sha256 = "b7f2f10d6f7da51997b1c46222afe4817f9a1eb100e9695a02dc7d313c9c0b00"
+expected_assertions = 13
 upstream = ["tests/Signal/subtle/watcher.test.ts", "tests/Signal/subtle/watch-unwatch.test.ts", "tests/behaviors/liveness.test.ts"]
 definitions = [
     { upstream = "tests/Signal/subtle/watcher.test.ts", line = 32, name = "should work" },

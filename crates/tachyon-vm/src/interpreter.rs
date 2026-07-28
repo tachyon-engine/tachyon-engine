@@ -56,6 +56,7 @@ impl Isolate {
         for code in &mut self.loaded_code {
             code.trace(tracer);
         }
+        self.module_graph.trace(tracer);
     }
 
     /// Starts the module entry function with one checked register reservation before opcode dispatch.
@@ -137,6 +138,7 @@ impl Isolate {
                             promise_jobs: &mut self.promise_jobs,
                             realm: &mut self.realm,
                             loaded_code: &mut self.loaded_code,
+                            module_graph: &mut self.module_graph,
                         },
                         constant_values: &mut constant_values,
                     };
@@ -333,7 +335,7 @@ impl Isolate {
     }
 
     /// Runs one resolved code entry with a test-selectable dispatch batch monomorphization.
-    fn execute_loaded_with_batch<const N: usize>(
+    pub(crate) fn execute_loaded_with_batch<const N: usize>(
         &mut self,
         code: CodeId,
         budget: ExecutionBudget,
@@ -1808,6 +1810,17 @@ impl Isolate {
                 let value = self.read(base, operands[0])?;
                 return self.throw_value(value, instruction_offset);
             }
+            Opcode::Await => {
+                self.suspend_async_function_await(crate::async_function::AsyncAwaitSite {
+                    code,
+                    instruction: instruction_offset,
+                    source: operands[0],
+                    destination: operands[1],
+                    suspend_id: operands[2],
+                    base,
+                })?;
+                return Ok(None);
+            }
             Opcode::Yield => {
                 self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
                     code,
@@ -1853,7 +1866,6 @@ impl Isolate {
                     instruction_offset,
                 );
             }
-            _ => return Err(ExecutionError::UnsupportedOpcode(opcode)),
         }
         Ok(None)
     }
@@ -2449,6 +2461,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::GeneratorResume => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::AsyncFunction => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::RegExpReplace => {
@@ -3264,6 +3279,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let environment = self
             .heap
@@ -3495,6 +3511,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_external_with_gc(
@@ -3521,6 +3538,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_external_with_gc(
@@ -3689,6 +3707,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let closure = self
             .heap
@@ -3907,6 +3926,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let plan = self
             .heap
@@ -3927,6 +3947,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let data = self
             .heap
@@ -3999,6 +4020,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let state = self
             .heap
@@ -4804,6 +4826,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             site,
         };
@@ -5287,6 +5310,22 @@ impl Isolate {
                             },
                         )?;
                         return self.write(site.caller_base, site.destination, generator);
+                    }
+                    if kind == FunctionKind::Async {
+                        if site.new_target.as_immediate() != Some(Immediate::Undefined) {
+                            return Err(ExecutionError::NonConstructor(site.callee));
+                        }
+                        return self.begin_async_function(
+                            &site,
+                            ResolvedCallTarget {
+                                code,
+                                function,
+                                environment,
+                                kind,
+                                layout,
+                                strictness,
+                            },
+                        );
                     }
                     return self.push_call_frame(
                         ResolvedCallTarget {
@@ -7930,6 +7969,9 @@ impl Isolate {
                 NativeContinuationKind::GeneratorResume => {
                     self.finish_generator_return(continuation, value)
                 }
+                NativeContinuationKind::AsyncFunction => {
+                    self.finish_async_function_return(continuation, value)
+                }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
@@ -8230,6 +8272,10 @@ impl Isolate {
                     }
                     instruction_offset = continuation.site().call_site;
                     continue;
+                }
+                if continuation.kind() == NativeContinuationKind::AsyncFunction {
+                    self.finish_async_function_throw(continuation, value)?;
+                    return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.reject_promise_executor(continuation, value)?;

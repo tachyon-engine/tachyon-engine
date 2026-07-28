@@ -655,24 +655,21 @@ fn compiler_emits_generator_yield_suspend_points() {
 }
 
 #[test]
-/// Keeps ordinary async unsupported while freezing async generators as their own function kind.
-fn compiler_accepts_async_generators_without_misclassifying_async_functions() {
-    let error = Compiler
-        .lower_to_hir(
+/// Freezes ordinary async and async generators as distinct callable function kinds.
+fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
+    let async_module = Compiler
+        .compile(
             source(
                 MediaType::JavaScript,
-                "async function value() { return 1; }",
+                "async function value() { return 1; } value;",
             ),
             CompileOptions::default(),
         )
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        CompileError::UnsupportedSyntax {
-            syntax: "async function",
-            ..
-        }
-    ));
+        .expect("async function fixture compiles");
+    assert_eq!(
+        async_module.functions()[1].kind(),
+        tachyon_bytecode::FunctionKind::Async
+    );
     let module = Compiler
         .compile(
             source(

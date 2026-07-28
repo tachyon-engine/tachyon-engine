@@ -213,6 +213,7 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 collect_expression(argument, bindings);
             }
         }
+        HirExpressionKind::Await(argument) => collect_expression(argument, bindings),
         HirExpressionKind::Binary { left, right, .. }
         | HirExpressionKind::Logical { left, right, .. } => {
             collect_expression(left, bindings);

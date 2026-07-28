@@ -1,17 +1,20 @@
 //! Owned ECMAScript module records and isolate-local live binding storage.
 
+mod lifecycle;
 mod link;
+
+pub use lifecycle::{LoadedModule, ModuleEvaluationError, ModuleLoadError, ModuleLoader};
 
 use core::num::NonZeroU32;
 
 use tachyon_gc::{Trace, Tracer};
 
-use crate::{Value, tuning::modules::*};
+use crate::{CompiledModule, Value, tuning::modules::*};
 
 /// Stable index of one record in an append-only module graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(transparent)]
-pub(crate) struct ModuleId(NonZeroU32);
+pub struct ModuleId(NonZeroU32);
 
 impl ModuleId {
     fn from_index(index: usize) -> Option<Self> {
@@ -53,20 +56,25 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<BindingCellId>>()];
 
 /// Canonical, host-resolved module identity retained independently of source storage.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ModuleSpecifier(Box<str>);
+pub struct ModuleSpecifier(Box<str>);
 
 impl ModuleSpecifier {
-    pub(crate) fn try_new(value: &str) -> Result<Self, ModuleError> {
+    pub fn try_new(value: &str) -> Result<Self, ModuleError> {
         try_owned_str(value, "module specifier").map(Self)
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 /// Tachyon-owned binding name; no parser arena or isolate atom is retained.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct BindingName(Box<str>);
+pub struct BindingName(Box<str>);
 
 impl BindingName {
-    pub(crate) fn try_new(value: &str) -> Result<Self, ModuleError> {
+    pub fn try_new(value: &str) -> Result<Self, ModuleError> {
         try_owned_str(value, "module binding name").map(Self)
     }
 
@@ -86,15 +94,15 @@ fn try_owned_str(value: &str, collection: &'static str) -> Result<Box<str>, Modu
 
 /// One named import whose local alias resolves to the exporting module's cell during linking.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ImportEntry {
-    pub(crate) module_request: ModuleSpecifier,
-    pub(crate) import_name: BindingName,
-    pub(crate) local_name: BindingName,
+pub struct ImportEntry {
+    module_request: ModuleSpecifier,
+    import_name: BindingName,
+    local_name: BindingName,
     resolved_cell: Option<BindingCellId>,
 }
 
 impl ImportEntry {
-    pub(crate) const fn new(
+    pub const fn new(
         module_request: ModuleSpecifier,
         import_name: BindingName,
         local_name: BindingName,
@@ -107,6 +115,7 @@ impl ImportEntry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn resolved_cell(&self) -> Option<BindingCellId> {
         self.resolved_cell
     }
@@ -114,7 +123,7 @@ impl ImportEntry {
 
 /// Local or indirect named export. Star and namespace exports remain a later M8.4 slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ExportEntry {
+pub enum ExportEntry {
     Local {
         export_name: BindingName,
         local_name: BindingName,
@@ -136,12 +145,31 @@ impl ExportEntry {
 
 /// Inputs already counted and frozen by the compiler or synthetic-module builder.
 #[derive(Debug)]
-pub(crate) struct ModuleRecordInit {
+pub struct ModuleRecordInit {
     pub(crate) specifier: ModuleSpecifier,
     pub(crate) requested_modules: Box<[ModuleSpecifier]>,
     pub(crate) imports: Box<[ImportEntry]>,
     pub(crate) exports: Box<[ExportEntry]>,
     pub(crate) local_bindings: Box<[BindingName]>,
+}
+
+impl ModuleRecordInit {
+    #[must_use]
+    pub const fn new(
+        specifier: ModuleSpecifier,
+        requested_modules: Box<[ModuleSpecifier]>,
+        imports: Box<[ImportEntry]>,
+        exports: Box<[ExportEntry]>,
+        local_bindings: Box<[BindingName]>,
+    ) -> Self {
+        Self {
+            specifier,
+            requested_modules,
+            imports,
+            exports,
+            local_bindings,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -167,13 +195,33 @@ pub(crate) struct ModuleRecord {
     exports: Box<[ExportEntry]>,
     local_bindings: Box<[LocalBinding]>,
     status: ModuleStatus,
+    evaluation: ModuleEvaluationState,
+    body: ModuleBody,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModuleEvaluationState {
+    Unevaluated,
+    Evaluating,
+    Evaluated(Value),
+    Errored(Value),
+}
+
+/// Executable content supplied by a host loader after canonical identity resolution.
+#[derive(Clone, Debug)]
+pub enum ModuleBody {
+    Synthetic,
+    Precompiled(CompiledModule),
+    AsyncPrecompiled(CompiledModule),
 }
 
 impl ModuleRecord {
+    #[cfg(test)]
     pub(crate) const fn status(&self) -> ModuleStatus {
         self.status
     }
 
+    #[cfg(test)]
     pub(crate) fn imports(&self) -> &[ImportEntry] {
         &self.imports
     }
@@ -203,14 +251,15 @@ impl Trace for LiveBindingCell {
 
 /// Host hard limits for cold module graph construction and linking work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ModuleGraphLimits {
+pub struct ModuleLimits {
     pub(crate) max_modules: u32,
     pub(crate) max_binding_cells: u32,
     pub(crate) max_edges: u32,
 }
 
-impl ModuleGraphLimits {
-    pub(crate) const fn new(max_modules: u32, max_binding_cells: u32, max_edges: u32) -> Self {
+impl ModuleLimits {
+    #[must_use]
+    pub const fn new(max_modules: u32, max_binding_cells: u32, max_edges: u32) -> Self {
         Self {
             max_modules,
             max_binding_cells,
@@ -220,7 +269,7 @@ impl ModuleGraphLimits {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ModuleError {
+pub enum ModuleError {
     AllocationFailed { collection: &'static str },
     CapacityOverflow { collection: &'static str },
     ModuleLimit { limit: u32 },
@@ -240,6 +289,8 @@ pub(crate) enum ModuleError {
     UninitializedBinding,
     UnlinkedImport,
     InvalidLinkState,
+    LoaderIdentityMismatch,
+    EvaluationOrderLimit { limit: u32 },
 }
 
 /// Append-only module records and binding cells with deterministic iteration order.
@@ -247,12 +298,33 @@ pub(crate) enum ModuleError {
 pub(crate) struct ModuleGraph {
     records: Vec<ModuleRecord>,
     cells: Vec<LiveBindingCell>,
-    limits: ModuleGraphLimits,
+    limits: ModuleLimits,
     edge_count: usize,
 }
 
+#[derive(Clone, Copy)]
+struct ModuleGraphCheckpoint {
+    records: usize,
+    cells: usize,
+    edges: usize,
+}
+
 impl ModuleGraph {
-    pub(crate) fn try_new(limits: ModuleGraphLimits) -> Result<Self, ModuleError> {
+    const fn checkpoint(&self) -> ModuleGraphCheckpoint {
+        ModuleGraphCheckpoint {
+            records: self.records.len(),
+            cells: self.cells.len(),
+            edges: self.edge_count,
+        }
+    }
+
+    fn rollback(&mut self, checkpoint: ModuleGraphCheckpoint) {
+        self.records.truncate(checkpoint.records);
+        self.cells.truncate(checkpoint.cells);
+        self.edge_count = checkpoint.edges;
+    }
+
+    pub(crate) fn try_new(limits: ModuleLimits) -> Result<Self, ModuleError> {
         let mut records = Vec::new();
         records
             .try_reserve_exact(INITIAL_MODULE_CAPACITY.min(limits.max_modules as usize))
@@ -274,7 +346,17 @@ impl ModuleGraph {
     }
 
     /// Validates a frozen record and publishes all of its stable IDs atomically.
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, init: ModuleRecordInit) -> Result<ModuleId, ModuleError> {
+        self.insert_with_body(init, ModuleBody::Synthetic)
+    }
+
+    /// Validates and publishes a loaded record together with its immutable executable body.
+    pub(crate) fn insert_with_body(
+        &mut self,
+        init: ModuleRecordInit,
+        body: ModuleBody,
+    ) -> Result<ModuleId, ModuleError> {
         self.validate_record(&init)?;
         if self.records.len() >= self.limits.max_modules as usize {
             return Err(ModuleError::ModuleLimit {
@@ -354,6 +436,8 @@ impl ModuleGraph {
             exports: init.exports,
             local_bindings: local_bindings.into_boxed_slice(),
             status: ModuleStatus::Unlinked,
+            evaluation: ModuleEvaluationState::Unevaluated,
+            body,
         });
         self.edge_count = next_edge_count;
         Ok(id)
@@ -468,6 +552,14 @@ impl Trace for ModuleGraph {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         for cell in &mut self.cells {
             cell.trace(tracer);
+        }
+        for record in &mut self.records {
+            match &mut record.evaluation {
+                ModuleEvaluationState::Evaluated(value) | ModuleEvaluationState::Errored(value) => {
+                    value.trace(tracer)
+                }
+                ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Evaluating => {}
+            }
         }
     }
 }

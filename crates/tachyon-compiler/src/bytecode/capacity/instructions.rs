@@ -341,6 +341,11 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
                 "bytecode instructions",
             )
         }
+        HirExpressionKind::Await(argument) => checked_count_add(
+            expression_instruction_count(argument)?,
+            1,
+            "bytecode instructions",
+        ),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

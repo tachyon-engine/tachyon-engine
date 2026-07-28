@@ -53,6 +53,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -116,6 +117,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             promise,
             cell: None,
@@ -408,6 +410,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             pending,
         };
@@ -680,6 +683,7 @@ impl Isolate {
                     .pc = site.call_site;
                 Ok(())
             }
+            PromiseResolutionMode::AsyncAwait => self.complete_async_function_await_resolution(),
         }
     }
 
@@ -1340,6 +1344,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             source,
             capability,
@@ -1463,6 +1468,14 @@ impl Isolate {
                     argument,
                     rejected,
                 } => {
+                    if self.is_async_function_state(capability) {
+                        return self.resume_async_function_job(
+                            capability,
+                            argument,
+                            rejected,
+                            return_site,
+                        );
+                    }
                     if self.resolve_function_object(handler).is_err() {
                         if self.begin_promise_reaction_settlement(
                             capability,

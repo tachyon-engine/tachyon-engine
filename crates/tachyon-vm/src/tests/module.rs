@@ -65,7 +65,7 @@ fn record(
 }
 
 fn test_graph() -> ModuleGraph {
-    ModuleGraph::try_new(ModuleGraphLimits::new(64, 128, 512)).expect("test module graph allocates")
+    ModuleGraph::try_new(ModuleLimits::new(64, 128, 512)).expect("test module graph allocates")
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn module_indirect_exports_resolve_to_the_original_cell_and_detect_cycles() {
 #[test]
 /// Record publication rejects duplicate identity and every configured hard limit.
 fn module_graph_rejects_duplicate_records_and_checked_limit_overflow() {
-    let mut graph = ModuleGraph::try_new(ModuleGraphLimits::new(1, 1, 1)).unwrap();
+    let mut graph = ModuleGraph::try_new(ModuleLimits::new(1, 1, 1)).unwrap();
     graph
         .insert(record(
             "memory:a",
@@ -318,7 +318,7 @@ fn module_graph_rejects_duplicate_records_and_checked_limit_overflow() {
         Err(ModuleError::ModuleLimit { limit: 1 })
     );
 
-    let mut edges = ModuleGraph::try_new(ModuleGraphLimits::new(2, 2, 0)).unwrap();
+    let mut edges = ModuleGraph::try_new(ModuleLimits::new(2, 2, 0)).unwrap();
     assert_eq!(
         edges.insert(record("memory:root", &["memory:dep"], vec![], vec![], &[])),
         Err(ModuleError::EdgeLimit { limit: 0 })
@@ -329,12 +329,8 @@ fn module_graph_rejects_duplicate_records_and_checked_limit_overflow() {
 /// A deep linear graph proves linking does not consume the native Rust call stack.
 fn module_linking_uses_iterative_worklists_for_deep_graphs() {
     const MODULES: usize = 1_000;
-    let mut graph = ModuleGraph::try_new(ModuleGraphLimits::new(
-        MODULES as u32,
-        0,
-        (MODULES - 1) as u32,
-    ))
-    .unwrap();
+    let mut graph =
+        ModuleGraph::try_new(ModuleLimits::new(MODULES as u32, 0, (MODULES - 1) as u32)).unwrap();
     let mut root = None;
     for index in 0..MODULES {
         let current = format!("memory:{index}");
@@ -362,5 +358,175 @@ fn module_linking_uses_iterative_worklists_for_deep_graphs() {
             .components()
             .iter()
             .all(|component| component.len() == 1)
+    );
+}
+
+struct MemoryLoader {
+    modules: Vec<(ModuleSpecifier, Option<LoadedModule>)>,
+}
+
+impl MemoryLoader {
+    fn new(modules: Vec<LoadedModule>) -> Self {
+        Self {
+            modules: modules
+                .into_iter()
+                .map(|module| (module.record.specifier.clone(), Some(module)))
+                .collect(),
+        }
+    }
+}
+
+impl ModuleLoader for MemoryLoader {
+    type Error = ();
+
+    fn resolve(
+        &mut self,
+        request: &ModuleSpecifier,
+        _referrer: Option<&ModuleSpecifier>,
+    ) -> Result<ModuleSpecifier, Self::Error> {
+        Ok(request.clone())
+    }
+
+    fn load(&mut self, resolved: &ModuleSpecifier) -> Result<Option<LoadedModule>, Self::Error> {
+        Ok(self
+            .modules
+            .iter_mut()
+            .find(|(specifier, _)| specifier == resolved)
+            .and_then(|(_, module)| module.take()))
+    }
+}
+
+fn loaded(record: ModuleRecordInit, body: ModuleBody) -> LoadedModule {
+    LoadedModule::new(record, body)
+}
+
+/// Exercises one loader/link/evaluate path under every supported dispatch batch.
+fn assert_memory_pipeline_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let dependency = loaded(
+        record("memory:dependency", &[], vec![], vec![], &[]),
+        ModuleBody::Synthetic,
+    );
+    let root = loaded(
+        record("memory:root", &["memory:dependency"], vec![], vec![], &[]),
+        ModuleBody::Precompiled(fixtures::arithmetic_module()),
+    );
+    let mut loader = MemoryLoader::new(vec![root, dependency]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(3))
+    );
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(3))
+    );
+}
+
+#[test]
+fn isolate_owned_module_pipeline_loads_links_and_evaluates_once() {
+    assert_memory_pipeline_batch::<1>(false);
+    assert_memory_pipeline_batch::<2>(false);
+    assert_memory_pipeline_batch::<4>(false);
+    assert_memory_pipeline_batch::<8>(true);
+    assert_memory_pipeline_batch::<16>(true);
+}
+
+#[test]
+fn module_loader_rejects_identity_substitution_before_publication() {
+    let mut isolate = fixtures::test_isolate();
+    let mut loader = MemoryLoader::new(vec![loaded(
+        record("memory:other", &[], vec![], vec![], &[]),
+        ModuleBody::Synthetic,
+    )]);
+    loader.modules[0].0 = specifier("memory:root");
+    assert!(matches!(
+        isolate.load_module_graph(&mut loader, &specifier("memory:root")),
+        Err(ModuleLoadError::Graph(ModuleError::LoaderIdentityMismatch))
+    ));
+}
+
+#[test]
+fn failed_module_load_rolls_back_every_record_from_the_transaction() {
+    let mut isolate = fixtures::test_isolate();
+    let root_record = || record("memory:root", &["memory:dependency"], vec![], vec![], &[]);
+    let mut incomplete = MemoryLoader::new(vec![loaded(root_record(), ModuleBody::Synthetic)]);
+    assert!(matches!(
+        isolate.load_module_graph(&mut incomplete, &specifier("memory:root")),
+        Err(ModuleLoadError::Missing(_))
+    ));
+
+    let mut complete = MemoryLoader::new(vec![
+        loaded(root_record(), ModuleBody::Synthetic),
+        loaded(
+            record("memory:dependency", &[], vec![], vec![], &[]),
+            ModuleBody::Synthetic,
+        ),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut complete, &specifier("memory:root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::Undefined))
+    );
+}
+
+#[test]
+fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
+    let mut isolate = fixtures::test_isolate();
+    let mut loader = MemoryLoader::new(vec![loaded(
+        record("memory:async", &[], vec![], vec![], &[]),
+        ModuleBody::AsyncPrecompiled(fixtures::arithmetic_module()),
+    )]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:async"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root),
+        Err(ModuleEvaluationError::AsyncEvaluationRequired(root))
+    );
+}
+
+#[test]
+fn module_live_cells_are_roots_at_allocation_triggered_major_collections() {
+    let mut isolate = fixtures::test_isolate();
+    let mut loader = MemoryLoader::new(vec![loaded(
+        record(
+            "memory:root",
+            &[],
+            vec![],
+            vec![local_export("value", "value")],
+            &["value"],
+        ),
+        ModuleBody::Synthetic,
+    )]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:root"))
+        .unwrap();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate.write_module_binding(root, "value", object).unwrap();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    for _ in 0..32 {
+        isolate.create_ordinary_object().unwrap();
+    }
+    let retained = isolate.read_module_binding(root, "value").unwrap();
+    let raw = retained
+        .as_heap_ref()
+        .expect("module binding retains object");
+    assert!(
+        isolate
+            .heap
+            .checked_reference(raw, isolate.types.ordinary_object)
+            .is_ok()
     );
 }

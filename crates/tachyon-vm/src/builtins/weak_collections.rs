@@ -2,6 +2,7 @@
 
 use super::super::*;
 use tachyon_gc::Ephemeron;
+use tachyon_value::RawHeapRef;
 
 impl Isolate {
     /// Looks up a WeakMap entry, returning undefined for keys that cannot be held weakly.
@@ -198,17 +199,15 @@ impl Isolate {
             return Ok(None);
         }
         let raw = key.as_heap_ref().expect("weak key was checked above");
-        let capacity = self.weak_collection_capacity(storage)?;
-        for index in 0..capacity {
-            if self
-                .weak_collection_entry(storage, index)?
-                .and_then(|entry| entry.key())
-                .is_some_and(|current| current.raw() == raw)
-            {
-                return Ok(Some(index));
-            }
-        }
-        Ok(None)
+        self.heap.with_running_scope(|scope| {
+            let storage = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(storage, self.types.weak_collection)
+                    .map(|table| table.find_index(raw))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
     }
 
     pub(crate) fn weak_collection_set(
@@ -222,11 +221,11 @@ impl Isolate {
         if let Some(index) = self.weak_collection_find(storage, key)? {
             return self.weak_collection_update(storage, index, value);
         }
-        let storage = self.ensure_weak_collection_capacity(receiver, storage, map)?;
-        let index = self.weak_collection_free_slot(storage)?;
         let raw = key
             .as_heap_ref()
             .expect("weak key was checked before insertion");
+        let storage = self.ensure_weak_collection_capacity(receiver, storage, map, raw)?;
+        let index = self.weak_collection_insertion_index(storage, raw)?;
         self.heap.with_running_scope(|scope| {
             let storage = scope.root(storage).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -277,18 +276,21 @@ impl Isolate {
         })
     }
 
-    fn weak_collection_free_slot(
+    fn weak_collection_insertion_index(
         &mut self,
         storage: GcRef<WeakCollection>,
+        key: RawHeapRef,
     ) -> Result<usize, ExecutionError> {
-        (0..self.weak_collection_capacity(storage)?)
-            .find(|index| {
-                self.weak_collection_entry(storage, *index)
-                    .ok()
-                    .flatten()
-                    .is_none_or(|entry| entry.key().is_none())
+        self.heap.with_running_scope(|scope| {
+            let storage = scope.root(storage).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(storage, self.types.weak_collection)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .insertion_index(key)
+                    .ok_or(ExecutionError::CollectionStorageAllocationFailed)
             })
-            .ok_or(ExecutionError::CollectionStorageAllocationFailed)
+        })
     }
 
     fn weak_collection_update(
@@ -335,8 +337,9 @@ impl Isolate {
         receiver: Value,
         storage: GcRef<WeakCollection>,
         map: bool,
+        key: RawHeapRef,
     ) -> Result<GcRef<WeakCollection>, ExecutionError> {
-        if self.weak_collection_free_slot(storage).is_ok() {
+        if self.weak_collection_insertion_index(storage, key).is_ok() {
             return Ok(storage);
         }
         let capacity =
@@ -365,6 +368,7 @@ impl Isolate {
                     promise_jobs: &mut self.promise_jobs,
                     realm: &mut self.realm,
                     loaded_code: &mut self.loaded_code,
+                    module_graph: &mut self.module_graph,
                 },
             )
             .map_err(ExecutionError::HeapAllocation)?;

@@ -16,6 +16,7 @@ pub(crate) struct LinkReport {
 }
 
 impl LinkReport {
+    #[cfg(test)]
     pub(crate) fn components(&self) -> &[Box<[ModuleId]>] {
         &self.components
     }

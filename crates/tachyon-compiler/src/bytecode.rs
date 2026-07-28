@@ -1092,6 +1092,7 @@ fn lower_function(
         FunctionMetadata {
             kind: match function.kind {
                 HirFunctionKind::Ordinary => FunctionKind::Ordinary,
+                HirFunctionKind::Async => FunctionKind::Async,
                 HirFunctionKind::Generator => FunctionKind::Generator,
                 HirFunctionKind::AsyncGenerator => FunctionKind::AsyncGenerator,
                 HirFunctionKind::DerivedClassConstructor

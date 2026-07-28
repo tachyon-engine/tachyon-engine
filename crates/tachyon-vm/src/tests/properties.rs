@@ -784,6 +784,7 @@ fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate
         .heap
@@ -834,6 +835,7 @@ fn collect_major(isolate: &mut Isolate) {
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate.heap.collect_major(&mut roots).unwrap();
 }
@@ -845,6 +847,7 @@ fn collect_minor(isolate: &mut Isolate) {
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate.heap.collect_minor(&mut roots).unwrap();
 }

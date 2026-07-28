@@ -698,6 +698,12 @@ impl Lowerer<'_> {
                     Ok(destination)
                 }
             }
+            HirExpressionKind::Await(argument) => {
+                let source = self.expression(argument)?;
+                let destination = self.register()?;
+                self.emit_suspend(Opcode::Await, source, destination, expression.span)?;
+                Ok(destination)
+            }
             HirExpressionKind::Sequence(expressions) => {
                 let mut result = None;
                 for expression in expressions.iter() {

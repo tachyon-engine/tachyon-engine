@@ -811,6 +811,7 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
                 .unwrap_or(0);
             checked_count_add(argument, if *delegate { 11 } else { 0 }, "bytecode labels")
         }
+        HirExpressionKind::Await(argument) => expression_label_count(argument),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

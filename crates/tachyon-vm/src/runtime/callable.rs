@@ -1,6 +1,7 @@
 //! Callable payloads, native functions, and VM descriptor identities.
 
 use super::super::*;
+use crate::async_function::AsyncFunctionState;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::generator::GeneratorObject;
@@ -2175,6 +2176,7 @@ pub(crate) struct VmTypes {
     pub(crate) signal_computed: GcType<ComputedSignal>,
     pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) generator_object: GcType<GeneratorObject>,
+    pub(crate) async_function_state: GcType<AsyncFunctionState>,
     pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,
@@ -2324,6 +2326,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::GeneratorBrand(_)
         | ExecutionError::GeneratorExecuting
         | ExecutionError::UnsupportedGeneratorYieldResume
+        | ExecutionError::UnsupportedAsyncFunctionResume
         | ExecutionError::ArrayReduceEmpty
         | ExecutionError::ClassConstructorCalledWithoutNew(_)
         | ExecutionError::InvalidDerivedConstructorReturn(_)

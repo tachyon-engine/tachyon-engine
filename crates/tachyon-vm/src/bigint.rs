@@ -891,6 +891,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             constant_values,
         };
@@ -918,6 +919,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_external_with_gc(

@@ -4,7 +4,7 @@ impl Isolate {
     /// Adds valid signals to a Watcher's ordered set after complete argument validation.
     pub(crate) fn signal_watcher_watch(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.ensure_signal_runtime_unfrozen(site.this_value)?;
-        let arguments = self.validated_signal_arguments(site, false)?;
+        let arguments = self.validated_signal_arguments(site)?;
         if site.argument_count == 0 {
             let watcher = self.signal_watcher_reference(site.this_value)?;
             self.heap.with_running_scope(|scope| {
@@ -40,10 +40,10 @@ impl Isolate {
         Ok(())
     }
 
-    /// Removes validated watched signals from a Watcher without partial mutation on errors.
+    /// Removes valid signals from a Watcher without partial mutation on argument errors.
     pub(crate) fn signal_watcher_unwatch(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.ensure_signal_runtime_unfrozen(site.this_value)?;
-        let arguments = self.validated_signal_arguments(site, true)?;
+        let arguments = self.validated_signal_arguments(site)?;
         let pending = self.allocate_pending_signal_watcher_operation(
             site.this_value,
             SignalWatcherOperationKind::Unwatch,
@@ -78,6 +78,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             watcher,
             arguments,

@@ -796,6 +796,7 @@ fn allocate_proxy_test_function(
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate
         .heap

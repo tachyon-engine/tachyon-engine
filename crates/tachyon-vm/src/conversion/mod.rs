@@ -171,6 +171,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             description,
         };
@@ -1851,6 +1852,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let value = self
             .heap
@@ -1878,6 +1880,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             retained,
         };

@@ -12,7 +12,7 @@ use test262_runner::{
 const CONFIG_PATH: &str = "signals_suite.toml";
 const PINNED_TEST_FILES: usize = 19;
 const PINNED_TEST_DEFINITIONS: usize = 70;
-const PINNED_ASSERTIONS: usize = 114;
+const PINNED_ASSERTIONS: usize = 117;
 
 #[derive(Debug, Deserialize)]
 struct SuiteConfig {

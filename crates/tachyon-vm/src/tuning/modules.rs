@@ -6,3 +6,5 @@ pub(crate) const INITIAL_MODULE_CAPACITY: usize = 16;
 pub(crate) const INITIAL_BINDING_CELL_CAPACITY: usize = 32;
 /// Link frames, SCC members, and export-resolution visits share this cold-path starting point.
 pub(crate) const INITIAL_LINK_WORK_CAPACITY: usize = 32;
+/// Default graph edges per configured module when the host does not override module limits.
+pub(crate) const DEFAULT_EDGE_CAPACITY_PER_MODULE: u32 = 16;

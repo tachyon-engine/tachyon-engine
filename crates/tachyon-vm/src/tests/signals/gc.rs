@@ -108,6 +108,7 @@ fn collect_signal_major_at_job_boundary(isolate: &mut Isolate) {
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate
         .heap

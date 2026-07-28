@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::completion::CompletionStack;
+use crate::module::ModuleGraph;
 
 pub(crate) struct VmRoots<'a> {
     pub(crate) fiber: &'a mut Fiber,
@@ -9,6 +10,7 @@ pub(crate) struct VmRoots<'a> {
     pub(crate) promise_jobs: &'a mut PromiseJobQueue,
     pub(crate) realm: &'a mut Realm,
     pub(crate) loaded_code: &'a mut Vec<LoadedCode>,
+    pub(crate) module_graph: &'a mut ModuleGraph,
 }
 
 pub(crate) struct PropertyMutationRoots<'a> {
@@ -92,6 +94,7 @@ impl Trace for VmRoots<'_> {
         for code in self.loaded_code.iter_mut() {
             code.trace(tracer);
         }
+        self.module_graph.trace(tracer);
     }
 }
 
@@ -762,6 +765,7 @@ pub(crate) enum PromiseResolutionMode {
     ResolverCall,
     Reaction,
     StaticResolve,
+    AsyncAwait,
 }
 
 /// One observable SpeciesConstructor lookup performed by Promise.prototype.then.
@@ -1439,6 +1443,7 @@ pub(crate) enum NativeContinuationKind {
     SignalComputed,
     SignalUntrack,
     GeneratorResume,
+    AsyncFunction,
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1505,6 +1510,17 @@ impl NativeContinuation {
             kind: NativeContinuationKind::GeneratorResume,
             first: generator,
             second: promise,
+        }
+    }
+
+    /// Roots one async-function state while its bytecode Fiber is active.
+    #[inline]
+    pub(crate) const fn async_function(site: NativeContinuationSite, state: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::AsyncFunction,
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

@@ -801,18 +801,8 @@ impl Isolate {
     pub(super) fn validated_signal_arguments(
         &mut self,
         site: &CallSite,
-        require_watched: bool,
     ) -> Result<Vec<Value>, ExecutionError> {
-        let watcher = self.signal_watcher_reference(site.this_value)?;
-        let watched = self.heap.with_running_scope(|scope| {
-            let watcher = scope.root(watcher).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(watcher, self.types.signal_watcher)
-                    .map_err(ExecutionError::NoGcBorrow)
-                    .and_then(|node| node.watched.try_snapshot())
-            })
-        })?;
+        self.signal_watcher_reference(site.this_value)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(site.argument_count as usize)
@@ -821,7 +811,7 @@ impl Isolate {
             let value = self
                 .call_argument(site, index)?
                 .unwrap_or(Value::from_immediate(Immediate::Undefined));
-            if !self.is_signal_value(value) || (require_watched && !watched.contains(&value)) {
+            if !self.is_signal_value(value) {
                 return Err(ExecutionError::NotObject(value));
             }
             values.push(value);

@@ -652,13 +652,6 @@ pub(super) fn lower_function_stencil(
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.r#async && !function.generator {
-        return Err(unsupported(
-            source.name(),
-            source_span(function.span),
-            "async function",
-        ));
-    }
     let body = function.body.as_ref().ok_or_else(|| {
         unsupported(
             source.name(),
@@ -728,6 +721,8 @@ pub(super) fn lower_function_stencil(
         is_arrow: false,
         kind: if function.r#async && function.generator {
             super::program::HirFunctionKind::AsyncGenerator
+        } else if function.r#async {
+            super::program::HirFunctionKind::Async
         } else if function.generator {
             super::program::HirFunctionKind::Generator
         } else {
@@ -738,20 +733,13 @@ pub(super) fn lower_function_stencil(
     Ok(id)
 }
 
-/// Copies the supported synchronous arrow subset into the same owned stencil used by functions.
+/// Copies the supported arrow subset into the same owned stencil used by functions.
 pub(super) fn lower_arrow_function_stencil(
     function: &oxc::ast::ast::ArrowFunctionExpression<'_>,
     source: &SourceText,
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.r#async {
-        return Err(unsupported(
-            source.name(),
-            source_span(function.span),
-            "async/rest arrow function",
-        ));
-    }
     let mut parameters = Vec::with_capacity(function.params.items.len());
     let mut parameter_initializers = Vec::with_capacity(function.params.items.len());
     for parameter in &function.params.items {
@@ -833,7 +821,11 @@ pub(super) fn lower_arrow_function_stencil(
                 .iter()
                 .any(|directive| directive.expression.value.as_str() == "use strict"),
         is_arrow: true,
-        kind: super::program::HirFunctionKind::Ordinary,
+        kind: if function.r#async {
+            super::program::HirFunctionKind::Async
+        } else {
+            super::program::HirFunctionKind::Ordinary
+        },
         initialize_instance_elements: false,
     });
     Ok(id)

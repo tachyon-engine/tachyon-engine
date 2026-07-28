@@ -82,6 +82,7 @@ cleanupRegistry.register(cleanupTarget, heldValue);
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate.heap.collect_major(&mut roots).unwrap();
     execute_source(&mut isolate, 7_453, "0;");
@@ -116,6 +117,7 @@ throwingRegistry.register(throwingTarget, "held");
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate.heap.collect_major(&mut roots).unwrap();
     let trigger = compile_fixture("0;", 7_457, "finalization-registry-throw");

@@ -59,6 +59,7 @@ fn weak_ref_target_clears_after_job_boundary_and_major_collection() {
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
         loaded_code: &mut isolate.loaded_code,
+        module_graph: &mut isolate.module_graph,
     };
     isolate.heap.collect_major(&mut roots).unwrap();
     let outcome = execute_source(

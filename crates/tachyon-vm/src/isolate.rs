@@ -3,6 +3,7 @@
 use core::mem;
 
 use super::*;
+use crate::module::ModuleGraph;
 
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
@@ -74,6 +75,7 @@ pub struct Isolate {
     pub(crate) host_providers: HostProviders,
     pub(crate) stack_limits: StackLimits,
     pub(crate) signal_runtime: SignalRuntime,
+    pub(crate) module_graph: ModuleGraph,
     #[cfg(feature = "opcode-profile")]
     pub(crate) execution_profile: ExecutionProfile,
     pub(crate) _not_sync: Cell<()>,
@@ -389,6 +391,9 @@ impl Isolate {
             generator_object: registry
                 .try_register("GeneratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            async_function_state: registry
+                .try_register("AsyncFunctionState")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_signal_watcher_operation: registry
                 .try_register("PendingSignalWatcherOperation")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -639,6 +644,8 @@ impl Isolate {
             host_providers,
             stack_limits: config.stack_limits,
             signal_runtime: SignalRuntime::default(),
+            module_graph: ModuleGraph::try_new(config.module_limits)
+                .map_err(IsolateCreationError::ModuleGraph)?,
             #[cfg(feature = "opcode-profile")]
             execution_profile: ExecutionProfile::default(),
             _not_sync: Cell::new(()),
@@ -703,6 +710,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -736,6 +744,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -781,6 +790,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -830,6 +840,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -906,6 +917,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             };
             self.heap
                 .try_allocate_external_with_gc(
@@ -934,6 +946,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let function = self
             .heap
@@ -971,6 +984,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_external_with_gc(
@@ -1213,6 +1227,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         let object = self
             .heap
@@ -1249,6 +1264,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1290,6 +1306,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1326,6 +1343,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1361,6 +1379,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1400,6 +1419,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1436,6 +1456,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1472,6 +1493,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_with_gc(
@@ -1508,6 +1530,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             source,
             flags,
@@ -1547,6 +1570,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             prototype,
             storage: None,
@@ -1596,6 +1620,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             prototype,
             storage: None,
@@ -1645,6 +1670,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             prototype,
             storage: None,
@@ -1694,6 +1720,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             prototype,
             storage: None,
@@ -1761,6 +1788,7 @@ impl Isolate {
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
                 loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
             },
             prototype,
         };
@@ -1808,6 +1836,7 @@ impl Isolate {
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
             loaded_code: &mut self.loaded_code,
+            module_graph: &mut self.module_graph,
         };
         self.heap
             .try_allocate_external_with_gc(

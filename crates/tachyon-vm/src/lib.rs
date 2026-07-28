@@ -26,6 +26,7 @@ mod array_slice;
 mod array_splice;
 mod array_static;
 mod array_to_sorted;
+mod async_function;
 mod atom;
 mod bigint;
 mod bound_function;
@@ -44,13 +45,6 @@ mod host;
 mod interpreter;
 mod isolate;
 mod iterator;
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "M8.4 record/link substrate is wired into the compiler and isolate in the next slice"
-    )
-)]
 mod module;
 mod number;
 mod object;
@@ -87,6 +81,11 @@ pub use finalization::{
 };
 pub use host::{HostProviderError, HostProviders, TimeZoneProvider, WallClockProvider};
 pub use isolate::Isolate;
+pub use module::{
+    BindingName, ExportEntry, ImportEntry, LoadedModule, ModuleBody, ModuleError,
+    ModuleEvaluationError, ModuleId, ModuleLimits, ModuleLoadError, ModuleLoader, ModuleRecordInit,
+    ModuleSpecifier,
+};
 pub use object::ShapeError;
 pub use runtime::{callable::NativeErrorKind, code::CodeId};
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
@@ -287,6 +286,7 @@ pub struct IsolateConfig {
     heap_limit: HeapLimit,
     stack_limits: StackLimits,
     realm_limits: RealmLimits,
+    module_limits: ModuleLimits,
 }
 
 impl IsolateConfig {
@@ -297,12 +297,27 @@ impl IsolateConfig {
         stack_limits: StackLimits,
         realm_limits: RealmLimits,
     ) -> Self {
+        let module_limits = ModuleLimits::new(
+            realm_limits.max_loaded_modules,
+            realm_limits.max_global_bindings,
+            realm_limits
+                .max_loaded_modules
+                .saturating_mul(tuning::modules::DEFAULT_EDGE_CAPACITY_PER_MODULE),
+        );
         Self {
             atom_table,
             heap_limit,
             stack_limits,
             realm_limits,
+            module_limits,
         }
+    }
+
+    /// Overrides graph, binding-cell, and traversal hard limits for module-heavy embeddings.
+    #[must_use]
+    pub const fn with_module_limits(mut self, module_limits: ModuleLimits) -> Self {
+        self.module_limits = module_limits;
+        self
     }
 }
 
@@ -398,6 +413,8 @@ pub enum ExecutionError {
     GeneratorExecuting,
     UnsupportedGeneratorYieldResume,
     GeneratorArgumentAllocationFailed,
+    UnsupportedAsyncFunctionResume,
+    AsyncFunctionArgumentAllocationFailed,
     NonConstructor(Value),
     ArrayReduceEmpty,
     ClassConstructorCalledWithoutNew(Value),
@@ -531,6 +548,7 @@ pub enum IsolateCreationError {
     String(StringAllocationError),
     HeapAllocation(HeapAllocationError),
     IntrinsicInitialization(ExecutionError),
+    ModuleGraph(module::ModuleError),
 }
 
 struct Int32PropertyKey {

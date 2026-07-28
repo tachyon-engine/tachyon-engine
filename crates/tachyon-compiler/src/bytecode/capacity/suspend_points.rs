@@ -195,6 +195,7 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
                 .transpose()?
                 .unwrap_or(0),
         ),
+        HirExpressionKind::Await(argument) => add(1, expression_suspend_point_count(argument)?),
         HirExpressionKind::Class(class) => {
             let mut count = class
                 .super_class

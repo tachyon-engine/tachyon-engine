@@ -199,6 +199,7 @@ pub enum HirExpressionKind {
         argument: Option<Box<HirExpression>>,
         delegate: bool,
     },
+    Await(Box<HirExpression>),
     Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
     ObjectSpread(Arc<[HirObjectExpressionPart]>),
@@ -431,6 +432,9 @@ pub(super) fn lower_expression(
                 .map(Box::new),
             delegate: expression.delegate,
         },
+        Expression::AwaitExpression(expression) => HirExpressionKind::Await(Box::new(
+            lower_expression(&expression.argument, source, semantic, functions)?,
+        )),
         Expression::SequenceExpression(sequence) => {
             let mut expressions = Vec::with_capacity(sequence.expressions.len());
             for expression in &sequence.expressions {

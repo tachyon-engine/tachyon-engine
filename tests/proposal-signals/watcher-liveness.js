@@ -41,6 +41,15 @@ assert(notifyCount === 2, "unwatch removes membership");
 right.set(10);
 assert(notifyCount === 3, "remaining membership stays live");
 
+var absent = new Signal.State(0);
+var beforeNoop = Signal.subtle.introspectSources(watcher);
+assert(watcher.unwatch(absent) === undefined, "unwatching an absent Signal is a no-op");
+var afterNoop = Signal.subtle.introspectSources(watcher);
+assert(afterNoop.length === beforeNoop.length && afterNoop[0] === beforeNoop[0],
+       "absent unwatch preserves ordered membership");
+absent.set(1);
+assert(notifyCount === 3, "absent unwatch does not attach the Signal");
+
 var dirtySource = new Signal.State(1);
 var dirty = new Signal.Computed(function() { return dirtySource.get(); });
 var dirtyWatcher = new Signal.subtle.Watcher(function() {});
