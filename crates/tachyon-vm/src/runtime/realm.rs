@@ -123,6 +123,7 @@ pub(crate) struct Realm {
     pub(crate) generator_function_prototype: Option<Value>,
     pub(crate) generator_prototype: Option<Value>,
     pub(crate) generator_next: Option<Value>,
+    pub(crate) async_iterator_prototype: Option<Value>,
     pub(crate) async_generator_function_constructor: Option<Value>,
     pub(crate) async_generator_function_prototype: Option<Value>,
     pub(crate) async_generator_prototype: Option<Value>,
@@ -302,6 +303,7 @@ impl Realm {
             generator_function_prototype: None,
             generator_prototype: None,
             generator_next: None,
+            async_iterator_prototype: None,
             async_generator_function_constructor: None,
             async_generator_function_prototype: None,
             async_generator_prototype: None,
@@ -716,6 +718,7 @@ impl Trace for Realm {
         self.generator_function_prototype.trace(tracer);
         self.generator_prototype.trace(tracer);
         self.generator_next.trace(tracer);
+        self.async_iterator_prototype.trace(tracer);
         self.async_generator_function_constructor.trace(tracer);
         self.async_generator_function_prototype.trace(tracer);
         self.async_generator_prototype.trace(tracer);
@@ -872,6 +875,7 @@ impl Trace for Realm {
 pub(crate) struct WellKnownSymbols {
     pub(crate) to_primitive: Option<Value>,
     pub(crate) iterator: Option<Value>,
+    pub(crate) async_iterator: Option<Value>,
     pub(crate) is_concat_spreadable: Option<Value>,
     pub(crate) replace: Option<Value>,
     pub(crate) search: Option<Value>,
@@ -887,6 +891,7 @@ impl Trace for WellKnownSymbols {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.to_primitive.trace(tracer);
         self.iterator.trace(tracer);
+        self.async_iterator.trace(tracer);
         self.is_concat_spreadable.trace(tracer);
         self.replace.trace(tracer);
         self.search.trace(tracer);

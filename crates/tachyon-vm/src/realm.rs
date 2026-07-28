@@ -1723,6 +1723,8 @@ impl Isolate {
                 self.realm.well_known_symbols.species = Some(symbol);
             } else if name == b"split" {
                 self.realm.well_known_symbols.split = Some(symbol);
+            } else if name == b"asyncIterator" {
+                self.realm.well_known_symbols.async_iterator = Some(symbol);
             }
             let symbol = if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag.unwrap()
@@ -1740,6 +1742,8 @@ impl Isolate {
                 self.realm.well_known_symbols.species.unwrap()
             } else if name == b"split" {
                 self.realm.well_known_symbols.split.unwrap()
+            } else if name == b"asyncIterator" {
+                self.realm.well_known_symbols.async_iterator.unwrap()
             } else {
                 symbol
             };
@@ -2729,12 +2733,40 @@ impl Isolate {
             generator_prototype,
             false,
         )?;
+        let async_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        self.realm.async_iterator_prototype = Some(async_iterator_prototype);
+        let async_iterator_symbol = self
+            .realm
+            .well_known_symbols
+            .async_iterator
+            .expect("Symbol.asyncIterator initializes before generator intrinsics");
+        let async_iterator_key = self.property_key(async_iterator_symbol)?;
+        let identity = self
+            .realm
+            .iterator_identity
+            .expect("Iterator identity initializes before async iterator prototype");
+        self.define_data_property(
+            async_iterator_prototype,
+            async_iterator_key,
+            DataPropertyDescriptor {
+                value: Some(identity),
+                writable: Some(true),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        self.define_intrinsic_to_string_tag(async_iterator_prototype, b"AsyncIterator")?;
         let async_generator_prototype =
             self.allocate_intrinsic_ordinary_object(OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,
                 storage: None,
-                prototype: iterator_prototype,
+                prototype: async_iterator_prototype,
             })?;
         let async_generator_function_prototype = self.allocate_native_function(
             NativeFunction::AsyncGeneratorFunctionPrototype,

@@ -104,6 +104,20 @@ const ASYNC_GENERATOR_QUEUE_ASSERTION: &str = r#"
 asyncTrace + "meta:" + asyncTagOk + ":" + invalidReceiverRejected + ":" + invalidReceiverThrew + "|";
 "#;
 
+const ASYNC_ITERATOR_INTRINSIC_SOURCE: &str = r#"
+var ag = (async function* () {})();
+var agPrototype = Object.getPrototypeOf(ag);
+var asyncIteratorPrototype = Object.getPrototypeOf(agPrototype);
+var iteratorPrototype = Object.getPrototypeOf(asyncIteratorPrototype);
+var asyncSymbol = Symbol.asyncIterator;
+var asyncIdentity = asyncIteratorPrototype[asyncSymbol];
+var intrinsicAsyncIterator = Object.getPrototypeOf(asyncIteratorPrototype) === iteratorPrototype;
+var chainOk = iteratorPrototype[Symbol.iterator].call(agPrototype) === agPrototype;
+var identityOk = asyncIdentity.call(agPrototype) === agPrototype;
+var tagOk = asyncIteratorPrototype[Symbol.toStringTag] === "AsyncIterator";
+(intrinsicAsyncIterator ? 1 : 0) + (chainOk ? 2 : 0) + (identityOk ? 4 : 0) + (tagOk ? 8 : 0);
+"#;
+
 const GENERATOR_YIELD_SOURCE: &str = r#"
 var entered = 0;
 function* exchange() {
@@ -510,6 +524,35 @@ fn async_generator_request_queue_runs_for_every_dispatch_batch() {
 #[test]
 fn async_generator_request_queue_survives_forced_major_collection() {
     assert_async_generator_queue::<8>(true);
+}
+
+#[test]
+fn async_iterator_intrinsic_chain_is_published() {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_850),
+                SourceName::new("async-iterator-intrinsic"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_ITERATOR_INTRINSIC_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async iterator intrinsic fixture compiles");
+    let mut isolate = test_isolate();
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("async iterator intrinsic fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(15)),
+        "async iterator intrinsic result: {outcome:?}"
+    );
 }
 
 #[test]
