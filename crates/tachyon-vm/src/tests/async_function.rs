@@ -62,6 +62,26 @@ original(undefined);
 result;
 "#;
 
+const ARROW_LEXICAL_ARGUMENTS_SOURCE: &str = r#"
+var result = "";
+function outer(value) {
+    var identity = arguments;
+    return () => arguments === identity && arguments[0] === value;
+}
+var escaped = outer(7);
+result += escaped() + "|";
+var escapedAsync;
+async function asyncOuter(value) {
+    var identity = arguments;
+    escapedAsync = async () => {
+        result += (arguments === identity && arguments[0] === value) + "|";
+    };
+}
+asyncOuter(9);
+escapedAsync();
+result;
+"#;
+
 #[test]
 fn async_function_await_runs_for_every_dispatch_batch() {
     assert_async_function_source::<1>(false);
@@ -88,6 +108,16 @@ fn named_async_parameter_environment_works_for_every_dispatch_batch() {
     assert_named_async_parameters::<8>(false);
     assert_named_async_parameters::<16>(false);
     assert_named_async_parameters::<8>(true);
+}
+
+#[test]
+fn arrow_lexical_arguments_escape_for_every_dispatch_batch() {
+    assert_arrow_lexical_arguments::<1>(false);
+    assert_arrow_lexical_arguments::<2>(false);
+    assert_arrow_lexical_arguments::<4>(false);
+    assert_arrow_lexical_arguments::<8>(false);
+    assert_arrow_lexical_arguments::<16>(false);
+    assert_arrow_lexical_arguments::<8>(true);
 }
 
 /// Runs one complete async-function lifecycle under a dispatch and collection policy.
@@ -199,4 +229,47 @@ fn assert_named_async_parameters<const N: usize>(forced_major: bool) {
         .string_value_to_utf16(value)
         .expect("named async parameter result is a string");
     assert_eq!(String::from_utf16(&result).unwrap(), "3:3:true|true|true|");
+}
+
+/// Verifies escaped ordinary and async arrows retain the owner activation's arguments object.
+fn assert_arrow_lexical_arguments<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_200 + N as u32),
+                SourceName::new("arrow-lexical-arguments"),
+                MediaType::JavaScript,
+                Arc::from(ARROW_LEXICAL_ARGUMENTS_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("arrow lexical arguments fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(43, 44)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("arrow lexical arguments isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("arrow lexical arguments fixture executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("arrow lexical arguments fixture did not complete: {outcome:?}");
+    };
+    let result = isolate
+        .string_value_to_utf16(value)
+        .expect("arrow lexical arguments result is a string");
+    assert_eq!(String::from_utf16(&result).unwrap(), "true|true|");
 }

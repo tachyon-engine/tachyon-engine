@@ -719,6 +719,7 @@ pub(super) fn lower_function_stencil(
                     .any(|directive| directive.expression.value.as_str() == "use strict")
             }),
         is_arrow: false,
+        lexical_arguments_owner: false,
         kind: if function.r#async && function.generator {
             super::program::HirFunctionKind::AsyncGenerator
         } else if function.r#async {
@@ -821,6 +822,7 @@ pub(super) fn lower_arrow_function_stencil(
                 .iter()
                 .any(|directive| directive.expression.value.as_str() == "use strict"),
         is_arrow: true,
+        lexical_arguments_owner: false,
         kind: if function.r#async {
             super::program::HirFunctionKind::Async
         } else {

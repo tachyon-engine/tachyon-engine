@@ -394,6 +394,16 @@ impl EnvironmentPlans {
                 push_function_name_slot(binding, &mut slots)?;
                 function_self_bindings.push(binding.id);
             }
+            if function.lexical_arguments_owner {
+                let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
+                slots.push(CapturedSlot {
+                    id: crate::hir::lexical_arguments_binding(function.scope),
+                    slot,
+                    name: std::sync::Arc::from("arguments"),
+                    mutable: false,
+                    initialized: false,
+                });
+            }
             for parameter in function.parameters.iter() {
                 for binding in pattern_bindings(parameter) {
                     push_captured_slot(
@@ -1049,6 +1059,26 @@ fn lower_function(
             rest.span,
         )?;
         lowerer.bind_pattern(rest, rest_value, true)?;
+    }
+    if function.lexical_arguments_owner {
+        let arguments = lowerer.register()?;
+        lowerer.needs_argument_source = true;
+        lowerer.emit(
+            Opcode::LoadArgumentsObject,
+            &[arguments.index()],
+            function.span,
+        )?;
+        let slot = environments
+            .local_slot(
+                function.scope,
+                crate::hir::lexical_arguments_binding(function.scope),
+            )
+            .ok_or(CompileError::BindingOverflow)?;
+        lowerer.emit(
+            Opcode::InitializeEnvironment,
+            &[arguments.index(), 0, slot.slot],
+            function.span,
+        )?;
     }
     for binding in &var_bindings {
         if lowerer.local_by_id(binding.id).is_some() {

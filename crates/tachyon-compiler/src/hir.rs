@@ -13,6 +13,7 @@ pub use expression::{
     HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirUnaryOperator, HirUpdateOperator,
 };
 pub use pattern::{HirPattern, HirPatternKind, HirPatternProperty};
+pub(crate) use program::lexical_arguments_binding;
 pub(crate) use program::lower;
 pub use program::{
     BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration, HirFunctionKind,

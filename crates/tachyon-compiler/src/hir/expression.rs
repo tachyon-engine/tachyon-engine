@@ -939,6 +939,7 @@ pub(super) fn lower_class(
                 scope: to_scope_id(scope),
                 strict: true,
                 is_arrow: false,
+                lexical_arguments_owner: false,
                 kind: if class.super_class.is_some() {
                     super::program::HirFunctionKind::DefaultDerivedConstructor
                 } else {
@@ -1134,6 +1135,7 @@ pub(super) fn lower_class(
                             scope: to_scope_id(class_scope),
                             strict: true,
                             is_arrow: false,
+                            lexical_arguments_owner: false,
                             kind: super::program::HirFunctionKind::ClassFieldInitializer,
                             initialize_instance_elements: false,
                         });
@@ -1195,6 +1197,7 @@ pub(super) fn lower_class(
                     scope: to_scope_id(scope),
                     strict: true,
                     is_arrow: false,
+                    lexical_arguments_owner: false,
                     kind: super::program::HirFunctionKind::ClassStaticBlock,
                     initialize_instance_elements: false,
                 });
@@ -1579,15 +1582,21 @@ pub(super) fn new_reference(
         .get()
         .ok_or_else(|| missing_semantic(source, span, "identifier reference"))?;
     let reference = semantic.scoping().get_reference(id);
+    let lexical_arguments_owner = (identifier.name == "arguments"
+        && reference.symbol_id().is_none())
+    .then(|| super::program::lexical_arguments_owner(semantic, reference.scope_id()))
+    .flatten();
     let binding_scope = reference
         .symbol_id()
-        .map(|symbol| to_scope_id(semantic.scoping().symbol_scope_id(symbol)));
+        .map(|symbol| to_scope_id(semantic.scoping().symbol_scope_id(symbol)))
+        .or(lexical_arguments_owner);
     Ok(HirIdentifierReference {
         id: ReferenceId(id.index() as u32),
         scope: to_scope_id(reference.scope_id()),
         binding: reference
             .symbol_id()
-            .map(|symbol| BindingId(symbol.index() as u32)),
+            .map(|symbol| BindingId(symbol.index() as u32))
+            .or_else(|| lexical_arguments_owner.map(super::program::lexical_arguments_binding)),
         binding_scope,
         name: Arc::from(identifier.name.as_str()),
         read: reference.is_read(),

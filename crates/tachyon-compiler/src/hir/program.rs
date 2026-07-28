@@ -140,6 +140,8 @@ pub struct HirFunction {
     pub strict: bool,
     /// Whether this stencil is an arrow and therefore has no own arguments binding.
     pub is_arrow: bool,
+    /// Whether a nested arrow captures this activation's implicit `arguments` binding.
+    pub lexical_arguments_owner: bool,
     pub kind: HirFunctionKind,
     /// Whether this class constructor must run its attached instance-element plan.
     pub initialize_instance_elements: bool,
@@ -219,6 +221,10 @@ pub(crate) fn lower(
             StatementContext::ScriptBody,
         )?);
     }
+    let lexical_arguments_owners = lexical_arguments_owners(semantic);
+    for function in &mut functions {
+        function.lexical_arguments_owner = lexical_arguments_owners.contains(&function.scope);
+    }
     Ok(HirProgram {
         source_id: source.id(),
         kind,
@@ -227,6 +233,49 @@ pub(crate) fn lower(
         root_scope: to_scope_id(semantic.scoping().root_scope_id()),
         scopes: copy_scopes(semantic).into(),
     })
+}
+
+/// Finds non-arrow function activations whose `arguments` binding escapes through an arrow.
+fn lexical_arguments_owners(semantic: &Semantic<'_>) -> Vec<ScopeId> {
+    let scoping = semantic.scoping();
+    let Some(references) = scoping.root_unresolved_references().get("arguments") else {
+        return Vec::new();
+    };
+    let mut owners = Vec::with_capacity(references.len());
+    for reference in references.iter().copied() {
+        let scope = scoping.get_reference(reference).scope_id();
+        if let Some(owner) = lexical_arguments_owner(semantic, scope)
+            && !owners.contains(&owner)
+        {
+            owners.push(owner);
+        }
+    }
+    owners
+}
+
+/// Resolves an unresolved `arguments` reference only when its nearest function is an arrow.
+pub(super) fn lexical_arguments_owner(
+    semantic: &Semantic<'_>,
+    mut scope: oxc::semantic::ScopeId,
+) -> Option<ScopeId> {
+    let scoping = semantic.scoping();
+    let mut crossed_arrow = false;
+    loop {
+        let flags = scoping.scope_flags(scope);
+        if flags.contains(OxcScopeFlags::Function) {
+            if flags.contains(OxcScopeFlags::Arrow) {
+                crossed_arrow = true;
+            } else {
+                return crossed_arrow.then(|| to_scope_id(scope));
+            }
+        }
+        scope = scoping.scope_parent_id(scope)?;
+    }
+}
+
+/// Allocates a collision-free compiler-internal binding identity for lexical `arguments`.
+pub(crate) const fn lexical_arguments_binding(owner: ScopeId) -> BindingId {
+    BindingId(u32::MAX - owner.index())
 }
 
 /// Copies Oxc's arena-owned scope tree into compact Tachyon identities and capability flags.

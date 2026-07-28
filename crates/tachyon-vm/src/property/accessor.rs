@@ -312,6 +312,48 @@ impl Isolate {
         Ok(())
     }
 
+    /// Snapshots a mapped arguments object before its owning register window leaves the fiber.
+    pub(crate) fn detach_mapped_arguments(&mut self, target: Value) -> Result<(), ExecutionError> {
+        let Some(raw) = target.as_heap_ref() else {
+            return Ok(());
+        };
+        let Ok(arguments) = self
+            .heap
+            .checked_reference(raw, self.types.arguments_object)
+        else {
+            return Ok(());
+        };
+        let count = self.heap.with_running_scope(|scope| {
+            let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(arguments, self.types.arguments_object)
+                    .map(|object| object.mapped_parameter_count)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        for index in 0..count {
+            let key = self.safe_integer_property_atom(u64::from(index))?;
+            if let Some(value) = self.mapped_argument_value(target, key.into())? {
+                self.set_own_data_property(target, key, value)?;
+            }
+        }
+        self.heap.with_running_scope(|scope| {
+            let arguments = scope.root(arguments).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(arguments, self.types.arguments_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.mapped_frame_depth = u32::MAX;
+                object.mapped_base = 0;
+                object.mapped_parameter_count = 0;
+                object.mapped_code = None;
+                object.mapped_function = None;
+                Ok(())
+            })
+        })
+    }
+
     /// Materializes one String-exotic UTF-16 code-unit value for descriptor consumers.
     pub(crate) fn string_index_value(
         &mut self,

@@ -5020,6 +5020,9 @@ impl Isolate {
             });
         }
         self.reserve_tail_call_windows(target.layout, requested)?;
+        if let Some(arguments) = self.fiber.argument_objects.last().copied().flatten() {
+            self.detach_mapped_arguments(arguments)?;
+        }
         let environment =
             if let Some(slot_count) = NonZeroU32::new(target.layout.environment_slot_count) {
                 Some(

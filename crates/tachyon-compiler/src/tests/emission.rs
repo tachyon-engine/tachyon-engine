@@ -200,6 +200,41 @@ fn compiler_materializes_the_arguments_object_in_function_scope() {
 }
 
 #[test]
+fn compiler_captures_outer_arguments_only_for_arrows_that_reference_it() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "function outer() { return () => arguments; } function plain() { return () => 1; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let outer = module
+        .function(tachyon_bytecode::FunctionId::new(2))
+        .unwrap();
+    let arrow = module
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .unwrap();
+    let plain = module
+        .function(tachyon_bytecode::FunctionId::new(4))
+        .unwrap();
+    assert_eq!(outer.layout().environment_slot_count, 1);
+    assert!(outer.layout().needs_argument_source);
+    assert!(
+        tachyon_bytecode::disassemble(outer)
+            .unwrap()
+            .contains("LoadArgumentsObject")
+    );
+    assert!(
+        tachyon_bytecode::disassemble(arrow)
+            .unwrap()
+            .contains("LoadEnvironment")
+    );
+    assert_eq!(plain.layout().environment_slot_count, 0);
+}
+
+#[test]
 fn compiler_keeps_loose_and_strict_inequality_opcodes_distinct() {
     let module = Compiler
         .compile(
