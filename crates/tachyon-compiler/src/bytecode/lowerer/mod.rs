@@ -41,6 +41,9 @@ pub(super) struct Lowerer<'a> {
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
     pub(super) is_arrow: bool,
+    /// Immutable internal name of a named function expression, if this stencil owns one.
+    pub(super) self_binding: Option<BindingId>,
+    pub(super) strict: bool,
     pub(super) initialize_instance_elements: bool,
     /// Whether this function may replace its frame at strict tail-call sites.
     pub(super) proper_tail_calls: bool,
@@ -1046,6 +1049,11 @@ impl Lowerer<'_> {
         value: RegisterId,
         span: SourceSpan,
     ) -> Result<(), CompileError> {
+        if self.self_binding == Some(binding.id) && !self.strict {
+            // Sloppy assignment to a named-function expression's immutable internal name is a
+            // no-op after the RHS/compound computation has produced its observable result.
+            return Ok(());
+        }
         match binding.storage {
             LocalStorage::Register(register) => {
                 self.emit(Opcode::Move, &[register.index(), value.index()], span)
