@@ -178,6 +178,7 @@ var unicode = /./dug;
 var unicodeResult = unicode.exec("\ud834\udf06");
 var hanU = /\p{Script=Han}/du.exec("\ud842\udfb7a");
 var hanV = /\p{Script=Han}/dv.exec("\ud842\udfb7a");
+var namedUnicode = /(?<\u03c0>a)(?<$\u{104A4}>b)(?<_\u200C>c)(?<_\u200D>d)(?<\u0CA0_\u0CA0>e)/du.exec("abcde");
 
 result[0] === "ac" && result[1] === "a" && result[2] === undefined &&
 result[3] === "c" && result.index === 0 && result.input === "ac" &&
@@ -195,7 +196,17 @@ sameSpan.indices.groups.same === sameSpan.indices[2] &&
 sameSpan.indices.groups.same !== sameSpan.indices[1] &&
 unicodeResult.indices[0][0] === 0 && unicodeResult.indices[0][1] === 2 &&
 unicode.lastIndex === 2 && hanU[0].length === 2 && hanU.indices[0][1] === 2 &&
-hanV[0].length === 2 && hanV.indices[0][1] === 2;
+hanV[0].length === 2 && hanV.indices[0][1] === 2 &&
+namedUnicode.groups["\u03c0"] === "a" &&
+namedUnicode.groups["$\u{104A4}"] === "b" &&
+namedUnicode.groups["_\u200C"] === "c" &&
+namedUnicode.groups["_\u200D"] === "d" &&
+namedUnicode.groups["\u0CA0_\u0CA0"] === "e" &&
+namedUnicode.indices.groups["\u03c0"] === namedUnicode.indices[1] &&
+namedUnicode.indices.groups["$\u{104A4}"] === namedUnicode.indices[2] &&
+namedUnicode.indices.groups["_\u200C"] === namedUnicode.indices[3] &&
+namedUnicode.indices.groups["_\u200D"] === namedUnicode.indices[4] &&
+namedUnicode.indices.groups["\u0CA0_\u0CA0"] === namedUnicode.indices[5];
 "#;
 
 #[test]

@@ -553,7 +553,7 @@ impl Isolate {
             self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
             self.set_own_data_property(result, groups_atom, groups)?;
             for capture in &matched.named_captures {
-                let atom = self.intern_intrinsic_name(capture.name.as_bytes())?;
+                let atom = self.intern_regexp_capture_name(&capture.name)?;
                 let value = match &capture.range {
                     Some(range) => self.allocate_runtime_string(
                         JsString::try_from_utf16(&input_units[range.clone()])
@@ -627,11 +627,22 @@ impl Isolate {
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
         self.set_own_data_property(indices, groups_atom, groups)?;
         for capture in &matched.named_captures {
-            let atom = self.intern_intrinsic_name(capture.name.as_bytes())?;
+            let atom = self.intern_regexp_capture_name(&capture.name)?;
             let value = self.regexp_named_indices_pair(indices, capture)?;
             self.set_own_data_property(groups, atom, value)?;
         }
         Ok(())
+    }
+
+    /// Interns a decoded capture name with its ECMAScript UTF-16 identity intact.
+    pub(crate) fn intern_regexp_capture_name(
+        &mut self,
+        name: &str,
+    ) -> Result<AtomId, ExecutionError> {
+        let string = JsString::try_from_str(name).map_err(ExecutionError::PropertyKeyString)?;
+        self.atoms
+            .try_intern(string)
+            .map_err(ExecutionError::PropertyKeyAtom)
     }
 
     /// Reuses the numeric capture's pair so `indices.groups` preserves specified identity.

@@ -288,7 +288,7 @@ impl Isolate {
             self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
         self.set_regexp_replace_argument(state, argument_index, groups)?;
         for capture in captures {
-            let atom = self.intern_intrinsic_name(capture.name.as_bytes())?;
+            let atom = self.intern_regexp_capture_name(&capture.name)?;
             let value = match &capture.range {
                 Some(range) => {
                     self.allocate_regexp_replace_state_substring(state, range.clone())?

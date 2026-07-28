@@ -119,8 +119,14 @@ fn functional_replace_resumes_for_every_dispatch_batch_and_major_gc() {
         emptyCalls += index;
         return "-";
       });
+      var unicodeGroups = "abc".replace(
+        /(?<\u03c0>a)(?<$\u{104A4}>b)(?<_\u200C>c)/du,
+        function(match, pi, astral, joiner, index, input, groups) {
+          return groups["\u03c0"] + groups["$\u{104A4}"] + groups["_\u200C"];
+        });
       regexp === "Xb" && order === "aatrue0abatrueT" &&
-        plain === "ab1abcc" && empty === "-a-b-" && emptyCalls === "012";
+        plain === "ab1abcc" && empty === "-a-b-" && emptyCalls === "012" &&
+        unicodeGroups === "abc";
     "#;
     assert_regexp_replace_captures::<1>(source, false);
     assert_regexp_replace_captures::<2>(source, false);
