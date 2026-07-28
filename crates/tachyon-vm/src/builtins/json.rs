@@ -90,7 +90,7 @@ impl Isolate {
     pub(crate) fn finish_json_parse_text(
         &mut self,
         site: NativeContinuationSite,
-        _reviver: Value,
+        reviver: Value,
         text: Value,
     ) -> Result<(), ExecutionError> {
         let mut units = Vec::new();
@@ -103,10 +103,57 @@ impl Isolate {
         let value = parser.parse_value(0)?;
         parser.skip_space();
         if parser.index == parser.units.len() {
+            if self.is_callable_value(reviver)? && !self.is_object_value(value) {
+                return self.call_json_parse_root_reviver(site, reviver, value);
+            }
             self.write(site.caller_base, site.destination, value)
         } else {
             Err(ExecutionError::InvalidJsonText)
         }
+    }
+
+    /// Creates the spec root holder and calls a reviver for one primitive parse result.
+    fn call_json_parse_root_reviver(
+        &mut self,
+        site: NativeContinuationSite,
+        reviver: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let empty = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"").map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let empty_atom = self.property_key_atom(empty)?;
+        let wrapper = self.create_ordinary_object()?;
+        self.set_own_data_property(wrapper, empty_atom, value)?;
+        let prefix = self.create_apply_argument_prefix(reviver, wrapper, vec![empty, value])?;
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::json_parse_reviver(
+                site, reviver, wrapper,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: reviver,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: Some(prefix),
+            argument_prefix_offset: 0,
+            argument_prefix_count: 2,
+            argument_count: 2,
+            this_value: wrapper,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        })?;
+        if let Some(frame) = self.fiber.frames.last_mut()
+            && frame.call_site == Some(site.call_site)
+        {
+            frame.return_register = None;
+            frame.return_continuation = true;
+        }
+        Ok(())
     }
 
     fn json_is_string(&mut self, value: Value) -> bool {

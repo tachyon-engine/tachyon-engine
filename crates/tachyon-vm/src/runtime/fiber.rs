@@ -1443,6 +1443,7 @@ pub(crate) enum NativeContinuationKind {
     TypedArraySlice(TypedArraySliceStage),
     TypedArraySubarray(TypedArraySubarrayStage),
     JsonStringify(JsonStringifyStage),
+    JsonParseReviver,
     SignalState(SignalStateStage),
     SignalWatcherHook,
     SignalComputed,
@@ -1489,6 +1490,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::JsonStringify(stage),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Retains the reviver and root wrapper across one JSON.parse callback.
+    #[inline]
+    pub(crate) const fn json_parse_reviver(
+        site: NativeContinuationSite,
+        reviver: Value,
+        wrapper: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::JsonParseReviver,
+            first: reviver,
+            second: wrapper,
         }
     }
 

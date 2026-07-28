@@ -2407,6 +2407,9 @@ impl Isolate {
             NativeContinuationKind::JsonStringify(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::JsonParseReviver => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::SignalState(SignalStateStage::Equals) => {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
@@ -7988,6 +7991,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::JsonStringify(stage) => {
                     self.resume_json_stringify(continuation, stage, value)
+                }
+                NativeContinuationKind::JsonParseReviver => {
+                    self.write(site.caller_base, site.destination, value)
                 }
                 NativeContinuationKind::SignalState(stage) => {
                     self.resume_signal_state(continuation, stage, value)
