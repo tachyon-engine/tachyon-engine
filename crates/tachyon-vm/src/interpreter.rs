@@ -3452,7 +3452,7 @@ impl Isolate {
         self_binding: Option<(u32, Value)>,
     ) -> Result<GcRef<Environment>, ExecutionError> {
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
-        let metadata_states = if kind != FunctionKind::Module && self_binding.is_none() {
+        let metadata_states = if kind != FunctionKind::Module {
             let function = self
                 .loaded_code(owner.code)?
                 .module
@@ -3481,13 +3481,13 @@ impl Isolate {
             Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |_| {
                 BindingState::new(true, false)
             })
-        } else if let Some((self_slot, _)) = self_binding {
-            Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
-                BindingState::new(slot != self_slot, slot != self_slot)
-            })
         } else if let Some(states) = metadata_states.as_ref() {
             Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
-                states[slot as usize]
+                if self_binding.is_some_and(|(self_slot, _)| slot == self_slot) {
+                    BindingState::new(false, false)
+                } else {
+                    states[slot as usize]
+                }
             })
         } else {
             Environment::try_captured(environment_kind, parent, Some(owner), slot_count)
