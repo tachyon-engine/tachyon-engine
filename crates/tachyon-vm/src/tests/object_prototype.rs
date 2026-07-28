@@ -96,6 +96,50 @@ Object.prototype.toString.call(args) === "[object Arguments]";
     ));
 }
 
+const OBJECT_TO_STRING_TAG_SOURCE: &str = r#"
+var trace = "";
+var target = [];
+var proxy = new Proxy(target, {
+  get(t, key, receiver) {
+    if (key === Symbol.toStringTag) { trace += "g"; return "Custom"; }
+    return Reflect.get(t, key, receiver);
+  }
+});
+var marker = {};
+var abrupt = false;
+var generatorFunction = function* () {};
+var asyncFunction = async function () {};
+var functionProxy = new Proxy(generatorFunction, {});
+try {
+  Object.prototype.toString.call({ get [Symbol.toStringTag]() { throw marker; } });
+} catch (error) { abrupt = error === marker; }
+Object.prototype.toString.call(proxy) === "[object Custom]" &&
+Object.prototype.toString.call({ [Symbol.toStringTag]: 1 }) === "[object Object]" &&
+Object.prototype.toString.call(1n) === "[object BigInt]" &&
+Object.prototype.toString.call(/x/) === "[object RegExp]" &&
+Object.prototype.toString.call([][Symbol.iterator]()) === "[object Array Iterator]" &&
+Object.prototype.toString.call(new Map()[Symbol.iterator]()) === "[object Map Iterator]" &&
+Object.prototype.toString.call(generatorFunction) === "[object GeneratorFunction]" &&
+Object.prototype.toString.call(generatorFunction()) === "[object Generator]" &&
+Object.prototype.toString.call(asyncFunction) === "[object AsyncFunction]" &&
+Object.prototype.toString.call(functionProxy) === "[object GeneratorFunction]" &&
+trace === "g" && abrupt;
+"#;
+
+#[test]
+fn object_to_string_tag_get_resumes_for_every_dispatch_batch() {
+    assert_object_prototype_source::<1>(OBJECT_TO_STRING_TAG_SOURCE, 1_311, false);
+    assert_object_prototype_source::<2>(OBJECT_TO_STRING_TAG_SOURCE, 1_312, false);
+    assert_object_prototype_source::<4>(OBJECT_TO_STRING_TAG_SOURCE, 1_313, false);
+    assert_object_prototype_source::<8>(OBJECT_TO_STRING_TAG_SOURCE, 1_314, false);
+    assert_object_prototype_source::<16>(OBJECT_TO_STRING_TAG_SOURCE, 1_315, false);
+}
+
+#[test]
+fn object_to_string_tag_roots_survive_forced_major_collections() {
+    assert_object_prototype_source::<8>(OBJECT_TO_STRING_TAG_SOURCE, 1_316, true);
+}
+
 const OBJECT_IS_PROTOTYPE_OF_SOURCE: &str = r#"
 function A() {}
 function B() {}
@@ -571,6 +615,34 @@ fn assert_object_proto_accessor_batch<const N: usize>() {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+/// Executes the observable `@@toStringTag` lookup under one dispatch and collection policy.
+fn assert_object_prototype_source<const N: usize>(
+    source: &str,
+    source_id: u32,
+    forced_major: bool,
+) {
+    let module = compile_object_source(source, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("Object.prototype fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

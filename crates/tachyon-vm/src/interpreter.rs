@@ -2330,6 +2330,9 @@ impl Isolate {
             NativeContinuationKind::ErrorStackSetter(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::ObjectToString => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -3688,6 +3691,10 @@ impl Isolate {
             .kind();
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
         let internal_prototype = match kind {
+            FunctionKind::Async => self
+                .realm
+                .async_function_prototype
+                .expect("async function intrinsics initialize before bytecode execution"),
             FunctionKind::Generator => self
                 .realm
                 .generator_function_prototype
@@ -4728,6 +4735,13 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     let function = self.create_dynamic_function_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, function);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::AsyncFunctionConstructor
+                    | NativeFunction::GeneratorFunctionConstructor
+                    | NativeFunction::AsyncGeneratorFunctionConstructor,
+                ) => {
+                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
                 FunctionExecutable::Bytecode { code, function, .. } => {
                     let kind = self
@@ -6103,8 +6117,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, boolean_value(result));
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectToString) => {
-                    let string = self.object_to_string(site.this_value)?;
-                    return self.write(site.caller_base, site.destination, string);
+                    return self.begin_object_to_string(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectToLocaleString) => {
                     return self.begin_object_to_locale_string(&site);
@@ -6236,6 +6249,13 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
                     let function = self.create_dynamic_function_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, function);
+                }
+                FunctionExecutable::Native(
+                    NativeFunction::AsyncFunctionConstructor
+                    | NativeFunction::GeneratorFunctionConstructor
+                    | NativeFunction::AsyncGeneratorFunctionConstructor,
+                ) => {
+                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                     return self.begin_error_constructor(&site, kind);
@@ -6407,6 +6427,13 @@ impl Isolate {
                     return self.begin_async_generator_throw(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::GeneratorFunctionPrototype) => {
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::AsyncFunctionPrototype) => {
                     return self.write(
                         site.caller_base,
                         site.destination,
@@ -7603,6 +7630,9 @@ impl Isolate {
         } else {
             value
         };
+        if let Some(arguments) = self.fiber.argument_objects.last().copied().flatten() {
+            self.detach_mapped_arguments(arguments)?;
+        }
         let frame = self
             .fiber
             .frames
@@ -7904,6 +7934,9 @@ impl Isolate {
                 NativeContinuationKind::ErrorStackSetter(stage) => {
                     self.resume_error_stack_setter(continuation, stage, value)
                 }
+                NativeContinuationKind::ObjectToString => {
+                    self.resume_object_to_string(continuation, value)
+                }
                 NativeContinuationKind::ObjectIsPrototypeOf => self
                     .resume_object_is_prototype_of(continuation, value)
                     .map(|_| ()),
@@ -8181,6 +8214,9 @@ impl Isolate {
                 .ok_or(ExecutionError::MissingCompletionRecord)?;
             if self.fiber.frames.len() == 1 && !frame.return_continuation {
                 return Ok(self.unhandled_throw(value));
+            }
+            if let Some(arguments) = self.fiber.argument_objects.last().copied().flatten() {
+                self.detach_mapped_arguments(arguments)?;
             }
             let frame = self
                 .fiber

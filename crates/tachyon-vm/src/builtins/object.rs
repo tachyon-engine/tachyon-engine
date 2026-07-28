@@ -34,6 +34,57 @@ struct GetOwnPropertyDescriptorsSnapshot {
     key: Option<PropertyKey>,
 }
 
+/// Compact spec fallback selected before the observable `@@toStringTag` lookup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum ObjectBuiltinTag {
+    Object,
+    Array,
+    Arguments,
+    Function,
+    Error,
+    Boolean,
+    Number,
+    String,
+    Date,
+    RegExp,
+}
+
+impl ObjectBuiltinTag {
+    #[inline(always)]
+    const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Object),
+            1 => Some(Self::Array),
+            2 => Some(Self::Arguments),
+            3 => Some(Self::Function),
+            4 => Some(Self::Error),
+            5 => Some(Self::Boolean),
+            6 => Some(Self::Number),
+            7 => Some(Self::String),
+            8 => Some(Self::Date),
+            9 => Some(Self::RegExp),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    const fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Object => b"Object",
+            Self::Array => b"Array",
+            Self::Arguments => b"Arguments",
+            Self::Function => b"Function",
+            Self::Error => b"Error",
+            Self::Boolean => b"Boolean",
+            Self::Number => b"Number",
+            Self::String => b"String",
+            Self::Date => b"Date",
+            Self::RegExp => b"RegExp",
+        }
+    }
+}
+
 impl Isolate {
     /// Begins the observable Get/Call sequence for Object.prototype.toLocaleString.
     pub(crate) fn begin_object_to_locale_string(
@@ -1210,112 +1261,166 @@ impl Isolate {
         self.same_value(left, right)
     }
 
-    /// Implements the ordinary tag-producing subset of Object.prototype.toString.
-    pub(crate) fn object_to_string(&mut self, value: Value) -> Result<Value, ExecutionError> {
-        let tag = if let Some(immediate) = value.as_immediate() {
-            match immediate {
-                Immediate::Undefined => "[object Undefined]",
-                Immediate::Null => "[object Null]",
-                Immediate::True | Immediate::False => "[object Boolean]",
-                Immediate::Hole | Immediate::Uninitialized => "[object Object]",
+    /// Starts Object.prototype.toString, retaining its fallback across observable tag lookup.
+    pub(crate) fn begin_object_to_string(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if let Some(immediate) = site.this_value.as_immediate() {
+            let direct = match immediate {
+                Immediate::Undefined => Some(b"Undefined".as_slice()),
+                Immediate::Null => Some(b"Null".as_slice()),
+                _ => None,
+            };
+            if let Some(tag) = direct {
+                let result = self.assemble_object_tag(None, tag)?;
+                return self.write(site.caller_base, site.destination, result);
             }
-        } else if value.as_i32().is_some()
-            || value.as_f64().is_some()
-            || value.as_heap_ref().is_some_and(|raw| {
-                self.heap
-                    .checked_reference(raw, self.types.number_object)
-                    .is_ok()
-            })
+        }
+        let receiver = self.coerce_to_object(site.this_value)?;
+        let builtin_tag = self.object_builtin_tag(receiver)?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let continuation =
+            NativeContinuation::object_to_string(native_site, receiver, builtin_tag as u8);
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before Object.prototype.toString");
+        let key = self.property_key(symbol)?;
+        if let Err(error) =
+            self.dispatch_proxy_aware_property_read(native_site, receiver, receiver, key)
         {
-            "[object Number]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.boolean_object)
-                .is_ok()
-        }) {
-            "[object Boolean]"
-        } else if self.is_bigint_value(value)
-            || value.as_heap_ref().is_some_and(|raw| {
-                self.heap
-                    .checked_reference(raw, self.types.bigint_object)
-                    .is_ok()
-            })
-        {
-            "[object BigInt]"
-        } else if let Some(raw) = value.as_heap_ref()
-            && self.heap.checked_reference(raw, self.types.string).is_ok()
-        {
-            "[object String]"
-        } else if self.realm.math_object.is_some_and(|math| math == value) {
-            "[object Math]"
-        } else if self.realm.json_object.is_some_and(|json| json == value) {
-            "[object JSON]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.array_buffer_object)
-                .is_ok()
-        }) {
-            "[object ArrayBuffer]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.data_view_object)
-                .is_ok()
-        }) {
-            "[object DataView]"
-        } else if self.is_typed_array_value(value) {
-            match self.typed_array_snapshot(value)?.kind {
-                TypedArrayKind::Int8 => "[object Int8Array]",
-                TypedArrayKind::Uint8 => "[object Uint8Array]",
-                TypedArrayKind::Uint8Clamped => "[object Uint8ClampedArray]",
-                TypedArrayKind::Int16 => "[object Int16Array]",
-                TypedArrayKind::Uint16 => "[object Uint16Array]",
-                TypedArrayKind::Int32 => "[object Int32Array]",
-                TypedArrayKind::Uint32 => "[object Uint32Array]",
-                TypedArrayKind::Float32 => "[object Float32Array]",
-                TypedArrayKind::Float64 => "[object Float64Array]",
-                TypedArrayKind::BigInt64 => "[object BigInt64Array]",
-                TypedArrayKind::BigUint64 => "[object BigUint64Array]",
-            }
-        } else if value.as_heap_ref().is_some_and(|raw| {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        if self.fiber.frames.len() != frame_depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let tag = self.read(native_site.caller_base, native_site.destination)?;
+        self.resume_object_to_string(continuation, tag)
+    }
+
+    /// Completes the tag lookup, accepting only primitive String overrides.
+    pub(crate) fn resume_object_to_string(
+        &mut self,
+        continuation: NativeContinuation,
+        tag: Value,
+    ) -> Result<(), ExecutionError> {
+        let raw = continuation
+            .second()
+            .as_i32()
+            .and_then(|value| u8::try_from(value).ok())
+            .and_then(ObjectBuiltinTag::from_raw)
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let result = if self.is_string_value(tag) {
+            self.assemble_object_tag(Some(tag), &[])?
+        } else {
+            self.assemble_object_tag(None, raw.as_bytes())?
+        };
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            result,
+        )
+    }
+
+    /// Computes the non-observable built-in fallback before reading `@@toStringTag`.
+    fn object_builtin_tag(&mut self, value: Value) -> Result<ObjectBuiltinTag, ExecutionError> {
+        if self.is_array_value(value)? {
+            return Ok(ObjectBuiltinTag::Array);
+        }
+        if value.as_heap_ref().is_some_and(|raw| {
             self.heap
                 .checked_reference(raw, self.types.arguments_object)
                 .is_ok()
         }) {
-            "[object Arguments]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.date_object)
-                .is_ok()
-        }) {
-            "[object Date]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.weak_ref_object)
-                .is_ok()
-        }) {
-            "[object WeakRef]"
-        } else if value.as_heap_ref().is_some_and(|raw| {
-            self.heap
-                .checked_reference(raw, self.types.finalization_registry_object)
-                .is_ok()
-        }) {
-            "[object FinalizationRegistry]"
-        } else if let Some(raw) = value.as_heap_ref()
-            && self
-                .heap
-                .checked_reference(raw, self.types.function)
-                .is_ok()
-        {
-            "[object Function]"
-        } else if self.is_array_value(value)? {
-            "[object Array]"
-        } else if self.native_error_kind(value)?.is_some() {
-            "[object Error]"
-        } else {
-            "[object Object]"
+            return Ok(ObjectBuiltinTag::Arguments);
+        }
+        if self.is_callable_value(value)? {
+            return Ok(ObjectBuiltinTag::Function);
+        }
+        if self.native_error_kind(value)?.is_some() {
+            return Ok(ObjectBuiltinTag::Error);
+        }
+        let Some(raw) = value.as_heap_ref() else {
+            return Ok(ObjectBuiltinTag::Object);
         };
+        if self
+            .heap
+            .checked_reference(raw, self.types.boolean_object)
+            .is_ok()
+        {
+            return Ok(ObjectBuiltinTag::Boolean);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.number_object)
+            .is_ok()
+        {
+            return Ok(ObjectBuiltinTag::Number);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.string_object)
+            .is_ok()
+        {
+            return Ok(ObjectBuiltinTag::String);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.date_object)
+            .is_ok()
+        {
+            return Ok(ObjectBuiltinTag::Date);
+        }
+        if self
+            .heap
+            .checked_reference(raw, self.types.regexp_object)
+            .is_ok()
+        {
+            return Ok(ObjectBuiltinTag::RegExp);
+        }
+        Ok(ObjectBuiltinTag::Object)
+    }
+
+    /// Concatenates one UTF-16 tag without converting it through Rust UTF-8.
+    fn assemble_object_tag(
+        &mut self,
+        string_tag: Option<Value>,
+        fallback: &[u8],
+    ) -> Result<Value, ExecutionError> {
+        const PREFIX: &[u8] = b"[object ";
+        let tag_length = string_tag
+            .map(|value| self.string_value_length(value))
+            .transpose()?
+            .unwrap_or(fallback.len());
+        let capacity = PREFIX
+            .len()
+            .checked_add(tag_length)
+            .and_then(|length| length.checked_add(1))
+            .ok_or(ExecutionError::StringBufferAllocationFailed)?;
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
+        units.extend(PREFIX.iter().map(|byte| u16::from(*byte)));
+        if let Some(tag) = string_tag {
+            self.append_primitive_string_units(tag, &mut units)?;
+        } else {
+            units.extend(fallback.iter().map(|byte| u16::from(*byte)));
+        }
+        units.push(u16::from(b']'));
         self.allocate_runtime_string(
-            JsString::try_from_latin1(tag.as_bytes()).map_err(ExecutionError::PropertyKeyString)?,
+            JsString::try_from_owned_code_units(units)
+                .map_err(ExecutionError::PropertyKeyString)?,
         )
     }
 

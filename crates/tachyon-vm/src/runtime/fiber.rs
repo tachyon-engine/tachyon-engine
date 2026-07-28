@@ -1419,6 +1419,7 @@ pub(crate) enum NativeContinuationKind {
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ErrorStackSetter(ErrorStackSetterStage),
+    ObjectToString,
     ObjectIsPrototypeOf,
     ObjectLookupAccessor {
         stage: ObjectLookupAccessorStage,
@@ -1606,6 +1607,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::ObjectIsPrototypeOf,
             first: prototype,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots the boxed receiver and compact builtin-tag fallback across observable `@@toStringTag` Get.
+    #[inline]
+    pub(crate) const fn object_to_string(
+        site: NativeContinuationSite,
+        receiver: Value,
+        builtin_tag: u8,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::ObjectToString,
+            first: receiver,
+            second: Value::from_i32(builtin_tag as i32),
         }
     }
 

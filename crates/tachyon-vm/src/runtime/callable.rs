@@ -436,7 +436,11 @@ pub(crate) enum NativeFunction {
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
+    AsyncFunctionConstructor,
+    AsyncFunctionPrototype,
+    GeneratorFunctionConstructor,
     GeneratorFunctionPrototype,
+    AsyncGeneratorFunctionConstructor,
     AsyncGeneratorFunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
@@ -929,6 +933,9 @@ impl NativeFunction {
                 | Self::BooleanConstructor
                 | Self::DateConstructor
                 | Self::FunctionConstructor
+                | Self::AsyncFunctionConstructor
+                | Self::GeneratorFunctionConstructor
+                | Self::AsyncGeneratorFunctionConstructor
                 | Self::ErrorConstructor(_)
                 | Self::ProxyConstructor
                 | Self::PromiseConstructor
@@ -1112,6 +1119,9 @@ impl NativeFunction {
             | Self::FunctionPrototypeApply
             | Self::FunctionPrototypeBind
             | Self::FunctionConstructor
+            | Self::AsyncFunctionConstructor
+            | Self::GeneratorFunctionConstructor
+            | Self::AsyncGeneratorFunctionConstructor
             | Self::ErrorConstructor(_)
             | Self::ErrorIsError
             | Self::ArrayConstructor
@@ -1280,6 +1290,7 @@ impl NativeFunction {
             | Self::DateLocalGetter(_)
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
+            | Self::AsyncFunctionPrototype
             | Self::GeneratorFunctionPrototype
             | Self::AsyncGeneratorFunctionPrototype
             | Self::SpeciesGetter
@@ -1513,7 +1524,11 @@ impl NativeFunction {
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
+            Self::AsyncFunctionConstructor => "AsyncFunction",
+            Self::AsyncFunctionPrototype => "",
+            Self::GeneratorFunctionConstructor => "GeneratorFunction",
             Self::GeneratorFunctionPrototype => "",
+            Self::AsyncGeneratorFunctionConstructor => "AsyncGeneratorFunction",
             Self::AsyncGeneratorFunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",

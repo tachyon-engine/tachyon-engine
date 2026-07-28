@@ -58,25 +58,6 @@ impl Isolate {
 
     /// Publishes the standard non-writable, configurable `String Iterator` toStringTag.
     fn initialize_string_iterator_tag(&mut self, prototype: Value) -> Result<(), ExecutionError> {
-        let tag = self.allocate_runtime_string(
-            JsString::try_from_latin1(b"String Iterator")
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )?;
-        let tag_symbol = self
-            .realm
-            .well_known_symbols
-            .to_string_tag
-            .expect("Symbol.toStringTag initializes before iterator intrinsics");
-        let tag_key = self.property_key(tag_symbol)?;
-        self.define_data_property(
-            prototype,
-            tag_key,
-            DataPropertyDescriptor {
-                value: Some(tag),
-                writable: Some(false),
-                enumerable: Some(false),
-                configurable: Some(true),
-            },
-        )
+        self.define_intrinsic_to_string_tag(prototype, b"String Iterator")
     }
 }

@@ -117,9 +117,13 @@ pub(crate) struct Realm {
     pub(crate) function_prototype: Option<Value>,
     pub(crate) function_prototype_call: Option<Value>,
     pub(crate) function_prototype_bind: Option<Value>,
+    pub(crate) async_function_constructor: Option<Value>,
+    pub(crate) async_function_prototype: Option<Value>,
+    pub(crate) generator_function_constructor: Option<Value>,
     pub(crate) generator_function_prototype: Option<Value>,
     pub(crate) generator_prototype: Option<Value>,
     pub(crate) generator_next: Option<Value>,
+    pub(crate) async_generator_function_constructor: Option<Value>,
     pub(crate) async_generator_function_prototype: Option<Value>,
     pub(crate) async_generator_prototype: Option<Value>,
     pub(crate) array_constructor: Option<Value>,
@@ -292,9 +296,13 @@ impl Realm {
             function_prototype: None,
             function_prototype_call: None,
             function_prototype_bind: None,
+            async_function_constructor: None,
+            async_function_prototype: None,
+            generator_function_constructor: None,
             generator_function_prototype: None,
             generator_prototype: None,
             generator_next: None,
+            async_generator_function_constructor: None,
             async_generator_function_prototype: None,
             async_generator_prototype: None,
             array_constructor: None,
@@ -702,9 +710,13 @@ impl Trace for Realm {
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
         self.function_prototype_bind.trace(tracer);
+        self.async_function_constructor.trace(tracer);
+        self.async_function_prototype.trace(tracer);
+        self.generator_function_constructor.trace(tracer);
         self.generator_function_prototype.trace(tracer);
         self.generator_prototype.trace(tracer);
         self.generator_next.trace(tracer);
+        self.async_generator_function_constructor.trace(tracer);
         self.async_generator_function_prototype.trace(tracer);
         self.async_generator_prototype.trace(tracer);
         self.array_constructor.trace(tracer);

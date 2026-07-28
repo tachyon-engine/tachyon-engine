@@ -2483,6 +2483,7 @@ impl Isolate {
                 configurable: Some(true),
             },
         )?;
+        self.define_intrinsic_to_string_tag(iterator_prototype, b"Iterator")?;
         let array_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,
@@ -2502,6 +2503,7 @@ impl Isolate {
         self.realm.array_iterator_next = Some(next);
         let next_atom = self.intern_intrinsic_name(b"next")?;
         self.set_intrinsic_data_property(array_iterator_prototype, next_atom, next, true)?;
+        self.define_intrinsic_to_string_tag(array_iterator_prototype, b"Array Iterator")?;
         let keys = self.allocate_native_function(
             NativeFunction::ArrayKeys,
             OrdinaryObject {
@@ -2621,8 +2623,35 @@ impl Isolate {
             storage: None,
             prototype: iterator_prototype,
         })?;
+        let async_function_prototype = self.allocate_native_function(
+            NativeFunction::AsyncFunctionPrototype,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let async_function_constructor = self.allocate_native_function(
+            NativeFunction::AsyncFunctionConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
         let generator_function_prototype = self.allocate_native_function(
             NativeFunction::GeneratorFunctionPrototype,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let generator_function_constructor = self.allocate_native_function(
+            NativeFunction::GeneratorFunctionConstructor,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,
@@ -2657,6 +2686,9 @@ impl Isolate {
                 prototype: function_prototype,
             },
         )?;
+        self.realm.async_function_constructor = Some(async_function_constructor);
+        self.realm.async_function_prototype = Some(async_function_prototype);
+        self.realm.generator_function_constructor = Some(generator_function_constructor);
         self.realm.generator_function_prototype = Some(generator_function_prototype);
         self.realm.generator_prototype = Some(generator_prototype);
         self.realm.generator_next = Some(next);
@@ -2666,7 +2698,24 @@ impl Isolate {
         self.set_intrinsic_data_property(generator_prototype, return_atom, r#return, true)?;
         let throw_atom = self.intern_intrinsic_name(b"throw")?;
         self.set_intrinsic_data_property(generator_prototype, throw_atom, r#throw, true)?;
+        self.define_intrinsic_to_string_tag(async_function_prototype, b"AsyncFunction")?;
+        self.define_intrinsic_to_string_tag(generator_prototype, b"Generator")?;
+        self.define_intrinsic_to_string_tag(generator_function_prototype, b"GeneratorFunction")?;
         let constructor_atom = self.constructor_atom()?;
+        self.set_function_prototype(async_function_constructor, async_function_prototype)?;
+        self.set_intrinsic_data_property(
+            async_function_prototype,
+            constructor_atom,
+            async_function_constructor,
+            true,
+        )?;
+        self.set_function_prototype(generator_function_constructor, generator_function_prototype)?;
+        self.set_intrinsic_data_property(
+            generator_function_prototype,
+            constructor_atom,
+            generator_function_constructor,
+            true,
+        )?;
         self.set_intrinsic_data_property(
             generator_prototype,
             constructor_atom,
@@ -2689,6 +2738,15 @@ impl Isolate {
             })?;
         let async_generator_function_prototype = self.allocate_native_function(
             NativeFunction::AsyncGeneratorFunctionPrototype,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: async_function_prototype,
+            },
+        )?;
+        let async_generator_function_constructor = self.allocate_native_function(
+            NativeFunction::AsyncGeneratorFunctionConstructor,
             OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,
@@ -2723,6 +2781,8 @@ impl Isolate {
                 prototype: function_prototype,
             },
         )?;
+        self.realm.async_generator_function_constructor =
+            Some(async_generator_function_constructor);
         self.realm.async_generator_function_prototype = Some(async_generator_function_prototype);
         self.realm.async_generator_prototype = Some(async_generator_prototype);
         self.set_intrinsic_data_property(async_generator_prototype, next_atom, async_next, true)?;
@@ -2733,25 +2793,20 @@ impl Isolate {
             true,
         )?;
         self.set_intrinsic_data_property(async_generator_prototype, throw_atom, async_throw, true)?;
-        let to_string_tag = self
-            .realm
-            .well_known_symbols
-            .to_string_tag
-            .expect("Symbol initializes before generator intrinsics");
-        let async_generator_tag = self.allocate_runtime_string(
-            JsString::try_from_latin1(b"AsyncGenerator")
-                .map_err(ExecutionError::PropertyKeyString)?,
+        self.define_intrinsic_to_string_tag(async_generator_prototype, b"AsyncGenerator")?;
+        self.define_intrinsic_to_string_tag(
+            async_generator_function_prototype,
+            b"AsyncGeneratorFunction",
         )?;
-        let to_string_tag_key = self.property_key(to_string_tag)?;
-        self.define_data_property(
-            async_generator_prototype,
-            to_string_tag_key,
-            DataPropertyDescriptor {
-                value: Some(async_generator_tag),
-                writable: Some(false),
-                enumerable: Some(false),
-                configurable: Some(true),
-            },
+        self.set_function_prototype(
+            async_generator_function_constructor,
+            async_generator_function_prototype,
+        )?;
+        self.set_intrinsic_data_property(
+            async_generator_function_prototype,
+            constructor_atom,
+            async_generator_function_constructor,
+            true,
         )?;
         self.set_intrinsic_data_property(
             async_generator_prototype,
@@ -3065,6 +3120,8 @@ impl Isolate {
         let next_atom = self.intern_intrinsic_name(b"next")?;
         self.set_intrinsic_data_property(map_iterator_prototype, next_atom, next, true)?;
         self.set_intrinsic_data_property(set_iterator_prototype, next_atom, next, true)?;
+        self.define_intrinsic_to_string_tag(map_iterator_prototype, b"Map Iterator")?;
+        self.define_intrinsic_to_string_tag(set_iterator_prototype, b"Set Iterator")?;
         let identity = self
             .realm
             .iterator_identity
@@ -3099,12 +3156,6 @@ impl Isolate {
         map_prototype: Value,
         set_prototype: Value,
     ) -> Result<(), ExecutionError> {
-        let symbol = self
-            .realm
-            .well_known_symbols
-            .to_string_tag
-            .expect("Symbol.toStringTag initializes before collections");
-        let key = self.property_key(symbol)?;
         for (prototype, tag) in [
             (map_prototype, b"Map".as_slice()),
             (set_prototype, b"Set".as_slice()),
@@ -3121,21 +3172,35 @@ impl Isolate {
                 b"WeakSet".as_slice(),
             ),
         ] {
-            let value = self.allocate_runtime_string(
-                JsString::try_from_latin1(tag).map_err(ExecutionError::PropertyKeyString)?,
-            )?;
-            self.define_data_property(
-                prototype,
-                key,
-                DataPropertyDescriptor {
-                    value: Some(value),
-                    writable: Some(false),
-                    enumerable: Some(false),
-                    configurable: Some(true),
-                },
-            )?;
+            self.define_intrinsic_to_string_tag(prototype, tag)?;
         }
         Ok(())
+    }
+
+    /// Defines the common non-writable, non-enumerable, configurable intrinsic tag descriptor.
+    pub(super) fn define_intrinsic_to_string_tag(
+        &mut self,
+        object: Value,
+        tag: &[u8],
+    ) -> Result<(), ExecutionError> {
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before intrinsic tag publication");
+        let key = self.property_key(symbol)?;
+        let atom = self.intern_intrinsic_name(tag)?;
+        let value = self.atom_string_value(atom)?;
+        self.define_data_property(
+            object,
+            key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
     }
 
     /// Installs weak collection constructors and prototype methods over ephemeron-backed objects.
@@ -3419,7 +3484,25 @@ impl Isolate {
         )?;
         self.realm.json_stringify = Some(stringify);
         let stringify_atom = self.intern_intrinsic_name(b"stringify")?;
-        self.set_intrinsic_data_property(object, stringify_atom, stringify, true)
+        self.set_intrinsic_data_property(object, stringify_atom, stringify, true)?;
+        let tag_symbol = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol.toStringTag initializes before JSON");
+        let tag_key = self.property_key(tag_symbol)?;
+        let tag_atom = self.intern_intrinsic_name(b"JSON")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            object,
+            tag_key,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
     }
 
     /// Installs the ordinary-internal-method Reflect subset before Proxy dispatch is available.
