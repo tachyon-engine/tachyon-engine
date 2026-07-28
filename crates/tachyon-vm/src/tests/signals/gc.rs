@@ -27,6 +27,33 @@ pub(super) fn assert_signal_forced_minor<const N: usize>() {
     }
 }
 
+/// Executes the allocation-heavy Signals fixtures with a major collection before every managed
+/// allocation, covering old-generation graph edges and callback roots for each VM batch size.
+pub(super) fn assert_signal_forced_major<const N: usize>() {
+    let fixtures = [
+        (SIGNAL_SOURCE, "signals-major-core"),
+        (SIGNAL_NOTIFY_SOURCE, "signals-major-notify"),
+        (SIGNAL_WATCHER_STATE_SOURCE, "signals-major-watcher"),
+        (
+            SIGNAL_DYNAMIC_DEPENDENCIES_SOURCE,
+            "signals-major-recompute",
+        ),
+        (SIGNAL_INTROSPECTION_SOURCE, "signals-major-introspection"),
+    ];
+    for (index, (source, name)) in fixtures.into_iter().enumerate() {
+        let mut isolate = signal_minor_test_isolate();
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+        assert_signal_job::<N>(
+            &mut isolate,
+            source,
+            9_700 + (N as u32) * 16 + index as u32,
+            name,
+        );
+    }
+}
+
 /// Gives the forced-minor matrix enough bounded heap for descriptor-heavy fixtures.
 pub(super) fn signal_minor_test_isolate() -> Isolate {
     Isolate::new(IsolateConfig::new(

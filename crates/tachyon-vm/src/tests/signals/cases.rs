@@ -552,3 +552,20 @@ fn signal_forced_minor_allocation_matrix_works_for_every_dispatch_batch() {
         }
     }
 }
+
+/// Runs the allocation-heavy Signals entry points with a major collection at every managed
+/// allocation point. This complements the minor matrix and exercises old-generation graph
+/// edges, callback roots, and pending watcher operations under the strongest collector cadence.
+#[test]
+fn signal_forced_major_allocation_matrix_works_for_every_dispatch_batch() {
+    for batch in [1, 2, 4, 8, 16] {
+        match batch {
+            1 => assert_signal_forced_major::<1>(),
+            2 => assert_signal_forced_major::<2>(),
+            4 => assert_signal_forced_major::<4>(),
+            8 => assert_signal_forced_major::<8>(),
+            16 => assert_signal_forced_major::<16>(),
+            _ => unreachable!("matrix only contains supported dispatch batches"),
+        }
+    }
+}
