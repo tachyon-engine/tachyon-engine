@@ -3,8 +3,33 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use test262_runner::{
-    RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
+    ProgressObserver, RunOptions, RunProgress, RunReport, TachyonAdapter, Test262Config,
+    compare_reports, run_checkout, run_checkout_with_progress,
 };
+
+struct StderrProgress;
+
+impl ProgressObserver for StderrProgress {
+    fn observe(&self, progress: RunProgress<'_>) {
+        match progress {
+            RunProgress::Started {
+                path,
+                started,
+                total,
+            } => eprintln!("test262 [{started}/{total}] start {path}"),
+            RunProgress::Completed {
+                path,
+                completed,
+                total,
+                variants,
+                elapsed,
+            } => eprintln!(
+                "test262 [{completed}/{total}] done {path} variants={variants} elapsed_ms={}",
+                elapsed.as_millis()
+            ),
+        }
+    }
+}
 
 /// Reads explicit config/checkout arguments and emits a versioned JSON report to stdout.
 fn main() -> ExitCode {
@@ -36,11 +61,13 @@ fn run_tachyon(
     let checkout = PathBuf::from(args.next().ok_or(USAGE)?);
     let mut options = RunOptions::default();
     let mut summary_only = false;
+    let mut progress = false;
     while let Some(argument) = args.next() {
         match argument.to_str() {
             Some("--serial") => options.parallel = false,
             Some("--parallel") => options.parallel = true,
             Some("--summary-only") => summary_only = true,
+            Some("--progress") => progress = true,
             Some("--seed") => {
                 let value = args.next().ok_or("--seed requires an unsigned integer")?;
                 options.seed = Some(
@@ -60,7 +87,17 @@ fn run_tachyon(
     }
     let config_source = fs::read_to_string(config_path)?;
     let config = Test262Config::parse(&config_source)?;
-    let report = run_checkout(&checkout, &config, &TachyonAdapter, &options)?;
+    let report = if progress {
+        run_checkout_with_progress(
+            &checkout,
+            &config,
+            &TachyonAdapter,
+            &options,
+            Some(&StderrProgress),
+        )?
+    } else {
+        run_checkout(&checkout, &config, &TachyonAdapter, &options)?
+    };
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
     if summary_only {
@@ -98,4 +135,4 @@ fn compare(
     Ok(())
 }
 
-const USAGE: &str = "usage:\n  test262-runner run-tachyon <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  test262-runner compare <base.json> <new.json> [--markdown]";
+const USAGE: &str = "usage:\n  test262-runner run-tachyon <config> <checkout> [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only] [--progress]\n  test262-runner compare <base.json> <new.json> [--markdown]";

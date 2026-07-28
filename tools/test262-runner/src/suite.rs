@@ -6,7 +6,11 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use rayon::prelude::*;
@@ -86,6 +90,31 @@ pub struct RunSummary {
     pub by_path: BTreeMap<Box<str>, BTreeMap<ResultKind, u64>>,
 }
 
+/// Optional execution diagnostics emitted around each source file without changing report order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunProgress<'a> {
+    /// The runner is about to execute all strictness variants for one file.
+    Started {
+        path: &'a str,
+        started: usize,
+        total: usize,
+    },
+    /// Every variant for one file completed.
+    Completed {
+        path: &'a str,
+        completed: usize,
+        total: usize,
+        variants: usize,
+        elapsed: Duration,
+    },
+}
+
+/// Thread-safe sink used only when a caller explicitly requests live progress diagnostics.
+pub trait ProgressObserver: Sync {
+    /// Receives one non-persisted execution boundary event.
+    fn observe(&self, progress: RunProgress<'_>);
+}
+
 /// A checkout path, metadata block, harness include, or variant could not be loaded safely.
 #[derive(Debug)]
 pub struct SuiteError {
@@ -110,6 +139,17 @@ pub fn run_checkout(
     adapter: &dyn EngineAdapter,
     options: &RunOptions,
 ) -> Result<RunReport, SuiteError> {
+    run_checkout_with_progress(checkout, config, adapter, options, None)
+}
+
+/// Executes a checkout while reporting file boundaries so a long-running test remains identifiable.
+pub fn run_checkout_with_progress(
+    checkout: &Path,
+    config: &Test262Config,
+    adapter: &dyn EngineAdapter,
+    options: &RunOptions,
+    observer: Option<&dyn ProgressObserver>,
+) -> Result<RunReport, SuiteError> {
     config.validate().map_err(|message| SuiteError {
         path: PathBuf::from("test262_config.toml"),
         message: message.into(),
@@ -127,7 +167,31 @@ pub fn run_checkout(
                 .then(left.relative_path.cmp(&right.relative_path))
         });
     }
-    let execute = |test: &LoadedTest| execute_loaded(test, &harness, adapter);
+    let total = tests.len();
+    let started = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
+    let execute = |test: &LoadedTest| {
+        let ordinal = started.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(observer) = observer {
+            observer.observe(RunProgress::Started {
+                path: &test.relative_path,
+                started: ordinal,
+                total,
+            });
+        }
+        let start = Instant::now();
+        let result = execute_loaded(test, &harness, adapter);
+        if let (Some(observer), Ok(variants)) = (observer, &result) {
+            observer.observe(RunProgress::Completed {
+                path: &test.relative_path,
+                completed: completed.fetch_add(1, Ordering::Relaxed) + 1,
+                total,
+                variants: variants.len(),
+                elapsed: start.elapsed(),
+            });
+        }
+        result
+    };
     let nested = if options.parallel {
         tests
             .par_iter()
@@ -456,7 +520,7 @@ impl std::error::Error for SuiteError {}
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, sync::Mutex};
 
     use tempfile::TempDir;
 
@@ -465,7 +529,9 @@ mod tests {
         StubAdapter, Test262Config, VariantKind,
     };
 
-    use super::{RunOptions, run_checkout};
+    use super::{
+        ProgressObserver, RunOptions, RunProgress, run_checkout, run_checkout_with_progress,
+    };
 
     const CONFIG: &str = include_str!("../../../test262_config.toml");
 
@@ -550,6 +616,48 @@ mod tests {
             serde_json::from_str::<super::RunReport>(&json).unwrap(),
             first
         );
+    }
+
+    #[derive(Default)]
+    struct RecordingProgress(Mutex<Vec<(bool, String, usize)>>);
+
+    impl ProgressObserver for RecordingProgress {
+        fn observe(&self, progress: RunProgress<'_>) {
+            let event = match progress {
+                RunProgress::Started { path, started, .. } => (true, path.to_owned(), started),
+                RunProgress::Completed {
+                    path, completed, ..
+                } => (false, path.to_owned(), completed),
+            };
+            self.0.lock().unwrap().push(event);
+        }
+    }
+
+    #[test]
+    fn progress_brackets_each_file_without_changing_variant_accounting() {
+        let root = checkout();
+        let config = Test262Config::parse(CONFIG).unwrap();
+        let progress = RecordingProgress::default();
+        let report = run_checkout_with_progress(
+            root.path(),
+            &config,
+            &StubAdapter::unsupported(),
+            &RunOptions {
+                parallel: false,
+                verify_commit: false,
+                ..RunOptions::default()
+            },
+            Some(&progress),
+        )
+        .unwrap();
+        let events = progress.0.into_inner().unwrap();
+        assert_eq!(report.summary.total, 4);
+        assert_eq!(events.len(), 6);
+        let (pairs, remainder) = events.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        assert!(pairs.iter().all(|[started, completed]| {
+            started.0 && !completed.0 && started.1 == completed.1 && started.2 == completed.2
+        }));
     }
 
     #[test]

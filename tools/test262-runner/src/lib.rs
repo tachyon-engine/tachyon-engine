@@ -30,5 +30,8 @@ pub use runner::{
     EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, ResultKind, StubAdapter,
     TestResult, run_test,
 };
-pub use suite::{RunOptions, RunReport, RunSummary, SuiteError, run_checkout};
+pub use suite::{
+    ProgressObserver, RunOptions, RunProgress, RunReport, RunSummary, SuiteError, run_checkout,
+    run_checkout_with_progress,
+};
 pub use tachyon::TachyonAdapter;

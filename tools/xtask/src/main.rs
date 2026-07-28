@@ -18,10 +18,35 @@ use benchmark_runner::{
     load_corpus, run_case,
 };
 use test262_runner::{
-    RunOptions, RunReport, TachyonAdapter, Test262Config, compare_reports, run_checkout,
+    ProgressObserver, RunOptions, RunProgress, RunReport, TachyonAdapter, Test262Config,
+    compare_reports, run_checkout, run_checkout_with_progress,
 };
 
 mod signals;
+
+struct StderrProgress;
+
+impl ProgressObserver for StderrProgress {
+    fn observe(&self, progress: RunProgress<'_>) {
+        match progress {
+            RunProgress::Started {
+                path,
+                started,
+                total,
+            } => eprintln!("test262 [{started}/{total}] start {path}"),
+            RunProgress::Completed {
+                path,
+                completed,
+                total,
+                variants,
+                elapsed,
+            } => eprintln!(
+                "test262 [{completed}/{total}] done {path} variants={variants} elapsed_ms={}",
+                elapsed.as_millis()
+            ),
+        }
+    }
+}
 
 const ENGINE_CRATES: [&str; 6] = [
     "tachyon-value",
@@ -122,7 +147,7 @@ fn main() {
     }
 }
 
-const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test signals\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
+const USAGE: &str = "usage:\n  cargo xtask architecture check\n  cargo xtask test signals\n  cargo xtask test262 fetch\n  cargo xtask test262 run [test/path-or-file] [--filter text] [--seed n] [--serial|--parallel] [--summary-only] [--progress]\n  cargo xtask test262 compare <base.json> <new.json> [--markdown]\n  cargo xtask bench verify\n  cargo xtask bench compare <base.json> <candidate.json> [--markdown]\n  cargo xtask bench build-profile <profile-id>\n  cargo xtask bench run-profile <profile-id> [--script id]\n  cargo xtask bench run-in-process <tachyon|boa|rquickjs> <steady-state> <script-id>\n  cargo xtask bench profile-tachyon <script-id>\n  cargo xtask bench run-external escargot <executable> <version> <commit> <features> <build-flags> [--script id] [--engine-arg arg]...";
 
 struct ExternalRunOptions {
     kind: EngineKind,
@@ -223,12 +248,14 @@ fn fetch_test262() -> Result<(), String> {
 fn run_test262(arguments: &[String]) -> Result<(), String> {
     let mut options = RunOptions::default();
     let mut summary_only = false;
+    let mut progress = false;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
             "--serial" => options.parallel = false,
             "--parallel" => options.parallel = true,
             "--summary-only" => summary_only = true,
+            "--progress" => progress = true,
             "--seed" => {
                 index += 1;
                 let value = arguments.get(index).ok_or("--seed requires an integer")?;
@@ -244,12 +271,19 @@ fn run_test262(arguments: &[String]) -> Result<(), String> {
         }
         index += 1;
     }
-    let report = run_checkout(
-        &workspace_root().join("test262"),
-        &test262_config()?,
-        &TachyonAdapter,
-        &options,
-    )
+    let checkout = workspace_root().join("test262");
+    let config = test262_config()?;
+    let report = if progress {
+        run_checkout_with_progress(
+            &checkout,
+            &config,
+            &TachyonAdapter,
+            &options,
+            Some(&StderrProgress),
+        )
+    } else {
+        run_checkout(&checkout, &config, &TachyonAdapter, &options)
+    }
     .map_err(|error| error.to_string())?;
     let stdout = std::io::stdout();
     let mut output = stdout.lock();
