@@ -55,6 +55,8 @@ original = async function self(a = 3, b = a, c = self) {
     result += a + ":" + b + ":" + (c === original) + "|";
     self = 1;
     result += (self === original) + "|";
+    (() => { self = 2; })();
+    result += (self === original) + "|";
 };
 original(undefined);
 result;
@@ -196,5 +198,5 @@ fn assert_named_async_parameters<const N: usize>(forced_major: bool) {
     let result = isolate
         .string_value_to_utf16(value)
         .expect("named async parameter result is a string");
-    assert_eq!(String::from_utf16(&result).unwrap(), "3:3:true|true|");
+    assert_eq!(String::from_utf16(&result).unwrap(), "3:3:true|true|true|");
 }

@@ -123,7 +123,6 @@ fn lower_entry(
         root_scope: hir.root_scope(),
         function_scope: Some(hir.root_scope()),
         is_arrow: false,
-        self_binding: None,
         strict: false,
         initialize_instance_elements: false,
         proper_tail_calls: false,
@@ -294,6 +293,7 @@ struct EnvironmentPlans {
     functions: Vec<FunctionEnvironmentPlan>,
     classes: Vec<ClassEnvironmentPlan>,
     global_lexicals: Vec<GlobalLexicalPlan>,
+    function_self_bindings: Vec<BindingId>,
     scopes: std::sync::Arc<[crate::HirScope]>,
 }
 
@@ -359,6 +359,7 @@ impl EnvironmentPlans {
             })
         });
         let mut functions = Vec::with_capacity(hir.functions().len());
+        let mut function_self_bindings = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
             let force_dynamic_bindings = hir
                 .scopes()
@@ -391,6 +392,7 @@ impl EnvironmentPlans {
                 function.parameter_initializers.iter().any(Option::is_some);
             if let Some(binding) = &function.self_binding {
                 push_function_name_slot(binding, &mut slots)?;
+                function_self_bindings.push(binding.id);
             }
             for parameter in function.parameters.iter() {
                 for binding in pattern_bindings(parameter) {
@@ -470,6 +472,7 @@ impl EnvironmentPlans {
             functions,
             classes,
             global_lexicals,
+            function_self_bindings,
             scopes: hir.scopes().into(),
         })
     }
@@ -497,6 +500,12 @@ impl EnvironmentPlans {
     #[inline(always)]
     fn scopes_root(&self) -> ScopeId {
         self.root_scope
+    }
+
+    /// Identifies immutable named-function expression bindings through nested closure scopes.
+    #[inline(always)]
+    fn is_function_self_binding(&self, binding: BindingId) -> bool {
+        self.function_self_bindings.contains(&binding)
     }
 
     /// Resolves a captured reference to the nearest allocated environment chain node.
@@ -940,7 +949,6 @@ fn lower_function(
         root_scope,
         function_scope: Some(function.scope),
         is_arrow: function.is_arrow,
-        self_binding: function.self_binding.as_ref().map(|binding| binding.id),
         strict: function.strict,
         initialize_instance_elements: function.initialize_instance_elements,
         proper_tail_calls: function.strict
