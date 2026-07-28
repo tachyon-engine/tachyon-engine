@@ -72,6 +72,76 @@ resourceUntrack.get() === 7 && resourceUntrackCalls === 2 && resourceUntrackOwne
 Signal.subtle.currentComputed() === undefined;
 "#;
 
+pub(super) const SIGNAL_STATE_EQUALS_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceStateEqualsCalls = 0;
+var resourceStateEquals = new Signal.State(1, { equals: function(oldValue, newValue) {
+    resourceStateEqualsCalls++;
+    return oldValue === newValue;
+} });
+true;
+"#;
+
+pub(super) const SIGNAL_STATE_EQUALS_RESOURCE_FAIL_SOURCE: &str = "resourceStateEquals.set(2);";
+
+pub(super) const SIGNAL_STATE_EQUALS_RESOURCE_RECOVER_SOURCE: &str = r#"
+var resourceStateEqualsUnchanged = resourceStateEquals.get() === 1 &&
+    resourceStateEqualsCalls === 0;
+resourceStateEquals.set(2);
+resourceStateEqualsUnchanged && resourceStateEquals.get() === 2 &&
+    resourceStateEqualsCalls === 1;
+"#;
+
+pub(super) const SIGNAL_WATCHED_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceWatchedCalls = 0;
+var resourceWatchedNotifyCalls = 0;
+var resourceWatchedState = new Signal.State(0, {
+    [Signal.subtle.watched]: function() { resourceWatchedCalls++; }
+});
+var resourceWatchedWatcher = new Signal.subtle.Watcher(function() {
+    resourceWatchedNotifyCalls++;
+});
+true;
+"#;
+
+pub(super) const SIGNAL_WATCHED_RESOURCE_FAIL_SOURCE: &str =
+    "resourceWatchedWatcher.watch(resourceWatchedState);";
+
+pub(super) const SIGNAL_WATCHED_RESOURCE_RECOVER_SOURCE: &str = r#"
+var resourceWatchedAttached = Signal.subtle.introspectSources(resourceWatchedWatcher).length === 1 &&
+    resourceWatchedCalls === 0;
+resourceWatchedWatcher.watch(resourceWatchedState);
+resourceWatchedState.set(1);
+resourceWatchedAttached && resourceWatchedCalls === 0 && resourceWatchedNotifyCalls === 1;
+"#;
+
+pub(super) const SIGNAL_UNWATCHED_RESOURCE_SETUP_SOURCE: &str = r#"
+var resourceUnwatchedWatchedCalls = 0;
+var resourceUnwatchedCalls = 0;
+var resourceUnwatchedNotifyCalls = 0;
+var resourceUnwatchedState = new Signal.State(0, {
+    [Signal.subtle.watched]: function() { resourceUnwatchedWatchedCalls++; },
+    [Signal.subtle.unwatched]: function() { resourceUnwatchedCalls++; }
+});
+var resourceUnwatchedWatcher = new Signal.subtle.Watcher(function() {
+    resourceUnwatchedNotifyCalls++;
+});
+resourceUnwatchedWatcher.watch(resourceUnwatchedState);
+resourceUnwatchedWatchedCalls === 1;
+"#;
+
+pub(super) const SIGNAL_UNWATCHED_RESOURCE_FAIL_SOURCE: &str =
+    "resourceUnwatchedWatcher.unwatch(resourceUnwatchedState);";
+
+pub(super) const SIGNAL_UNWATCHED_RESOURCE_RECOVER_SOURCE: &str = r#"
+resourceUnwatchedState.set(1);
+var resourceUnwatchedDetached = Signal.subtle.introspectSources(resourceUnwatchedWatcher).length === 0 &&
+    resourceUnwatchedCalls === 0 && resourceUnwatchedNotifyCalls === 0;
+resourceUnwatchedWatcher.watch(resourceUnwatchedState);
+resourceUnwatchedState.set(2);
+resourceUnwatchedDetached && resourceUnwatchedWatchedCalls === 2 &&
+    resourceUnwatchedCalls === 0 && resourceUnwatchedNotifyCalls === 1;
+"#;
+
 #[derive(Clone, Copy)]
 pub(super) struct SignalResourceCase {
     pub(super) setup: &'static str,

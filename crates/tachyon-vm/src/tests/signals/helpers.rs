@@ -43,6 +43,36 @@ pub(super) fn assert_signal_resource_restoration<const N: usize>(forced_major: b
             source_id: 9_230,
             name: "untrack",
         },
+        SignalResourceCase {
+            setup: SIGNAL_STATE_EQUALS_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_STATE_EQUALS_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_STATE_EQUALS_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 0,
+            expects_stack_limit: true,
+            source_id: 9_240,
+            name: "state-equals",
+        },
+        SignalResourceCase {
+            setup: SIGNAL_WATCHED_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_WATCHED_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_WATCHED_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 0,
+            expects_stack_limit: true,
+            source_id: 9_250,
+            name: "watched-hook",
+        },
+        SignalResourceCase {
+            setup: SIGNAL_UNWATCHED_RESOURCE_SETUP_SOURCE,
+            failure: SIGNAL_UNWATCHED_RESOURCE_FAIL_SOURCE,
+            recovery: SIGNAL_UNWATCHED_RESOURCE_RECOVER_SOURCE,
+            dirty: None,
+            completion_limit: 0,
+            expects_stack_limit: true,
+            source_id: 9_260,
+            name: "unwatched-hook",
+        },
     ] {
         assert_signal_resource_case::<N>(forced_major, case);
     }
