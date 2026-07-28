@@ -40,14 +40,14 @@ fn deep_weak_map_chain_survives_explicit_major_collection() {
 var map = new WeakMap();
 var head = {};
 var key = head;
-for (var i = 0; i < 1000; i++) {
+for (var i = 0; i < 99999; i++) {
   var next = {};
   map.set(key, next);
   key = next;
 }
 var traversed = 0;
 for (key = head; key !== undefined; key = map.get(key)) traversed++;
-traversed === 1001;
+traversed === 100000;
 "#;
     let module = Compiler
         .compile(
@@ -60,18 +60,25 @@ traversed === 1001;
             CompileOptions::default(),
         )
         .expect("deep WeakMap fixture compiles");
-    let mut isolate = test_isolate();
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1 << 14, 16 * 1024 * 1024, AtomHashSeed::new(3, 4)),
+        HeapLimit::new(256 * 1024 * 1024),
+        StackLimits::new(4096, 2 * 1024 * 1024),
+        RealmLimits::new(64, 1 << 18),
+    ))
+    .expect("large deep-chain isolate descriptors register");
     let outcome = isolate
         .execute(
             &module,
             ExecutionBudget {
-                fuel: 2_000_000,
+                fuel: 20_000_000,
                 quantum: u32::MAX,
             },
         )
         .expect("deep WeakMap fixture executes");
     assert!(
-        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "deep WeakMap outcome: {outcome:?}"
     );
 }
 
