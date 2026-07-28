@@ -48,6 +48,18 @@ const ASYNC_FUNCTION_ASSERTION: &str = r#"
 trace;
 "#;
 
+const NAMED_ASYNC_PARAMETER_SOURCE: &str = r#"
+var result = "";
+var original;
+original = async function self(a = 3, b = a, c = self) {
+    result += a + ":" + b + ":" + (c === original) + "|";
+    self = 1;
+    result += (self === original) + "|";
+};
+original(undefined);
+result;
+"#;
+
 #[test]
 fn async_function_await_runs_for_every_dispatch_batch() {
     assert_async_function_source::<1>(false);
@@ -64,6 +76,16 @@ fn async_function_state_survives_forced_major_collection() {
     assert_async_function_source::<4>(true);
     assert_async_function_source::<8>(true);
     assert_async_function_source::<16>(true);
+}
+
+#[test]
+fn named_async_parameter_environment_works_for_every_dispatch_batch() {
+    assert_named_async_parameters::<1>(false);
+    assert_named_async_parameters::<2>(false);
+    assert_named_async_parameters::<4>(false);
+    assert_named_async_parameters::<8>(false);
+    assert_named_async_parameters::<16>(false);
+    assert_named_async_parameters::<8>(true);
 }
 
 /// Runs one complete async-function lifecycle under a dispatch and collection policy.
@@ -132,4 +154,47 @@ fn assert_async_function_source<const N: usize>(forced_major: bool) {
         "body|caller|before|return:5|after:7|caught|finally|paused:8|rejected:9|arrow:3|",
         "async function batch {N}, forced_major={forced_major}"
     );
+}
+
+/// Verifies named-function and parameter environments remain distinct across async suspension.
+fn assert_named_async_parameters<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_100 + N as u32),
+                SourceName::new("named-async-parameters"),
+                MediaType::JavaScript,
+                Arc::from(NAMED_ASYNC_PARAMETER_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("named async parameter fixture compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(41, 42)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("named async parameter isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("named async parameter fixture executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("named async parameter fixture did not complete: {outcome:?}");
+    };
+    let result = isolate
+        .string_value_to_utf16(value)
+        .expect("named async parameter result is a string");
+    assert_eq!(String::from_utf16(&result).unwrap(), "3:3:true|true|");
 }
