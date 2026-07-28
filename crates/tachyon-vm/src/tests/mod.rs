@@ -53,6 +53,7 @@ mod finally;
 mod fixtures;
 mod generator;
 mod grouping;
+mod module;
 mod object_prototype;
 mod promise;
 mod properties;

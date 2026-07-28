@@ -44,6 +44,14 @@ mod host;
 mod interpreter;
 mod isolate;
 mod iterator;
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "M8.4 record/link substrate is wired into the compiler and isolate in the next slice"
+    )
+)]
+mod module;
 mod number;
 mod object;
 mod promise;
