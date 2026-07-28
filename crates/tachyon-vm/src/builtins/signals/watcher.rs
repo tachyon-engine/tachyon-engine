@@ -770,7 +770,7 @@ impl Isolate {
             Ok(result.0)
         })?;
         if inserted {
-            self.add_signal_sink(signal, watcher)?;
+            self.add_signal_sink(signal, watcher, true)?;
             self.attach_signal_liveness(signal, hooks)?;
         }
         Ok(())

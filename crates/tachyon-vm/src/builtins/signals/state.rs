@@ -37,7 +37,7 @@ impl Isolate {
                     equals: Value::from_immediate(Immediate::Undefined),
                     watched: Value::from_immediate(Immediate::Undefined),
                     unwatched: Value::from_immediate(Immediate::Undefined),
-                    sinks: OrderedSignals::try_new()?,
+                    sinks: OrderedSignalSinks::try_new()?,
                     live_sinks: 0,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
@@ -374,7 +374,7 @@ impl Isolate {
                     cached: Value::from_immediate(Immediate::Undefined),
                     state: ComputedState::Dirty,
                     sources: OrderedSignals::try_new()?,
-                    sinks: OrderedSignals::try_new()?,
+                    sinks: OrderedSignalSinks::try_new()?,
                     live_sinks: 0,
                     generation: COMPUTED_UNINITIALIZED_GENERATION,
                     ordinary: OrdinaryObject {

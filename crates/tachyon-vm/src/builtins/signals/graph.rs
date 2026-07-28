@@ -208,7 +208,7 @@ impl Isolate {
             if old_sources.contains(&source) {
                 continue;
             }
-            self.add_signal_sink(source, receiver)?;
+            self.add_signal_sink(source, receiver, live)?;
             if live {
                 self.attach_signal_liveness(source, &mut hooks)?;
             }
@@ -312,6 +312,9 @@ impl Isolate {
                         next_source: 0,
                     });
                 }
+                for source in sources.iter().copied() {
+                    self.set_signal_sink_live(source, current, true)?;
+                }
                 work.try_reserve(sources.len())
                     .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                 work.extend(sources.into_iter().rev());
@@ -387,6 +390,9 @@ impl Isolate {
                         next_source: 0,
                     });
                 }
+                for source in sources.iter().copied() {
+                    self.set_signal_sink_live(source, current, false)?;
+                }
                 work.try_reserve(sources.len())
                     .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
                 work.extend(sources.into_iter().rev());
@@ -400,6 +406,7 @@ impl Isolate {
         &mut self,
         source: Value,
         sink: Value,
+        live: bool,
     ) -> Result<(), ExecutionError> {
         if let Ok(state) = self.signal_state_reference(source) {
             self.heap.with_running_scope(|scope| {
@@ -409,7 +416,7 @@ impl Isolate {
                         .borrow_mut(state, self.types.signal_state)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .sinks
-                        .insert(sink)
+                        .insert(sink, live)
                         .map(|_| ())
                 })
             })?;
@@ -422,12 +429,51 @@ impl Isolate {
                         .borrow_mut(computed, self.types.signal_computed)
                         .map_err(ExecutionError::NoGcBorrow)?
                         .sinks
-                        .insert(sink)
+                        .insert(sink, live)
                         .map(|_| ())
                 })
             })?;
         }
         if let (Some(source), Some(sink)) = (source.as_heap_ref(), sink.as_heap_ref()) {
+            self.heap
+                .write_barrier(source, sink)
+                .map_err(|_| ExecutionError::NotObject(Value::from_heap_ref(source)))?;
+        }
+        Ok(())
+    }
+
+    /// Promotes or demotes one reverse edge as its dependent enters or leaves the live graph.
+    fn set_signal_sink_live(
+        &mut self,
+        source: Value,
+        sink: Value,
+        live: bool,
+    ) -> Result<(), ExecutionError> {
+        if let Ok(state) = self.signal_state_reference(source) {
+            self.heap.with_running_scope(|scope| {
+                let state = scope.root(state).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(state, self.types.signal_state)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .sinks
+                        .set_live(sink, live)
+                })
+            })?;
+        } else {
+            let computed = self.signal_computed_reference(source)?;
+            self.heap.with_running_scope(|scope| {
+                let computed = scope.root(computed).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(computed, self.types.signal_computed)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .sinks
+                        .set_live(sink, live)
+                })
+            })?;
+        }
+        if live && let (Some(source), Some(sink)) = (source.as_heap_ref(), sink.as_heap_ref()) {
             self.heap
                 .write_barrier(source, sink)
                 .map_err(|_| ExecutionError::NotObject(Value::from_heap_ref(source)))?;

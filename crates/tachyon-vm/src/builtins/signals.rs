@@ -1,6 +1,7 @@
 //! Native TC39 Signals graph payloads and the first executable API slice.
 
 use super::super::*;
+use tachyon_gc::WeakGcRef;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -71,6 +72,113 @@ impl Trace for OrderedSignals {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SignalSinkEdge {
+    weak: WeakGcRef<()>,
+    live: Option<Value>,
+}
+
+impl SignalSinkEdge {
+    #[inline(always)]
+    fn value(self) -> Option<Value> {
+        self.live.or_else(|| {
+            self.weak
+                .get()
+                .map(|reference| Value::from_heap_ref(reference.raw()))
+        })
+    }
+}
+
+impl Trace for SignalSinkEdge {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.live.trace(tracer);
+        self.weak.trace(tracer);
+    }
+}
+
+/// Ordered reverse edges whose cold identities do not keep dependents alive.
+#[derive(Debug)]
+struct OrderedSignalSinks {
+    entries: Vec<SignalSinkEdge>,
+}
+
+impl OrderedSignalSinks {
+    fn try_new() -> Result<Self, ExecutionError> {
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(tuning::signals::INITIAL_EDGE_CAPACITY)
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        Ok(Self { entries })
+    }
+
+    /// Reuses cleared weak slots and promotes an existing edge without changing insertion order.
+    fn insert(&mut self, value: Value, live: bool) -> Result<bool, ExecutionError> {
+        if let Some(edge) = self
+            .entries
+            .iter_mut()
+            .find(|edge| edge.value() == Some(value))
+        {
+            if live {
+                edge.live = Some(value);
+            }
+            return Ok(false);
+        }
+        let reference = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        self.entries.retain(|edge| edge.value().is_some());
+        if self.entries.len() == self.entries.capacity() {
+            self.entries
+                .try_reserve_exact(1)
+                .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        }
+        self.entries.push(SignalSinkEdge {
+            weak: WeakGcRef::new(GcRef::from_erased_raw(reference)),
+            live: live.then_some(value),
+        });
+        Ok(true)
+    }
+
+    fn remove(&mut self, value: Value) -> bool {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|edge| edge.value() == Some(value))
+        else {
+            return false;
+        };
+        self.entries.remove(index);
+        true
+    }
+
+    fn set_live(&mut self, value: Value, live: bool) -> Result<(), ExecutionError> {
+        let edge = self
+            .entries
+            .iter_mut()
+            .find(|edge| edge.value() == Some(value))
+            .ok_or(ExecutionError::NotObject(value))?;
+        edge.live = live.then_some(value);
+        Ok(())
+    }
+
+    fn try_snapshot(&self) -> Result<Vec<Value>, ExecutionError> {
+        let mut snapshot = Vec::new();
+        snapshot
+            .try_reserve_exact(self.entries.len())
+            .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
+        snapshot.extend(self.entries.iter().filter_map(|edge| edge.value()));
+        Ok(snapshot)
+    }
+}
+
+impl Trace for OrderedSignalSinks {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.entries.trace(tracer);
+    }
+}
+
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct StateSignal {
@@ -78,7 +186,7 @@ pub(crate) struct StateSignal {
     equals: Value,
     watched: Value,
     unwatched: Value,
-    sinks: OrderedSignals,
+    sinks: OrderedSignalSinks,
     live_sinks: u32,
     pub(crate) ordinary: OrdinaryObject,
 }
@@ -102,7 +210,7 @@ pub(crate) struct ComputedSignal {
     cached: Value,
     state: ComputedState,
     sources: OrderedSignals,
-    sinks: OrderedSignals,
+    sinks: OrderedSignalSinks,
     live_sinks: u32,
     generation: u64,
     pub(crate) ordinary: OrdinaryObject,

@@ -526,6 +526,10 @@ var transientWatcher = new Signal.subtle.Watcher(function() {});
 transientWatcher.watch(rootedSource);
 var weakWatcher = new WeakRef(transientWatcher);
 
+var coldDependent = new Signal.Computed(function() { return rootedSource.get().marker; });
+coldDependent.get();
+var weakColdDependent = new WeakRef(coldDependent);
+
 var coldComputed = new Signal.Computed(function() { return 1; });
 var weakColdComputed = new WeakRef(coldComputed);
 
@@ -545,6 +549,7 @@ gcHookTrace === "wc";
 
 pub(super) const SIGNAL_GC_LIVENESS_DROP_ROOTS_SOURCE: &str = r#"
 transientWatcher = null;
+coldDependent = null;
 coldComputed = null;
 cycleSource = null;
 cycleComputed = null;
@@ -555,6 +560,7 @@ true;
 pub(super) const SIGNAL_GC_LIVENESS_AFTER_FIRST_MAJOR_SOURCE: &str = r#"
 var recoveredWatcher = weakWatcher.deref();
 var activeWatcherRetained = recoveredWatcher !== undefined;
+var coldDependentCollected = weakColdDependent.deref() === undefined;
 var coldComputedCollected = weakColdComputed.deref() === undefined;
 var cycleSourceCollected = weakCycleSource.deref() === undefined;
 var cycleComputedCollected = weakCycleComputed.deref() === undefined;
@@ -562,7 +568,7 @@ var cycleWatcherCollected = weakCycleWatcher.deref() === undefined;
 var collectionSkippedHooks = gcHookTrace === "wc";
 recoveredWatcher.unwatch(rootedSource);
 recoveredWatcher = null;
-activeWatcherRetained && coldComputedCollected && cycleSourceCollected &&
+activeWatcherRetained && coldDependentCollected && coldComputedCollected && cycleSourceCollected &&
 cycleComputedCollected && cycleWatcherCollected && collectionSkippedHooks && gcHookTrace === "wcu";
 "#;
 

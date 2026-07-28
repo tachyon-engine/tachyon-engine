@@ -41,19 +41,30 @@ pub(super) fn signal_minor_test_isolate() -> Isolate {
 /// Exercises graph ownership across job boundaries and explicit major collections.
 #[test]
 fn signal_gc_liveness_contract_works_for_every_dispatch_batch() {
-    assert_signal_gc_liveness::<1>(8_800);
-    assert_signal_gc_liveness::<2>(8_810);
-    assert_signal_gc_liveness::<4>(8_820);
-    assert_signal_gc_liveness::<8>(8_830);
-    assert_signal_gc_liveness::<16>(8_840);
+    assert_signal_gc_liveness::<1>(8_800, ForcedCollectionMode::Major);
+    assert_signal_gc_liveness::<2>(8_810, ForcedCollectionMode::Major);
+    assert_signal_gc_liveness::<4>(8_820, ForcedCollectionMode::Major);
+    assert_signal_gc_liveness::<8>(8_830, ForcedCollectionMode::Major);
+    assert_signal_gc_liveness::<16>(8_840, ForcedCollectionMode::Major);
+}
+
+#[test]
+fn signal_gc_liveness_contract_survives_forced_minor_allocations() {
+    assert_signal_gc_liveness::<1>(8_900, ForcedCollectionMode::Minor);
+    assert_signal_gc_liveness::<2>(8_910, ForcedCollectionMode::Minor);
+    assert_signal_gc_liveness::<4>(8_920, ForcedCollectionMode::Minor);
+    assert_signal_gc_liveness::<8>(8_930, ForcedCollectionMode::Minor);
+    assert_signal_gc_liveness::<16>(8_940, ForcedCollectionMode::Minor);
 }
 
 /// Runs setup, collection, detach, and collection as distinct ECMAScript jobs.
-fn assert_signal_gc_liveness<const N: usize>(source_id: u32) {
-    let mut isolate = signal_api_test_isolate();
-    isolate
-        .heap
-        .set_forced_collection_mode(ForcedCollectionMode::Major);
+fn assert_signal_gc_liveness<const N: usize>(source_id: u32, mode: ForcedCollectionMode) {
+    let mut isolate = if mode == ForcedCollectionMode::Minor {
+        signal_minor_test_isolate()
+    } else {
+        signal_api_test_isolate()
+    };
+    isolate.heap.set_forced_collection_mode(mode);
     assert_signal_job::<N>(
         &mut isolate,
         SIGNAL_GC_LIVENESS_SETUP_SOURCE,
