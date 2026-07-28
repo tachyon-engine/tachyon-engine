@@ -100,7 +100,12 @@ impl Lowerer<'_> {
         mutable: bool,
     ) -> Result<(), CompileError> {
         match &pattern.kind {
-            HirPatternKind::Binding(binding) => self.add_local(binding, Some(value), mutable),
+            HirPatternKind::Binding(binding) => {
+                if let Some(local) = self.local_by_id(binding.id).cloned() {
+                    return self.initialize_local(&local, value, pattern.span);
+                }
+                self.add_local(binding, Some(value), mutable)
+            }
             HirPatternKind::Default {
                 target,
                 initializer,

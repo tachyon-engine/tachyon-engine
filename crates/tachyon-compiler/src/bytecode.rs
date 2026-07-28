@@ -10,7 +10,7 @@ use lowerer::Lowerer;
 use tachyon_bytecode::{
     BytecodeBuilder, BytecodeConstant, CompiledFunctionTemplate, CompiledModule,
     EnvironmentRecordKind, EnvironmentSlotMetadata, FunctionId, FunctionKind, FunctionLayout,
-    FunctionMetadata, FunctionStrictness, HandlerEntry, Opcode, RegisterId,
+    FunctionMetadata, FunctionStrictness, HandlerEntry, Opcode,
 };
 
 use crate::hir::HirForInLeft;
@@ -385,6 +385,8 @@ impl EnvironmentPlans {
                     collection: "captured environment slots",
                 })?;
             let mut slots = Vec::with_capacity(capacity);
+            let needs_parameter_environment =
+                function.parameter_initializers.iter().any(Option::is_some);
             if let Some(binding) = &function.self_binding {
                 push_function_name_slot(binding, &mut slots)?;
             }
@@ -393,8 +395,10 @@ impl EnvironmentPlans {
                     push_captured_slot(
                         &binding,
                         true,
-                        true,
-                        force_dynamic_bindings,
+                        !needs_parameter_environment,
+                        // Parameter bindings must exist in the parameter environment even when
+                        // no nested closure captures them: default initializers observe TDZ.
+                        force_dynamic_bindings || needs_parameter_environment,
                         &forced_captures,
                         &mut slots,
                     )?;
@@ -1000,7 +1004,27 @@ fn lower_function(
             function.span,
         )?;
     }
-    for (parameter, register) in function.parameters.iter().zip(parameter_registers) {
+    if function.parameter_initializers.iter().any(Option::is_some) {
+        // Install every parameter name before evaluating any initializer. This gives `x = x`
+        // and references to later parameters a real TDZ environment binding instead of treating
+        // the name as an unresolved global.
+        for parameter in function.parameters.iter() {
+            for binding in pattern_bindings(parameter) {
+                lowerer.add_local(&binding, None, true)?;
+            }
+        }
+    }
+    for (index, (parameter, register)) in function
+        .parameters
+        .iter()
+        .zip(parameter_registers)
+        .enumerate()
+    {
+        // Keep the current parameter uninitialized while its default expression runs. Earlier
+        // parameters are already published, while later/self references correctly hit TDZ.
+        if let Some(initializer) = function.parameter_initializers[index].as_ref() {
+            lowerer.parameter_initializer(register, initializer)?;
+        }
         lowerer.bind_pattern(parameter, register, true)?;
     }
     if let Some(rest) = &function.rest_parameter {
@@ -1013,13 +1037,6 @@ fn lower_function(
             rest.span,
         )?;
         lowerer.bind_pattern(rest, rest_value, true)?;
-    }
-    for (index, initializer) in function.parameter_initializers.iter().enumerate() {
-        if let Some(initializer) = initializer {
-            let parameter =
-                RegisterId::new(u32::try_from(index).map_err(|_| CompileError::RegisterOverflow)?);
-            lowerer.parameter_initializer(parameter, initializer)?;
-        }
     }
     for binding in &var_bindings {
         if lowerer.local_by_id(binding.id).is_some() {
