@@ -7003,8 +7003,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {
-                    let value = self.json_parse(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_json_parse(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::JsonStringify) => {
                     return self.begin_json_stringify(&site);

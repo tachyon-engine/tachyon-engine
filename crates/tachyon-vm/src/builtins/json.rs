@@ -57,11 +57,42 @@ impl JsonIndentation {
 }
 
 impl Isolate {
-    /// Parses JSON text into ordinary engine values without accepting JavaScript syntax extensions.
-    pub(crate) fn json_parse(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
+    /// Converts JSON.parse text through the shared resumable ToPrimitive path when required.
+    pub(crate) fn begin_json_parse(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         let text = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let reviver = self
+            .call_argument(site, 1)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if self.is_object_value(text) {
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::JsonParseText,
+                site.caller_base,
+                site.destination,
+                reviver,
+                text,
+                site.call_site,
+            );
+        }
+        self.finish_json_parse_text(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            reviver,
+            text,
+        )
+    }
+
+    /// Parses one already-primitive text value and publishes the unfiltered result.
+    pub(crate) fn finish_json_parse_text(
+        &mut self,
+        site: NativeContinuationSite,
+        _reviver: Value,
+        text: Value,
+    ) -> Result<(), ExecutionError> {
         let mut units = Vec::new();
         self.append_primitive_string_units(text, &mut units)?;
         let mut parser = JsonParser {
@@ -72,7 +103,7 @@ impl Isolate {
         let value = parser.parse_value(0)?;
         parser.skip_space();
         if parser.index == parser.units.len() {
-            Ok(value)
+            self.write(site.caller_base, site.destination, value)
         } else {
             Err(ExecutionError::InvalidJsonText)
         }

@@ -279,6 +279,7 @@ pub(crate) enum ConversionConsumer {
     DateToPrimitiveString,
     DateToPrimitiveNumber,
     DateToJson,
+    JsonParseText,
     JsonStringifyNumberSpace,
     JsonStringifyStringSpace,
     JsonStringifyNumberValue,
@@ -392,6 +393,7 @@ impl ConversionConsumer {
             | Self::DateToPrimitiveString
             | Self::DateToPrimitiveNumber
             | Self::DateToJson
+            | Self::JsonParseText
             | Self::JsonStringifyNumberSpace
             | Self::JsonStringifyStringSpace
             | Self::JsonStringifyNumberValue
@@ -506,6 +508,7 @@ impl ConversionConsumer {
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
                 | Self::DateToPrimitiveString
+                | Self::JsonParseText
                 | Self::JsonStringifyStringSpace
                 | Self::JsonStringifyStringValue
                 | Self::JsonStringifyPropertyListString
@@ -570,6 +573,7 @@ impl ConversionConsumer {
                 | Self::DateToPrimitiveString
                 | Self::DateToPrimitiveNumber
                 | Self::DateToJson
+                | Self::JsonParseText
                 | Self::JsonStringifyNumberSpace
                 | Self::JsonStringifyStringSpace
                 | Self::JsonStringifyNumberValue

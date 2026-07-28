@@ -460,6 +460,14 @@ impl Isolate {
                             _ => unreachable!("matched JSON conversion consumer"),
                         };
                     }
+                    if continuation.consumer == ConversionConsumer::JsonParseText {
+                        let text = self.primitive_string_value(Some(value))?;
+                        return self.finish_json_parse_text(
+                            continuation.site,
+                            continuation.receiver,
+                            text,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::AddLeft {
                         let left = value;
                         let right = continuation.receiver;
@@ -1344,6 +1352,9 @@ impl Isolate {
                 | ConversionConsumer::DateToPrimitiveNumber => argument,
                 ConversionConsumer::DateToJson => {
                     unreachable!("Date toJSON resumes inside the conversion state machine")
+                }
+                ConversionConsumer::JsonParseText => {
+                    unreachable!("JSON parse text resumes inside the conversion state machine")
                 }
                 ConversionConsumer::JsonStringifyNumberSpace
                 | ConversionConsumer::JsonStringifyStringSpace
