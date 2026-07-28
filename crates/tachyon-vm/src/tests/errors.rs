@@ -58,6 +58,24 @@ var options = new Proxy({ get cause() { return 42; } }, { has(t, k) { return k i
 new TypeError(undefined, options).cause === 42;
 "#;
 
+const SUPPRESSED_ERROR_SOURCE: &str = r#"
+var trace = "";
+var primary = {};
+var prior = {};
+var error = SuppressedError(primary, prior, {
+  toString() { trace += "m"; return "cleanup"; }
+});
+var keys = Object.getOwnPropertyNames(error);
+trace === "m" &&
+error instanceof SuppressedError && error instanceof Error &&
+error.error === primary && error.suppressed === prior && error.message === "cleanup" &&
+keys.indexOf("error") === keys.indexOf("message") + 1 &&
+keys.indexOf("suppressed") === keys.indexOf("error") + 1 &&
+!Object.prototype.hasOwnProperty.call(new SuppressedError(), "message") &&
+Object.getPrototypeOf(SuppressedError) === Error &&
+SuppressedError.length === 3;
+"#;
+
 const ERROR_STACK_ACCESSOR_SOURCE: &str = r#"
 var trace = "";
 var descriptor = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
@@ -144,6 +162,20 @@ fn error_message_paths_survive_forced_major_collections() {
 #[test]
 fn error_cause_only_survives_forced_major_collections() {
     assert_forced_major_source(ERROR_CAUSE_ONLY_SOURCE, 91);
+}
+
+#[test]
+fn suppressed_error_resumes_for_every_dispatch_batch() {
+    assert_source_batch::<1>(SUPPRESSED_ERROR_SOURCE, 98, false);
+    assert_source_batch::<2>(SUPPRESSED_ERROR_SOURCE, 99, false);
+    assert_source_batch::<4>(SUPPRESSED_ERROR_SOURCE, 100, false);
+    assert_source_batch::<8>(SUPPRESSED_ERROR_SOURCE, 101, false);
+    assert_source_batch::<16>(SUPPRESSED_ERROR_SOURCE, 102, false);
+}
+
+#[test]
+fn suppressed_error_roots_survive_forced_major_collections() {
+    assert_source_batch::<8>(SUPPRESSED_ERROR_SOURCE, 103, true);
 }
 
 #[test]

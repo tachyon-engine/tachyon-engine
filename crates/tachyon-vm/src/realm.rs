@@ -1881,6 +1881,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"RangeError")?,
                 self.intern_intrinsic_name(b"URIError")?,
                 self.intern_intrinsic_name(b"AggregateError")?,
+                self.intern_intrinsic_name(b"SuppressedError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,

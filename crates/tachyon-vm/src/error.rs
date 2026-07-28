@@ -30,6 +30,7 @@ struct ErrorConstructorRoots<'a> {
     error: Value,
     options: Value,
     errors: Value,
+    suppressed: Value,
 }
 
 struct ErrorToStringRoots<'a> {
@@ -52,6 +53,7 @@ impl Trace for ErrorConstructorRoots<'_> {
         self.error.trace(tracer);
         self.options.trace(tracer);
         self.errors.trace(tracer);
+        self.suppressed.trace(tracer);
     }
 }
 
@@ -59,6 +61,7 @@ const ERROR_STATE_ERROR: usize = 0;
 const ERROR_STATE_OPTIONS: usize = 1;
 const ERROR_STATE_MESSAGE: usize = 2;
 const ERROR_STATE_ERRORS: usize = 3;
+const ERROR_STATE_SUPPRESSED: usize = 4;
 const ERROR_STRING_RECEIVER: usize = 0;
 const ERROR_STRING_NAME: usize = 1;
 const ERROR_STRING_MESSAGE: usize = 2;
@@ -183,16 +186,27 @@ impl Isolate {
         kind: NativeErrorKind,
     ) -> Result<(), ExecutionError> {
         let aggregate = kind == NativeErrorKind::Aggregate;
-        let errors = if aggregate {
+        let suppressed = kind == NativeErrorKind::Suppressed;
+        let errors = if aggregate || suppressed {
             self.call_argument(site, 0)?
                 .unwrap_or(Value::from_immediate(Immediate::Undefined))
         } else {
             Value::from_immediate(Immediate::Undefined)
         };
-        let message = self.call_argument(site, u32::from(aggregate))?;
-        let options = self
-            .call_argument(site, if aggregate { 2 } else { 1 })?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let suppressed_value = if suppressed {
+            self.call_argument(site, 1)?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+        } else {
+            Value::from_immediate(Immediate::Undefined)
+        };
+        let message_index = if suppressed { 2 } else { u32::from(aggregate) };
+        let message = self.call_argument(site, message_index)?;
+        let options = if suppressed {
+            Value::from_immediate(Immediate::Undefined)
+        } else {
+            self.call_argument(site, if aggregate { 2 } else { 1 })?
+                .unwrap_or(Value::from_immediate(Immediate::Undefined))
+        };
         let intrinsic_prototype = self
             .realm
             .error_intrinsics
@@ -213,7 +227,8 @@ impl Isolate {
                 .unwrap_or(fallback)
         };
         let error = self.allocate_native_error_with_prototype(kind, None, prototype)?;
-        let state = self.allocate_error_constructor_state(error, options, errors)?;
+        let state =
+            self.allocate_error_constructor_state(error, options, errors, suppressed_value)?;
         let state_value = Value::from_heap_ref(state.raw());
         let continuation_site = NativeContinuationSite {
             caller_base: site.caller_base,
@@ -323,12 +338,13 @@ impl Isolate {
         self.continue_error_cause(site, state)
     }
 
-    /// Allocates an exact two-value construction state before any user callback can run.
+    /// Allocates fixed traced construction state before any user callback can run.
     fn allocate_error_constructor_state(
         &mut self,
         error: Value,
         options: Value,
         errors: Value,
+        suppressed: Value,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
         let mut roots = ErrorConstructorRoots {
             vm: VmRoots {
@@ -342,6 +358,7 @@ impl Isolate {
             error,
             options,
             errors,
+            suppressed,
         };
         self.heap
             .try_allocate_with_gc(
@@ -354,9 +371,9 @@ impl Isolate {
                         roots.options,
                         Value::from_immediate(Immediate::Undefined),
                         roots.errors,
-                        Value::from_immediate(Immediate::Undefined),
+                        roots.suppressed,
                     ],
-                    count: 4,
+                    count: 5,
                 },
                 AllocationSpace::Young,
                 &mut roots,
@@ -517,7 +534,13 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
     ) -> Result<(), ExecutionError> {
-        let options = self.native_call_state_snapshot(state)?.values[ERROR_STATE_OPTIONS];
+        let snapshot = self.native_call_state_snapshot(state)?;
+        if self.native_error_kind(snapshot.values[ERROR_STATE_ERROR])?
+            == Some(NativeErrorKind::Suppressed)
+        {
+            return self.finish_suppressed_error(site, state);
+        }
+        let options = snapshot.values[ERROR_STATE_OPTIONS];
         if !self.is_object_value(options) {
             return self.finish_error_constructor_or_errors(site, state);
         }
@@ -535,6 +558,45 @@ impl Isolate {
                 .dispatch_has_property(site, options, key)
                 .map(|_| ())
         })
+    }
+
+    /// Publishes SuppressedError's two fixed own properties after optional message conversion.
+    fn finish_suppressed_error(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let continuation = NativeContinuation::error_constructor(
+            site,
+            ErrorConstructorStage::HasCause,
+            Value::from_heap_ref(state.raw()),
+        );
+        self.with_error_state_root(continuation, |isolate| {
+            let error = isolate.intern_intrinsic_name(b"error")?;
+            isolate.define_data_property(
+                snapshot.values[ERROR_STATE_ERROR],
+                error,
+                DataPropertyDescriptor {
+                    value: Some(snapshot.values[ERROR_STATE_ERRORS]),
+                    writable: Some(true),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
+            )?;
+            let suppressed = isolate.intern_intrinsic_name(b"suppressed")?;
+            isolate.define_data_property(
+                snapshot.values[ERROR_STATE_ERROR],
+                suppressed,
+                DataPropertyDescriptor {
+                    value: Some(snapshot.values[ERROR_STATE_SUPPRESSED]),
+                    writable: Some(true),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                },
+            )
+        })?;
+        self.finish_error_constructor(site, state)
     }
 
     /// Finishes ordinary Errors or collects the AggregateError iterable after message/cause.

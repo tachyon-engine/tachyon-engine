@@ -989,6 +989,7 @@ impl NativeFunction {
             Self::DateConstructor | Self::DateUtc => 7,
             Self::ArrayBufferResize => 1,
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => 2,
+            Self::ErrorConstructor(NativeErrorKind::Suppressed) => 3,
             Self::ErrorStackSetter => 1,
             Self::DateNow => 0,
             Self::DateParse | Self::DateToPrimitive | Self::DateToJson => 1,
@@ -1526,6 +1527,7 @@ impl NativeFunction {
             Self::ErrorConstructor(NativeErrorKind::Range) => "RangeError",
             Self::ErrorConstructor(NativeErrorKind::Uri) => "URIError",
             Self::ErrorConstructor(NativeErrorKind::Aggregate) => "AggregateError",
+            Self::ErrorConstructor(NativeErrorKind::Suppressed) => "SuppressedError",
             Self::ErrorIsError => "isError",
             Self::ErrorToString => "toString",
             Self::ErrorStackGetter => "get stack",
@@ -1802,10 +1804,11 @@ pub enum NativeErrorKind {
     Range,
     Uri,
     Aggregate,
+    Suppressed,
 }
 
 impl NativeErrorKind {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Error,
         Self::Eval,
         Self::Reference,
@@ -1814,6 +1817,7 @@ impl NativeErrorKind {
         Self::Range,
         Self::Uri,
         Self::Aggregate,
+        Self::Suppressed,
     ];
 
     #[inline(always)]
@@ -1832,6 +1836,7 @@ impl NativeErrorKind {
             Self::Range => "RangeError",
             Self::Uri => "URIError",
             Self::Aggregate => "AggregateError",
+            Self::Suppressed => "SuppressedError",
         }
     }
 }
