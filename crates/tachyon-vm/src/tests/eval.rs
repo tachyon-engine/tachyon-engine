@@ -256,6 +256,19 @@ fn nested_sloppy_eval_var_shadows_an_ancestor_eval_overlay() {
 }
 
 #[test]
+fn sloppy_eval_cannot_cross_a_non_simple_parameter_environment() {
+    let module = compile_source(
+        "var body = false; function rejected(a = eval('var a = 42')) { body = true; } var syntax = false; try { rejected(); } catch (error) { syntax = error instanceof SyntaxError; } function simple(a) { eval('var a = 42'); return a; } syntax && !body && simple(1) === 42;",
+        1_175,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
 fn direct_eval_lexical_record_enforces_tdz_const_and_escaping_closure_capture() {
     let module = compile_source(
         "var escaped; var assignment = false; eval('let hidden; const fixed = 4; escaped = function() { return fixed; }; try { fixed = 5; } catch (error) { assignment = error instanceof TypeError; }'); typeof hidden === 'undefined' && assignment && escaped() === 4;",

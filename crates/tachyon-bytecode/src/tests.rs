@@ -666,6 +666,7 @@ fn compiled_module_freezes_async_metadata_without_runtime_values() {
         name: Arc::from("captured"),
         mutable: false,
         initialized: false,
+        parameter: false,
     }]
     .into();
 
@@ -703,6 +704,7 @@ fn compiled_module_freezes_async_metadata_without_runtime_values() {
             name: Arc::from("captured"),
             mutable: false,
             initialized: false,
+            parameter: false,
         }]
     );
     assert_eq!(
@@ -1010,6 +1012,7 @@ fn environment_slot(
         name: Arc::from(name),
         mutable,
         initialized,
+        parameter: false,
     }
 }
 

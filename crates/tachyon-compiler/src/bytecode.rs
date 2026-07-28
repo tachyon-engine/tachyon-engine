@@ -264,6 +264,7 @@ struct CapturedSlot {
     name: std::sync::Arc<str>,
     mutable: bool,
     initialized: bool,
+    parameter: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -335,6 +336,7 @@ impl EnvironmentPlans {
                                 name: binding.name.clone(),
                                 mutable: declaration.kind == HirVariableDeclarationKind::Let,
                                 initialized: false,
+                                parameter: false,
                             });
                         } else {
                             global_lexicals.push(GlobalLexicalPlan {
@@ -402,6 +404,7 @@ impl EnvironmentPlans {
                     name: std::sync::Arc::from("arguments"),
                     mutable: false,
                     initialized: false,
+                    parameter: false,
                 });
             }
             for parameter in function.parameters.iter() {
@@ -416,6 +419,11 @@ impl EnvironmentPlans {
                         &forced_captures,
                         &mut slots,
                     )?;
+                    if needs_parameter_environment
+                        && let Some(slot) = slots.iter_mut().find(|slot| slot.id == binding.id)
+                    {
+                        slot.parameter = true;
+                    }
                 }
             }
             if let Some(rest) = &function.rest_parameter {
@@ -471,6 +479,7 @@ impl EnvironmentPlans {
                         name: binding.name,
                         mutable: false,
                         initialized: false,
+                        parameter: false,
                     }),
                     private_names,
                 })
@@ -632,6 +641,7 @@ fn push_captured_slot(
         name: binding.name.clone(),
         mutable,
         initialized,
+        parameter: false,
     });
     Ok(())
 }
@@ -651,6 +661,7 @@ fn push_function_name_slot(
         name: binding.name.clone(),
         mutable: false,
         initialized: true,
+        parameter: false,
     });
     Ok(())
 }
@@ -1214,6 +1225,7 @@ fn freeze_environment_slot_metadata(
             name: slot.name.clone(),
             mutable: slot.mutable,
             initialized: slot.initialized,
+            parameter: slot.parameter,
         });
     }
     debug_assert_eq!(metadata.len(), slots.len());

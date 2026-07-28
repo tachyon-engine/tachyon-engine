@@ -427,6 +427,8 @@ pub struct EnvironmentSlotMetadata {
     pub mutable: bool,
     /// Whether activation instantiation initializes this binding before bytecode begins.
     pub initialized: bool,
+    /// Whether this slot belongs to a non-simple formal-parameter environment.
+    pub parameter: bool,
 }
 
 /// Register and stack-reservation requirements known before a function begins execution.

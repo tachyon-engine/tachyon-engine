@@ -71,6 +71,7 @@ pub(in crate::tests) fn captured_environment_module() -> CompiledModule {
                         name: Arc::from("value"),
                         mutable: true,
                         initialized: true,
+                        parameter: false,
                     }]),
                     ..FunctionMetadata::new(FunctionKind::Script, FunctionLayout::default())
                 },

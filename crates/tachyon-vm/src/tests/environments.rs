@@ -31,6 +31,7 @@ fn module_environment_module() -> CompiledModule {
                     name: Arc::from("value"),
                     mutable: true,
                     initialized: true,
+                    parameter: false,
                 }]),
                 ..FunctionMetadata::new(FunctionKind::Module, layout)
             },

@@ -430,6 +430,9 @@ impl Isolate {
                 None
             };
             if let Some((environment, slot)) = lexical_binding {
+                if self.environment_slot_is_parameter(environment, slot)? {
+                    return Err(ExecutionError::GlobalLexicalRedeclaration(atom));
+                }
                 let immutable = self.heap.with_running_scope(|scope| {
                     scope.with_no_gc_scope(|no_gc| {
                         no_gc
@@ -2935,6 +2938,34 @@ impl Isolate {
             cursor = parent;
         }
         Ok(None)
+    }
+
+    /// Checks immutable owner metadata for a non-simple formal-parameter binding.
+    fn environment_slot_is_parameter(
+        &mut self,
+        environment: GcRef<Environment>,
+        slot: u32,
+    ) -> Result<bool, ExecutionError> {
+        let owner = self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(Environment::owner)
+            })
+        })?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        let function = self
+            .loaded_code(owner.code)?
+            .module
+            .function(owner.function)
+            .ok_or(ExecutionError::MissingEntryFunction(owner.function))?;
+        Ok(function
+            .environment_slots()
+            .get(slot as usize)
+            .is_some_and(|metadata| metadata.parameter))
     }
 
     /// Walks only the sparse eval-var overlay chain owned by the active activation.
