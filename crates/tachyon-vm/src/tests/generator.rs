@@ -56,6 +56,54 @@ delayed && instanceChain && functionChain && nextMetadata && descriptorOk && com
     afterThrow.value === undefined && executingRejected && afterReentry.done;
 "#;
 
+const ASYNC_GENERATOR_QUEUE_SOURCE: &str = r#"
+var asyncTrace = "";
+var reentrant;
+async function* queued() {
+    asyncTrace += "start|";
+    var queuedPromise = reentrant.next(7);
+    queuedPromise.then(function(result) {
+        asyncTrace += "queued:" + result.value + ":" + result.done + "|";
+    });
+    var resumed = yield 1;
+    asyncTrace += "resume:" + resumed + "|";
+    return 2;
+}
+reentrant = queued();
+var asyncGeneratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf(reentrant));
+var asyncTagOk = asyncGeneratorPrototype[Symbol.toStringTag] === "AsyncGenerator";
+var invalidReceiverRejected = false;
+var invalidReceiverThrew = false;
+try {
+    asyncGeneratorPrototype.next.call({}).then(undefined, function(error) {
+        invalidReceiverRejected = error instanceof TypeError;
+    });
+} catch (error) {
+    invalidReceiverThrew = true;
+}
+var firstPromise = reentrant.next(99);
+firstPromise.then(function(result) {
+    asyncTrace += "first:" + result.value + ":" + result.done + "|";
+});
+
+var returned = (async function* () { yield 3; })();
+returned.next().then(function(result) {
+    asyncTrace += "return-first:" + result.value + ":" + result.done + "|";
+});
+returned.return(8).then(function(result) {
+    asyncTrace += "return:" + result.value + ":" + result.done + "|";
+});
+
+var thrown = (async function* () { return 4; })();
+thrown.throw(11).then(undefined, function(reason) {
+    asyncTrace += "throw:" + reason + "|";
+});
+"#;
+
+const ASYNC_GENERATOR_QUEUE_ASSERTION: &str = r#"
+asyncTrace + "meta:" + asyncTagOk + ":" + invalidReceiverRejected + ":" + invalidReceiverThrew + "|";
+"#;
+
 const GENERATOR_YIELD_SOURCE: &str = r#"
 var entered = 0;
 function* exchange() {
@@ -451,6 +499,20 @@ fn generator_state_and_arguments_survive_forced_major_collection() {
 }
 
 #[test]
+fn async_generator_request_queue_runs_for_every_dispatch_batch() {
+    assert_async_generator_queue::<1>(false);
+    assert_async_generator_queue::<2>(false);
+    assert_async_generator_queue::<4>(false);
+    assert_async_generator_queue::<8>(false);
+    assert_async_generator_queue::<16>(false);
+}
+
+#[test]
+fn async_generator_request_queue_survives_forced_major_collection() {
+    assert_async_generator_queue::<8>(true);
+}
+
+#[test]
 fn generator_yield_and_next_value_run_for_every_dispatch_batch() {
     assert_generator_yield_source::<1>(false);
     assert_generator_yield_source::<2>(false);
@@ -654,6 +716,74 @@ fn assert_generator_source<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes queue setup through a checkpoint, then verifies its stable settlement trace.
+fn assert_async_generator_queue<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_600 + N as u32),
+                SourceName::new("async-generator-queue"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_QUEUE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator queue fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_700 + N as u32),
+                SourceName::new("async-generator-queue-assertion"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_QUEUE_ASSERTION),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator assertion compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(21, 22)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("async generator isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("async generator setup executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("async generator assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("async generator trace did not complete: {outcome:?}");
+    };
+    let trace = isolate
+        .string_value_to_utf16(value)
+        .expect("async generator trace is a string");
+    assert_eq!(
+        String::from_utf16(&trace).expect("trace is valid UTF-16"),
+        "start|resume:7|throw:11|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
+        "async generator batch {N}, forced_major={forced_major}"
     );
 }
 

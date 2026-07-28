@@ -436,6 +436,7 @@ pub(crate) enum NativeFunction {
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
     GeneratorFunctionPrototype,
+    AsyncGeneratorFunctionPrototype,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
     FunctionPrototypeBind,
@@ -543,6 +544,9 @@ pub(crate) enum NativeFunction {
     GeneratorNext,
     GeneratorReturn,
     GeneratorThrow,
+    AsyncGeneratorNext,
+    AsyncGeneratorReturn,
+    AsyncGeneratorThrow,
     IteratorIdentity,
     MapConstructor,
     MapGet,
@@ -1123,6 +1127,9 @@ impl NativeFunction {
             | Self::GeneratorNext
             | Self::GeneratorReturn
             | Self::GeneratorThrow
+            | Self::AsyncGeneratorNext
+            | Self::AsyncGeneratorReturn
+            | Self::AsyncGeneratorThrow
             | Self::ArrayIsArray
             | Self::ArrayFrom
             | Self::ArrayConcat
@@ -1272,6 +1279,7 @@ impl NativeFunction {
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
             | Self::GeneratorFunctionPrototype
+            | Self::AsyncGeneratorFunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
@@ -1504,6 +1512,7 @@ impl NativeFunction {
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
             Self::GeneratorFunctionPrototype => "",
+            Self::AsyncGeneratorFunctionPrototype => "",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
@@ -1622,6 +1631,9 @@ impl NativeFunction {
             Self::GeneratorNext => "next",
             Self::GeneratorReturn => "return",
             Self::GeneratorThrow => "throw",
+            Self::AsyncGeneratorNext => "next",
+            Self::AsyncGeneratorReturn => "return",
+            Self::AsyncGeneratorThrow => "throw",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",
             Self::MapGet => "get",

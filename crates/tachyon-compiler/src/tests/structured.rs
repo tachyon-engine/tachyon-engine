@@ -655,26 +655,37 @@ fn compiler_emits_generator_yield_suspend_points() {
 }
 
 #[test]
-/// Keeps unsupported async execution explicit instead of misclassifying it as synchronous.
-fn compiler_rejects_async_and_async_generator_functions() {
-    for source_text in [
-        "async function value() { return 1; }",
-        "async function* values() { return 1; }",
-    ] {
-        let error = Compiler
-            .lower_to_hir(
-                source(MediaType::JavaScript, source_text),
-                CompileOptions::default(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            CompileError::UnsupportedSyntax {
-                syntax: "async function",
-                ..
-            }
-        ));
-    }
+/// Keeps ordinary async unsupported while freezing async generators as their own function kind.
+fn compiler_accepts_async_generators_without_misclassifying_async_functions() {
+    let error = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "async function value() { return 1; }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CompileError::UnsupportedSyntax {
+            syntax: "async function",
+            ..
+        }
+    ));
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "async function* values() { yield 1; return 2; } values;",
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator fixture compiles");
+    assert_eq!(
+        module.functions()[1].kind(),
+        tachyon_bytecode::FunctionKind::AsyncGenerator
+    );
 }
 
 #[test]

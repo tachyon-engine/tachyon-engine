@@ -1493,6 +1493,21 @@ impl NativeContinuation {
         }
     }
 
+    /// Roots an async generator and its active request Promise while its Fiber executes.
+    #[inline]
+    pub(crate) const fn async_generator_resume(
+        site: NativeContinuationSite,
+        generator: Value,
+        promise: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::GeneratorResume,
+            first: generator,
+            second: promise,
+        }
+    }
+
     /// Roots State construction/mutation state across one observable getter or callback.
     #[inline]
     pub(crate) const fn signal_state(

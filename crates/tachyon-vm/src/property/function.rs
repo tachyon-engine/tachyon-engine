@@ -388,6 +388,7 @@ impl Isolate {
             FunctionKind::DerivedClassConstructor
                 | FunctionKind::BaseClassConstructor
                 | FunctionKind::Generator
+                | FunctionKind::AsyncGenerator
         ))
     }
 
@@ -420,11 +421,16 @@ impl Isolate {
 
     /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
     fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
-        if self.is_generator_function(function)? {
-            let generator_prototype = self
-                .realm
-                .generator_prototype
-                .expect("generator intrinsics initialize before generator closures");
+        if let Some(kind) = self.generator_function_kind(function)? {
+            let generator_prototype = if kind == FunctionKind::AsyncGenerator {
+                self.realm
+                    .async_generator_prototype
+                    .expect("async generator intrinsics initialize before closures")
+            } else {
+                self.realm
+                    .generator_prototype
+                    .expect("generator intrinsics initialize before generator closures")
+            };
             let mut roots = PrototypeInitializationRoots {
                 vm: VmRoots {
                     fiber: &mut self.fiber,
@@ -517,9 +523,18 @@ impl Isolate {
         &mut self,
         function: Value,
     ) -> Result<bool, ExecutionError> {
+        self.generator_function_kind(function)
+            .map(|kind| kind == Some(FunctionKind::Generator))
+    }
+
+    /// Returns the immutable generator flavor without widening every function object.
+    fn generator_function_kind(
+        &mut self,
+        function: Value,
+    ) -> Result<Option<FunctionKind>, ExecutionError> {
         let function = self.resolve_function_object(function)?;
         let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
-            return Ok(false);
+            return Ok(None);
         };
         let kind = self
             .loaded_code(code)?
@@ -527,7 +542,7 @@ impl Isolate {
             .function(function)
             .ok_or(ExecutionError::MissingEntryFunction(function))?
             .kind();
-        Ok(kind == FunctionKind::Generator)
+        Ok(matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator).then_some(kind))
     }
 
     /// Replaces the inline function prototype slot and records its possible young edge.

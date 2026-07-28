@@ -652,7 +652,7 @@ pub(super) fn lower_function_stencil(
     semantic: &Semantic<'_>,
     functions: &mut Vec<HirFunction>,
 ) -> Result<FunctionStencilId, CompileError> {
-    if function.r#async {
+    if function.r#async && !function.generator {
         return Err(unsupported(
             source.name(),
             source_span(function.span),
@@ -726,7 +726,9 @@ pub(super) fn lower_function_stencil(
                     .any(|directive| directive.expression.value.as_str() == "use strict")
             }),
         is_arrow: false,
-        kind: if function.generator {
+        kind: if function.r#async && function.generator {
+            super::program::HirFunctionKind::AsyncGenerator
+        } else if function.generator {
             super::program::HirFunctionKind::Generator
         } else {
             super::program::HirFunctionKind::Ordinary

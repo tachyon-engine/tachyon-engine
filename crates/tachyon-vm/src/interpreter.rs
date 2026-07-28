@@ -3669,14 +3669,19 @@ impl Isolate {
             .ok_or(ExecutionError::MissingEntryFunction(function))?
             .kind();
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
-        let internal_prototype = if kind == FunctionKind::Generator {
-            self.realm
+        let internal_prototype = match kind {
+            FunctionKind::Generator => self
+                .realm
                 .generator_function_prototype
-                .expect("generator intrinsics initialize before bytecode execution")
-        } else {
-            self.realm
+                .expect("generator intrinsics initialize before bytecode execution"),
+            FunctionKind::AsyncGenerator => self
+                .realm
+                .async_generator_function_prototype
+                .expect("async generator intrinsics initialize before bytecode execution"),
+            _ => self
+                .realm
                 .function_prototype
-                .expect("function intrinsics initialize before bytecode execution")
+                .expect("function intrinsics initialize before bytecode execution"),
         };
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
@@ -5266,7 +5271,7 @@ impl Isolate {
                             site.callee,
                         ));
                     }
-                    if kind == FunctionKind::Generator {
+                    if matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator) {
                         if site.new_target.as_immediate() != Some(Immediate::Undefined) {
                             return Err(ExecutionError::NonConstructor(site.callee));
                         }
@@ -6353,7 +6358,23 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::GeneratorThrow) => {
                     return self.begin_generator_throw(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::AsyncGeneratorNext) => {
+                    return self.begin_async_generator_next(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::AsyncGeneratorReturn) => {
+                    return self.begin_async_generator_return(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::AsyncGeneratorThrow) => {
+                    return self.begin_async_generator_throw(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::GeneratorFunctionPrototype) => {
+                    return self.write(
+                        site.caller_base,
+                        site.destination,
+                        Value::from_immediate(Immediate::Undefined),
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::AsyncGeneratorFunctionPrototype) => {
                     return self.write(
                         site.caller_base,
                         site.destination,
@@ -8204,7 +8225,9 @@ impl Isolate {
                     continue;
                 }
                 if continuation.kind() == NativeContinuationKind::GeneratorResume {
-                    self.finish_generator_throw(continuation)?;
+                    if self.finish_generator_throw(continuation, value)? {
+                        return Ok(None);
+                    }
                     instruction_offset = continuation.site().call_site;
                     continue;
                 }

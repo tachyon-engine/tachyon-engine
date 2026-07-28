@@ -2677,6 +2677,91 @@ impl Isolate {
             prototype_atom,
             generator_prototype,
             false,
+        )?;
+        let async_generator_prototype =
+            self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: iterator_prototype,
+            })?;
+        let async_generator_function_prototype = self.allocate_native_function(
+            NativeFunction::AsyncGeneratorFunctionPrototype,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let async_next = self.allocate_native_function(
+            NativeFunction::AsyncGeneratorNext,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let async_return = self.allocate_native_function(
+            NativeFunction::AsyncGeneratorReturn,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let async_throw = self.allocate_native_function(
+            NativeFunction::AsyncGeneratorThrow,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.async_generator_function_prototype = Some(async_generator_function_prototype);
+        self.realm.async_generator_prototype = Some(async_generator_prototype);
+        self.set_intrinsic_data_property(async_generator_prototype, next_atom, async_next, true)?;
+        self.set_intrinsic_data_property(
+            async_generator_prototype,
+            return_atom,
+            async_return,
+            true,
+        )?;
+        self.set_intrinsic_data_property(async_generator_prototype, throw_atom, async_throw, true)?;
+        let to_string_tag = self
+            .realm
+            .well_known_symbols
+            .to_string_tag
+            .expect("Symbol initializes before generator intrinsics");
+        let async_generator_tag = self.allocate_runtime_string(
+            JsString::try_from_latin1(b"AsyncGenerator")
+                .map_err(ExecutionError::PropertyKeyString)?,
+        )?;
+        let to_string_tag_key = self.property_key(to_string_tag)?;
+        self.define_data_property(
+            async_generator_prototype,
+            to_string_tag_key,
+            DataPropertyDescriptor {
+                value: Some(async_generator_tag),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )?;
+        self.set_intrinsic_data_property(
+            async_generator_prototype,
+            constructor_atom,
+            async_generator_function_prototype,
+            true,
+        )?;
+        self.set_intrinsic_data_property(
+            async_generator_function_prototype,
+            prototype_atom,
+            async_generator_prototype,
+            false,
         )
     }
 

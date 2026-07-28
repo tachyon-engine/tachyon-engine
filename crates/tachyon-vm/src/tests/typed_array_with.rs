@@ -214,7 +214,7 @@ fn typed_array_with_accepts_all_standard_source_factories() {
 /// Executes one with fixture under the selected dispatch and collection policy.
 fn assert_typed_array_with<const N: usize>(source: &'static str, forced_major: bool) {
     let module = compile_typed_array_with_fixture(source);
-    let mut isolate = test_isolate();
+    let mut isolate = typed_array_with_test_isolate(source);
     isolate
         .install_realm_hooks(unused_eval_callback, unused_dynamic_function_callback)
         .expect("detach host hook installs");
@@ -240,6 +240,20 @@ fn assert_typed_array_with<const N: usize>(source: &'static str, forced_major: b
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
     );
+}
+
+/// Gives only the all-constructor high-water fixture one extra span for its simultaneous backings.
+fn typed_array_with_test_isolate(source: &'static str) -> Isolate {
+    if source != TYPED_ARRAY_WITH_SOURCE_FACTORIES {
+        return test_isolate();
+    }
+    Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
+        HeapLimit::new(10 * SPAN_SIZE_BYTES),
+        StackLimits::new(64, 4_096),
+        RealmLimits::new(64, 1_024),
+    ))
+    .expect("large TypedArray fixture isolate initializes")
 }
 
 fn unused_eval_callback(

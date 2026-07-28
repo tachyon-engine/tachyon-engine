@@ -1093,6 +1093,7 @@ fn lower_function(
             kind: match function.kind {
                 HirFunctionKind::Ordinary => FunctionKind::Ordinary,
                 HirFunctionKind::Generator => FunctionKind::Generator,
+                HirFunctionKind::AsyncGenerator => FunctionKind::AsyncGenerator,
                 HirFunctionKind::DerivedClassConstructor
                 | HirFunctionKind::DefaultDerivedConstructor => {
                     FunctionKind::DerivedClassConstructor

@@ -149,6 +149,7 @@ pub struct HirFunction {
 pub enum HirFunctionKind {
     Ordinary,
     Generator,
+    AsyncGenerator,
     DerivedClassConstructor,
     DefaultDerivedConstructor,
     BaseClassConstructor,

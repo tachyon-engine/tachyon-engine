@@ -12,7 +12,7 @@ pub(super) fn forced_captures(hir: &HirProgram) -> Vec<BindingId> {
     let mut bindings = Vec::new();
     for function in hir.functions() {
         match function.kind {
-            HirFunctionKind::Generator => {}
+            HirFunctionKind::Generator | HirFunctionKind::AsyncGenerator => {}
             HirFunctionKind::ClassFieldInitializer => {
                 for statement in function.body.iter() {
                     if let HirStatementKind::Return(Some(expression)) = &statement.kind {
