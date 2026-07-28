@@ -2333,9 +2333,7 @@ impl Isolate {
             NativeContinuationKind::ErrorStackSetter(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
-            NativeContinuationKind::ObjectToString => {
-                return Err(ExecutionError::MissingNativeContinuation);
-            }
+            NativeContinuationKind::ObjectToString => (continuation.first(), 0, None, 0),
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -2395,8 +2393,11 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
             }
-            NativeContinuationKind::TypedArrayConstruction(_) => {
-                return Err(ExecutionError::MissingNativeContinuation);
+            NativeContinuationKind::TypedArrayConstruction(stage) => {
+                let state =
+                    self.pending_typed_array_construction_reference(continuation.first())?;
+                let receiver = self.typed_array_construction_callback_receiver(state, stage)?;
+                (receiver, 0, None, 0)
             }
             NativeContinuationKind::TypedArraySet(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);

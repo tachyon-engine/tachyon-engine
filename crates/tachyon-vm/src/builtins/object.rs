@@ -1283,6 +1283,7 @@ impl Isolate {
         };
         let continuation =
             NativeContinuation::object_to_string(native_site, receiver, builtin_tag as u8);
+        let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
             .push_native(continuation)
@@ -1301,6 +1302,9 @@ impl Isolate {
             return Err(error);
         }
         if self.fiber.frames.len() != frame_depth {
+            return Ok(());
+        }
+        if self.fiber.completions.len() <= completion_depth {
             return Ok(());
         }
         let continuation = self.pop_native_continuation()?;

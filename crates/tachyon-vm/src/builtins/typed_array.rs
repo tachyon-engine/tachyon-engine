@@ -290,6 +290,22 @@ impl Isolate {
         }
     }
 
+    /// Returns the receiver whose accessor callback belongs to one construction stage.
+    pub(crate) fn typed_array_construction_callback_receiver(
+        &mut self,
+        state: GcRef<PendingTypedArrayConstruction>,
+        stage: TypedArrayConstructionStage,
+    ) -> Result<Value, ExecutionError> {
+        let snapshot = self.typed_array_construction_snapshot(state)?;
+        Ok(match stage {
+            TypedArrayConstructionStage::Prototype => snapshot.new_target,
+            TypedArrayConstructionStage::IteratorMethod
+            | TypedArrayConstructionStage::ArrayLikeLength
+            | TypedArrayConstructionStage::ArrayLikeElement
+            | TypedArrayConstructionStage::SourceList => snapshot.source,
+        })
+    }
+
     /// Resumes ToPrimitive for ArrayBuffer indices, array-like length, or one element.
     pub(crate) fn resume_typed_array_conversion(
         &mut self,
