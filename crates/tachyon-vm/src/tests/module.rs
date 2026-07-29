@@ -1109,6 +1109,38 @@ fn top_level_await_class_heritage_rebases_module_bindings() {
     assert_tla_class_heritage_batch::<16>(true);
 }
 
+/// Executes top-level async iteration through the module-owned Fiber and shared close handler.
+fn assert_tla_for_await_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_600 + N as u32,
+        "memory:tla-for-await",
+        "let sum = 0; for await (let value of [await 1, Promise.resolve(2)]) { \
+         sum += await value; } sum === 3;",
+    ));
+    let identity = specifier("memory:tla-for-await");
+    let mut loader = PrecompiledGraphLoader::new(vec![(identity.clone(), module)]);
+    let root = isolate.load_module_graph(&mut loader, &identity).unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::True))
+    );
+}
+
+#[test]
+fn top_level_for_await_reuses_module_async_execution() {
+    assert_tla_for_await_batch::<1>(false);
+    assert_tla_for_await_batch::<2>(false);
+    assert_tla_for_await_batch::<4>(false);
+    assert_tla_for_await_batch::<8>(true);
+    assert_tla_for_await_batch::<16>(true);
+}
+
 #[test]
 fn top_level_await_rejection_propagates_through_shared_async_parents() {
     let mut isolate = fixtures::test_isolate();

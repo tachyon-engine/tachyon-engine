@@ -77,9 +77,17 @@ impl Lowerer<'_> {
                 body,
             } => {
                 if *r#await {
-                    return Err(self.unsupported(statement.span, "for-await-of bytecode"));
+                    self.for_await_or_of_statement(
+                        true,
+                        left,
+                        right,
+                        body,
+                        Some(result),
+                        statement.span,
+                    )?;
+                } else {
+                    self.entry_for_of_statement(left, right, body, result, statement.span)?;
                 }
-                self.entry_for_of_statement(left, right, body, result, statement.span)?;
                 Ok(false)
             }
             HirStatementKind::Loop {
@@ -361,13 +369,7 @@ impl Lowerer<'_> {
                 right,
                 body,
             } => {
-                self.function_for_await_or_of_statement(
-                    *r#await,
-                    left,
-                    right,
-                    body,
-                    statement.span,
-                )?;
+                self.for_await_or_of_statement(*r#await, left, right, body, None, statement.span)?;
                 Ok(false)
             }
             HirStatementKind::Loop {
@@ -575,15 +577,17 @@ impl Lowerer<'_> {
     }
 
     /// Emits one uniform async loop after acquisition normalizes synchronous iterables.
-    pub(in crate::bytecode) fn function_for_await_or_of_statement(
+    pub(in crate::bytecode) fn for_await_or_of_statement(
         &mut self,
         is_async: bool,
         left: &HirForInLeft,
         right: &HirExpression,
         body: &HirStatement,
+        entry_result: Option<RegisterId>,
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         if !is_async {
+            debug_assert!(entry_result.is_none());
             return self.function_for_of_statement(left, right, body, span);
         }
         let checkpoint = self.locals.len();
@@ -635,7 +639,11 @@ impl Lowerer<'_> {
             label: end,
             finally_depth: self.finally_depth - 1,
         });
-        self.function_statement(body)?;
+        if let Some(result) = entry_result {
+            self.entry_statement(body, result)?;
+        } else {
+            self.function_statement(body)?;
+        }
         self.break_targets.pop();
         self.continue_targets.pop();
         self.emit_jump(condition, span)?;

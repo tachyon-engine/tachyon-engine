@@ -239,6 +239,22 @@ fn module_binding_depth_is_not_cached_from_first_nested_use() {
 }
 
 #[test]
+/// Reuses the async-function iterator protocol for a top-level module loop.
+fn module_for_await_uses_verified_await_suspend_points() {
+    let module = compile_module(
+        "let value; for await (value of [await 1]) { await value; break; } export { value };",
+    );
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(entry).unwrap();
+    assert!(disassembly.contains("LoadAsyncIteratorSymbol"));
+    assert!(disassembly.matches("Await").count() >= 3);
+    assert!(disassembly.contains("ResumeCompletion"));
+    assert!(entry.suspend_points().len() >= 3);
+}
+
+#[test]
 /// Prevents static module semantics from being attached to an ordinary script entry.
 fn script_cannot_carry_a_module_stencil() {
     let script = Compiler
