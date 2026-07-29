@@ -167,6 +167,104 @@ poisonedInstance.next().then(function() {
 
 const ASYNC_GENERATOR_DELEGATE_ASSERTION: &str = "asyncDelegateTrace;";
 
+const ASYNC_GENERATOR_AWAIT_SOURCE: &str = r#"
+var yieldOk = false;
+(async function* () { yield Promise.resolve(3); })().next().then(function(result) {
+    yieldOk = result.value === 3 && !result.done;
+});
+
+var blockedTrace = "";
+var releaseYield;
+async function* blocked() {
+    var received = yield new Promise(function(resolve) { releaseYield = resolve; });
+    return received;
+}
+var blockedGenerator = blocked();
+blockedGenerator.next().then(function(result) {
+    blockedTrace += "first:" + result.value + ":" + result.done + "|";
+});
+blockedGenerator.next(9).then(function(result) {
+    blockedTrace += "second:" + result.value + ":" + result.done + "|";
+});
+Promise.resolve().then(function() {
+    blockedTrace += "release|";
+    releaseYield(4);
+});
+
+var completedOk = false;
+var completed = (async function* () { return 1; })();
+completed.next().then(function() {
+    return completed.return(Promise.resolve(5));
+}).then(function(result) {
+    completedOk = result.value === 5 && result.done;
+});
+
+var callerRegisterOk = false;
+var callerReturnOk = false;
+function returnWithoutClobber(generator, value, expected) {
+    var sentinel = 41;
+    generator.return(value).then(function(result) {
+        callerReturnOk = result.value === 12 && result.done;
+    });
+    return sentinel === 41 && generator === expected;
+}
+var callerGenerator = (async function* () {})();
+callerRegisterOk = returnWithoutClobber(callerGenerator, Promise.resolve(12), callerGenerator);
+
+var startEntered = false;
+var start = (async function* () { startEntered = true; yield 1; })();
+var startOk = false;
+start.return(Promise.resolve(6)).then(function(result) {
+    startOk = !startEntered && result.value === 6 && result.done;
+});
+
+var returnFinally = false;
+var suspended = (async function* () {
+    try { yield 1; }
+    finally { returnFinally = true; }
+})();
+var suspendedOk = false;
+suspended.next().then(function() {
+    return suspended.return(Promise.resolve(7));
+}).then(function(result) {
+    suspendedOk = returnFinally && result.value === 7 && result.done;
+});
+
+var rejectionMarker = {};
+var rejected = (async function* () {
+    try { yield 1; }
+    catch (error) { return error === rejectionMarker ? 8 : 0; }
+})();
+var rejectedOk = false;
+rejected.next().then(function() {
+    return rejected.return(Promise.reject(rejectionMarker));
+}).then(function(result) {
+    rejectedOk = result.value === 8 && result.done;
+});
+
+var poisonMarker = {};
+var poisonedPromise = Promise.resolve(9);
+Object.defineProperty(poisonedPromise, "constructor", {
+    get: function() { throw poisonMarker; }
+});
+var poisoned = (async function* () {
+    try { yield 1; }
+    catch (error) { return error === poisonMarker ? 10 : 0; }
+})();
+var poisonedOk = false;
+poisoned.next().then(function() {
+    return poisoned.return(poisonedPromise);
+}).then(function(result) {
+    poisonedOk = result.value === 10 && result.done;
+});
+"#;
+
+const ASYNC_GENERATOR_AWAIT_ASSERTION: &str = r#"
+yieldOk && completedOk && callerRegisterOk && callerReturnOk && startOk && suspendedOk &&
+    rejectedOk && poisonedOk &&
+    blockedTrace === "release|first:4:false|second:9:true|";
+"#;
+
 const ASYNC_ITERATOR_INTRINSIC_SOURCE: &str = r#"
 var ag = (async function* () {})();
 var agPrototype = Object.getPrototypeOf(ag);
@@ -178,7 +276,13 @@ var intrinsicAsyncIterator = Object.getPrototypeOf(asyncIteratorPrototype) === i
 var chainOk = iteratorPrototype[Symbol.iterator].call(agPrototype) === agPrototype;
 var identityOk = asyncIdentity.call(agPrototype) === agPrototype;
 var tagOk = iteratorPrototype[Symbol.toStringTag] === "AsyncIterator";
-(intrinsicAsyncIterator ? 1 : 0) + (chainOk ? 2 : 0) + (identityOk ? 4 : 0) + (tagOk ? 8 : 0);
+var asyncGeneratorFunctionPrototype = Object.getPrototypeOf(async function* () {});
+var constructorDescriptor = Object.getOwnPropertyDescriptor(asyncIteratorPrototype, "constructor");
+var constructorOk = constructorDescriptor.value === asyncGeneratorFunctionPrototype &&
+    !constructorDescriptor.writable && !constructorDescriptor.enumerable &&
+    constructorDescriptor.configurable;
+(intrinsicAsyncIterator ? 1 : 0) + (chainOk ? 2 : 0) + (identityOk ? 4 : 0) +
+    (tagOk ? 8 : 0) + (constructorOk ? 16 : 0);
 "#;
 
 const GENERATOR_YIELD_SOURCE: &str = r#"
@@ -604,6 +708,20 @@ fn async_generator_delegation_survives_forced_major_collection() {
 }
 
 #[test]
+fn async_generator_await_runs_for_every_dispatch_batch() {
+    assert_async_generator_await::<1>(false);
+    assert_async_generator_await::<2>(false);
+    assert_async_generator_await::<4>(false);
+    assert_async_generator_await::<8>(false);
+    assert_async_generator_await::<16>(false);
+}
+
+#[test]
+fn async_generator_await_survives_forced_major_collection() {
+    assert_async_generator_await::<8>(true);
+}
+
+#[test]
 fn async_iterator_intrinsic_chain_is_published() {
     let module = Compiler
         .compile(
@@ -627,7 +745,7 @@ fn async_iterator_intrinsic_chain_is_published() {
         )
         .expect("async iterator intrinsic fixture executes");
     assert!(
-        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(15)),
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(31)),
         "async iterator intrinsic result: {outcome:?}"
     );
 }
@@ -902,7 +1020,7 @@ fn assert_async_generator_queue<const N: usize>(forced_major: bool) {
         .expect("async generator trace is a string");
     assert_eq!(
         String::from_utf16(&trace).expect("trace is valid UTF-16"),
-        "start|resume:7|throw:11|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
+        "start|throw:11|resume:7|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
         "async generator batch {N}, forced_major={forced_major}"
     );
 }
@@ -966,6 +1084,61 @@ fn assert_async_generator_delegate<const N: usize>(forced_major: bool) {
         String::from_utf16(&trace).expect("delegate trace is valid UTF-16"),
         "next:3:false|throw:5:false|poison:true:1|done:9:true|",
         "async generator delegate batch {N}, forced_major={forced_major}"
+    );
+}
+
+/// Runs async yield and return Await paths under one dispatch and collection policy.
+fn assert_async_generator_await<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_100 + N as u32),
+                SourceName::new("async-generator-await"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_AWAIT_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator await fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_200 + N as u32),
+                SourceName::new("async-generator-await-assertion"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_AWAIT_ASSERTION),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator await assertion compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 200_000,
+                quantum: 200_000,
+            },
+        )
+        .expect("async generator await setup executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("async generator await assertion executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "async generator await batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

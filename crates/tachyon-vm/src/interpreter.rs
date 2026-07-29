@@ -1867,7 +1867,7 @@ impl Isolate {
                 })?;
                 return self.resume_restored_generator_native_caller();
             }
-            Opcode::YieldDelegate => {
+            Opcode::YieldWithKind => {
                 self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
                     code,
                     instruction: instruction_offset,

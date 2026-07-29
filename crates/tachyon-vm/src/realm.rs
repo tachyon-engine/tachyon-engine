@@ -2883,7 +2883,7 @@ impl Isolate {
             async_generator_function_constructor,
             true,
         )?;
-        self.set_intrinsic_data_property(
+        self.set_intrinsic_readonly_data_property(
             async_generator_prototype,
             constructor_atom,
             async_generator_function_prototype,

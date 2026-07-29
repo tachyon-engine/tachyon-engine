@@ -185,7 +185,7 @@ fn operand_count_table_covers_every_opcode_once() {
         (
             3,
             &[
-                Opcode::YieldDelegate,
+                Opcode::YieldWithKind,
                 Opcode::CallSpread,
                 Opcode::TailCallSpread,
                 Opcode::CallSpreadWithReceiver,
@@ -1300,9 +1300,9 @@ fn compiled_module_rejects_invalid_pool_and_suspend_references() {
 }
 
 #[test]
-fn yield_delegate_requires_generator_kind_and_adjacent_resume_registers() {
+fn yield_with_kind_requires_generator_kind_and_adjacent_resume_registers() {
     let build = |kind, register_count| {
-        let mut words = encode_instruction(Opcode::YieldDelegate, &[0, 1, 0]).unwrap();
+        let mut words = encode_instruction(Opcode::YieldWithKind, &[0, 1, 0]).unwrap();
         let instruction = decode_instruction(&words, WordOffset::new(0)).unwrap();
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         let mut metadata = FunctionMetadata::new(
@@ -1338,7 +1338,7 @@ fn yield_delegate_requires_generator_kind_and_adjacent_resume_registers() {
     assert!(matches!(
         build(FunctionKind::Script, 3),
         Err(ModuleBuildError::SuspendInIncompatibleFunction {
-            opcode: Opcode::YieldDelegate,
+            opcode: Opcode::YieldWithKind,
             ..
         })
     ));

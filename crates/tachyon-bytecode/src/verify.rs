@@ -701,7 +701,7 @@ pub(super) fn validate_suspend_points(
             )?;
         if !matches!(
             instruction.opcode,
-            Opcode::Await | Opcode::Yield | Opcode::YieldDelegate
+            Opcode::Await | Opcode::Yield | Opcode::YieldWithKind
         ) || instruction.operands[1] != suspend_point.destination.index()
             || instruction.operands[2] != suspend_point.id.index()
             || suspend_point.resume_offset.index()
@@ -735,7 +735,7 @@ fn validate_suspend_opcodes(
         })?;
         if matches!(
             decoded.opcode,
-            Opcode::Await | Opcode::Yield | Opcode::YieldDelegate
+            Opcode::Await | Opcode::Yield | Opcode::YieldWithKind
         ) {
             let is_compatible = match decoded.opcode {
                 Opcode::Await => matches!(
@@ -745,7 +745,7 @@ fn validate_suspend_opcodes(
                 Opcode::Yield => {
                     matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
                 }
-                Opcode::YieldDelegate => {
+                Opcode::YieldWithKind => {
                     matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
                 }
                 _ => false,
@@ -1061,7 +1061,7 @@ fn verify_instruction(
             check_register(operands[0])?;
             check_register(operands[1])?;
         }
-        Opcode::YieldDelegate => {
+        Opcode::YieldWithKind => {
             check_register(operands[0])?;
             check_register(operands[1])?;
             check_register(

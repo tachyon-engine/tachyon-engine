@@ -136,6 +136,26 @@ impl Isolate {
         )
     }
 
+    /// Defines one read-only spec-facing intrinsic field with builtin attributes.
+    pub(crate) fn set_intrinsic_readonly_data_property(
+        &mut self,
+        receiver: Value,
+        key: AtomId,
+        value: Value,
+        configurable: bool,
+    ) -> Result<(), ExecutionError> {
+        self.define_data_property(
+            receiver,
+            key,
+            DataPropertyDescriptor {
+                value: Some(value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(configurable),
+            },
+        )
+    }
+
     /// Defines one non-writable, non-enumerable, non-configurable intrinsic constant.
     pub(crate) fn set_intrinsic_constant_property(
         &mut self,

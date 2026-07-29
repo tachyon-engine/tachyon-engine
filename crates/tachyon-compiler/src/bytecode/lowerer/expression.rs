@@ -195,7 +195,7 @@ impl Lowerer<'_> {
         } else {
             inner_result
         };
-        self.emit_suspend(Opcode::YieldDelegate, yielded, received_value, span)?;
+        self.emit_suspend(Opcode::YieldWithKind, yielded, received_value, span)?;
         self.emit_jump(loop_start, span)?;
         self.bind_label(end)?;
         Ok(destination)
@@ -240,6 +240,37 @@ impl Lowerer<'_> {
             .emit_jump_if_true(matches, target, self.bytecode_span(span))
             .map(|_| ())
             .map_err(CompileError::Builder)
+    }
+
+    /// Lowers AsyncGeneratorYield and unwraps Return resumptions before abrupt propagation.
+    fn async_generator_yield(
+        &mut self,
+        source: RegisterId,
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        const RESUME_NORMAL: u32 = 0;
+        const RESUME_RETURN: u32 = 1;
+
+        let yielded = self.register()?;
+        self.emit_suspend(Opcode::Await, source, yielded, span)?;
+        let received = self.register()?;
+        let received_kind = self.register()?;
+        debug_assert_eq!(received_kind.index(), received.index() + 1);
+        self.emit_suspend(Opcode::YieldWithKind, yielded, received, span)?;
+
+        let normal = self.new_label()?;
+        let returning = self.new_label()?;
+        self.branch_resume_kind(received_kind, RESUME_NORMAL, normal, span)?;
+        self.branch_resume_kind(received_kind, RESUME_RETURN, returning, span)?;
+        self.emit(Opcode::Throw, &[received.index()], span)?;
+
+        self.bind_label(returning)?;
+        let returned = self.register()?;
+        self.emit_suspend(Opcode::Await, received, returned, span)?;
+        self.emit(Opcode::Return, &[returned.index()], span)?;
+
+        self.bind_label(normal)?;
+        Ok(received)
     }
 
     /// Loads one delegated iterator method into the fixed receiver call window.
@@ -719,6 +750,8 @@ impl Lowerer<'_> {
                 };
                 if *delegate {
                     self.yield_delegate(source, expression.span)
+                } else if self.is_async_generator {
+                    self.async_generator_yield(source, expression.span)
                 } else {
                     let destination = self.register()?;
                     self.emit_suspend(Opcode::Yield, source, destination, expression.span)?;

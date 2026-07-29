@@ -225,7 +225,15 @@ impl Isolate {
         let source = self.read(site.base, site.source)?;
         if self.promise_snapshot(source).is_ok() {
             self.prepare_async_function_await(state, site.destination, site.instruction)?;
-            return self.begin_async_await_constructor_get(site, state_value, source);
+            return self.begin_async_await_constructor_get(
+                NativeContinuationSite {
+                    caller_base: site.base,
+                    destination: site.destination,
+                    call_site: site.instruction,
+                },
+                state_value,
+                source,
+            );
         }
         if !self.is_object_value(source) {
             let awaited = self.create_promise(PromiseState::Fulfilled, source)?;
@@ -254,15 +262,10 @@ impl Isolate {
     /// Performs the observable PromiseResolve constructor lookup for an awaited native Promise.
     pub(crate) fn begin_async_await_constructor_get(
         &mut self,
-        site: AsyncAwaitSite,
+        continuation_site: NativeContinuationSite,
         state: Value,
         source: Value,
     ) -> Result<(), ExecutionError> {
-        let continuation_site = NativeContinuationSite {
-            caller_base: site.base,
-            destination: site.destination,
-            call_site: site.instruction,
-        };
         let continuation =
             NativeContinuation::async_await_constructor(continuation_site, state, source);
         let depth = self.fiber.completions.len();
@@ -272,30 +275,27 @@ impl Isolate {
             .push_native(continuation)
             .map_err(Self::completion_stack_error)?;
         let constructor = self.constructor_atom()?;
+        let saved_destination;
         let result = match self.resolve_property_read_until_proxy(source, constructor.into())? {
-            PropertyReadResolution::Read(PropertyRead::Missing) => self
-                .write(
-                    continuation_site.caller_base,
-                    continuation_site.destination,
+            PropertyReadResolution::Read(PropertyRead::Missing) => {
+                self.pop_native_continuation()?;
+                return self.resume_async_await_constructor(
+                    continuation,
                     Value::from_immediate(Immediate::Undefined),
-                )
-                .map(|()| None),
-            PropertyReadResolution::Read(PropertyRead::Data(value)) => self
-                .write(
-                    continuation_site.caller_base,
-                    continuation_site.destination,
-                    value,
-                )
-                .map(|()| None),
+                );
+            }
+            PropertyReadResolution::Read(PropertyRead::Data(value)) => {
+                self.pop_native_continuation()?;
+                return self.resume_async_await_constructor(continuation, value);
+            }
             PropertyReadResolution::Read(PropertyRead::Accessor(getter))
                 if getter.as_immediate() == Some(Immediate::Undefined) =>
             {
-                self.write(
-                    continuation_site.caller_base,
-                    continuation_site.destination,
+                self.pop_native_continuation()?;
+                return self.resume_async_await_constructor(
+                    continuation,
                     Value::from_immediate(Immediate::Undefined),
-                )
-                .map(|()| None)
+                );
             }
             PropertyReadResolution::Read(PropertyRead::Accessor(getter)) => {
                 self.pop_native_continuation()?;
@@ -303,16 +303,27 @@ impl Isolate {
                     .dispatch_property_callback(continuation, getter)
                     .map(|_| ());
             }
-            PropertyReadResolution::Proxy(_) => self.dispatch_proxy_aware_property_read(
-                continuation_site,
-                source,
-                source,
-                constructor.into(),
-            ),
+            PropertyReadResolution::Proxy(_) => {
+                saved_destination =
+                    Some(self.read(continuation_site.caller_base, continuation_site.destination)?);
+                self.dispatch_proxy_aware_property_read(
+                    continuation_site,
+                    source,
+                    source,
+                    constructor.into(),
+                )
+            }
         };
         if let Err(error) = result {
             if self.fiber.completions.len() > depth {
                 self.pop_native_continuation()?;
+            }
+            if let Some(saved) = saved_destination {
+                self.write(
+                    continuation_site.caller_base,
+                    continuation_site.destination,
+                    saved,
+                )?;
             }
             return self.reject_async_await_constructor_error(continuation, error);
         }
@@ -320,7 +331,15 @@ impl Isolate {
             return Ok(());
         }
         let continuation = self.pop_native_continuation()?;
-        let constructor = self.read(site.base, site.destination)?;
+        let constructor =
+            self.read(continuation_site.caller_base, continuation_site.destination)?;
+        if let Some(saved) = saved_destination {
+            self.write(
+                continuation_site.caller_base,
+                continuation_site.destination,
+                saved,
+            )?;
+        }
         self.resume_async_await_constructor(continuation, constructor)
     }
 
@@ -336,8 +355,12 @@ impl Isolate {
             .realm
             .promise_constructor
             .expect("Promise constructor initializes before Await");
+        let awaiting_return = self.is_async_generator_awaiting_return(state);
         if constructor == intrinsic {
             self.perform_promise_then_with_capability(source, None, None, state)?;
+            if awaiting_return {
+                return Ok(());
+            }
             return self.complete_async_await_resolution();
         }
         let awaited = self.create_promise(
@@ -349,7 +372,11 @@ impl Isolate {
             awaited,
             source,
             continuation.site(),
-            PromiseResolutionMode::AsyncAwait,
+            if awaiting_return {
+                PromiseResolutionMode::StaticResolve
+            } else {
+                PromiseResolutionMode::AsyncAwait
+            },
         )
     }
 
@@ -361,6 +388,9 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let awaited = self.create_promise(PromiseState::Rejected, reason)?;
         self.perform_promise_then_with_capability(awaited, None, None, continuation.first())?;
+        if self.is_async_generator_awaiting_return(continuation.first()) {
+            return Ok(());
+        }
         self.complete_async_await_resolution()
     }
 

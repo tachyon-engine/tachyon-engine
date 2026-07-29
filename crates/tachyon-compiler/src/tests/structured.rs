@@ -643,14 +643,14 @@ fn compiler_emits_generator_yield_suspend_points() {
         point.instruction,
     )
     .unwrap();
-    assert_eq!(instruction.opcode, tachyon_bytecode::Opcode::YieldDelegate);
+    assert_eq!(instruction.opcode, tachyon_bytecode::Opcode::YieldWithKind);
     assert_eq!(instruction.operands[1], point.destination.index());
     assert!(instruction.operands[1] + 1 < function.layout().register_count);
     assert_eq!(instruction.operands[2], point.id.index());
     assert!(
         tachyon_bytecode::disassemble(function)
             .unwrap()
-            .contains("YieldDelegate")
+            .contains("YieldWithKind")
     );
 }
 
@@ -683,6 +683,13 @@ fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
         module.functions()[1].kind(),
         tachyon_bytecode::FunctionKind::AsyncGenerator
     );
+    let function = &module.functions()[1];
+    let disassembly = tachyon_bytecode::disassemble(function).expect("bytecode disassembles");
+    assert_eq!(disassembly.matches("Await").count(), 2);
+    assert!(disassembly.contains("YieldWithKind"));
+    assert!(disassembly.contains("Throw"));
+    assert!(disassembly.contains("Return"));
+    assert_eq!(function.suspend_points().len(), 3);
 }
 
 #[test]

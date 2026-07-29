@@ -85,6 +85,7 @@ pub(crate) enum GeneratorState {
     SuspendedStart,
     SuspendedYield,
     Executing,
+    AwaitingReturn,
     Completed,
 }
 
@@ -342,7 +343,10 @@ impl Isolate {
                     .try_reserve(1)
                     .map_err(|_| ExecutionError::GeneratorArgumentAllocationFailed)?;
                 let should_start = generator.active_async_request.is_none()
-                    && generator.state != GeneratorState::Executing;
+                    && !matches!(
+                        generator.state,
+                        GeneratorState::Executing | GeneratorState::AwaitingReturn
+                    );
                 generator.async_requests.push_back(request);
                 Ok(should_start)
             })?;
@@ -366,6 +370,7 @@ impl Isolate {
             let request = self.activate_async_generator_request(generator)?;
             let header = self.generator_header(generator)?;
             match (header.state, request.kind) {
+                (GeneratorState::Executing | GeneratorState::AwaitingReturn, _) => return Ok(()),
                 (GeneratorState::Completed, AsyncGeneratorRequestKind::Next) => {
                     let result = self.create_iterator_result(
                         Value::from_immediate(Immediate::Undefined),
@@ -378,8 +383,11 @@ impl Isolate {
                     if header.state == GeneratorState::SuspendedStart {
                         self.complete_generator_without_resume(generator)?;
                     }
-                    let result = self.create_iterator_result(request.value, true)?;
-                    return self.schedule_async_generator_settlement(generator, result, false);
+                    return self.begin_async_generator_await_return(
+                        generator_value,
+                        generator,
+                        request.value,
+                    );
                 }
                 (GeneratorState::Completed, AsyncGeneratorRequestKind::Throw)
                 | (GeneratorState::SuspendedStart, AsyncGeneratorRequestKind::Throw) => {
@@ -392,7 +400,7 @@ impl Isolate {
                     let site = self.async_generator_request_site(generator_value, request);
                     return self.begin_generator_next_kind(&site, true, Some(request.value));
                 }
-                (_, AsyncGeneratorRequestKind::Return) => {
+                (GeneratorState::SuspendedYield, AsyncGeneratorRequestKind::Return) => {
                     let site = self.async_generator_request_site(generator_value, request);
                     return self.begin_generator_abrupt(
                         &site,
@@ -413,6 +421,46 @@ impl Isolate {
                 return Ok(());
             }
         }
+    }
+
+    /// Awaits a queued return value after the generator body can no longer execute.
+    fn begin_async_generator_await_return(
+        &mut self,
+        generator_value: Value,
+        generator: GcRef<GeneratorObject>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.set_generator_state(generator, GeneratorState::AwaitingReturn)?;
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .copied()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let site = NativeContinuationSite {
+            caller_base: frame.base,
+            destination: 0,
+            call_site: frame.pc,
+        };
+        if self.promise_snapshot(value).is_ok() {
+            return self.begin_async_await_constructor_get(site, generator_value, value);
+        }
+        if !self.is_object_value(value) {
+            let awaited =
+                self.create_promise(crate::promise_state::PromiseState::Fulfilled, value)?;
+            return self.perform_promise_then_with_capability(awaited, None, None, generator_value);
+        }
+        let awaited = self.create_promise(
+            crate::promise_state::PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )?;
+        self.perform_promise_then_with_capability(awaited, None, None, generator_value)?;
+        self.begin_promise_resolution(
+            awaited,
+            value,
+            site,
+            crate::runtime::fiber::PromiseResolutionMode::StaticResolve,
+        )
     }
 
     /// Builds an allocation-free internal call site; async results settle the active Promise.
@@ -460,7 +508,9 @@ impl Isolate {
                     self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true)?;
                 return self.write(site.caller_base, site.destination, result);
             }
-            GeneratorState::Executing => return Err(ExecutionError::GeneratorExecuting),
+            GeneratorState::Executing | GeneratorState::AwaitingReturn => {
+                return Err(ExecutionError::GeneratorExecuting);
+            }
             GeneratorState::SuspendedYield => {
                 return self.resume_generator_yield(generator, site, resume_value);
             }
@@ -578,7 +628,10 @@ impl Isolate {
         if header.is_async != expected_async {
             return Err(ExecutionError::GeneratorBrand(site.this_value));
         }
-        if header.state == GeneratorState::Executing {
+        if matches!(
+            header.state,
+            GeneratorState::Executing | GeneratorState::AwaitingReturn
+        ) {
             return Err(ExecutionError::GeneratorExecuting);
         }
         if matches!(
@@ -957,7 +1010,15 @@ impl Isolate {
         self.prepare_async_generator_await(generator, site.destination, site.instruction)?;
         let source = self.read(site.base, site.source)?;
         if self.promise_snapshot(source).is_ok() {
-            return self.begin_async_await_constructor_get(site, generator_value, source);
+            return self.begin_async_await_constructor_get(
+                NativeContinuationSite {
+                    caller_base: site.base,
+                    destination: site.destination,
+                    call_site: site.instruction,
+                },
+                generator_value,
+                source,
+            );
         }
         if !self.is_object_value(source) {
             let awaited =
@@ -1065,13 +1126,23 @@ impl Isolate {
                     .borrow(generator, self.types.generator_object)
                     .is_ok_and(|generator| {
                         generator.is_async
-                            && generator.state == GeneratorState::Executing
-                            && generator.paused.is_some()
-                            && generator.resume_destination.is_some()
-                            && generator.resume_instruction.is_some()
+                            && (generator.state == GeneratorState::AwaitingReturn
+                                || (generator.state == GeneratorState::Executing
+                                    && generator.paused.is_some()
+                                    && generator.resume_destination.is_some()
+                                    && generator.resume_instruction.is_some()))
                     })
             })
         })
+    }
+
+    /// Reports the constructor-lookup branch used by AsyncGeneratorAwaitReturn.
+    pub(crate) fn is_async_generator_awaiting_return(&mut self, value: Value) -> bool {
+        let Ok(generator) = self.generator_reference(value) else {
+            return false;
+        };
+        self.generator_header(generator)
+            .is_ok_and(|header| header.is_async && header.state == GeneratorState::AwaitingReturn)
     }
 
     /// Resumes an awaited async generator from a Promise reaction without changing its request head.
@@ -1089,6 +1160,20 @@ impl Isolate {
             .last_mut()
             .ok_or(ExecutionError::MissingEnvironment)?
             .pc = return_site;
+        if self.generator_header(generator)?.state == GeneratorState::AwaitingReturn {
+            self.set_generator_state(generator, GeneratorState::Completed)?;
+            let result = if rejected {
+                argument
+            } else {
+                self.create_iterator_result(argument, true)?
+            };
+            self.settle_active_async_generator_request(generator, result, rejected)?;
+            self.promise_jobs.finish_active();
+            if self.has_queued_async_generator_request(generator)? {
+                self.resume_next_async_generator_request(generator_value)?;
+            }
+            return Ok(None);
+        }
         let continuation = NativeContinuation::async_generator_resume(
             NativeContinuationSite {
                 caller_base: self

@@ -297,8 +297,8 @@ pub enum Opcode {
     LoadIteratorSymbol = 125,
     /// Throws a language-level TypeError unless the selected register contains an Object.
     CheckObject = 126,
-    /// Forwards a delegated iterator result and resumes into adjacent value/kind registers.
-    YieldDelegate = 127,
+    /// Yields one value and resumes into adjacent value/kind registers.
+    YieldWithKind = 127,
     /// Calls with arguments materialized in an engine-private Array.
     CallSpread = 128,
     /// Tail-calls with arguments materialized in an engine-private Array.
@@ -444,7 +444,7 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // CreateDataPropertyByValue
     1, // LoadIteratorSymbol
     1, // CheckObject
-    3, // YieldDelegate
+    3, // YieldWithKind
     3, // CallSpread
     3, // TailCallSpread
     3, // CallSpreadWithReceiver
@@ -628,7 +628,7 @@ impl Opcode {
             60 => Some(Self::CreateDataPropertyByValue),
             61 => Some(Self::LoadIteratorSymbol),
             62 => Some(Self::CheckObject),
-            63 => Some(Self::YieldDelegate),
+            63 => Some(Self::YieldWithKind),
             64 => Some(Self::CallSpread),
             65 => Some(Self::TailCallSpread),
             66 => Some(Self::CallSpreadWithReceiver),
