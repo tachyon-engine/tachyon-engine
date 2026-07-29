@@ -1086,6 +1086,100 @@ fn top_level_await_rejection_enters_module_catch_and_caches_uncaught_error() {
     );
 }
 
+/// Verifies the public evaluation Promise is cycle-root owned and stable across GC and reentry.
+fn assert_module_evaluation_promise_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let module = LoadedModule::precompiled(compile_source_module(
+        1_900 + N as u32,
+        "memory:evaluation-promise",
+        "await 41; 42;",
+    ));
+    let mut loader =
+        PrecompiledGraphLoader::new(vec![(specifier("memory:evaluation-promise"), module)]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:evaluation-promise"))
+        .unwrap();
+    let promise = isolate
+        .evaluate_module_promise_with_test_batch::<N>(root)
+        .unwrap();
+    assert_eq!(
+        isolate.promise_snapshot(promise).unwrap().state,
+        PromiseState::Fulfilled
+    );
+    assert_eq!(
+        isolate
+            .evaluate_module_promise_with_test_batch::<N>(root)
+            .unwrap(),
+        promise
+    );
+}
+
+#[test]
+fn module_evaluation_promise_is_stable_for_every_dispatch_batch() {
+    assert_module_evaluation_promise_batch::<1>(false);
+    assert_module_evaluation_promise_batch::<2>(false);
+    assert_module_evaluation_promise_batch::<4>(false);
+    assert_module_evaluation_promise_batch::<8>(true);
+    assert_module_evaluation_promise_batch::<16>(true);
+}
+
+#[test]
+fn module_evaluation_promise_caches_rejection() {
+    let mut isolate = fixtures::test_isolate();
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_000,
+        "memory:evaluation-rejection",
+        "await Promise.reject(41);",
+    ));
+    let mut loader =
+        PrecompiledGraphLoader::new(vec![(specifier("memory:evaluation-rejection"), module)]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:evaluation-rejection"))
+        .unwrap();
+    let promise = isolate.evaluate_module_promise(root).unwrap();
+    let snapshot = isolate.promise_snapshot(promise).unwrap();
+    assert_eq!(snapshot.state, PromiseState::Rejected);
+    assert_eq!(snapshot.result, Value::from_i32(41));
+    assert_eq!(isolate.evaluate_module_promise(root).unwrap(), promise);
+}
+
+#[test]
+fn module_evaluation_promise_is_shared_by_every_cycle_member() {
+    let mut isolate = fixtures::test_isolate();
+    let left = LoadedModule::precompiled(compile_source_module(
+        2_010,
+        "memory:promise-cycle-left",
+        "import 'memory:promise-cycle-right'; export const left = 1;",
+    ));
+    let right = LoadedModule::precompiled(compile_source_module(
+        2_011,
+        "memory:promise-cycle-right",
+        "import 'memory:promise-cycle-left'; export const right = await 2;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:promise-cycle-left"), left),
+        (specifier("memory:promise-cycle-right"), right),
+    ]);
+    let left = isolate
+        .load_module_graph(&mut loader, &specifier("memory:promise-cycle-left"))
+        .unwrap();
+    let right = isolate
+        .module_graph
+        .find_specifier(&specifier("memory:promise-cycle-right"))
+        .unwrap();
+    let promise = isolate.evaluate_module_promise(left).unwrap();
+    assert_eq!(isolate.evaluate_module_promise(right).unwrap(), promise);
+    assert_eq!(
+        isolate.promise_snapshot(promise).unwrap().state,
+        PromiseState::Fulfilled
+    );
+}
+
 #[test]
 /// Executes a compiled source module against live cells instead of the realm global object.
 fn compiled_source_module_initializes_and_reads_module_cells() {

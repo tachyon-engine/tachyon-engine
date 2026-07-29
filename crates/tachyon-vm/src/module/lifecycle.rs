@@ -418,6 +418,78 @@ impl Isolate {
         self.evaluate_module_with_batch::<{ crate::tuning::dispatch::DEFAULT_DISPATCH_BATCH }>(root)
     }
 
+    /// Starts or resumes evaluation and returns the cycle root's stable intrinsic Promise.
+    pub fn evaluate_module_promise(
+        &mut self,
+        root: ModuleId,
+    ) -> Result<Value, ModuleEvaluationError> {
+        self.evaluate_module_promise_with_batch::<{
+            crate::tuning::dispatch::DEFAULT_DISPATCH_BATCH
+        }>(root)
+    }
+
+    /// Creates the public evaluation Promise before any module body becomes observable.
+    fn evaluate_module_promise_with_batch<const N: usize>(
+        &mut self,
+        root: ModuleId,
+    ) -> Result<Value, ModuleEvaluationError> {
+        let (promise, published) = if let Some(promise) = self
+            .module_graph
+            .evaluation_promise(root)
+            .map_err(ModuleEvaluationError::Graph)?
+        {
+            (promise, false)
+        } else {
+            let promise = self
+                .create_promise(
+                    crate::PromiseState::Pending,
+                    Value::from_immediate(tachyon_value::Immediate::Undefined),
+                )
+                .map_err(ModuleEvaluationError::Execution)?;
+            self.module_graph
+                .publish_evaluation_promise(root, promise)
+                .map_err(ModuleEvaluationError::Graph)?;
+            (promise, true)
+        };
+        match self.evaluate_module_with_batch::<N>(root) {
+            Ok(RunOutcome::Completed(_)) => {
+                if self
+                    .promise_snapshot(promise)
+                    .map_err(ModuleEvaluationError::Execution)?
+                    .state
+                    == crate::PromiseState::Pending
+                {
+                    self.settle_promise(
+                        promise,
+                        crate::PromiseState::Fulfilled,
+                        Value::from_immediate(tachyon_value::Immediate::Undefined),
+                    )
+                    .map_err(ModuleEvaluationError::Execution)?;
+                }
+            }
+            Ok(RunOutcome::Thrown(error)) => {
+                if self
+                    .promise_snapshot(promise)
+                    .map_err(ModuleEvaluationError::Execution)?
+                    .state
+                    == crate::PromiseState::Pending
+                {
+                    self.settle_promise(promise, crate::PromiseState::Rejected, error)
+                        .map_err(ModuleEvaluationError::Execution)?;
+                }
+            }
+            Ok(RunOutcome::BudgetExhausted) => unreachable!("unbounded module evaluation"),
+            Err(ModuleEvaluationError::AsyncEvaluationPending(_)) => {}
+            Err(error) => {
+                if published {
+                    let _ = self.module_graph.clear_evaluation_promise(root, promise);
+                }
+                return Err(error);
+            }
+        }
+        Ok(promise)
+    }
+
     /// Starts every dependency-ready body and interleaves suspended modules at Promise job turns.
     fn evaluate_module_with_batch<const N: usize>(
         &mut self,
@@ -611,5 +683,13 @@ impl Isolate {
         root: ModuleId,
     ) -> Result<RunOutcome, ModuleEvaluationError> {
         self.evaluate_module_with_batch::<N>(root)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn evaluate_module_promise_with_test_batch<const N: usize>(
+        &mut self,
+        root: ModuleId,
+    ) -> Result<Value, ModuleEvaluationError> {
+        self.evaluate_module_promise_with_batch::<N>(root)
     }
 }

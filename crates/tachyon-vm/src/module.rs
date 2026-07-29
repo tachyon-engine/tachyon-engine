@@ -274,6 +274,7 @@ pub(crate) struct ModuleRecord {
     async_parents: Vec<ModuleId>,
     pending_async_dependencies: u32,
     async_evaluation_order: Option<u64>,
+    evaluation_promise: Option<Value>,
     body: ModuleBody,
     has_top_level_await: bool,
     namespace: Option<Value>,
@@ -412,6 +413,54 @@ struct ModuleGraphCheckpoint {
 }
 
 impl ModuleGraph {
+    /// Resolves any SCC member to the linked cycle root that owns evaluation state.
+    pub(crate) fn cycle_root(&self, module: ModuleId) -> Result<ModuleId, ModuleError> {
+        match self.record(module)?.status {
+            ModuleStatus::Linked { cycle_root } => Ok(cycle_root),
+            ModuleStatus::Unlinked | ModuleStatus::Linking { .. } => {
+                Err(ModuleError::InvalidLinkState)
+            }
+        }
+    }
+
+    pub(crate) fn evaluation_promise(
+        &self,
+        module: ModuleId,
+    ) -> Result<Option<Value>, ModuleError> {
+        Ok(self.record(self.cycle_root(module)?)?.evaluation_promise)
+    }
+
+    pub(crate) fn publish_evaluation_promise(
+        &mut self,
+        module: ModuleId,
+        promise: Value,
+    ) -> Result<(), ModuleError> {
+        let root = self.cycle_root(module)?;
+        let record = self.record_mut(root)?;
+        if record.evaluation_promise.is_some() {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        record.evaluation_promise = Some(promise);
+        Ok(())
+    }
+
+    /// Rolls back a capability published before evaluation state became observable.
+    pub(crate) fn clear_evaluation_promise(
+        &mut self,
+        module: ModuleId,
+        promise: Value,
+    ) -> Result<(), ModuleError> {
+        let root = self.cycle_root(module)?;
+        let record = self.record_mut(root)?;
+        if record.evaluation_promise != Some(promise)
+            || record.evaluation != ModuleEvaluationState::Unevaluated
+        {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        record.evaluation_promise = None;
+        Ok(())
+    }
+
     /// Reserves completion worklists before any module body can produce observable effects.
     pub(crate) fn prepare_evaluation(&mut self, module_count: usize) -> Result<(), ModuleError> {
         self.ready_async_modules
@@ -810,6 +859,7 @@ impl ModuleGraph {
             async_parents: Vec::new(),
             pending_async_dependencies: 0,
             async_evaluation_order: None,
+            evaluation_promise: None,
             body,
             has_top_level_await: init.has_top_level_await,
             namespace: None,
@@ -1015,6 +1065,7 @@ impl Trace for ModuleGraph {
         }
         for record in &mut self.records {
             record.namespace.trace(tracer);
+            record.evaluation_promise.trace(tracer);
             match &mut record.evaluation {
                 ModuleEvaluationState::AsyncEvaluating(value)
                 | ModuleEvaluationState::Evaluated(value)
