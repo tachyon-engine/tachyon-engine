@@ -15,4 +15,5 @@ fn source(media_type: MediaType, text: &str) -> SourceText {
 
 mod emission;
 mod frontend;
+mod module;
 mod structured;

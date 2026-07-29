@@ -8,6 +8,7 @@ use oxc::{
 use crate::{CompileError, ProgramKind, SourceId, SourceSpan, SourceText};
 
 use super::expression::{HirExpression, HirExpressionKind};
+use super::module::{HirModuleStencil, lower_module};
 use super::pattern::HirPattern;
 use super::statement::{HirStatement, HirStatementKind, StatementContext, lower_statement};
 use super::{copy_string_literal, source_span, to_scope_id};
@@ -85,6 +86,7 @@ pub struct HirProgram {
     functions: Arc<[HirFunction]>,
     root_scope: ScopeId,
     scopes: Arc<[HirScope]>,
+    module_stencil: Option<HirModuleStencil>,
 }
 
 impl HirProgram {
@@ -116,6 +118,11 @@ impl HirProgram {
     #[must_use]
     pub fn scopes(&self) -> &[HirScope] {
         &self.scopes
+    }
+
+    #[must_use]
+    pub const fn module_stencil(&self) -> Option<&HirModuleStencil> {
+        self.module_stencil.as_ref()
     }
 }
 
@@ -212,15 +219,22 @@ pub(crate) fn lower(
             }),
         });
     }
-    for statement in &program.body {
-        statements.push(lower_statement(
-            statement,
-            source,
-            semantic,
-            &mut functions,
-            StatementContext::ScriptBody,
-        )?);
-    }
+    let module_stencil = if kind == ProgramKind::Module {
+        let (stencil, module_statements) = lower_module(program, source, semantic, &mut functions)?;
+        statements.extend(module_statements);
+        Some(stencil)
+    } else {
+        for statement in &program.body {
+            statements.push(lower_statement(
+                statement,
+                source,
+                semantic,
+                &mut functions,
+                StatementContext::ScriptBody,
+            )?);
+        }
+        None
+    };
     let lexical_arguments_owners = lexical_arguments_owners(semantic);
     for function in &mut functions {
         function.lexical_arguments_owner = lexical_arguments_owners.contains(&function.scope);
@@ -232,6 +246,7 @@ pub(crate) fn lower(
         functions: functions.into(),
         root_scope: to_scope_id(semantic.scoping().root_scope_id()),
         scopes: copy_scopes(semantic).into(),
+        module_stencil,
     })
 }
 

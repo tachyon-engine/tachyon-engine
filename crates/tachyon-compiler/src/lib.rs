@@ -23,11 +23,13 @@ pub use hir::{
     HirBinding, HirCatchClause, HirClass, HirClassElement, HirClassField, HirClassMethod,
     HirClassMethodKind, HirExpression, HirExpressionKind, HirForInitializer, HirFunction,
     HirFunctionDeclaration, HirFunctionKind, HirIdentifierReference, HirLogicalOperator,
-    HirObjectProperty, HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind,
-    HirPatternProperty, HirPrivateAccessor, HirPrivateField, HirPrivateMethod, HirPrivateName,
-    HirPrivateNameId, HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind,
-    HirSwitchCase, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
-    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirModuleAttribute, HirModuleExportEntry, HirModuleImportEntry, HirModuleImportName,
+    HirModuleRequest, HirModuleStencil, HirObjectProperty, HirObjectPropertyKey,
+    HirObjectPropertyValue, HirPattern, HirPatternKind, HirPatternProperty, HirPrivateAccessor,
+    HirPrivateField, HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirProgram, HirScope,
+    HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase, HirUnaryOperator,
+    HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
+    ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};
@@ -46,6 +48,7 @@ pub enum CompileError {
     },
     Builder(tachyon_bytecode::BuilderError),
     Module(tachyon_bytecode::ModuleBuildError),
+    ModuleStencil(tachyon_bytecode::ModuleStencilError),
     ConstantOverflow,
     ConstantAllocationFailed,
     RegisterOverflow,

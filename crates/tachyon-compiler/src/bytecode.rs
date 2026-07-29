@@ -56,14 +56,93 @@ pub(crate) fn lower(
             &mut scope_names,
         )?);
     }
-    CompiledModule::new(
+    let module = CompiledModule::new(
         source.shared_text(),
         constants,
         scope_names,
         templates,
         FunctionId::new(0),
     )
-    .map_err(CompileError::Module)
+    .map_err(CompileError::Module)?;
+    let Some(stencil) = hir.module_stencil() else {
+        return Ok(module);
+    };
+    let stencil = freeze_module_stencil(stencil)?;
+    module
+        .with_module_stencil(stencil)
+        .map_err(CompileError::Module)
+}
+
+/// Converts compiler-owned module metadata into the runtime-independent bytecode representation.
+fn freeze_module_stencil(
+    stencil: &crate::hir::HirModuleStencil,
+) -> Result<tachyon_bytecode::ModuleStencil, CompileError> {
+    use tachyon_bytecode::{
+        ModuleAttribute, ModuleExportEntry, ModuleImportEntry, ModuleImportName, ModuleRequest,
+        ModuleRequestId, ModuleStencil,
+    };
+    let import_name = |name: &crate::hir::HirModuleImportName| match name {
+        crate::hir::HirModuleImportName::Name(name) => ModuleImportName::Name(name.clone()),
+        crate::hir::HirModuleImportName::Namespace => ModuleImportName::Namespace,
+    };
+    let requests = stencil
+        .requested_modules
+        .iter()
+        .map(|request| ModuleRequest {
+            specifier: request.specifier.clone(),
+            attributes: request
+                .attributes
+                .iter()
+                .map(|attribute| ModuleAttribute {
+                    key: attribute.key.clone(),
+                    value: attribute.value.clone(),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        })
+        .collect();
+    let imports = stencil
+        .imports
+        .iter()
+        .map(|entry| ModuleImportEntry {
+            module_request: ModuleRequestId::new(entry.module_request),
+            import_name: import_name(&entry.import_name),
+            local_name: entry.local_name.clone(),
+        })
+        .collect();
+    let exports = stencil
+        .exports
+        .iter()
+        .map(|entry| match entry {
+            crate::hir::HirModuleExportEntry::Local {
+                export_name,
+                local_name,
+            } => ModuleExportEntry::Local {
+                export_name: export_name.clone(),
+                local_name: local_name.clone(),
+            },
+            crate::hir::HirModuleExportEntry::Indirect {
+                export_name,
+                module_request,
+                import_name: name,
+            } => ModuleExportEntry::Indirect {
+                export_name: export_name.clone(),
+                module_request: ModuleRequestId::new(*module_request),
+                import_name: import_name(name),
+            },
+            crate::hir::HirModuleExportEntry::Star { module_request } => ModuleExportEntry::Star {
+                module_request: ModuleRequestId::new(*module_request),
+            },
+        })
+        .collect();
+    ModuleStencil::new(
+        requests,
+        imports,
+        exports,
+        stencil.local_bindings.to_vec(),
+        stencil.has_top_level_await,
+    )
+    .map_err(CompileError::ModuleStencil)
 }
 
 /// Hoists top-level function declarations, then lowers script completion into function zero.

@@ -176,41 +176,7 @@ pub(super) fn lower_statement(
             )?),
         }),
         Statement::ClassDeclaration(class) => {
-            let identifier = class.id.as_ref().ok_or_else(|| {
-                unsupported(
-                    source.name(),
-                    source_span(class.span),
-                    "anonymous class declaration",
-                )
-            })?;
-            let binding = new_binding(identifier, source, semantic)?;
-            let name: Arc<str> = Arc::from(identifier.name.as_str());
-            let class_expression = HirExpression {
-                span: source_span(class.span),
-                kind: HirExpressionKind::Class(lower_class(
-                    class,
-                    Some(name),
-                    source,
-                    semantic,
-                    functions,
-                )?),
-            };
-            Ok(HirStatement {
-                span: source_span(class.span),
-                completion: StatementCompletion::Empty,
-                kind: HirStatementKind::VariableDeclaration(HirVariableDeclaration {
-                    kind: HirVariableDeclarationKind::Let,
-                    declarators: vec![HirVariableDeclarator {
-                        span: source_span(class.span),
-                        pattern: HirPattern {
-                            span: binding.span,
-                            kind: super::pattern::HirPatternKind::Binding(binding),
-                        },
-                        initializer: Some(class_expression),
-                    }]
-                    .into(),
-                }),
-            })
+            lower_class_declaration(class, source, semantic, functions)
         }
         Statement::FunctionDeclaration(function)
             if matches!(
@@ -610,8 +576,52 @@ fn lower_switch_statement(
     })
 }
 
+/// Lowers a named class declaration into the lexical binding initialized by its class expression.
+pub(super) fn lower_class_declaration(
+    class: &oxc::ast::ast::Class<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirStatement, CompileError> {
+    let identifier = class.id.as_ref().ok_or_else(|| {
+        unsupported(
+            source.name(),
+            source_span(class.span),
+            "anonymous class declaration",
+        )
+    })?;
+    let binding = new_binding(identifier, source, semantic)?;
+    let name: Arc<str> = Arc::from(identifier.name.as_str());
+    let class_expression = HirExpression {
+        span: source_span(class.span),
+        kind: HirExpressionKind::Class(lower_class(
+            class,
+            Some(name),
+            source,
+            semantic,
+            functions,
+        )?),
+    };
+    Ok(HirStatement {
+        span: source_span(class.span),
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::VariableDeclaration(HirVariableDeclaration {
+            kind: HirVariableDeclarationKind::Let,
+            declarators: vec![HirVariableDeclarator {
+                span: source_span(class.span),
+                pattern: HirPattern {
+                    span: binding.span,
+                    kind: super::pattern::HirPatternKind::Binding(binding),
+                },
+                initializer: Some(class_expression),
+            }]
+            .into(),
+        }),
+    })
+}
+
 /// Copies one ordinary declaration and its simple parameters/body into an owned function stencil.
-fn lower_function_declaration(
+pub(super) fn lower_function_declaration(
     function: &oxc::ast::ast::Function<'_>,
     source: &SourceText,
     semantic: &Semantic<'_>,
@@ -834,7 +844,7 @@ pub(super) fn lower_arrow_function_stencil(
 }
 
 /// Copies simple variable declarations and assigns stable IDs before the Oxc arena is discarded.
-fn lower_variable_declaration(
+pub(super) fn lower_variable_declaration(
     declaration: &VariableDeclaration<'_>,
     source: &SourceText,
     semantic: &Semantic<'_>,

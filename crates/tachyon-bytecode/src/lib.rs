@@ -20,6 +20,7 @@ use encoding::OPCODE_COUNT;
 mod builder;
 mod disassembler;
 mod encoding;
+mod module;
 mod verify;
 
 pub use builder::{BuilderError, BytecodeBuilder, Label, SourceMapEntry, SourceSpan};
@@ -28,6 +29,10 @@ pub use encoding::{
     ConstantId, DecodeError, DecodedInstruction, EncodeError, FeedbackSlot, FunctionId,
     MAX_ENCODED_INSTRUCTION_WORDS, Opcode, OperandWidth, RegisterId, WordOffset,
     decode_instruction, encode_instruction,
+};
+pub use module::{
+    ModuleAttribute, ModuleExportEntry, ModuleImportEntry, ModuleImportName, ModuleRequest,
+    ModuleRequestId, ModuleStencil, ModuleStencilError,
 };
 pub use verify::{VerifyContext, VerifyError};
 
@@ -598,6 +603,7 @@ pub struct CompiledModule {
     scope_names: Arc<[Arc<str>]>,
     functions: Arc<[CompiledFunction]>,
     entry_function: FunctionId,
+    module_stencil: Option<Arc<ModuleStencil>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -769,6 +775,9 @@ pub enum ModuleBuildError {
     VerifiedBytecodeDecodeInvariant {
         function: FunctionId,
         offset: WordOffset,
+    },
+    ModuleStencilOnNonModuleEntry {
+        kind: FunctionKind,
     },
 }
 
@@ -942,7 +951,20 @@ impl CompiledModule {
             scope_names: scope_names.into(),
             functions: functions.into(),
             entry_function,
+            module_stencil: None,
         })
+    }
+
+    /// Attaches verified static module semantics only to a module entry function.
+    pub fn with_module_stencil(mut self, stencil: ModuleStencil) -> Result<Self, ModuleBuildError> {
+        let kind = self.functions[self.entry_function.index() as usize]
+            .metadata
+            .kind;
+        if kind != FunctionKind::Module {
+            return Err(ModuleBuildError::ModuleStencilOnNonModuleEntry { kind });
+        }
+        self.module_stencil = Some(Arc::new(stencil));
+        Ok(self)
     }
 
     #[must_use]
@@ -981,6 +1003,11 @@ impl CompiledModule {
     #[must_use]
     pub const fn entry_function(&self) -> FunctionId {
         self.entry_function
+    }
+
+    #[must_use]
+    pub fn module_stencil(&self) -> Option<&ModuleStencil> {
+        self.module_stencil.as_deref()
     }
 }
 
