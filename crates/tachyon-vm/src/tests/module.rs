@@ -1088,12 +1088,13 @@ fn compiled_source_cycle_reports_tdz_before_ancestor_evaluation() {
         .unwrap();
 
     for _ in 0..2 {
-        assert!(matches!(
-            isolate.evaluate_module(root),
-            Err(ModuleEvaluationError::Execution(ExecutionError::Module(
-                ModuleError::UninitializedBinding
-            )))
-        ));
+        let RunOutcome::Thrown(error) = isolate.evaluate_module(root).unwrap() else {
+            panic!("cyclic TDZ read must throw");
+        };
+        assert_eq!(
+            isolate.native_error_kind(error).unwrap(),
+            Some(NativeErrorKind::Reference)
+        );
     }
 }
 
@@ -1122,12 +1123,38 @@ fn compiled_source_module_preserves_tdz() {
     let root = isolate
         .load_module_graph(&mut loader, &specifier("memory:tdz"))
         .unwrap();
-    assert!(matches!(
-        isolate.evaluate_module(root),
-        Err(ModuleEvaluationError::Execution(ExecutionError::Module(
-            ModuleError::UninitializedBinding
-        )))
-    ));
+    let RunOutcome::Thrown(error) = isolate.evaluate_module(root).unwrap() else {
+        panic!("module TDZ read must throw");
+    };
+    assert_eq!(
+        isolate.native_error_kind(error).unwrap(),
+        Some(NativeErrorKind::Reference)
+    );
+}
+
+#[test]
+/// A catchable source-level module TDZ read materializes a native ReferenceError.
+fn compiled_source_module_catches_tdz_as_reference_error() {
+    let mut isolate = fixtures::test_isolate();
+    let module = compile_source_module(
+        1_005,
+        "memory:caught-tdz",
+        "let caught = false;\
+         try { value; } catch (error) { caught = error instanceof ReferenceError; }\
+         export let value = 1;\
+         caught;",
+    );
+    let mut loader = PrecompiledLoader {
+        identity: specifier("memory:caught-tdz"),
+        module: Some(LoadedModule::precompiled(module)),
+    };
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:caught-tdz"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::True))
+    );
 }
 
 #[test]

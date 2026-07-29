@@ -2368,6 +2368,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         ExecutionError::UnresolvedBinding(_)
         | ExecutionError::UninitializedBinding(_)
         | ExecutionError::UninitializedEnvironmentBinding { .. }
+        | ExecutionError::Module(crate::ModuleError::UninitializedBinding)
         | ExecutionError::UninitializedThis
         | ExecutionError::SuperAlreadyCalled => Some(NativeErrorKind::Reference),
         ExecutionError::NonCallable(_)

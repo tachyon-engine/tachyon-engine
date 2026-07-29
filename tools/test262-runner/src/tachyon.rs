@@ -25,6 +25,12 @@ const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
 const MAX_LOADED_MODULES: u32 = 64;
 const MAX_GLOBAL_BINDINGS: u32 = 1 << 18;
 const ASYNC_HARNESS_NAME: &str = "doneprintHandle.js";
+const GLOBAL_OBJECT_HARNESS_NAME: &str = "fnGlobalObject.js";
+const GLOBAL_OBJECT_HARNESS_SOURCE: &str = r#"
+function fnGlobalObject() {
+  return globalThis;
+}
+"#;
 const ASYNC_HARNESS_SOURCE: &str = r#"
 var __tachyonAsyncStatus = 0;
 function $DONE(error) {
@@ -273,6 +279,14 @@ fn prelude_source_text(id: u32, unit: &SourceUnit, is_async: bool) -> SourceText
             SourceName::new(ASYNC_HARNESS_NAME),
             MediaType::JavaScript,
             Arc::from(ASYNC_HARNESS_SOURCE),
+        );
+    }
+    if unit.name.as_ref() == GLOBAL_OBJECT_HARNESS_NAME {
+        return SourceText::new(
+            SourceId::new(id),
+            SourceName::new(GLOBAL_OBJECT_HARNESS_NAME),
+            MediaType::JavaScript,
+            Arc::from(GLOBAL_OBJECT_HARNESS_SOURCE),
         );
     }
     source_text(id, unit)
