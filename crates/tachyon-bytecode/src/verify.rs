@@ -574,6 +574,7 @@ pub(super) fn validate_binding_plan(
     layout: FunctionLayout,
     max_environment_slot_count: u32,
     environment_slots: &[EnvironmentSlotMetadata],
+    function_count: u32,
 ) -> Result<(), ModuleBuildError> {
     for binding in bindings {
         if binding.name.is_empty() {
@@ -594,6 +595,7 @@ pub(super) fn validate_binding_plan(
             }
             BindingLocation::Environment { slot, .. }
             | BindingLocation::ClassEnvironment { slot, .. }
+            | BindingLocation::ModuleFunction { slot, .. }
                 if slot >= max_environment_slot_count =>
             {
                 return Err(ModuleBuildError::BindingEnvironmentSlotOutOfRange {
@@ -602,12 +604,23 @@ pub(super) fn validate_binding_plan(
                     environment_slot_count: max_environment_slot_count,
                 });
             }
+            BindingLocation::ModuleFunction {
+                function: target, ..
+            } if target.index() >= function_count => {
+                return Err(ModuleBuildError::BindingFunctionOutOfRange {
+                    function,
+                    binding: binding.clone(),
+                    function_count,
+                });
+            }
             _ => {}
         }
     }
     for binding in bindings {
-        let BindingLocation::Environment { depth: 0, slot } = binding.location else {
-            continue;
+        let slot = match binding.location {
+            BindingLocation::Environment { depth: 0, slot }
+            | BindingLocation::ModuleFunction { slot, .. } => slot,
+            _ => continue,
         };
         if layout.environment_slot_count == 0 {
             continue;

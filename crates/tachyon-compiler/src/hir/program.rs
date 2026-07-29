@@ -290,7 +290,12 @@ pub(super) fn lexical_arguments_owner(
 
 /// Allocates a collision-free compiler-internal binding identity for lexical `arguments`.
 pub(crate) const fn lexical_arguments_binding(owner: ScopeId) -> BindingId {
-    BindingId(u32::MAX - owner.index())
+    BindingId((u32::MAX - 1) - owner.index())
+}
+
+/// Reserves one compiler-owned identity for ParseModule's inaccessible `*default*` binding.
+pub(crate) const fn module_default_binding() -> BindingId {
+    BindingId(u32::MAX)
 }
 
 /// Copies Oxc's arena-owned scope tree into compact Tachyon identities and capability flags.

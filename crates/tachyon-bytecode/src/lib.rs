@@ -412,6 +412,11 @@ pub enum BindingLocation {
     ModuleCell {
         slot: u32,
     },
+    /// A module cell whose function declaration is initialized during SCC instantiation.
+    ModuleFunction {
+        slot: u32,
+        function: FunctionId,
+    },
     GlobalLexical,
     GlobalProperty,
     Dynamic,
@@ -721,6 +726,11 @@ pub enum ModuleBuildError {
         binding: BindingPlanEntry,
         environment_slot_count: u32,
     },
+    BindingFunctionOutOfRange {
+        function: FunctionId,
+        binding: BindingPlanEntry,
+        function_count: u32,
+    },
     EnvironmentSlotMetadataCountMismatch {
         function: FunctionId,
         expected: u32,
@@ -926,6 +936,7 @@ impl CompiledModule {
                 template.metadata.layout,
                 max_environment_slot_count,
                 &template.metadata.environment_slots,
+                function_count,
             )?;
             verify::validate_environment_slots(
                 template.id,

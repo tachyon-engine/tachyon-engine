@@ -749,6 +749,23 @@ impl ModuleLoader for PrecompiledLoader {
     }
 }
 
+fn compile_source_module(source_id: u32, name: &str, source: &str) -> CompiledModule {
+    Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id),
+                SourceName::new(name),
+                MediaType::Mjs,
+                source.into(),
+            ),
+            CompileOptions {
+                source_mode: SourceMode::Module,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("source module should compile")
+}
+
 fn loaded(record: ModuleRecordInit, body: ModuleBody) -> LoadedModule {
     LoadedModule::new(record, body)
 }
@@ -948,6 +965,136 @@ fn compiled_source_modules_share_imported_live_bindings() {
         isolate.read_module_binding(root, "value").unwrap(),
         Value::from_i32(99)
     );
+}
+
+/// Runs a valid compiled cycle under one dispatch batch and proves both liveness and evaluation caching.
+fn assert_compiled_source_cycle_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let left = LoadedModule::precompiled(compile_source_module(
+        1_101 + N as u32,
+        "memory:cycle-left",
+        "import { readLeft, runs } from 'memory:cycle-right';\
+         export let left = 1;\
+         export let first = readLeft();\
+         left = 2;\
+         export let second = readLeft();\
+         first + second + runs;",
+    ));
+    let right = LoadedModule::precompiled(compile_source_module(
+        1_201 + N as u32,
+        "memory:cycle-right",
+        "import { left } from 'memory:cycle-left';\
+         export let runs = 0;\
+         runs += 1;\
+         export function readLeft() { return left; }",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:cycle-left"), left),
+        (specifier("memory:cycle-right"), right),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:cycle-left"))
+        .unwrap();
+
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(4))
+    );
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(4))
+    );
+    for (name, expected) in [("left", 2), ("first", 1), ("second", 2)] {
+        assert_eq!(
+            isolate.read_module_binding(root, name).unwrap(),
+            Value::from_i32(expected)
+        );
+    }
+    let right = isolate
+        .module_graph
+        .find_specifier(&specifier("memory:cycle-right"))
+        .unwrap();
+    assert_eq!(
+        isolate.read_module_binding(right, "runs").unwrap(),
+        Value::from_i32(1)
+    );
+}
+
+#[test]
+fn compiled_source_cycle_preserves_live_bindings_and_evaluates_once() {
+    assert_compiled_source_cycle_batch::<1>(false);
+    assert_compiled_source_cycle_batch::<2>(false);
+    assert_compiled_source_cycle_batch::<4>(false);
+    assert_compiled_source_cycle_batch::<8>(true);
+    assert_compiled_source_cycle_batch::<16>(true);
+}
+
+#[test]
+/// Function declarations are instantiated across an SCC before dependency evaluation begins.
+fn compiled_source_cycle_hoists_ancestor_function_before_dependency_evaluation() {
+    let mut isolate = fixtures::test_isolate();
+    let left = LoadedModule::precompiled(compile_source_module(
+        1_401,
+        "memory:function-left",
+        "import { observed } from 'memory:function-right';\
+         export function answer() { return 42; }\
+         observed;",
+    ));
+    let right = LoadedModule::precompiled(compile_source_module(
+        1_402,
+        "memory:function-right",
+        "import { answer } from 'memory:function-left';\
+         export const observed = answer();",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:function-left"), left),
+        (specifier("memory:function-right"), right),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:function-left"))
+        .unwrap();
+
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+}
+
+#[test]
+/// A cyclic dependency that reads an uninitialized ancestor lexical binding fails at evaluation.
+fn compiled_source_cycle_reports_tdz_before_ancestor_evaluation() {
+    let mut isolate = fixtures::test_isolate();
+    let left = LoadedModule::precompiled(compile_source_module(
+        1_301,
+        "memory:tdz-left",
+        "import { right } from 'memory:tdz-right'; export let left = 1; right;",
+    ));
+    let right = LoadedModule::precompiled(compile_source_module(
+        1_302,
+        "memory:tdz-right",
+        "import { left } from 'memory:tdz-left'; export let right = left;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:tdz-left"), left),
+        (specifier("memory:tdz-right"), right),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tdz-left"))
+        .unwrap();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            isolate.evaluate_module(root),
+            Err(ModuleEvaluationError::Execution(ExecutionError::Module(
+                ModuleError::UninitializedBinding
+            )))
+        ));
+    }
 }
 
 #[test]

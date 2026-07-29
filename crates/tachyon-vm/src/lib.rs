@@ -93,9 +93,9 @@ pub use string::{JsString, JsStringView, StringAllocationError, StringRepresenta
 use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
-    BytecodeConstant, ClassInstanceElementKind, CompiledModule, DecodedInstruction, FunctionId,
-    FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry, HandlerKind, Opcode,
-    RegisterId, VerifiedBytecode, VerifiedInstructionDecoder, WordOffset,
+    BindingLocation, BytecodeConstant, ClassInstanceElementKind, CompiledModule,
+    DecodedInstruction, FunctionId, FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry,
+    HandlerKind, Opcode, RegisterId, VerifiedBytecode, VerifiedInstructionDecoder, WordOffset,
 };
 use tachyon_gc::{
     AllocationSpace, FinalizationRegistration, GcExternalMemory, GcRef, GcType, Heap,

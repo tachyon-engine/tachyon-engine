@@ -427,6 +427,25 @@ impl Isolate {
             .module_graph
             .evaluation_order(root)
             .map_err(ModuleEvaluationError::Graph)?;
+        for &module in &order {
+            let (state, body) = {
+                let record = self
+                    .module_graph
+                    .record(module)
+                    .map_err(ModuleEvaluationError::Graph)?;
+                (record.evaluation, record.body.clone())
+            };
+            if state != ModuleEvaluationState::Unevaluated {
+                continue;
+            }
+            if let ModuleBody::Precompiled(body) = body {
+                let code = self
+                    .load_module(&body)
+                    .map_err(ModuleEvaluationError::Execution)?;
+                self.instantiate_loaded_module_functions(code, module)
+                    .map_err(ModuleEvaluationError::Execution)?;
+            }
+        }
         let mut root_result = Value::from_immediate(tachyon_value::Immediate::Undefined);
         for module in order {
             let (state, body) = {

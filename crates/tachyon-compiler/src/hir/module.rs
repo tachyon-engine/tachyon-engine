@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use oxc::{
     ast::ast::{
-        Declaration, ImportAttributeKey, ImportDeclarationSpecifier, ModuleExportName, Program,
-        Statement, WithClause,
+        Declaration, ExportDefaultDeclarationKind, Expression, ImportAttributeKey,
+        ImportDeclarationSpecifier, ModuleExportName, Program, Statement, WithClause,
     },
     ast_visit::Visit,
     semantic::Semantic,
@@ -13,15 +13,23 @@ use oxc::{
 
 use crate::{CompileError, SourceText};
 
-use super::pattern::new_binding;
+use super::expression::{
+    HirExpression, HirExpressionKind, HirFunctionExpression, lower_class, lower_expression,
+};
+use super::pattern::{HirPattern, HirPatternKind, new_binding};
+use super::program::{HirBinding, HirFunctionDeclaration, module_default_binding};
 use super::statement::{
-    StatementContext, lower_class_declaration, lower_function_declaration, lower_statement,
-    lower_variable_declaration,
+    HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator, StatementContext,
+    lower_arrow_function_stencil, lower_class_declaration, lower_function_declaration,
+    lower_function_stencil, lower_statement, lower_variable_declaration,
 };
 use super::{
     BindingId, HirFunction, HirStatement, HirStatementKind, StatementCompletion,
-    copy_string_literal, source_span, unsupported,
+    copy_string_literal, source_span, to_scope_id, unsupported,
 };
+
+const DEFAULT_EXPORT_NAME: &str = "default";
+const DEFAULT_EXPORT_BINDING_NAME: &str = "*default*";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HirModuleAttribute {
@@ -104,6 +112,9 @@ pub(super) fn lower_module(
         })
         .map(|name| Arc::from(name.as_str()))
         .collect::<Vec<_>>();
+    if builder.synthetic_default {
+        local_bindings.push(Arc::from(DEFAULT_EXPORT_BINDING_NAME));
+    }
     local_bindings.sort_unstable();
     Ok((
         HirModuleStencil {
@@ -121,6 +132,7 @@ struct ModuleStencilBuilder {
     requests: Vec<HirModuleRequest>,
     imports: Vec<HirModuleImportEntry>,
     exports: Vec<HirModuleExportEntry>,
+    synthetic_default: bool,
 }
 
 impl ModuleStencilBuilder {
@@ -129,6 +141,7 @@ impl ModuleStencilBuilder {
             requests: Vec::with_capacity(item_count),
             imports: Vec::with_capacity(item_count),
             exports: Vec::with_capacity(item_count),
+            synthetic_default: false,
         }
     }
 
@@ -248,11 +261,9 @@ impl ModuleStencilBuilder {
                     },
                 )
             }
-            Statement::ExportDefaultDeclaration(declaration) => Err(unsupported(
-                source.name(),
-                source_span(declaration.span),
-                "default export synthetic binding",
-            )),
+            Statement::ExportDefaultDeclaration(declaration) => {
+                self.lower_default_export(declaration, source, semantic, functions)
+            }
             _ => lower_statement(
                 statement,
                 source,
@@ -322,6 +333,84 @@ impl ModuleStencilBuilder {
         Ok(())
     }
 
+    /// Lowers default declarations while separating their public name from the hidden local cell.
+    fn lower_default_export(
+        &mut self,
+        declaration: &oxc::ast::ast::ExportDefaultDeclaration<'_>,
+        source: &SourceText,
+        semantic: &Semantic<'_>,
+        functions: &mut Vec<HirFunction>,
+    ) -> Result<HirStatement, CompileError> {
+        let span = source_span(declaration.span);
+        match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(identifier) = &function.id {
+                    self.push_default_export(Arc::from(identifier.name.as_str()));
+                    return lower_function_declaration(function, source, semantic, functions);
+                }
+                let binding = synthetic_default_binding(span, semantic);
+                self.push_synthetic_default_export();
+                let function = lower_function_stencil(
+                    function,
+                    Some(Arc::from(DEFAULT_EXPORT_NAME)),
+                    None,
+                    source,
+                    semantic,
+                    functions,
+                )?;
+                Ok(HirStatement {
+                    span,
+                    completion: StatementCompletion::Empty,
+                    kind: HirStatementKind::FunctionDeclaration(HirFunctionDeclaration {
+                        binding,
+                        function,
+                    }),
+                })
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(identifier) = &class.id {
+                    self.push_default_export(Arc::from(identifier.name.as_str()));
+                    return lower_class_declaration(class, source, semantic, functions);
+                }
+                self.push_synthetic_default_export();
+                let expression = HirExpression {
+                    span: source_span(class.span),
+                    kind: HirExpressionKind::Class(lower_class(
+                        class,
+                        Some(Arc::from(DEFAULT_EXPORT_NAME)),
+                        source,
+                        semantic,
+                        functions,
+                    )?),
+                };
+                Ok(synthetic_default_declaration(span, expression, semantic))
+            }
+            kind if kind.is_expression() => {
+                self.push_synthetic_default_export();
+                let expression =
+                    lower_default_expression(kind.to_expression(), source, semantic, functions)?;
+                Ok(synthetic_default_declaration(span, expression, semantic))
+            }
+            _ => Err(unsupported(
+                source.name(),
+                span,
+                "TypeScript default export declaration",
+            )),
+        }
+    }
+
+    fn push_default_export(&mut self, local_name: Arc<str>) {
+        self.exports.push(HirModuleExportEntry::Local {
+            export_name: units(DEFAULT_EXPORT_NAME),
+            local_name,
+        });
+    }
+
+    fn push_synthetic_default_export(&mut self) {
+        self.synthetic_default = true;
+        self.push_default_export(Arc::from(DEFAULT_EXPORT_BINDING_NAME));
+    }
+
     fn intern_request(
         &mut self,
         specifier: Arc<[u16]>,
@@ -349,6 +438,99 @@ impl ModuleStencilBuilder {
         })?;
         self.requests.push(request);
         Ok(index)
+    }
+}
+
+/// Creates the inaccessible root binding used by anonymous/default-expression exports.
+fn synthetic_default_binding(span: super::SourceSpan, semantic: &Semantic<'_>) -> HirBinding {
+    HirBinding {
+        id: module_default_binding(),
+        scope: to_scope_id(semantic.scoping().root_scope_id()),
+        span,
+        name: Arc::from(DEFAULT_EXPORT_BINDING_NAME),
+        captured: false,
+    }
+}
+
+/// Wraps one source-order default value in its immutable module-cell initialization.
+fn synthetic_default_declaration(
+    span: super::SourceSpan,
+    expression: HirExpression,
+    semantic: &Semantic<'_>,
+) -> HirStatement {
+    let binding = synthetic_default_binding(span, semantic);
+    HirStatement {
+        span,
+        completion: StatementCompletion::Empty,
+        kind: HirStatementKind::VariableDeclaration(HirVariableDeclaration {
+            kind: HirVariableDeclarationKind::Const,
+            declarators: vec![HirVariableDeclarator {
+                span,
+                pattern: HirPattern {
+                    span,
+                    kind: HirPatternKind::Binding(binding),
+                },
+                initializer: Some(expression),
+            }]
+            .into(),
+        }),
+    }
+}
+
+/// Applies ExportDeclaration's NamedEvaluation to anonymous function and class definitions.
+fn lower_default_expression(
+    expression: &Expression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<HirExpression, CompileError> {
+    let span = source_span(expression.span());
+    match expression {
+        Expression::FunctionExpression(function) if function.id.is_none() => Ok(HirExpression {
+            span,
+            kind: HirExpressionKind::Function(HirFunctionExpression {
+                stencil: lower_function_stencil(
+                    function,
+                    Some(Arc::from(DEFAULT_EXPORT_NAME)),
+                    None,
+                    source,
+                    semantic,
+                    functions,
+                )?,
+                anonymous: true,
+            }),
+        }),
+        Expression::ArrowFunctionExpression(function) => {
+            let stencil = lower_arrow_function_stencil(function, source, semantic, functions)?;
+            functions
+                .get_mut(stencil.index() as usize)
+                .ok_or(CompileError::BindingOverflow)?
+                .name = Some(Arc::from(DEFAULT_EXPORT_NAME));
+            Ok(HirExpression {
+                span,
+                kind: HirExpressionKind::Function(HirFunctionExpression {
+                    stencil,
+                    anonymous: true,
+                }),
+            })
+        }
+        Expression::ClassExpression(class) if class.id.is_none() => Ok(HirExpression {
+            span,
+            kind: HirExpressionKind::Class(lower_class(
+                class,
+                Some(Arc::from(DEFAULT_EXPORT_NAME)),
+                source,
+                semantic,
+                functions,
+            )?),
+        }),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            let mut lowered =
+                lower_default_expression(&parenthesized.expression, source, semantic, functions)?;
+            lowered.span = span;
+            Ok(lowered)
+        }
+        _ => lower_expression(expression, source, semantic, functions),
     }
 }
 

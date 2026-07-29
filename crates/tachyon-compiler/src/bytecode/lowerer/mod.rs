@@ -3,7 +3,7 @@ mod expression;
 mod statement;
 
 use tachyon_bytecode::{
-    BindingLocation, BindingPlanEntry, BytecodeBuilder, BytecodeConstant, HandlerEntry,
+    BindingLocation, BindingPlanEntry, BytecodeBuilder, BytecodeConstant, FunctionId, HandlerEntry,
     HandlerKind, Label, Opcode, RegisterId, SourceSpan as BytecodeSourceSpan, SuspendPoint,
     SuspendPointId,
 };
@@ -806,8 +806,31 @@ impl Lowerer<'_> {
             .local_by_id(declaration.binding.id)
             .cloned()
             .ok_or(CompileError::BindingOverflow)?;
+        let function_id = FunctionId::new(function);
+        self.mark_module_function(&binding, &declaration.binding.name, function_id)?;
         self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
         self.initialize_local(&binding, register, span)
+    }
+
+    /// Marks one module binding for SCC-wide function declaration instantiation.
+    fn mark_module_function(
+        &mut self,
+        binding: &LocalBinding,
+        name: &std::sync::Arc<str>,
+        function: FunctionId,
+    ) -> Result<(), CompileError> {
+        let LocalStorage::Environment { depth: 0, slot } = binding.storage else {
+            return Err(CompileError::BindingOverflow);
+        };
+        let entry = self
+            .binding_plan
+            .iter_mut()
+            .find(|entry| &entry.name == name);
+        let Some(entry) = entry else {
+            return Err(CompileError::BindingOverflow);
+        };
+        entry.location = BindingLocation::ModuleFunction { slot, function };
+        Ok(())
     }
 
     /// Instantiates one direct function-body declaration before ordinary statement execution.

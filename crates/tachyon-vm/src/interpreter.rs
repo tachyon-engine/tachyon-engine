@@ -378,6 +378,46 @@ impl Isolate {
         )
     }
 
+    /// Instantiates all module function declarations before any module in the linked SCC runs.
+    pub(crate) fn instantiate_loaded_module_functions(
+        &mut self,
+        code: CodeId,
+        module: ModuleId,
+    ) -> Result<(), ExecutionError> {
+        let declarations = self
+            .loaded_code(code)?
+            .module
+            .function(FunctionId::new(0))
+            .ok_or(ExecutionError::MissingEntryFunction(FunctionId::new(0)))?
+            .binding_plan()
+            .iter()
+            .filter_map(|binding| match binding.location {
+                BindingLocation::ModuleFunction { slot, function } => Some((slot, function)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if declarations.is_empty() {
+            return Ok(());
+        }
+        self.enter_with_parent(code, FunctionId::new(0), None, Some(module))?;
+        for (slot, function) in declarations {
+            self.create_closure(code, 0, 0, function)?;
+            let value = self.read(0, 0)?;
+            let ModuleBindingTarget::Cell(cell) = self
+                .module_graph
+                .binding_target_at_slot(module, slot)
+                .map_err(ExecutionError::Module)?
+            else {
+                return Err(ExecutionError::Module(ModuleError::ImportedBinding));
+            };
+            self.module_graph
+                .initialize_cell(cell, value)
+                .map_err(ExecutionError::Module)?;
+        }
+        self.fiber.frames.clear();
+        Ok(())
+    }
+
     /// Runs eval code with an explicitly retained caller lexical environment.
     pub(crate) fn execute_loaded_with_parent(
         &mut self,
@@ -3482,9 +3522,10 @@ impl Isolate {
         else {
             return Err(ExecutionError::Module(ModuleError::ImportedBinding));
         };
-        self.module_graph
-            .initialize_cell(cell, value)
-            .map_err(ExecutionError::Module)
+        match self.module_graph.initialize_cell(cell, value) {
+            Ok(()) | Err(ModuleError::AlreadyInitializedBinding) => Ok(()),
+            Err(error) => Err(ExecutionError::Module(error)),
+        }
     }
 
     fn store_module_environment_slot(

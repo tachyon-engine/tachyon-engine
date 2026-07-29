@@ -1,5 +1,5 @@
 use super::*;
-use tachyon_bytecode::{ModuleExportEntry, ModuleImportName};
+use tachyon_bytecode::{BindingLocation, FunctionKind, ModuleExportEntry, ModuleImportName};
 
 fn compile_module(text: &str) -> tachyon_bytecode::CompiledModule {
     Compiler
@@ -111,6 +111,96 @@ fn top_level_await_excludes_nested_async_functions() {
             .module_stencil()
             .expect("module stencil")
             .has_top_level_await()
+    );
+}
+
+#[test]
+/// Materializes anonymous default values in the hidden immutable module cell.
+fn anonymous_default_expression_uses_the_synthetic_binding() {
+    let module = compile_module("export default 42;");
+    let stencil = module.module_stencil().expect("module stencil");
+    assert_eq!(stencil.local_bindings(), &[Arc::from("*default*")]);
+    assert!(matches!(
+        &stencil.exports()[0],
+        ModuleExportEntry::Local {
+            export_name,
+            local_name,
+        } if export_name.as_ref() == units("default") && local_name.as_ref() == "*default*"
+    ));
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .unwrap();
+    assert_eq!(entry.environment_slots().len(), 1);
+    assert_eq!(entry.environment_slots()[0].name.as_ref(), "*default*");
+    assert!(!entry.environment_slots()[0].mutable);
+    assert!(!entry.environment_slots()[0].initialized);
+    assert!(entry.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "*default*"
+            && binding.location == BindingLocation::ModuleCell { slot: 0 }
+            && !binding.mutable
+    }));
+}
+
+#[test]
+/// Keeps anonymous function/class default names public while storing their hidden local name.
+fn anonymous_default_declarations_use_default_for_function_names() {
+    let cases = [
+        ("export default function () {}", FunctionKind::Ordinary),
+        ("export default async function () {}", FunctionKind::Async),
+        ("export default function* () {}", FunctionKind::Generator),
+        (
+            "export default async function* () {}",
+            FunctionKind::AsyncGenerator,
+        ),
+    ];
+    for (source_text, kind) in cases {
+        let module = compile_module(source_text);
+        let stencil = module.module_stencil().expect("module stencil");
+        assert_eq!(stencil.local_bindings(), &[Arc::from("*default*")]);
+        let function = module
+            .function(tachyon_bytecode::FunctionId::new(1))
+            .unwrap();
+        assert_eq!(function.kind(), kind);
+        let name_scope = function.layout().name_scope.expect("inferred name");
+        assert_eq!(
+            module.scope_names()[name_scope as usize].as_ref(),
+            "default"
+        );
+        let entry = module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap();
+        assert_eq!(entry.environment_slots()[0].name.as_ref(), "*default*");
+        assert!(entry.environment_slots()[0].mutable);
+        assert!(!entry.environment_slots()[0].initialized);
+    }
+}
+
+#[test]
+/// Applies ExportDeclaration NamedEvaluation to anonymous arrow and class defaults.
+fn anonymous_default_expression_infers_arrow_and_class_names() {
+    let arrow = compile_module("export default () => 1;");
+    let arrow_function = arrow
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .unwrap();
+    let arrow_name = arrow_function.layout().name_scope.expect("arrow name");
+    assert_eq!(arrow.scope_names()[arrow_name as usize].as_ref(), "default");
+
+    let class = compile_module("export default class {};");
+    let class_constructor = class
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .unwrap();
+    let class_name = class_constructor
+        .layout()
+        .name_scope
+        .expect("class constructor name");
+    assert_eq!(class.scope_names()[class_name as usize].as_ref(), "default");
+    assert!(
+        class
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap()
+            .environment_slots()
+            .iter()
+            .any(|slot| slot.name.as_ref() == "*default*" && !slot.mutable)
     );
 }
 

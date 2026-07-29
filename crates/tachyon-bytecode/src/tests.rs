@@ -1125,6 +1125,30 @@ fn compiled_module_verifies_environment_slot_metadata() {
     ));
     assert!(matches!(
         binding_plan_entries_module(
+            FunctionKind::Module,
+            vec![BindingPlanEntry {
+                name: Arc::from("hoisted"),
+                location: BindingLocation::ModuleFunction {
+                    slot: 0,
+                    function: FunctionId::new(1),
+                },
+                mutable: true,
+            }],
+            FunctionLayout {
+                register_count: 1,
+                environment_slot_count: 1,
+                ..FunctionLayout::default()
+            },
+            EnvironmentRecordKind::Module,
+            vec![environment_slot("hoisted", true, false)],
+        ),
+        Err(ModuleBuildError::BindingFunctionOutOfRange {
+            function_count: 1,
+            ..
+        })
+    ));
+    assert!(matches!(
+        binding_plan_entries_module(
             FunctionKind::Ordinary,
             vec![BindingPlanEntry {
                 name: Arc::from("value"),
