@@ -436,6 +436,9 @@ impl Isolate {
             let generator = self.generator_reference(continuation.first())?;
             return self.complete_async_generator_await_resolution(generator);
         }
+        if continuation.kind() == NativeContinuationKind::AsyncModule {
+            return self.complete_async_module_await_resolution(continuation.first());
+        }
         if continuation.kind() != NativeContinuationKind::AsyncFunction {
             return Err(ExecutionError::UnsupportedAsyncFunctionResume);
         }

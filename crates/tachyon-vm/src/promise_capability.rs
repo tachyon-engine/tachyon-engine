@@ -673,11 +673,9 @@ impl Isolate {
         site: NativeContinuationSite,
     ) -> Result<(), ExecutionError> {
         self.promise_jobs.finish_active();
-        self.fiber
-            .frames
-            .last_mut()
-            .ok_or(ExecutionError::MissingEnvironment)?
-            .pc = site.call_site;
+        if let Some(frame) = self.fiber.frames.last_mut() {
+            frame.pc = site.call_site;
+        }
         Ok(())
     }
 }

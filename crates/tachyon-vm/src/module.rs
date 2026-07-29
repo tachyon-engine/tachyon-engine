@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use tachyon_gc::{Trace, Tracer};
 
-use crate::{CompiledModule, Value, tuning::modules::*};
+use crate::{CompiledModule, ExecutionError, Value, tuning::modules::*};
 
 /// Stable index of one record in an append-only module graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -277,9 +277,10 @@ pub(crate) struct ModuleRecord {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ModuleEvaluationState {
+pub(crate) enum ModuleEvaluationState {
     Unevaluated,
     Evaluating,
+    AsyncEvaluating(Value),
     Evaluated(Value),
     Errored(Value),
 }
@@ -404,6 +405,115 @@ struct ModuleGraphCheckpoint {
 }
 
 impl ModuleGraph {
+    /// Returns the first failed external dependency through its canonical cycle root.
+    pub(crate) fn dependency_error(&self, module: ModuleId) -> Result<Option<Value>, ModuleError> {
+        let record = self.record(module)?;
+        let ModuleStatus::Linked { cycle_root } = record.status else {
+            return Err(ModuleError::InvalidLinkState);
+        };
+        for request in &record.requested_modules {
+            let dependency = self
+                .find_specifier(request)
+                .ok_or(ModuleError::MissingModule)?;
+            let dependency_record = self.record(dependency)?;
+            let ModuleStatus::Linked {
+                cycle_root: dependency_root,
+            } = dependency_record.status
+            else {
+                return Err(ModuleError::InvalidLinkState);
+            };
+            if dependency_root == cycle_root {
+                continue;
+            }
+            if let ModuleEvaluationState::Errored(error) = self.record(dependency_root)?.evaluation
+            {
+                return Ok(Some(error));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reports whether every dependency outside the linked SCC has completed successfully.
+    pub(crate) fn dependencies_ready(&self, module: ModuleId) -> Result<bool, ModuleError> {
+        let record = self.record(module)?;
+        let ModuleStatus::Linked { cycle_root } = record.status else {
+            return Err(ModuleError::InvalidLinkState);
+        };
+        for request in &record.requested_modules {
+            let dependency = self
+                .find_specifier(request)
+                .ok_or(ModuleError::MissingModule)?;
+            let dependency_record = self.record(dependency)?;
+            let ModuleStatus::Linked {
+                cycle_root: dependency_root,
+            } = dependency_record.status
+            else {
+                return Err(ModuleError::InvalidLinkState);
+            };
+            if dependency_root == cycle_root {
+                if matches!(
+                    dependency_record.evaluation,
+                    ModuleEvaluationState::AsyncEvaluating(_)
+                ) {
+                    return Ok(false);
+                }
+                continue;
+            }
+            let dependency_cycle_root = self.record(dependency_root)?;
+            if !matches!(
+                dependency_cycle_root.evaluation,
+                ModuleEvaluationState::Evaluated(_)
+            ) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn record_mut(&mut self, id: ModuleId) -> Result<&mut ModuleRecord, ModuleError> {
+        self.records
+            .get_mut(id.index())
+            .ok_or(ModuleError::MissingModule)
+    }
+
+    pub(crate) fn begin_async_evaluation(
+        &mut self,
+        module: ModuleId,
+        state: Value,
+    ) -> Result<(), ModuleError> {
+        let record = self.record_mut(module)?;
+        if record.evaluation != ModuleEvaluationState::Evaluating {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        record.evaluation = ModuleEvaluationState::AsyncEvaluating(state);
+        Ok(())
+    }
+
+    pub(crate) fn finish_async_evaluation(
+        &mut self,
+        module: ModuleId,
+        result: Result<Value, Value>,
+    ) -> Result<(), ExecutionError> {
+        let record = self.record_mut(module).map_err(ExecutionError::Module)?;
+        if !matches!(record.evaluation, ModuleEvaluationState::AsyncEvaluating(_)) {
+            return Err(ExecutionError::Module(ModuleError::InvalidLinkState));
+        }
+        record.evaluation = match result {
+            Ok(value) => ModuleEvaluationState::Evaluated(value),
+            Err(error) => ModuleEvaluationState::Errored(error),
+        };
+        Ok(())
+    }
+
+    pub(crate) fn reset_async_evaluation(&mut self, module: ModuleId) -> Result<(), ModuleError> {
+        let record = self.record_mut(module)?;
+        if !matches!(record.evaluation, ModuleEvaluationState::AsyncEvaluating(_)) {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        record.evaluation = ModuleEvaluationState::Unevaluated;
+        Ok(())
+    }
+
     const fn checkpoint(&self) -> ModuleGraphCheckpoint {
         ModuleGraphCheckpoint {
             records: self.records.len(),
@@ -737,9 +847,9 @@ impl Trace for ModuleGraph {
         for record in &mut self.records {
             record.namespace.trace(tracer);
             match &mut record.evaluation {
-                ModuleEvaluationState::Evaluated(value) | ModuleEvaluationState::Errored(value) => {
-                    value.trace(tracer)
-                }
+                ModuleEvaluationState::AsyncEvaluating(value)
+                | ModuleEvaluationState::Evaluated(value)
+                | ModuleEvaluationState::Errored(value) => value.trace(tracer),
                 ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Evaluating => {}
             }
         }

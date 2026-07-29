@@ -397,6 +397,9 @@ impl Isolate {
             async_function_state: registry
                 .try_register("AsyncFunctionState")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            async_module_state: registry
+                .try_register("AsyncModuleState")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_signal_watcher_operation: registry
                 .try_register("PendingSignalWatcherOperation")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -584,6 +584,34 @@ impl Isolate {
             if let Some(outcome) = self.execute_batch::<N, UNBOUNDED>(&mut budget)? {
                 return Ok(outcome);
             }
+            if self.fiber.frames.is_empty() {
+                return Ok(RunOutcome::Completed(Value::from_immediate(
+                    Immediate::Undefined,
+                )));
+            }
+        }
+    }
+
+    /// Continues a previously suspended entry without rebuilding its module environment.
+    pub(crate) fn continue_active_module_with_batch<const N: usize>(
+        &mut self,
+    ) -> Result<RunOutcome, ExecutionError> {
+        if N == 0 {
+            return Err(ExecutionError::InvalidDispatchBatch { batch: N });
+        }
+        let mut budget = ExecutionBudget {
+            fuel: u64::MAX,
+            quantum: u32::MAX,
+        };
+        loop {
+            if let Some(outcome) = self.execute_batch::<N, true>(&mut budget)? {
+                return Ok(outcome);
+            }
+            if self.fiber.frames.is_empty() {
+                return Ok(RunOutcome::Completed(Value::from_immediate(
+                    Immediate::Undefined,
+                )));
+            }
         }
     }
 
@@ -688,6 +716,9 @@ impl Isolate {
             }
             #[cfg(feature = "opcode-profile")]
             let previous_activation = (code, function, base);
+            if self.fiber.frames.is_empty() {
+                return Ok(None);
+            }
             (code, function, pc, base) = {
                 let frame = self
                     .fiber
@@ -1854,6 +1885,9 @@ impl Isolate {
                             .last()
                             .is_some_and(|frame| frame.return_continuation)
                     {
+                        if self.current_entry_is_module()? {
+                            return Ok(Some(RunOutcome::Completed(value)));
+                        }
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -1877,6 +1911,9 @@ impl Isolate {
                             .last()
                             .is_some_and(|frame| frame.return_continuation)
                     {
+                        if self.current_entry_is_module()? {
+                            return Ok(Some(RunOutcome::Completed(value)));
+                        }
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -1911,6 +1948,8 @@ impl Isolate {
                     .kind();
                 if kind == FunctionKind::AsyncGenerator {
                     self.suspend_async_generator_await(site)?;
+                } else if kind == FunctionKind::Module {
+                    self.suspend_async_module_await(site)?;
                 } else {
                     self.suspend_async_function_await(site)?;
                 }
@@ -2571,6 +2610,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::AsyncFunction => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::AsyncModule => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::AsyncAwaitConstructor
@@ -3926,7 +3968,7 @@ impl Isolate {
     }
 
     /// Initializes one entry frame and optionally exposes a suspended direct-eval parent chain.
-    fn enter_with_parent(
+    pub(crate) fn enter_with_parent(
         &mut self,
         code: CodeId,
         function_id: FunctionId,
@@ -7969,6 +8011,22 @@ impl Isolate {
         self.return_from_callee(value)
     }
 
+    /// Distinguishes module scheduling from script job completion without widening each Frame.
+    fn current_entry_is_module(&self) -> Result<bool, ExecutionError> {
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?;
+        let kind = self
+            .loaded_code(frame.code)?
+            .module
+            .function(frame.function)
+            .ok_or(ExecutionError::MissingEntryFunction(frame.function))?
+            .kind();
+        Ok(kind == FunctionKind::Module)
+    }
+
     /// Pops a non-entry frame and restores caller checkpoints on the ordinary call hot path.
     #[inline(always)]
     fn return_from_callee(&mut self, value: Value) -> Result<Option<RunOutcome>, ExecutionError> {
@@ -8376,6 +8434,9 @@ impl Isolate {
                 NativeContinuationKind::AsyncFunction => {
                     self.finish_async_function_return(continuation, value)
                 }
+                NativeContinuationKind::AsyncModule => {
+                    self.finish_async_module_return(continuation, value)
+                }
                 NativeContinuationKind::AsyncAwaitConstructor => {
                     self.resume_async_await_constructor(continuation, value)
                 }
@@ -8499,6 +8560,9 @@ impl Isolate {
                     return Err(error);
                 };
                 return self.throw_native_error(kind, site.call_site);
+            }
+            if self.fiber.frames.is_empty() {
+                return Ok(None);
             }
             let restored_sync_generator_caller = continuation.kind()
                 == NativeContinuationKind::GeneratorResume
@@ -8631,6 +8695,9 @@ impl Isolate {
                         .value()
                         .ok_or(ExecutionError::MissingCompletionRecord)?;
                     if self.fiber.frames.len() == 1 && !frame.return_continuation {
+                        if self.current_entry_is_module()? {
+                            return Ok(Some(RunOutcome::Completed(value)));
+                        }
                         return self.promise_checkpoint(value, instruction_offset);
                     }
                     return self.finish_return(value);
@@ -8747,6 +8814,10 @@ impl Isolate {
                 }
                 if continuation.kind() == NativeContinuationKind::AsyncFunction {
                     self.finish_async_function_throw(continuation, value)?;
+                    return Ok(None);
+                }
+                if continuation.kind() == NativeContinuationKind::AsyncModule {
+                    self.finish_async_module_throw(continuation, value)?;
                     return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::AsyncAwaitConstructor {

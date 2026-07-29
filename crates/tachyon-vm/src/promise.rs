@@ -676,11 +676,9 @@ impl Isolate {
             }
             PromiseResolutionMode::Reaction => {
                 self.promise_jobs.finish_active();
-                self.fiber
-                    .frames
-                    .last_mut()
-                    .ok_or(ExecutionError::MissingEnvironment)?
-                    .pc = site.call_site;
+                if let Some(frame) = self.fiber.frames.last_mut() {
+                    frame.pc = site.call_site;
+                }
                 Ok(())
             }
             PromiseResolutionMode::AsyncAwait => self.complete_async_await_resolution(),
@@ -1476,6 +1474,9 @@ impl Isolate {
                             return_site,
                         );
                     }
+                    if self.is_async_module_state(capability) {
+                        return self.resume_async_module_job(capability, argument, rejected);
+                    }
                     if self.is_async_generator_await(capability) {
                         return self.resume_async_generator_await_job(
                             capability,
@@ -1485,20 +1486,9 @@ impl Isolate {
                         );
                     }
                     if self.resolve_function_object(handler).is_err() {
+                        let site = self.promise_job_site(return_site)?;
                         if self.begin_promise_reaction_settlement(
-                            capability,
-                            argument,
-                            rejected,
-                            NativeContinuationSite {
-                                caller_base: self
-                                    .fiber
-                                    .frames
-                                    .last()
-                                    .ok_or(ExecutionError::MissingEnvironment)?
-                                    .base,
-                                destination: 0,
-                                call_site: return_site,
-                            },
+                            capability, argument, rejected, site,
                         )? {
                             return Ok(None);
                         }
@@ -1533,16 +1523,7 @@ impl Isolate {
         return_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let arguments = self.allocate_promise_job_arguments(argument)?;
-        let frame = *self
-            .fiber
-            .frames
-            .last()
-            .ok_or(ExecutionError::MissingEnvironment)?;
-        let site = NativeContinuationSite {
-            caller_base: frame.base,
-            destination: 0,
-            call_site: return_site,
-        };
+        let site = self.promise_job_site(return_site)?;
         let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
@@ -1550,7 +1531,7 @@ impl Isolate {
             .map_err(Isolate::completion_stack_error)?;
         let frame_depth = self.fiber.frames.len();
         if let Err(error) = self.call(CallSite {
-            caller_base: frame.base,
+            caller_base: site.caller_base,
             destination: 0,
             callee: handler,
             argument_base: 0,
@@ -1628,16 +1609,7 @@ impl Isolate {
         return_site: WordOffset,
     ) -> Result<bool, ExecutionError> {
         let arguments = self.create_promise_capability_arguments(promise)?;
-        let frame = *self
-            .fiber
-            .frames
-            .last()
-            .ok_or(ExecutionError::MissingEnvironment)?;
-        let site = NativeContinuationSite {
-            caller_base: frame.base,
-            destination: 0,
-            call_site: return_site,
-        };
+        let site = self.promise_job_site(return_site)?;
         let continuation = NativeContinuation::promise_thenable(
             site,
             promise,
@@ -1650,7 +1622,7 @@ impl Isolate {
             .map_err(Isolate::completion_stack_error)?;
         let frame_depth = self.fiber.frames.len();
         if let Err(error) = self.call(CallSite {
-            caller_base: frame.base,
+            caller_base: site.caller_base,
             destination: 0,
             callee: then,
             argument_base: 0,
@@ -1698,11 +1670,9 @@ impl Isolate {
         continuation: NativeContinuation,
     ) -> Result<(), ExecutionError> {
         self.promise_jobs.finish_active();
-        self.fiber
-            .frames
-            .last_mut()
-            .ok_or(ExecutionError::MissingEnvironment)?
-            .pc = continuation.site().call_site;
+        if let Some(frame) = self.fiber.frames.last_mut() {
+            frame.pc = continuation.site().call_site;
+        }
         Ok(())
     }
 
@@ -1723,12 +1693,36 @@ impl Isolate {
             self.settle_promise(promise, PromiseState::Rejected, reason)?;
         }
         self.promise_jobs.finish_active();
-        self.fiber
-            .frames
-            .last_mut()
-            .ok_or(ExecutionError::MissingEnvironment)?
-            .pc = continuation.site().call_site;
+        if let Some(frame) = self.fiber.frames.last_mut() {
+            frame.pc = continuation.site().call_site;
+        }
         Ok(())
+    }
+
+    /// Provides one destination slot for a Promise job invoked without a JavaScript caller.
+    fn promise_job_site(
+        &mut self,
+        return_site: WordOffset,
+    ) -> Result<NativeContinuationSite, ExecutionError> {
+        let caller_base = if let Some(frame) = self.fiber.frames.last() {
+            frame.base
+        } else {
+            if self.fiber.registers.is_empty() {
+                self.fiber
+                    .registers
+                    .try_reserve_exact(1)
+                    .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+                self.fiber
+                    .registers
+                    .push(Value::from_immediate(Immediate::Undefined));
+            }
+            0
+        };
+        Ok(NativeContinuationSite {
+            caller_base,
+            destination: 0,
+            call_site: return_site,
+        })
     }
 
     /// Rejects an abruptly completed Promise executor through its shared one-shot cell.

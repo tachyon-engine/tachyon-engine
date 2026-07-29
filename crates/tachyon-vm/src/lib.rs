@@ -28,6 +28,7 @@ mod array_static;
 mod array_to_sorted;
 mod async_from_sync_iterator;
 mod async_function;
+mod async_module;
 mod atom;
 mod bigint;
 mod bound_function;

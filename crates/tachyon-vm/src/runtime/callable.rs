@@ -2,6 +2,7 @@
 
 use super::super::*;
 use crate::async_function::AsyncFunctionState;
+use crate::async_module::AsyncModuleState;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::generator::GeneratorObject;
@@ -2225,6 +2226,7 @@ pub(crate) struct VmTypes {
     pub(crate) generator_object: GcType<GeneratorObject>,
     pub(crate) async_from_sync_iterator: GcType<AsyncFromSyncIteratorObject>,
     pub(crate) async_function_state: GcType<AsyncFunctionState>,
+    pub(crate) async_module_state: GcType<AsyncModuleState>,
     pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,
     pub(crate) array: GcType<ArrayObject>,

@@ -851,16 +851,21 @@ fn failed_module_load_rolls_back_every_record_from_the_transaction() {
     );
 }
 
-#[test]
-fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
+/// Exercises module-owned Await suspension, live cells, caching, and GC across one batch shape.
+fn assert_top_level_await_batch<const N: usize>(forced_major: bool) {
     let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
     let module = Compiler
         .compile(
             SourceText::new(
                 SourceId::new(1),
                 SourceName::new("memory:async"),
                 MediaType::Mjs,
-                "await 1;".into(),
+                "export const value = await 41; value + 1;".into(),
             ),
             CompileOptions {
                 source_mode: SourceMode::Module,
@@ -876,8 +881,104 @@ fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
         .load_module_graph(&mut loader, &specifier("memory:async"))
         .unwrap();
     assert_eq!(
-        isolate.evaluate_module(root),
-        Err(ModuleEvaluationError::AsyncEvaluationRequired(root))
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+}
+
+#[test]
+fn top_level_await_executes_through_the_module_owned_async_boundary() {
+    assert_top_level_await_batch::<1>(false);
+    assert_top_level_await_batch::<2>(false);
+    assert_top_level_await_batch::<4>(false);
+    assert_top_level_await_batch::<8>(true);
+    assert_top_level_await_batch::<16>(true);
+}
+
+/// Proves a synchronous importer observes its TLA dependency only after async settlement.
+fn assert_top_level_await_dependency_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let dependency = LoadedModule::precompiled(compile_source_module(
+        1_300 + N as u32,
+        "memory:tla-dependency",
+        "export const value = await 41;",
+    ));
+    let root = LoadedModule::precompiled(compile_source_module(
+        1_400 + N as u32,
+        "memory:tla-root",
+        "import { value } from 'memory:tla-dependency'; value + 1;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:tla-root"), root),
+        (specifier("memory:tla-dependency"), dependency),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tla-root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+}
+
+#[test]
+fn synchronous_parent_waits_for_top_level_await_dependency() {
+    assert_top_level_await_dependency_batch::<1>(false);
+    assert_top_level_await_dependency_batch::<2>(false);
+    assert_top_level_await_dependency_batch::<4>(false);
+    assert_top_level_await_dependency_batch::<8>(true);
+    assert_top_level_await_dependency_batch::<16>(true);
+}
+
+#[test]
+fn top_level_await_rejection_enters_module_catch_and_caches_uncaught_error() {
+    let mut caught_isolate = fixtures::test_isolate();
+    let caught = LoadedModule::precompiled(compile_source_module(
+        1_501,
+        "memory:tla-caught",
+        "let value = 0; try { await Promise.reject(41); } catch (error) { value = error; } value + 1;",
+    ));
+    let mut caught_loader =
+        PrecompiledGraphLoader::new(vec![(specifier("memory:tla-caught"), caught)]);
+    let caught = caught_isolate
+        .load_module_graph(&mut caught_loader, &specifier("memory:tla-caught"))
+        .unwrap();
+    assert_eq!(
+        caught_isolate.evaluate_module(caught).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+
+    let mut rejected_isolate = fixtures::test_isolate();
+    let rejected = LoadedModule::precompiled(compile_source_module(
+        1_502,
+        "memory:tla-rejected",
+        "await Promise.reject(41); 0;",
+    ));
+    let mut rejected_loader =
+        PrecompiledGraphLoader::new(vec![(specifier("memory:tla-rejected"), rejected)]);
+    let rejected = rejected_isolate
+        .load_module_graph(&mut rejected_loader, &specifier("memory:tla-rejected"))
+        .unwrap();
+    assert_eq!(
+        rejected_isolate.evaluate_module(rejected).unwrap(),
+        RunOutcome::Thrown(Value::from_i32(41))
+    );
+    assert_eq!(
+        rejected_isolate.evaluate_module(rejected).unwrap(),
+        RunOutcome::Thrown(Value::from_i32(41))
     );
 }
 

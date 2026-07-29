@@ -1468,6 +1468,7 @@ pub(crate) enum NativeContinuationKind {
     GeneratorInitialize,
     GeneratorResume,
     AsyncFunction,
+    AsyncModule,
     AsyncAwaitConstructor,
     AsyncFromSyncIterator(AsyncFromSyncIteratorStage),
     AsyncFromSyncCloseOnReject(CollectionIteratorCloseStage),
@@ -1576,6 +1577,17 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::AsyncFunction,
+            first: state,
+            second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots one module-owned execution state while its bytecode Fiber is active.
+    #[inline]
+    pub(crate) const fn async_module(site: NativeContinuationSite, state: Value) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::AsyncModule,
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
         }
