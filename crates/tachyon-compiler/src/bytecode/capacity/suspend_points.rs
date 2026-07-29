@@ -80,7 +80,7 @@ fn statements_suspend_point_count(statements: &[HirStatement]) -> Result<usize, 
                     expression_suspend_point_count(right)?,
                 )?;
                 let nested = add(nested, statement_suspend_point_count(body)?)?;
-                add(nested, usize::from(*r#await))?
+                add(nested, usize::from(*r#await) * 2)?
             }
             HirStatementKind::Loop { test, body, .. } => add(
                 expression_suspend_point_count(test)?,

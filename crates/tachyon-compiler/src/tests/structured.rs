@@ -686,7 +686,7 @@ fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
 }
 
 #[test]
-/// Confirms async-function `for await...of` emits async iterator lookup and Await suspension.
+/// Confirms async `for await...of` emits acquisition, iteration, and close suspension.
 fn compiler_lowers_async_for_await_of_iterator_step() {
     let module = Compiler
         .compile(
@@ -707,7 +707,14 @@ fn compiler_lowers_async_for_await_of_iterator_step() {
     assert!(disassembly.contains("LoadIteratorSymbol"));
     assert!(disassembly.contains("CreateAsyncFromSyncIterator"));
     assert!(disassembly.contains("Await"));
-    assert_eq!(function.suspend_points().len(), 1);
+    assert!(disassembly.contains("EnterFinally"));
+    assert!(disassembly.contains("ResumeCompletion"));
+    assert_eq!(function.suspend_points().len(), 2);
+    assert_eq!(function.handlers().len(), 1);
+    assert_eq!(
+        function.handlers()[0].kind,
+        tachyon_bytecode::HandlerKind::IteratorClose
+    );
 }
 
 #[test]

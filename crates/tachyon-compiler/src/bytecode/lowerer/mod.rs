@@ -504,6 +504,80 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)
     }
 
+    /// Emits AsyncIteratorClose inside a completion-preserving bytecode finalizer.
+    fn close_async_iterator_normally(
+        &mut self,
+        iterator: IteratorRegisters,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let closed = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .emit_jump_if_true(
+                iterator.done,
+                closed,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let return_value = self.register()?;
+        let return_atom = self.scope_name(&std::sync::Arc::from("return"))?;
+        self.emit(
+            Opcode::GetById,
+            &[return_value.index(), iterator.iterator.index(), return_atom],
+            span,
+        )?;
+        let undefined = self.load_undefined(span)?;
+        let missing = self.register()?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[missing.index(), return_value.index(), undefined.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                missing,
+                closed,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let null = self.load_null(span)?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[missing.index(), return_value.index(), null.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                missing,
+                closed,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let receiver = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[receiver.index(), iterator.iterator.index()],
+            span,
+        )?;
+        let callee = self.register()?;
+        self.emit(Opcode::Move, &[callee.index(), return_value.index()], span)?;
+        let promise = self.call_receiver(receiver, callee, span)?;
+        let result = self.register()?;
+        self.emit_suspend(Opcode::Await, promise, result, span)?;
+        self.emit(Opcode::CheckObject, &[result.index()], span)?;
+        self.builder
+            .bind_label(closed)
+            .map_err(CompileError::Builder)
+    }
+
     /// Emits the existing base guard without performing an observable property lookup.
     fn require_object_coercible(
         &mut self,

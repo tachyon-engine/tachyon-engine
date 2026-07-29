@@ -103,6 +103,61 @@ collect();
 result;
 "#;
 
+const FOR_AWAIT_CLOSE_SOURCE: &str = r#"
+var result = "";
+
+function values(mode) {
+    var iterator = {
+        next: function() {
+            if (mode === "next-reject") return Promise.reject("next");
+            return { done: false, value: 1 };
+        },
+        return: function() {
+            result += mode + "-close|";
+            if (mode === "throw") return Promise.reject("close");
+            return Promise.resolve(0)
+                .then(function() { result += mode + "-tick|"; })
+                .then(function() { return {}; });
+        }
+    };
+    var iterable = {};
+    iterable[Symbol.asyncIterator] = function() { return iterator; };
+    return iterable;
+}
+
+async function breakCase() {
+    for await (var value of values("break")) break;
+    result += "break-done|";
+}
+
+async function returnCase() {
+    for await (var value of values("return")) return 7;
+}
+
+async function throwCase() {
+    try {
+        for await (var value of values("throw")) throw "body";
+    } catch (error) {
+        result += "throw:" + error + "|";
+    }
+}
+
+async function nextRejectCase() {
+    try {
+        for await (var value of values("next-reject"));
+    } catch (error) {
+        result += "next:" + error + "|";
+    }
+}
+
+breakCase()
+    .then(function() { return returnCase(); })
+    .then(function(value) { result += "return:" + value + "|"; return throwCase(); })
+    .then(function() { return nextRejectCase(); })
+    .then(function() { result += "done|"; });
+result;
+"#;
+
 #[test]
 fn async_function_await_runs_for_every_dispatch_batch() {
     assert_async_function_source::<1>(false);
@@ -163,6 +218,84 @@ fn for_await_consumes_sync_iterables_for_every_dispatch_batch() {
 #[test]
 fn for_await_sync_iterable_survives_forced_major_collection() {
     assert_for_await_sync_iterable::<8>(true);
+}
+
+#[test]
+fn for_await_close_preserves_completion_for_every_dispatch_batch() {
+    assert_for_await_close::<1>(false);
+    assert_for_await_close::<2>(false);
+    assert_for_await_close::<4>(false);
+    assert_for_await_close::<8>(false);
+    assert_for_await_close::<16>(false);
+    assert_for_await_close::<8>(true);
+}
+
+/// Runs abrupt async-loop exits through the completion-preserving close finalizer.
+fn assert_for_await_close<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_800 + N as u32),
+                SourceName::new("for-await-close"),
+                MediaType::JavaScript,
+                Arc::from(FOR_AWAIT_CLOSE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("for-await close fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_900 + N as u32),
+                SourceName::new("for-await-close-assertion"),
+                MediaType::JavaScript,
+                Arc::from("result;"),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("for-await close assertion compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(55, 56)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("for-await close isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("for-await close fixture executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("for-await close assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("for-await close assertion did not complete: {outcome:?}");
+    };
+    let value = isolate
+        .string_value_to_utf16(value)
+        .expect("for-await close trace is a string");
+    assert_eq!(
+        String::from_utf16(&value).unwrap(),
+        "break-close|break-tick|break-done|return-close|return-tick|return:7|throw-close|throw:body|next:next|done|",
+        "for-await close batch {N}, forced_major={forced_major}"
+    );
 }
 
 /// Runs an Async-from-Sync loop through promise assimilation and the shared body.

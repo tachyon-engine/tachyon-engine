@@ -583,7 +583,15 @@ impl Lowerer<'_> {
         let source = self.expression(right)?;
         let iterator = self.get_async_or_sync_iterator(source, span)?;
         self.prepare_for_in_binding(left, span)?;
+        let finally_slot = self.reserve_handler();
+        self.finally_depth =
+            self.finally_depth
+                .checked_add(1)
+                .ok_or(CompileError::LoweringCapacityOverflow {
+                    collection: "finally nesting depth",
+                })?;
         let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let natural_end = self.builder.new_label().map_err(CompileError::Builder)?;
         let end = self.builder.new_label().map_err(CompileError::Builder)?;
         self.builder
             .bind_label(condition)
@@ -597,10 +605,11 @@ impl Lowerer<'_> {
             &crate::HirObjectPropertyKey::Static("done".into()),
             span,
         )?;
+        self.emit(Opcode::Move, &[iterator.done.index(), done.index()], span)?;
         self.builder
             .emit_jump_if_true(
                 done,
-                end,
+                natural_end,
                 BytecodeSourceSpan {
                     start: span.start,
                     end: span.end,
@@ -612,13 +621,33 @@ impl Lowerer<'_> {
             &crate::HirObjectPropertyKey::Static("value".into()),
             span,
         )?;
+        let protected_start = self.emit_marker(span)?;
         self.store_for_in_left(left, value, span)?;
         self.continue_targets.push(self.control_target(condition));
-        self.break_targets.push(self.control_target(end));
+        self.break_targets.push(ControlTarget {
+            label: end,
+            finally_depth: self.finally_depth - 1,
+        });
         self.function_statement(body)?;
         self.break_targets.pop();
         self.continue_targets.pop();
         self.emit_jump(condition, span)?;
+        self.builder
+            .bind_label(natural_end)
+            .map_err(CompileError::Builder)?;
+        self.emit(Opcode::EnterFinally, &[], span)?;
+        let finalizer = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.close_async_iterator_normally(iterator, span)?;
+        self.emit(Opcode::ResumeCompletion, &[], span)?;
+        let handler_end = self
+            .builder
+            .current_offset()
+            .map_err(CompileError::Builder)?;
+        self.finally_depth -= 1;
+        self.publish_iterator_close_handler(finally_slot, protected_start, finalizer, handler_end)?;
         self.builder
             .bind_label(end)
             .map_err(CompileError::Builder)?;

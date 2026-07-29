@@ -453,9 +453,9 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                     statements_label_count(core::slice::from_ref(body))?,
                     "bytecode labels",
                 )?;
-                // Async uses acquisition plus loop labels; sync uses the close-handler labels.
+                // Async uses acquisition, loop, and async-close labels.
                 count = checked_count_add(count, nested, "bytecode labels")?;
-                count = checked_count_add(count, if *r#await { 4 } else { 5 }, "bytecode labels")?;
+                count = checked_count_add(count, if *r#await { 6 } else { 5 }, "bytecode labels")?;
             }
             HirStatementKind::Switch {
                 discriminant,

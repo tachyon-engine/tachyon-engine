@@ -95,8 +95,8 @@ pub(super) fn statements_instruction_count(
                     statements_instruction_count(core::slice::from_ref(body))?,
                     "bytecode instructions",
                 )?;
-                // Async iteration includes both acquisition branches and one normalized Await loop.
-                let lowering_overhead = if *r#await { 44 } else { 24 };
+                // Async iteration includes acquisition, the normalized Await loop, and close Await.
+                let lowering_overhead = if *r#await { 60 } else { 24 };
                 checked_count_add(nested, lowering_overhead, "bytecode instructions")?
             }
             HirStatementKind::Loop {
