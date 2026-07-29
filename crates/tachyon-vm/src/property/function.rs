@@ -200,7 +200,8 @@ impl Isolate {
                 self.allocate_runtime_string(name).map(Some)
             }
             FunctionExecutable::PromiseFinallyHandler { .. }
-            | FunctionExecutable::PromiseCombinatorHandler { .. } => {
+            | FunctionExecutable::PromiseCombinatorHandler { .. }
+            | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => {
                 if key == self.length_atom()? {
                     return Ok(Some(Value::from_i32(1)));
                 }
@@ -355,7 +356,8 @@ impl Isolate {
                 | FunctionExecutable::PromiseCapabilityExecutor(_)
                 | FunctionExecutable::PromiseFinallyHandler { .. }
                 | FunctionExecutable::PromiseFinallyResultHandler { .. }
-                | FunctionExecutable::PromiseCombinatorHandler { .. } => false,
+                | FunctionExecutable::PromiseCombinatorHandler { .. }
+                | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => false,
             })
     }
 

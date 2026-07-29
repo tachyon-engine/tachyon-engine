@@ -93,6 +93,16 @@ collect();
 result;
 "#;
 
+const FOR_AWAIT_SYNC_ITERABLE_SOURCE: &str = r#"
+var result = "";
+async function collect() {
+    for await (var value of [Promise.resolve(1), 2]) result += value + "|";
+    result += "done|";
+}
+collect();
+result;
+"#;
+
 #[test]
 fn async_function_await_runs_for_every_dispatch_batch() {
     assert_async_function_source::<1>(false);
@@ -139,6 +149,84 @@ fn for_await_consumes_async_generators_for_every_dispatch_batch() {
     assert_for_await_async_generator::<8>(false);
     assert_for_await_async_generator::<16>(false);
     assert_for_await_async_generator::<8>(true);
+}
+
+#[test]
+fn for_await_consumes_sync_iterables_for_every_dispatch_batch() {
+    assert_for_await_sync_iterable::<1>(false);
+    assert_for_await_sync_iterable::<2>(false);
+    assert_for_await_sync_iterable::<4>(false);
+    assert_for_await_sync_iterable::<8>(false);
+    assert_for_await_sync_iterable::<16>(false);
+}
+
+#[test]
+fn for_await_sync_iterable_survives_forced_major_collection() {
+    assert_for_await_sync_iterable::<8>(true);
+}
+
+/// Runs an Async-from-Sync loop through promise assimilation and the shared body.
+fn assert_for_await_sync_iterable<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_500 + N as u32),
+                SourceName::new("for-await-sync-iterable"),
+                MediaType::JavaScript,
+                Arc::from(FOR_AWAIT_SYNC_ITERABLE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("sync for-await fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_600 + N as u32),
+                SourceName::new("for-await-sync-assertion"),
+                MediaType::JavaScript,
+                Arc::from("result;"),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("sync for-await assertion compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(53, 54)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("sync for-await isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("sync for-await setup executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("sync for-await assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("sync for-await assertion did not complete: {outcome:?}");
+    };
+    let value = isolate
+        .string_value_to_utf16(value)
+        .expect("sync for-await trace is a string");
+    assert_eq!(String::from_utf16(&value).unwrap(), "1|2|done|");
 }
 
 /// Runs one async-generator consumer until queued promise reactions finish.

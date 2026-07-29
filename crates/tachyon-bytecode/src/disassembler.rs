@@ -96,6 +96,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::LoadIteratorSymbol | Opcode::LoadAsyncIteratorSymbol | Opcode::CheckObject => {
             write!(output, " r{}", operands[0])?
         }
+        Opcode::CreateAsyncFromSyncIterator => write!(
+            output,
+            " r{}, iterator=r{}, next=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
         Opcode::Move
         | Opcode::Not
         | Opcode::Negate

@@ -79,7 +79,10 @@ pub(super) fn statements_instruction_count(
                 checked_count_add(nested, 8, "bytecode instructions")?
             }
             HirStatementKind::ForOf {
-                left, right, body, ..
+                r#await,
+                left,
+                right,
+                body,
             } => {
                 let mut nested = expression_instruction_count(right)?;
                 nested = checked_count_add(
@@ -92,8 +95,9 @@ pub(super) fn statements_instruction_count(
                     statements_instruction_count(core::slice::from_ref(body))?,
                     "bytecode instructions",
                 )?;
-                // GetIterator + next/value loop, normal exit, and the early-close branch.
-                checked_count_add(nested, 24, "bytecode instructions")?
+                // Async iteration includes both acquisition branches and one normalized Await loop.
+                let lowering_overhead = if *r#await { 44 } else { 24 };
+                checked_count_add(nested, lowering_overhead, "bytecode instructions")?
             }
             HirStatementKind::Loop {
                 test,

@@ -62,15 +62,25 @@ fn statements_suspend_point_count(statements: &[HirStatement]) -> Result<usize, 
                 }
                 add(nested, statement_suspend_point_count(body)?)?
             }
-            HirStatementKind::ForIn { left, right, body }
-            | HirStatementKind::ForOf {
-                left, right, body, ..
-            } => {
+            HirStatementKind::ForIn { left, right, body } => {
                 let nested = add(
                     for_in_left_suspend_point_count(left)?,
                     expression_suspend_point_count(right)?,
                 )?;
                 add(nested, statement_suspend_point_count(body)?)?
+            }
+            HirStatementKind::ForOf {
+                r#await,
+                left,
+                right,
+                body,
+            } => {
+                let nested = add(
+                    for_in_left_suspend_point_count(left)?,
+                    expression_suspend_point_count(right)?,
+                )?;
+                let nested = add(nested, statement_suspend_point_count(body)?)?;
+                add(nested, usize::from(*r#await))?
             }
             HirStatementKind::Loop { test, body, .. } => add(
                 expression_suspend_point_count(test)?,

@@ -1351,6 +1351,21 @@ pub(crate) enum JsonStringifyStage {
     ObjectDescriptor,
 }
 
+/// Observable boundaries in the Async-from-Sync iterator algorithms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum AsyncFromSyncIteratorStage {
+    IteratorCall,
+    ReturnGet,
+    ReturnCall,
+    ThrowGet,
+    ThrowCall,
+    DoneGet,
+    ValueGet,
+    PromiseConstructorGet,
+    PromiseResolve,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NativeContinuationKind {
     Conversion {
@@ -1450,6 +1465,8 @@ pub(crate) enum NativeContinuationKind {
     SignalUntrack,
     GeneratorResume,
     AsyncFunction,
+    AsyncAwaitConstructor,
+    AsyncFromSyncIterator(AsyncFromSyncIteratorStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1542,6 +1559,37 @@ impl NativeContinuation {
             kind: NativeContinuationKind::AsyncFunction,
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots an async function and awaited native Promise across its constructor getter.
+    #[inline]
+    pub(crate) const fn async_await_constructor(
+        site: NativeContinuationSite,
+        state: Value,
+        source: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::AsyncAwaitConstructor,
+            first: state,
+            second: source,
+        }
+    }
+
+    /// Roots one Async-from-Sync operation across an observable Get, Call, or resolution.
+    #[inline]
+    pub(crate) const fn async_from_sync_iterator(
+        site: NativeContinuationSite,
+        stage: AsyncFromSyncIteratorStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::AsyncFromSyncIterator(stage),
+            first: state,
+            second: retained,
         }
     }
 

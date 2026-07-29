@@ -2761,6 +2761,49 @@ impl Isolate {
             },
         )?;
         self.define_intrinsic_to_string_tag(async_iterator_prototype, b"AsyncIterator")?;
+        let async_from_sync_iterator_prototype =
+            self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: async_iterator_prototype,
+            })?;
+        self.realm.async_from_sync_iterator_prototype = Some(async_from_sync_iterator_prototype);
+        for (name, native) in [
+            (
+                b"next".as_slice(),
+                NativeFunction::AsyncFromSyncIteratorNext,
+            ),
+            (
+                b"return".as_slice(),
+                NativeFunction::AsyncFromSyncIteratorReturn,
+            ),
+            (
+                b"throw".as_slice(),
+                NativeFunction::AsyncFromSyncIteratorThrow,
+            ),
+        ] {
+            let method = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let name = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(
+                async_from_sync_iterator_prototype,
+                name,
+                method,
+                true,
+            )?;
+        }
+        self.define_intrinsic_to_string_tag(
+            async_from_sync_iterator_prototype,
+            b"Async-from-Sync Iterator",
+        )?;
         let async_generator_prototype =
             self.allocate_intrinsic_ordinary_object(OrdinaryObject {
                 shape: ShapeId::EMPTY,

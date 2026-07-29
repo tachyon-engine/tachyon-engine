@@ -879,6 +879,11 @@ fn verify_instruction(
         | Opcode::LoadAsyncIteratorSymbol
         | Opcode::CheckObject
         | Opcode::LoadSuperBase => check_register(operands[0])?,
+        Opcode::CreateAsyncFromSyncIterator => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            check_register(operands[2])?;
+        }
         Opcode::InitializeClassEnvironment => {
             check_register(operands[0])?;
             if operands[1] >= context.max_environment_slot_count {

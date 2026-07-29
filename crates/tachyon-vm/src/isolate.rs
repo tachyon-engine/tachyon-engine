@@ -391,6 +391,9 @@ impl Isolate {
             generator_object: registry
                 .try_register("GeneratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            async_from_sync_iterator: registry
+                .try_register("AsyncFromSyncIteratorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             async_function_state: registry
                 .try_register("AsyncFunctionState")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1963,7 +1966,8 @@ impl Isolate {
                     | FunctionExecutable::PromiseCapabilityExecutor(_)
                     | FunctionExecutable::PromiseFinallyHandler { .. }
                     | FunctionExecutable::PromiseFinallyResultHandler { .. }
-                    | FunctionExecutable::PromiseCombinatorHandler { .. } => 2,
+                    | FunctionExecutable::PromiseCombinatorHandler { .. }
+                    | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => 2,
                     FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_) => 3,
                 },
                 Err(_) => 0,

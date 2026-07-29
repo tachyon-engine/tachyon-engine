@@ -1165,6 +1165,21 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Generator(generator), ordinary));
         }
+        if let Ok(iterator) = self
+            .heap
+            .checked_reference(raw, self.types.async_from_sync_iterator)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(iterator, self.types.async_from_sync_iterator)
+                        .map(|iterator| iterator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::AsyncFromSyncIterator(iterator), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -1724,6 +1739,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::AsyncFromSyncIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(iterator, self.types.async_from_sync_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .extensible = extensible;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2056,6 +2084,19 @@ impl Isolate {
                     Ok(())
                 })
             }),
+            ObjectReceiver::AsyncFromSyncIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        no_gc
+                            .borrow_mut(iterator, self.types.async_from_sync_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?
+                            .ordinary
+                            .shape = shape;
+                        Ok(())
+                    })
+                })
+            }
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2628,6 +2669,29 @@ impl Isolate {
                 }
                 Ok(())
             }),
+            ObjectReceiver::AsyncFromSyncIterator(iterator) => {
+                self.heap.with_running_scope(|scope| {
+                    let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                    let storage_local = storage
+                        .map(|storage| scope.root(storage))
+                        .transpose()
+                        .map_err(ExecutionError::Root)?;
+                    scope.with_no_gc_scope(|no_gc| {
+                        let iterator = no_gc
+                            .borrow_mut(iterator, self.types.async_from_sync_iterator)
+                            .map_err(ExecutionError::NoGcBorrow)?;
+                        iterator.ordinary.shape = shape;
+                        iterator.ordinary.storage = storage;
+                        Ok::<(), ExecutionError>(())
+                    })?;
+                    if let Some(storage) = storage_local {
+                        scope
+                            .write_barrier(iterator, storage)
+                            .map_err(ExecutionError::HeapReference)?;
+                    }
+                    Ok(())
+                })
+            }
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 let storage_local = storage

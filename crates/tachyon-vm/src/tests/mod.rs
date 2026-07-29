@@ -35,6 +35,7 @@ mod array_splice;
 mod array_static;
 mod array_to_sorted;
 mod assign;
+mod async_from_sync_iterator;
 mod async_function;
 mod bigint;
 mod call_spread;

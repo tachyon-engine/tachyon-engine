@@ -270,6 +270,7 @@ impl BytecodeBuilder {
             | Opcode::CheckObject
             | Opcode::Return
             | Opcode::Throw => &[0],
+            Opcode::CreateAsyncFromSyncIterator => &[0, 1, 2],
             Opcode::CreateObject
             | Opcode::CreateArray
             | Opcode::LoadException

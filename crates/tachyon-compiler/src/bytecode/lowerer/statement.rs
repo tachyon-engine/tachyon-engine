@@ -567,7 +567,7 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Emits the initial async-iterator lowering using Await for each iterator result.
+    /// Emits one uniform async loop after acquisition normalizes synchronous iterables.
     pub(in crate::bytecode) fn function_for_await_or_of_statement(
         &mut self,
         is_async: bool,
@@ -581,7 +581,7 @@ impl Lowerer<'_> {
         }
         let checkpoint = self.locals.len();
         let source = self.expression(right)?;
-        let iterator = self.get_async_iterator(source, span)?;
+        let iterator = self.get_async_or_sync_iterator(source, span)?;
         self.prepare_for_in_binding(left, span)?;
         let condition = self.builder.new_label().map_err(CompileError::Builder)?;
         let end = self.builder.new_label().map_err(CompileError::Builder)?;

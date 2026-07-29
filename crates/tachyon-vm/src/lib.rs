@@ -26,6 +26,7 @@ mod array_slice;
 mod array_splice;
 mod array_static;
 mod array_to_sorted;
+mod async_from_sync_iterator;
 mod async_function;
 mod atom;
 mod bigint;
@@ -174,6 +175,7 @@ use array_slice::PendingArraySlice;
 use array_splice::PendingArraySplice;
 use array_static::PendingArrayStatic;
 use array_to_sorted::PendingArrayToSorted;
+use async_from_sync_iterator::AsyncFromSyncIteratorObject;
 use bigint::{BigIntValue, small_bigint_binary_hot, small_bigint_not_hot};
 use bound_function::BoundFunctionData;
 use builtins::object::PendingGetOwnPropertyDescriptors;
@@ -248,13 +250,14 @@ use runtime::{
         ActiveHandler, ArrayAllocationRoots, ArrayConcatStage, ArrayCopyStage,
         ArrayCopyWithinStage, ArrayFillStage, ArrayFlatMapStage, ArrayFlatStage, ArrayForEachStage,
         ArrayInsertStage, ArrayJoinStage, ArrayRemoveStage, ArrayReverseStage, ArraySliceStage,
-        ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, BuiltinPropertyKeyConsumer,
-        ClassActivation, CodeLoadRoots, CollectionInitializerStage, CollectionIteratorCloseStage,
-        ConstructReceiverRoots, ConversionCallbackStage, ConversionConsumer,
-        ConversionContinuation, ConversionNativeFunction, CopyDataPropertiesStage, DateToJsonStage,
-        DefinePropertiesStage, ErrorConstructorStage, ErrorStackSetterStage, ErrorToStringStage,
-        EvalVarEnvironment, Fiber, Frame, GetOwnPropertyDescriptorsStage, InstanceElementStage,
-        JsonStringifyStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
+        ArraySpliceStage, ArrayStaticStage, ArrayToSortedStage, AsyncFromSyncIteratorStage,
+        BuiltinPropertyKeyConsumer, ClassActivation, CodeLoadRoots, CollectionInitializerStage,
+        CollectionIteratorCloseStage, ConstructReceiverRoots, ConversionCallbackStage,
+        ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
+        CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
+        ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, JsonStringifyStage,
+        NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
         PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
         PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,

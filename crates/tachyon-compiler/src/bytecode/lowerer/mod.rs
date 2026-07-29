@@ -234,12 +234,20 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Obtains an async iterator record through the realm's `Symbol.asyncIterator`.
-    pub(super) fn get_async_iterator(
+    /// Selects an async iterator or a direct Async-from-Sync record before the loop starts.
+    pub(super) fn get_async_or_sync_iterator(
         &mut self,
         object: RegisterId,
         span: SourceSpan,
     ) -> Result<IteratorRegisters, CompileError> {
+        let iterator = IteratorRegisters {
+            iterator: self.register()?,
+            receiver: self.register()?,
+            next: self.register()?,
+            done: self.load_boolean(false, span)?,
+        };
+        let sync_setup = self.builder.new_label().map_err(CompileError::Builder)?;
+        let setup_end = self.builder.new_label().map_err(CompileError::Builder)?;
         let iterator_key = self.register()?;
         self.emit(
             Opcode::LoadAsyncIteratorSymbol,
@@ -247,24 +255,107 @@ impl Lowerer<'_> {
             span,
         )?;
         self.prepare_property_key(iterator_key, object, false, span)?;
-        let iterator = self.computed_method_call(object, iterator_key, span)?;
-        self.emit(Opcode::CheckObject, &[iterator.index()], span)?;
-        let receiver = self.register()?;
-        self.emit(Opcode::Move, &[receiver.index(), iterator.index()], span)?;
-        let next = self.register()?;
+        let async_receiver = self.register()?;
+        self.emit(
+            Opcode::Move,
+            &[async_receiver.index(), object.index()],
+            span,
+        )?;
+        let async_method = self.register()?;
+        self.emit(
+            Opcode::GetByValue,
+            &[
+                async_method.index(),
+                async_receiver.index(),
+                iterator_key.index(),
+            ],
+            span,
+        )?;
+        let undefined = self.load_undefined(span)?;
+        let missing = self.register()?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[missing.index(), async_method.index(), undefined.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                missing,
+                sync_setup,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let null = self.load_null(span)?;
+        self.emit(
+            Opcode::StrictEqual,
+            &[missing.index(), async_method.index(), null.index()],
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                missing,
+                sync_setup,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let async_iterator = self.call_receiver(async_receiver, async_method, span)?;
+        self.emit(Opcode::CheckObject, &[async_iterator.index()], span)?;
+        self.emit(
+            Opcode::Move,
+            &[iterator.iterator.index(), async_iterator.index()],
+            span,
+        )?;
+        self.emit(
+            Opcode::Move,
+            &[iterator.receiver.index(), async_iterator.index()],
+            span,
+        )?;
         let next_atom = self.scope_name(&std::sync::Arc::from("next"))?;
         self.emit(
             Opcode::GetById,
-            &[next.index(), receiver.index(), next_atom],
+            &[iterator.next.index(), iterator.receiver.index(), next_atom],
             span,
         )?;
-        let done = self.load_boolean(false, span)?;
-        Ok(IteratorRegisters {
-            iterator,
-            receiver,
-            next,
-            done,
-        })
+        self.emit_jump(setup_end, span)?;
+        self.builder
+            .bind_label(sync_setup)
+            .map_err(CompileError::Builder)?;
+        let sync_iterator = self.get_sync_iterator(object, span)?;
+        let wrapper = self.register()?;
+        self.emit(
+            Opcode::CreateAsyncFromSyncIterator,
+            &[
+                wrapper.index(),
+                sync_iterator.iterator.index(),
+                sync_iterator.next.index(),
+            ],
+            span,
+        )?;
+        self.emit(
+            Opcode::Move,
+            &[iterator.iterator.index(), wrapper.index()],
+            span,
+        )?;
+        self.emit(
+            Opcode::Move,
+            &[iterator.receiver.index(), wrapper.index()],
+            span,
+        )?;
+        self.emit(
+            Opcode::GetById,
+            &[iterator.next.index(), iterator.receiver.index(), next_atom],
+            span,
+        )?;
+        self.builder
+            .bind_label(setup_end)
+            .map_err(CompileError::Builder)?;
+        Ok(iterator)
     }
 
     /// Calls cached `next`, then updates the record's done register from its result object.

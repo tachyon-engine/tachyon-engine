@@ -442,6 +442,9 @@ pub(crate) enum NativeFunction {
     GeneratorFunctionPrototype,
     AsyncGeneratorFunctionConstructor,
     AsyncGeneratorFunctionPrototype,
+    AsyncFromSyncIteratorNext,
+    AsyncFromSyncIteratorReturn,
+    AsyncFromSyncIteratorThrow,
     FunctionPrototypeCall,
     FunctionPrototypeApply,
     FunctionPrototypeBind,
@@ -1032,6 +1035,9 @@ impl NativeFunction {
             Self::PromiseThen => 2,
             Self::BigIntAsIntN | Self::BigIntAsUintN => 2,
             Self::PromiseFinally => 1,
+            Self::AsyncFromSyncIteratorNext
+            | Self::AsyncFromSyncIteratorReturn
+            | Self::AsyncFromSyncIteratorThrow => 1,
             Self::ReflectGet => 2,
             Self::ReflectSet => 3,
             Self::ReflectSetPrototypeOf => 2,
@@ -1530,6 +1536,9 @@ impl NativeFunction {
             Self::GeneratorFunctionPrototype => "",
             Self::AsyncGeneratorFunctionConstructor => "AsyncGeneratorFunction",
             Self::AsyncGeneratorFunctionPrototype => "",
+            Self::AsyncFromSyncIteratorNext => "next",
+            Self::AsyncFromSyncIteratorReturn => "return",
+            Self::AsyncFromSyncIteratorThrow => "throw",
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
@@ -1919,6 +1928,10 @@ pub(crate) enum FunctionExecutable {
         element: GcRef<PromiseCombinatorElement>,
         rejected: bool,
     },
+    /// Promise reaction that wraps an awaited sync value in an IteratorResult object.
+    AsyncFromSyncIteratorUnwrap {
+        done: bool,
+    },
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -1990,6 +2003,7 @@ pub(crate) enum ObjectReceiver {
     ArrayIterator(GcRef<ArrayIteratorObject>),
     CollectionIterator(GcRef<CollectionIteratorObject>),
     RegExpStringIterator(GcRef<RegExpStringIteratorObject>),
+    AsyncFromSyncIterator(GcRef<AsyncFromSyncIteratorObject>),
 }
 
 impl ObjectReceiver {
@@ -2025,6 +2039,7 @@ impl ObjectReceiver {
             Self::ArrayIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::RegExpStringIterator(iterator) => Value::from_heap_ref(iterator.raw()),
+            Self::AsyncFromSyncIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
 }
@@ -2196,6 +2211,7 @@ pub(crate) struct VmTypes {
     pub(crate) signal_computed: GcType<ComputedSignal>,
     pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) generator_object: GcType<GeneratorObject>,
+    pub(crate) async_from_sync_iterator: GcType<AsyncFromSyncIteratorObject>,
     pub(crate) async_function_state: GcType<AsyncFunctionState>,
     pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
     pub(crate) pending_typed_array_construction: GcType<PendingTypedArrayConstruction>,

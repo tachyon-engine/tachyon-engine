@@ -440,7 +440,10 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                 count = checked_count_add(count, 2, "bytecode labels")?;
             }
             HirStatementKind::ForOf {
-                left, right, body, ..
+                r#await,
+                left,
+                right,
+                body,
             } => {
                 let mut nested = expression_label_count(right)?;
                 nested =
@@ -450,9 +453,9 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                     statements_label_count(core::slice::from_ref(body))?,
                     "bytecode labels",
                 )?;
-                // condition, natural end, close, final exit, and close's internal skip label.
+                // Async uses acquisition plus loop labels; sync uses the close-handler labels.
                 count = checked_count_add(count, nested, "bytecode labels")?;
-                count = checked_count_add(count, 5, "bytecode labels")?;
+                count = checked_count_add(count, if *r#await { 4 } else { 5 }, "bytecode labels")?;
             }
             HirStatementKind::Switch {
                 discriminant,

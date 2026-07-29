@@ -704,7 +704,10 @@ fn compiler_lowers_async_for_await_of_iterator_step() {
         .expect("async function is published");
     let disassembly = tachyon_bytecode::disassemble(function).expect("bytecode disassembles");
     assert!(disassembly.contains("LoadAsyncIteratorSymbol"));
+    assert!(disassembly.contains("LoadIteratorSymbol"));
+    assert!(disassembly.contains("CreateAsyncFromSyncIterator"));
     assert!(disassembly.contains("Await"));
+    assert_eq!(function.suspend_points().len(), 1);
 }
 
 #[test]

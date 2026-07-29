@@ -224,9 +224,8 @@ impl Isolate {
         }
         let source = self.read(site.base, site.source)?;
         if self.promise_snapshot(source).is_ok() {
-            self.perform_promise_then_with_capability(source, None, None, state_value)?;
             self.prepare_async_function_await(state, site.destination, site.instruction)?;
-            return self.complete_async_function_await_resolution();
+            return self.begin_async_await_constructor_get(site, state_value, source);
         }
         if !self.is_object_value(source) {
             let awaited = self.create_promise(PromiseState::Fulfilled, source)?;
@@ -250,6 +249,137 @@ impl Isolate {
             },
             PromiseResolutionMode::AsyncAwait,
         )
+    }
+
+    /// Performs the observable PromiseResolve constructor lookup for an awaited native Promise.
+    fn begin_async_await_constructor_get(
+        &mut self,
+        site: AsyncAwaitSite,
+        state: Value,
+        source: Value,
+    ) -> Result<(), ExecutionError> {
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.base,
+            destination: site.destination,
+            call_site: site.instruction,
+        };
+        let continuation =
+            NativeContinuation::async_await_constructor(continuation_site, state, source);
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let constructor = self.constructor_atom()?;
+        let result = match self.resolve_property_read_until_proxy(source, constructor.into())? {
+            PropertyReadResolution::Read(PropertyRead::Missing) => self
+                .write(
+                    continuation_site.caller_base,
+                    continuation_site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+                .map(|()| None),
+            PropertyReadResolution::Read(PropertyRead::Data(value)) => self
+                .write(
+                    continuation_site.caller_base,
+                    continuation_site.destination,
+                    value,
+                )
+                .map(|()| None),
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                self.write(
+                    continuation_site.caller_base,
+                    continuation_site.destination,
+                    Value::from_immediate(Immediate::Undefined),
+                )
+                .map(|()| None)
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter)) => {
+                self.pop_native_continuation()?;
+                return self
+                    .dispatch_property_callback(continuation, getter)
+                    .map(|_| ());
+            }
+            PropertyReadResolution::Proxy(_) => self.dispatch_proxy_aware_property_read(
+                continuation_site,
+                source,
+                source,
+                constructor.into(),
+            ),
+        };
+        if let Err(error) = result {
+            if self.fiber.completions.len() > depth {
+                self.pop_native_continuation()?;
+            }
+            return self.reject_async_await_constructor_error(continuation, error);
+        }
+        if self.fiber.frames.len() != frames || self.fiber.completions.len() <= depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let constructor = self.read(site.base, site.destination)?;
+        self.resume_async_await_constructor(continuation, constructor)
+    }
+
+    /// Selects the PromiseResolve identity path or creates the intrinsic wrapper Promise.
+    pub(crate) fn resume_async_await_constructor(
+        &mut self,
+        continuation: NativeContinuation,
+        constructor: Value,
+    ) -> Result<(), ExecutionError> {
+        let source = continuation.second();
+        let state = continuation.first();
+        let intrinsic = self
+            .realm
+            .promise_constructor
+            .expect("Promise constructor initializes before Await");
+        if constructor == intrinsic {
+            self.perform_promise_then_with_capability(source, None, None, state)?;
+            return self.complete_async_function_await_resolution();
+        }
+        let awaited = self.create_promise(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )?;
+        self.perform_promise_then_with_capability(awaited, None, None, state)?;
+        self.begin_promise_resolution(
+            awaited,
+            source,
+            continuation.site(),
+            PromiseResolutionMode::AsyncAwait,
+        )
+    }
+
+    /// Converts an abrupt Promise constructor lookup into the rejected Promise awaited by the fiber.
+    pub(crate) fn reject_async_await_constructor(
+        &mut self,
+        continuation: NativeContinuation,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let awaited = self.create_promise(PromiseState::Rejected, reason)?;
+        self.perform_promise_then_with_capability(awaited, None, None, continuation.first())?;
+        self.complete_async_function_await_resolution()
+    }
+
+    /// Maps an internal VM error from the constructor lookup to its JavaScript rejection value.
+    fn reject_async_await_constructor_error(
+        &mut self,
+        continuation: NativeContinuation,
+        error: ExecutionError,
+    ) -> Result<(), ExecutionError> {
+        let reason = match error {
+            ExecutionError::HostThrown(value) => value,
+            error => {
+                let Some(kind) = execution_error_kind(&error) else {
+                    return Err(error);
+                };
+                self.create_native_error(kind, None)?
+            }
+        };
+        self.reject_async_await_constructor(continuation, reason)
     }
 
     /// Publishes the active child once PromiseResolve has produced the awaited Promise.

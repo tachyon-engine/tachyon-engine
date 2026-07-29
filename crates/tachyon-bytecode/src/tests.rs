@@ -191,6 +191,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::CallSpreadWithReceiver,
                 Opcode::TailCallSpreadWithReceiver,
                 Opcode::DirectEvalSpread,
+                Opcode::CreateAsyncFromSyncIterator,
             ],
         ),
         (

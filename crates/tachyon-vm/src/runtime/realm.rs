@@ -124,6 +124,7 @@ pub(crate) struct Realm {
     pub(crate) generator_prototype: Option<Value>,
     pub(crate) generator_next: Option<Value>,
     pub(crate) async_iterator_prototype: Option<Value>,
+    pub(crate) async_from_sync_iterator_prototype: Option<Value>,
     pub(crate) async_generator_function_constructor: Option<Value>,
     pub(crate) async_generator_function_prototype: Option<Value>,
     pub(crate) async_generator_prototype: Option<Value>,
@@ -304,6 +305,7 @@ impl Realm {
             generator_prototype: None,
             generator_next: None,
             async_iterator_prototype: None,
+            async_from_sync_iterator_prototype: None,
             async_generator_function_constructor: None,
             async_generator_function_prototype: None,
             async_generator_prototype: None,
@@ -719,6 +721,7 @@ impl Trace for Realm {
         self.generator_prototype.trace(tracer);
         self.generator_next.trace(tracer);
         self.async_iterator_prototype.trace(tracer);
+        self.async_from_sync_iterator_prototype.trace(tracer);
         self.async_generator_function_constructor.trace(tracer);
         self.async_generator_function_prototype.trace(tracer);
         self.async_generator_prototype.trace(tracer);
