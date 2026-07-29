@@ -104,6 +104,69 @@ const ASYNC_GENERATOR_QUEUE_ASSERTION: &str = r#"
 asyncTrace + "meta:" + asyncTagOk + ":" + invalidReceiverRejected + ":" + invalidReceiverThrew + "|";
 "#;
 
+const ASYNC_GENERATOR_DELEGATE_SOURCE: &str = r#"
+var asyncDelegateTrace = "";
+var delegateMarker = {};
+var delegateIndex = 0;
+var delegateIterator = {
+    next: function(value) {
+        if (delegateIndex === 0) {
+            delegateIndex = 1;
+            return { value: Promise.resolve(3), done: false };
+        }
+        return { value: value + 1, done: true };
+    },
+    throw: function(value) {
+        return { value: Promise.resolve(value === delegateMarker ? 5 : 0), done: false };
+    }
+};
+var delegateIterable = {};
+delegateIterable[Symbol.iterator] = function() { return delegateIterator; };
+async function* delegatedAsync() { return yield* delegateIterable; }
+var delegatedInstance = delegatedAsync();
+delegatedInstance.next().then(function(result) {
+    asyncDelegateTrace += "next:" + result.value + ":" + result.done + "|";
+});
+delegatedInstance.throw(delegateMarker).then(function(result) {
+    asyncDelegateTrace += "throw:" + result.value + ":" + result.done + "|";
+});
+delegatedInstance.next(8).then(function(result) {
+    asyncDelegateTrace += "done:" + result.value + ":" + result.done + "|";
+});
+
+var closeCount = 0;
+var poisonMarker = {};
+var poisonIndex = 0;
+var poisonIterator = {
+    next: function() {
+        poisonIndex += 1;
+        return { value: 1, done: false };
+    },
+    throw: function() {
+        var promise = Promise.resolve(2);
+        Object.defineProperty(promise, "constructor", {
+            get: function() { throw poisonMarker; }
+        });
+        return { value: promise, done: false };
+    },
+    return: function() {
+        closeCount += 1;
+        return { value: undefined, done: true };
+    }
+};
+var poisonIterable = {};
+poisonIterable[Symbol.iterator] = function() { return poisonIterator; };
+async function* poisonedAsync() { return yield* poisonIterable; }
+var poisonedInstance = poisonedAsync();
+poisonedInstance.next().then(function() {
+    return poisonedInstance.throw({});
+}).then(undefined, function(error) {
+    asyncDelegateTrace += "poison:" + (error === poisonMarker) + ":" + closeCount + "|";
+});
+"#;
+
+const ASYNC_GENERATOR_DELEGATE_ASSERTION: &str = "asyncDelegateTrace;";
+
 const ASYNC_ITERATOR_INTRINSIC_SOURCE: &str = r#"
 var ag = (async function* () {})();
 var agPrototype = Object.getPrototypeOf(ag);
@@ -527,6 +590,20 @@ fn async_generator_request_queue_survives_forced_major_collection() {
 }
 
 #[test]
+fn async_generator_delegation_runs_for_every_dispatch_batch() {
+    assert_async_generator_delegate::<1>(false);
+    assert_async_generator_delegate::<2>(false);
+    assert_async_generator_delegate::<4>(false);
+    assert_async_generator_delegate::<8>(false);
+    assert_async_generator_delegate::<16>(false);
+}
+
+#[test]
+fn async_generator_delegation_survives_forced_major_collection() {
+    assert_async_generator_delegate::<8>(true);
+}
+
+#[test]
 fn async_iterator_intrinsic_chain_is_published() {
     let module = Compiler
         .compile(
@@ -827,6 +904,68 @@ fn assert_async_generator_queue<const N: usize>(forced_major: bool) {
         String::from_utf16(&trace).expect("trace is valid UTF-16"),
         "start|resume:7|throw:11|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
         "async generator batch {N}, forced_major={forced_major}"
+    );
+}
+
+/// Runs async delegated iteration through queued resumes, Promise assimilation, and abrupt close.
+fn assert_async_generator_delegate<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_900 + N as u32),
+                SourceName::new("async-generator-delegate"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_DELEGATE_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator delegate fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_000 + N as u32),
+                SourceName::new("async-generator-delegate-assertion"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_DELEGATE_ASSERTION),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator delegate assertion compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("async generator delegate setup executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("async generator delegate assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("async generator delegate trace did not complete: {outcome:?}");
+    };
+    let trace = isolate
+        .string_value_to_utf16(value)
+        .expect("async generator delegate trace is a string");
+    assert_eq!(
+        String::from_utf16(&trace).expect("delegate trace is valid UTF-16"),
+        "next:3:false|throw:5:false|poison:true:1|done:9:true|",
+        "async generator delegate batch {N}, forced_major={forced_major}"
     );
 }
 

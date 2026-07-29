@@ -1828,14 +1828,31 @@ impl Isolate {
                 return self.throw_value(value, instruction_offset);
             }
             Opcode::Await => {
-                self.suspend_async_function_await(crate::async_function::AsyncAwaitSite {
+                let site = crate::async_function::AsyncAwaitSite {
                     code,
                     instruction: instruction_offset,
                     source: operands[0],
                     destination: operands[1],
                     suspend_id: operands[2],
                     base,
-                })?;
+                };
+                let kind = self
+                    .loaded_code(code)?
+                    .module
+                    .function(
+                        self.fiber
+                            .frames
+                            .last()
+                            .ok_or(ExecutionError::MissingEnvironment)?
+                            .function,
+                    )
+                    .ok_or(ExecutionError::MissingEnvironment)?
+                    .kind();
+                if kind == FunctionKind::AsyncGenerator {
+                    self.suspend_async_generator_await(site)?;
+                } else {
+                    self.suspend_async_function_await(site)?;
+                }
                 return Ok(None);
             }
             Opcode::Yield => {
@@ -8470,6 +8487,14 @@ impl Isolate {
                     NativeContinuationKind::AsyncFromSyncIterator(_)
                 ) {
                     let state = self.native_call_state_reference(continuation.first())?;
+                    if continuation.kind()
+                        == NativeContinuationKind::AsyncFromSyncIterator(
+                            crate::runtime::fiber::AsyncFromSyncIteratorStage::PromiseConstructorGet,
+                        )
+                    {
+                        self.reject_async_from_sync_value_resolution(continuation, state, value)?;
+                        return Ok(None);
+                    }
                     self.reject_async_from_sync(continuation.site(), state, value)?;
                     return Ok(None);
                 }

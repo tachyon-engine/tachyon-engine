@@ -745,7 +745,9 @@ fn validate_suspend_opcodes(
                 Opcode::Yield => {
                     matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
                 }
-                Opcode::YieldDelegate => matches!(kind, FunctionKind::Generator),
+                Opcode::YieldDelegate => {
+                    matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
+                }
                 _ => false,
             };
             if !is_compatible {

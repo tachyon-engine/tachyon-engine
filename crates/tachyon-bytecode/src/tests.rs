@@ -1300,7 +1300,7 @@ fn compiled_module_rejects_invalid_pool_and_suspend_references() {
 }
 
 #[test]
-fn yield_delegate_requires_generator_and_adjacent_resume_registers() {
+fn yield_delegate_requires_generator_kind_and_adjacent_resume_registers() {
     let build = |kind, register_count| {
         let mut words = encode_instruction(Opcode::YieldDelegate, &[0, 1, 0]).unwrap();
         let instruction = decode_instruction(&words, WordOffset::new(0)).unwrap();
@@ -1334,6 +1334,7 @@ fn yield_delegate_requires_generator_and_adjacent_resume_registers() {
     };
 
     build(FunctionKind::Generator, 3).expect("generator delegation verifies");
+    build(FunctionKind::AsyncGenerator, 3).expect("async generator delegation verifies");
     assert!(matches!(
         build(FunctionKind::Script, 3),
         Err(ModuleBuildError::SuspendInIncompatibleFunction {

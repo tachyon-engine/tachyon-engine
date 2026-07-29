@@ -475,6 +475,50 @@ impl Isolate {
         )
     }
 
+    /// Closes a non-returning sync iterator when PromiseResolve itself abruptly completes.
+    pub(crate) fn reject_async_from_sync_value_resolution(
+        &mut self,
+        continuation: NativeContinuation,
+        state: GcRef<NativeCallState>,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.native_call_state_snapshot(state)?;
+        let flags = snapshot.values[STATE_FLAGS]
+            .as_i32()
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let close_on_rejection = flags & RESULT_DONE == 0 && flags & 0b11 != OP_RETURN;
+        if !close_on_rejection {
+            return self.reject_async_from_sync(continuation.site(), state, reason);
+        }
+        let wrapper = self.async_from_sync_iterator_snapshot(
+            self.async_from_sync_iterator_reference(snapshot.values[STATE_ITERATOR])
+                .ok_or(ExecutionError::MissingNativeContinuation)?,
+        )?;
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        self.begin_async_from_sync_close_on_reject(
+            &CallSite {
+                caller_base: continuation.site().caller_base,
+                destination: continuation.site().destination,
+                callee: Value::from_immediate(Immediate::Undefined),
+                argument_base: 0,
+                argument_source: None,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: wrapper.sync_iterator,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: continuation.site().call_site,
+            },
+            wrapper.sync_iterator,
+            reason,
+        )
+    }
+
     /// Dispatches one arbitrary iterator method without using the Rust call stack as JS state.
     fn dispatch_async_from_sync_call(
         &mut self,
@@ -1007,16 +1051,24 @@ impl Isolate {
         )
     }
 
-    /// Rejects the parent Promise reaction capability with the original sync value error.
+    /// Rejects the parent reaction or direct Async-from-Sync capability with the original error.
     pub(crate) fn finish_async_from_sync_close_on_reject(
         &mut self,
         reason: Value,
     ) -> Result<(), ExecutionError> {
-        let reaction = self.pop_native_continuation()?;
-        if reaction.kind() != NativeContinuationKind::PromiseReaction {
-            return Err(ExecutionError::MissingNativeContinuation);
+        let parent = self.pop_native_continuation()?;
+        if parent.kind() == NativeContinuationKind::PromiseReaction {
+            return self.begin_promise_reaction_rejection(parent, reason);
         }
-        self.begin_promise_reaction_rejection(reaction, reason)
+        if parent.kind()
+            == NativeContinuationKind::AsyncFromSyncIterator(
+                AsyncFromSyncIteratorStage::PromiseConstructorGet,
+            )
+        {
+            let state = self.native_call_state_reference(parent.first())?;
+            return self.reject_async_from_sync(parent.site(), state, reason);
+        }
+        Err(ExecutionError::MissingNativeContinuation)
     }
 
     #[inline(always)]

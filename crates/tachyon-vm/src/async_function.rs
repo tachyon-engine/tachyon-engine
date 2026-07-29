@@ -231,7 +231,7 @@ impl Isolate {
             let awaited = self.create_promise(PromiseState::Fulfilled, source)?;
             self.perform_promise_then_with_capability(awaited, None, None, state_value)?;
             self.prepare_async_function_await(state, site.destination, site.instruction)?;
-            return self.complete_async_function_await_resolution();
+            return self.complete_async_await_resolution();
         }
         let awaited = self.create_promise(
             PromiseState::Pending,
@@ -252,7 +252,7 @@ impl Isolate {
     }
 
     /// Performs the observable PromiseResolve constructor lookup for an awaited native Promise.
-    fn begin_async_await_constructor_get(
+    pub(crate) fn begin_async_await_constructor_get(
         &mut self,
         site: AsyncAwaitSite,
         state: Value,
@@ -338,7 +338,7 @@ impl Isolate {
             .expect("Promise constructor initializes before Await");
         if constructor == intrinsic {
             self.perform_promise_then_with_capability(source, None, None, state)?;
-            return self.complete_async_function_await_resolution();
+            return self.complete_async_await_resolution();
         }
         let awaited = self.create_promise(
             PromiseState::Pending,
@@ -361,7 +361,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let awaited = self.create_promise(PromiseState::Rejected, reason)?;
         self.perform_promise_then_with_capability(awaited, None, None, continuation.first())?;
-        self.complete_async_function_await_resolution()
+        self.complete_async_await_resolution()
     }
 
     /// Maps an internal VM error from the constructor lookup to its JavaScript rejection value.
@@ -383,9 +383,7 @@ impl Isolate {
     }
 
     /// Publishes the active child once PromiseResolve has produced the awaited Promise.
-    pub(crate) fn complete_async_function_await_resolution(
-        &mut self,
-    ) -> Result<(), ExecutionError> {
+    pub(crate) fn complete_async_await_resolution(&mut self) -> Result<(), ExecutionError> {
         let frame = self
             .fiber
             .frames
@@ -401,8 +399,16 @@ impl Isolate {
             .fiber
             .completions
             .native_at(continuation_index)
-            .filter(|continuation| continuation.kind() == NativeContinuationKind::AsyncFunction)
             .ok_or(ExecutionError::UnsupportedAsyncFunctionResume)?;
+        if continuation.kind() == NativeContinuationKind::GeneratorResume
+            && continuation.second().as_immediate() != Some(Immediate::Undefined)
+        {
+            let generator = self.generator_reference(continuation.first())?;
+            return self.complete_async_generator_await_resolution(generator);
+        }
+        if continuation.kind() != NativeContinuationKind::AsyncFunction {
+            return Err(ExecutionError::UnsupportedAsyncFunctionResume);
+        }
         let state = self.async_function_state_reference(continuation.first())?;
         let paused = core::mem::take(&mut self.fiber);
         self.fiber = self.publish_prepared_async_function_pause(state, paused)?;

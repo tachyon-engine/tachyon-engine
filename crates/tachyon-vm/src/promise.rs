@@ -683,7 +683,7 @@ impl Isolate {
                     .pc = site.call_site;
                 Ok(())
             }
-            PromiseResolutionMode::AsyncAwait => self.complete_async_function_await_resolution(),
+            PromiseResolutionMode::AsyncAwait => self.complete_async_await_resolution(),
         }
     }
 
@@ -1470,6 +1470,14 @@ impl Isolate {
                 } => {
                     if self.is_async_function_state(capability) {
                         return self.resume_async_function_job(
+                            capability,
+                            argument,
+                            rejected,
+                            return_site,
+                        );
+                    }
+                    if self.is_async_generator_await(capability) {
+                        return self.resume_async_generator_await_job(
                             capability,
                             argument,
                             rejected,

@@ -41,6 +41,8 @@ pub(super) struct Lowerer<'a> {
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
     pub(super) is_arrow: bool,
+    /// Whether `yield` lowering must use the async-generator protocol.
+    pub(super) is_async_generator: bool,
     pub(super) strict: bool,
     pub(super) initialize_instance_elements: bool,
     /// Whether this function may replace its frame at strict tail-call sites.

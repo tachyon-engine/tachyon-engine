@@ -123,6 +123,7 @@ fn lower_entry(
         root_scope: hir.root_scope(),
         function_scope: Some(hir.root_scope()),
         is_arrow: false,
+        is_async_generator: false,
         strict: false,
         initialize_instance_elements: false,
         proper_tail_calls: false,
@@ -970,6 +971,7 @@ fn lower_function(
         root_scope,
         function_scope: Some(function.scope),
         is_arrow: function.is_arrow,
+        is_async_generator: function.kind == HirFunctionKind::AsyncGenerator,
         strict: function.strict,
         initialize_instance_elements: function.initialize_instance_elements,
         proper_tail_calls: function.strict

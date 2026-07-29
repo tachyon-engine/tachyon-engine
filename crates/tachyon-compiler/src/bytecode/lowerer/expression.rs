@@ -88,7 +88,11 @@ impl Lowerer<'_> {
         const RESUME_RETURN: u32 = 1;
         const RESUME_THROW: u32 = 2;
 
-        let iterator = self.get_sync_iterator(source, span)?;
+        let iterator = if self.is_async_generator {
+            self.get_async_or_sync_iterator(source, span)?
+        } else {
+            self.get_sync_iterator(source, span)?
+        };
         let destination = self.register()?;
         let received_value = self.register()?;
         let received_kind = self.register()?;
@@ -138,6 +142,7 @@ impl Lowerer<'_> {
             span,
         )?;
         self.call_delegate(inner_result, call_receiver, 1, span)?;
+        self.await_delegate_result(inner_result, span)?;
         self.emit_jump(process_result, span)?;
 
         self.bind_label(throwing)?;
@@ -150,12 +155,14 @@ impl Lowerer<'_> {
         self.bind_label(have_close)?;
         let close_result = self.register()?;
         self.call_delegate(close_result, call_receiver, 0, span)?;
+        self.await_delegate_result(close_result, span)?;
         self.emit(Opcode::CheckObject, &[close_result.index()], span)?;
         self.emit(Opcode::CheckObject, &[undefined.index()], span)?;
 
         self.bind_label(have_throw)?;
         self.prepare_delegate_argument(received_value, call_receiver, span)?;
         self.call_delegate(inner_result, call_receiver, 1, span)?;
+        self.await_delegate_result(inner_result, span)?;
         self.emit_jump(process_result, span)?;
 
         self.bind_label(returning)?;
@@ -166,6 +173,7 @@ impl Lowerer<'_> {
         self.bind_label(have_return)?;
         self.prepare_delegate_argument(received_value, call_receiver, span)?;
         self.call_delegate(inner_result, call_receiver, 1, span)?;
+        self.await_delegate_result(inner_result, span)?;
 
         self.bind_label(process_result)?;
         self.emit(Opcode::CheckObject, &[inner_result.index()], span)?;
@@ -182,7 +190,12 @@ impl Lowerer<'_> {
         self.emit(Opcode::Return, &[value.index()], span)?;
 
         self.bind_label(yield_result)?;
-        self.emit_suspend(Opcode::YieldDelegate, inner_result, received_value, span)?;
+        let yielded = if self.is_async_generator {
+            self.load_delegate_property(inner_result, "value", span)?
+        } else {
+            inner_result
+        };
+        self.emit_suspend(Opcode::YieldDelegate, yielded, received_value, span)?;
         self.emit_jump(loop_start, span)?;
         self.bind_label(end)?;
         Ok(destination)
@@ -301,6 +314,20 @@ impl Lowerer<'_> {
             &[destination.index(), receiver.index(), argument_count],
             span,
         )
+    }
+
+    /// Awaits an async delegate call and copies the fulfillment back into its stable CFG register.
+    fn await_delegate_result(
+        &mut self,
+        result: RegisterId,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        if !self.is_async_generator {
+            return Ok(());
+        }
+        let awaited = self.register()?;
+        self.emit_suspend(Opcode::Await, result, awaited, span)?;
+        self.emit(Opcode::Move, &[result.index(), awaited.index()], span)
     }
 
     /// Loads an observable property from one validated delegated iterator result.

@@ -647,7 +647,10 @@ impl Isolate {
         Ok(true)
     }
 
-    fn generator_reference(&self, value: Value) -> Result<GcRef<GeneratorObject>, ExecutionError> {
+    pub(crate) fn generator_reference(
+        &self,
+        value: Value,
+    ) -> Result<GcRef<GeneratorObject>, ExecutionError> {
         let raw = value
             .as_heap_ref()
             .ok_or(ExecutionError::GeneratorBrand(value))?;
@@ -904,6 +907,222 @@ impl Isolate {
         let caller = self.take_generator_caller(generator)?;
         let _generator_fiber = core::mem::replace(&mut self.fiber, caller);
         Ok(())
+    }
+
+    /// Awaits one value without settling or removing the active async-generator request.
+    pub(crate) fn suspend_async_generator_await(
+        &mut self,
+        site: crate::async_function::AsyncAwaitSite,
+    ) -> Result<(), ExecutionError> {
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .copied()
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let continuation_index = frame
+            .completion_base
+            .checked_sub(1)
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
+            as usize;
+        let continuation = self
+            .fiber
+            .completions
+            .native_at(continuation_index)
+            .filter(|continuation| {
+                continuation.kind()
+                    == crate::runtime::fiber::NativeContinuationKind::GeneratorResume
+                    && continuation.second().as_immediate() != Some(Immediate::Undefined)
+            })
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let generator_value = continuation.first();
+        let generator = self.generator_reference(generator_value)?;
+        let point = self
+            .loaded_code(site.code)?
+            .module
+            .function(frame.function)
+            .and_then(|function| {
+                function
+                    .suspend_points()
+                    .get(site.suspend_id as usize)
+                    .copied()
+            })
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        if point.instruction != site.instruction
+            || point.destination.index() != site.destination
+            || point.resume_offset != frame.pc
+        {
+            return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+        }
+        self.prepare_async_generator_await(generator, site.destination, site.instruction)?;
+        let source = self.read(site.base, site.source)?;
+        if self.promise_snapshot(source).is_ok() {
+            return self.begin_async_await_constructor_get(site, generator_value, source);
+        }
+        if !self.is_object_value(source) {
+            let awaited =
+                self.create_promise(crate::promise_state::PromiseState::Fulfilled, source)?;
+            self.perform_promise_then_with_capability(awaited, None, None, generator_value)?;
+            return self.complete_async_await_resolution();
+        }
+        let awaited = self.create_promise(
+            crate::promise_state::PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )?;
+        self.perform_promise_then_with_capability(awaited, None, None, generator_value)?;
+        self.begin_promise_resolution(
+            awaited,
+            source,
+            NativeContinuationSite {
+                caller_base: site.base,
+                destination: site.destination,
+                call_site: site.instruction,
+            },
+            crate::runtime::fiber::PromiseResolutionMode::AsyncAwait,
+        )
+    }
+
+    /// Records one async-generator await destination before observable Promise resolution begins.
+    fn prepare_async_generator_await(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        destination: u32,
+        instruction: WordOffset,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if !generator.is_async
+                    || generator.state != GeneratorState::Executing
+                    || generator.paused.is_some()
+                    || generator.resume_destination.is_some()
+                    || generator.resume_kind_destination.is_some()
+                    || generator.resume_instruction.is_some()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.resume_destination = Some(destination);
+                generator.resume_instruction = Some(instruction);
+                Ok(())
+            })
+        })
+    }
+
+    /// Publishes the awaiting Fiber and restores the Promise-checkpoint caller.
+    pub(crate) fn complete_async_generator_await_resolution(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+    ) -> Result<(), ExecutionError> {
+        let paused = core::mem::take(&mut self.fiber);
+        let mut paused = Some(paused);
+        let caller = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.state != GeneratorState::Executing
+                    || generator.paused.is_some()
+                    || generator.resume_destination.is_none()
+                    || generator.resume_kind_destination.is_some()
+                    || generator.resume_instruction.is_none()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.paused = paused.take();
+                generator
+                    .caller
+                    .take()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
+            })
+        });
+        match caller {
+            Ok(caller) => {
+                self.fiber = caller;
+                Ok(())
+            }
+            Err(error) => {
+                self.fiber = paused.expect("failed async-generator await retains Fiber ownership");
+                Err(error)
+            }
+        }
+    }
+
+    /// Reports whether a Promise reaction capability names a currently awaiting async generator.
+    pub(crate) fn is_async_generator_await(&mut self, value: Value) -> bool {
+        let Ok(generator) = self.generator_reference(value) else {
+            return false;
+        };
+        self.heap.with_running_scope(|scope| {
+            let Ok(generator) = scope.root(generator) else {
+                return false;
+            };
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(generator, self.types.generator_object)
+                    .is_ok_and(|generator| {
+                        generator.is_async
+                            && generator.state == GeneratorState::Executing
+                            && generator.paused.is_some()
+                            && generator.resume_destination.is_some()
+                            && generator.resume_instruction.is_some()
+                    })
+            })
+        })
+    }
+
+    /// Resumes an awaited async generator from a Promise reaction without changing its request head.
+    pub(crate) fn resume_async_generator_await_job(
+        &mut self,
+        generator_value: Value,
+        argument: Value,
+        rejected: bool,
+        return_site: WordOffset,
+    ) -> Result<Option<crate::RunOutcome>, ExecutionError> {
+        let generator = self.generator_reference(generator_value)?;
+        let request = self.active_async_generator_request(generator)?;
+        self.fiber
+            .frames
+            .last_mut()
+            .ok_or(ExecutionError::MissingEnvironment)?
+            .pc = return_site;
+        let continuation = NativeContinuation::async_generator_resume(
+            NativeContinuationSite {
+                caller_base: self
+                    .fiber
+                    .frames
+                    .last()
+                    .ok_or(ExecutionError::MissingEnvironment)?
+                    .base,
+                destination: 0,
+                call_site: return_site,
+            },
+            generator_value,
+            request.promise,
+        );
+        let caller = core::mem::take(&mut self.fiber);
+        let resume = if rejected {
+            GeneratorResume::Abrupt(CompletionRecord::throw(argument))
+        } else {
+            GeneratorResume::Next(argument)
+        };
+        let prepared =
+            match self.swap_generator_caller_for_paused(generator, caller, continuation, resume) {
+                Ok(prepared) => prepared,
+                Err(rollback) => {
+                    self.fiber = rollback.fiber;
+                    return Err(rollback.error);
+                }
+            };
+        self.fiber = prepared.fiber;
+        self.promise_jobs.finish_active();
+        if let Some(abrupt) = prepared.abrupt {
+            return self.dispatch_abrupt(abrupt.completion, abrupt.instruction);
+        }
+        Ok(None)
     }
 
     /// Suspends the active generator fiber and publishes one observable `{ value, done: false }`.
