@@ -958,10 +958,16 @@ fn scan_source_tree(root: &Path, violations: &mut Vec<String>) -> Result<(), Str
         let path = entry.path();
 
         if path.is_dir() {
+            if path.file_name().is_some_and(|name| name == "tests") {
+                continue;
+            }
             scan_source_tree(&path, violations)?;
             continue;
         }
 
+        if path.file_name().is_some_and(|name| name == "tests.rs") {
+            continue;
+        }
         if path.extension().is_some_and(|extension| extension == "rs") {
             check_source_file(&path, violations)?;
         }

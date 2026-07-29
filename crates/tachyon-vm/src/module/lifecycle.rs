@@ -218,68 +218,6 @@ impl ModuleGraph {
             .find(|record| &record.specifier == specifier)
             .map(|record| record.id)
     }
-
-    /// Produces dependency postorder without recursion; cyclic back-edges are ignored while active.
-    fn evaluation_order(&self, root: ModuleId) -> Result<Vec<ModuleId>, ModuleError> {
-        let max_work = self.limits.max_modules as usize;
-        let mut state = Vec::new();
-        let mut frames = Vec::new();
-        let mut order = Vec::new();
-        state
-            .try_reserve_exact(self.records.len())
-            .map_err(|_| ModuleError::AllocationFailed {
-                collection: "module evaluation state",
-            })?;
-        state.resize(self.records.len(), 0);
-        let initial_work = INITIAL_LINK_WORK_CAPACITY.min(max_work);
-        frames
-            .try_reserve_exact(initial_work)
-            .map_err(|_| ModuleError::AllocationFailed {
-                collection: "module evaluation frames",
-            })?;
-        order
-            .try_reserve_exact(initial_work)
-            .map_err(|_| ModuleError::AllocationFailed {
-                collection: "module evaluation order",
-            })?;
-        frames.push((root, 0_usize));
-        state[root.index()] = 1;
-        while let Some((module, next_request)) = frames.last_mut() {
-            let record = self.record(*module)?;
-            if *next_request < record.requested_modules.len() {
-                let request = &record.requested_modules[*next_request];
-                *next_request += 1;
-                let child = self
-                    .find_specifier(request)
-                    .ok_or(ModuleError::MissingModule)?;
-                if state[child.index()] == 0 {
-                    if frames.len() >= max_work {
-                        return Err(ModuleError::EvaluationOrderLimit {
-                            limit: self.limits.max_modules,
-                        });
-                    }
-                    frames
-                        .try_reserve_exact(1)
-                        .map_err(|_| ModuleError::AllocationFailed {
-                            collection: "module evaluation frames",
-                        })?;
-                    state[child.index()] = 1;
-                    frames.push((child, 0));
-                }
-                continue;
-            }
-            let module = *module;
-            frames.pop();
-            state[module.index()] = 2;
-            order
-                .try_reserve_exact(1)
-                .map_err(|_| ModuleError::AllocationFailed {
-                    collection: "module evaluation order",
-                })?;
-            order.push(module);
-        }
-        Ok(order)
-    }
 }
 
 impl Isolate {
@@ -415,8 +353,24 @@ impl Isolate {
 
     /// Evaluates linked synchronous dependencies once and returns the root's cached completion.
     pub fn evaluate_module(&mut self, root: ModuleId) -> Result<RunOutcome, ModuleEvaluationError> {
-        if self.driver_active_work.is_some() {
+        if let Some(outcome) = self
+            .module_graph
+            .evaluation_outcome(root)
+            .map_err(ModuleEvaluationError::Graph)?
+        {
+            return Ok(outcome);
+        }
+        if self.driver_is_busy() {
             return Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy));
+        }
+        if !self.module_graph.evaluation_start_pending() {
+            self.module_graph
+                .begin_evaluation_start(root)
+                .map_err(ModuleEvaluationError::Graph)?;
+        }
+        while self.module_graph.evaluation_start_pending() {
+            self.advance_module_start_transition()
+                .map_err(ModuleEvaluationError::Execution)?;
         }
         self.evaluate_module_with_batch::<{ crate::tuning::dispatch::DEFAULT_DISPATCH_BATCH }>(root)
     }
@@ -426,13 +380,11 @@ impl Isolate {
         &mut self,
         root: ModuleId,
     ) -> Result<Value, ModuleEvaluationError> {
-        self.evaluate_module_promise_with_batch::<{
-            crate::tuning::dispatch::DEFAULT_DISPATCH_BATCH
-        }>(root)
+        self.evaluate_module_promise_start(root)
     }
 
     /// Creates the public evaluation Promise before any module body becomes observable.
-    fn evaluate_module_promise_with_batch<const N: usize>(
+    fn evaluate_module_promise_start(
         &mut self,
         root: ModuleId,
     ) -> Result<Value, ModuleEvaluationError> {
@@ -443,7 +395,7 @@ impl Isolate {
         {
             return Ok(promise);
         }
-        if self.driver_active_work.is_some() {
+        if self.driver_is_busy() {
             return Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy));
         }
         let promise = self
@@ -455,41 +407,72 @@ impl Isolate {
         self.module_graph
             .publish_evaluation_promise(root, promise)
             .map_err(ModuleEvaluationError::Graph)?;
-        match self.evaluate_module_with_batch::<N>(root) {
-            Ok(RunOutcome::Completed(_)) => {
-                if self
-                    .promise_snapshot(promise)
-                    .map_err(ModuleEvaluationError::Execution)?
-                    .state
-                    == crate::PromiseState::Pending
-                {
-                    self.settle_promise(
-                        promise,
-                        crate::PromiseState::Fulfilled,
-                        Value::from_immediate(tachyon_value::Immediate::Undefined),
-                    )
-                    .map_err(ModuleEvaluationError::Execution)?;
-                }
-            }
-            Ok(RunOutcome::Thrown(error)) => {
-                if self
-                    .promise_snapshot(promise)
-                    .map_err(ModuleEvaluationError::Execution)?
-                    .state
-                    == crate::PromiseState::Pending
-                {
-                    self.settle_promise(promise, crate::PromiseState::Rejected, error)
-                        .map_err(ModuleEvaluationError::Execution)?;
-                }
-            }
-            Ok(RunOutcome::BudgetExhausted) => unreachable!("unbounded module evaluation"),
-            Err(ModuleEvaluationError::AsyncEvaluationPending(_)) => {}
-            Err(error) => {
-                let _ = self.module_graph.clear_evaluation_promise(root, promise);
-                return Err(error);
-            }
+        if let Err(error) = self.module_graph.begin_evaluation_start(root) {
+            let _ = self.module_graph.clear_evaluation_promise(root, promise);
+            return Err(ModuleEvaluationError::Graph(error));
         }
         Ok(promise)
+    }
+
+    /// Advances one graph traversal, function declaration, or dependency-registration transition.
+    pub(crate) fn advance_module_start_transition(&mut self) -> Result<(), ExecutionError> {
+        match self
+            .module_graph
+            .evaluation_start_phase()
+            .map_err(ExecutionError::Module)?
+        {
+            ModuleStartPhase::Traverse => {
+                self.module_graph
+                    .advance_evaluation_traversal()
+                    .map_err(ExecutionError::Module)?;
+            }
+            ModuleStartPhase::Instantiate => {
+                let Some(module) = self
+                    .module_graph
+                    .evaluation_start_module()
+                    .map_err(ExecutionError::Module)?
+                else {
+                    self.module_graph
+                        .transition_evaluation_start_phase(ModuleStartPhase::Register)
+                        .map_err(ExecutionError::Module)?;
+                    return Ok(());
+                };
+                if self.module_graph.records[module.index()].evaluation
+                    != ModuleEvaluationState::Unevaluated
+                {
+                    self.module_graph
+                        .advance_evaluation_start_cursor()
+                        .map_err(ExecutionError::Module)?;
+                    return Ok(());
+                }
+                let ModuleBody::Precompiled(body) =
+                    self.module_graph.records[module.index()].body.clone()
+                else {
+                    self.module_graph
+                        .advance_evaluation_start_cursor()
+                        .map_err(ExecutionError::Module)?;
+                    return Ok(());
+                };
+                let code = self.load_module(&body)?;
+                if self.instantiate_next_module_function(code, module)? {
+                    self.module_graph
+                        .advance_evaluation_start_cursor()
+                        .map_err(ExecutionError::Module)?;
+                }
+            }
+            ModuleStartPhase::Register => {
+                if self
+                    .module_graph
+                    .advance_evaluation_registration()
+                    .map_err(ExecutionError::Module)?
+                {
+                    self.module_graph
+                        .finish_evaluation_start()
+                        .map_err(ExecutionError::Module)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Starts every dependency-ready body and interleaves suspended modules at Promise job turns.
@@ -497,60 +480,6 @@ impl Isolate {
         &mut self,
         root: ModuleId,
     ) -> Result<RunOutcome, ModuleEvaluationError> {
-        let order = self
-            .module_graph
-            .evaluation_order(root)
-            .map_err(ModuleEvaluationError::Graph)?;
-        self.module_graph
-            .prepare_evaluation(order.len())
-            .map_err(ModuleEvaluationError::Graph)?;
-        for &module in &order {
-            let (state, body) = {
-                let record = self
-                    .module_graph
-                    .record(module)
-                    .map_err(ModuleEvaluationError::Graph)?;
-                (record.evaluation, record.body.clone())
-            };
-            if state != ModuleEvaluationState::Unevaluated {
-                continue;
-            }
-            if let ModuleBody::Precompiled(body) = body {
-                let code = self
-                    .load_module(&body)
-                    .map_err(ModuleEvaluationError::Execution)?;
-                self.instantiate_loaded_module_functions(code, module)
-                    .map_err(ModuleEvaluationError::Execution)?;
-            }
-        }
-        for &module in &order {
-            if self.module_graph.records[module.index()].evaluation
-                != ModuleEvaluationState::Unevaluated
-            {
-                continue;
-            }
-            if let Some(error) = self
-                .module_graph
-                .dependency_error(module)
-                .map_err(ModuleEvaluationError::Graph)?
-            {
-                self.module_graph
-                    .complete_evaluation(module, Err(error))
-                    .map_err(ModuleEvaluationError::Graph)?;
-                continue;
-            }
-            let pending = self
-                .module_graph
-                .pending_dependency_owners(module)
-                .map_err(ModuleEvaluationError::Graph)?;
-            if pending.is_empty() {
-                self.execute_ready_module_with_batch::<N>(module)?;
-            } else {
-                self.module_graph
-                    .wait_for_dependencies(module, &pending)
-                    .map_err(ModuleEvaluationError::Graph)?;
-            }
-        }
         loop {
             match self.module_graph.records[root.index()].evaluation {
                 ModuleEvaluationState::Evaluated(value) => {
@@ -742,14 +671,18 @@ impl Isolate {
         &mut self,
         root: ModuleId,
     ) -> Result<RunOutcome, ModuleEvaluationError> {
+        if !self.module_graph.evaluation_start_pending()
+            && self.module_graph.records[root.index()].evaluation
+                == ModuleEvaluationState::Unevaluated
+        {
+            self.module_graph
+                .begin_evaluation_start(root)
+                .map_err(ModuleEvaluationError::Graph)?;
+        }
+        while self.module_graph.evaluation_start_pending() {
+            self.advance_module_start_transition()
+                .map_err(ModuleEvaluationError::Execution)?;
+        }
         self.evaluate_module_with_batch::<N>(root)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn evaluate_module_promise_with_test_batch<const N: usize>(
-        &mut self,
-        root: ModuleId,
-    ) -> Result<Value, ModuleEvaluationError> {
-        self.evaluate_module_promise_with_batch::<N>(root)
     }
 }

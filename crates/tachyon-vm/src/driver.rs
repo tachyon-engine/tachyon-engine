@@ -124,6 +124,10 @@ impl Isolate {
             }>(budget)?;
             return self.finish_driver_work(active, outcome);
         }
+        if self.module_graph.evaluation_start_pending() {
+            self.advance_module_start_transition()?;
+            return Ok(DriverProgress::Progressed);
+        }
         if let Some(module) = self.module_graph.take_ready_module() {
             self.driver_active_work = Some(DriverActiveWork::Module(module));
             let outcome = self.start_ready_module_with_budget::<{

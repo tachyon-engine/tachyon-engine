@@ -66,7 +66,7 @@ impl Isolate {
         module: &CompiledModule,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        if self.driver_active_work.is_some() {
+        if self.driver_is_busy() {
             return Err(ExecutionError::DriverBusy);
         }
         let code = self.load_module(module)?;
@@ -378,29 +378,38 @@ impl Isolate {
         }
     }
 
-    /// Instantiates all module function declarations before any module in the linked SCC runs.
-    pub(crate) fn instantiate_loaded_module_functions(
+    /// Instantiates at most one module function declaration and persists the binding-plan cursor.
+    pub(crate) fn instantiate_next_module_function(
         &mut self,
         code: CodeId,
         module: ModuleId,
-    ) -> Result<(), ExecutionError> {
-        let declarations = self
+    ) -> Result<bool, ExecutionError> {
+        let cursor = self
+            .module_graph
+            .function_instantiation_cursor(module)
+            .map_err(ExecutionError::Module)? as usize;
+        let plan = self
             .loaded_code(code)?
             .module
             .function(FunctionId::new(0))
             .ok_or(ExecutionError::MissingEntryFunction(FunctionId::new(0)))?
-            .binding_plan()
-            .iter()
-            .filter_map(|binding| match binding.location {
-                BindingLocation::ModuleFunction { slot, function } => Some((slot, function)),
-                _ => None,
+            .binding_plan();
+        let Some(binding) = plan.get(cursor) else {
+            return Ok(true);
+        };
+        let next = u32::try_from(cursor + 1).map_err(|_| {
+            ExecutionError::Module(ModuleError::CapacityOverflow {
+                collection: "module function instantiation cursor",
             })
-            .collect::<Vec<_>>();
-        if declarations.is_empty() {
-            return Ok(());
-        }
+        })?;
+        let BindingLocation::ModuleFunction { slot, function } = binding.location else {
+            self.module_graph
+                .set_function_instantiation_cursor(module, next)
+                .map_err(ExecutionError::Module)?;
+            return Ok(false);
+        };
         self.enter_with_parent(code, FunctionId::new(0), None, Some(module))?;
-        for (slot, function) in declarations {
+        let result = (|| {
             self.create_closure(code, 0, 0, function)?;
             let value = self.read(0, 0)?;
             let ModuleBindingTarget::Cell(cell) = self
@@ -412,10 +421,15 @@ impl Isolate {
             };
             self.module_graph
                 .initialize_cell(cell, value)
+                .map_err(ExecutionError::Module)
+        })();
+        self.fiber.frames.clear();
+        if result.is_ok() {
+            self.module_graph
+                .set_function_instantiation_cursor(module, next)
                 .map_err(ExecutionError::Module)?;
         }
-        self.fiber.frames.clear();
-        Ok(())
+        result.map(|_| false)
     }
 
     /// Runs eval code with an explicitly retained caller lexical environment.

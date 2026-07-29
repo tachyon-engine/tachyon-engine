@@ -1097,8 +1097,8 @@ fn top_level_await_rejection_enters_module_catch_and_caches_uncaught_error() {
     );
 }
 
-/// Verifies the public evaluation Promise is cycle-root owned and stable across GC and reentry.
-fn assert_module_evaluation_promise_batch<const N: usize>(forced_major: bool) {
+/// Verifies the public evaluation Promise starts pending, then remains stable after driver completion.
+fn assert_module_evaluation_promise_driver(quantum: u32, forced_major: bool) {
     let mut isolate = fixtures::test_isolate();
     if forced_major {
         isolate
@@ -1106,7 +1106,7 @@ fn assert_module_evaluation_promise_batch<const N: usize>(forced_major: bool) {
             .set_forced_collection_mode(ForcedCollectionMode::Major);
     }
     let module = LoadedModule::precompiled(compile_source_module(
-        1_900 + N as u32,
+        1_900 + quantum,
         "memory:evaluation-promise",
         "await 41; 42;",
     ));
@@ -1115,28 +1115,33 @@ fn assert_module_evaluation_promise_batch<const N: usize>(forced_major: bool) {
     let root = isolate
         .load_module_graph(&mut loader, &specifier("memory:evaluation-promise"))
         .unwrap();
-    let promise = isolate
-        .evaluate_module_promise_with_test_batch::<N>(root)
-        .unwrap();
+    let promise = isolate.evaluate_module_promise(root).unwrap();
     assert_eq!(
         isolate.promise_snapshot(promise).unwrap().state,
-        PromiseState::Fulfilled
+        PromiseState::Pending
     );
-    assert_eq!(
-        isolate
-            .evaluate_module_promise_with_test_batch::<N>(root)
-            .unwrap(),
-        promise
-    );
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(promise, NonZeroU32::new(quantum).unwrap())
+            .unwrap();
+        if let core::task::Poll::Ready(Ok(PromiseOutcome::Fulfilled(_))) =
+            Pin::new(&mut driver).poll(&mut context)
+        {
+            break;
+        }
+    }
+    assert_eq!(isolate.evaluate_module_promise(root).unwrap(), promise);
 }
 
 #[test]
 fn module_evaluation_promise_is_stable_for_every_dispatch_batch() {
-    assert_module_evaluation_promise_batch::<1>(false);
-    assert_module_evaluation_promise_batch::<2>(false);
-    assert_module_evaluation_promise_batch::<4>(false);
-    assert_module_evaluation_promise_batch::<8>(true);
-    assert_module_evaluation_promise_batch::<16>(true);
+    assert_module_evaluation_promise_driver(1, false);
+    assert_module_evaluation_promise_driver(2, false);
+    assert_module_evaluation_promise_driver(4, false);
+    assert_module_evaluation_promise_driver(8, true);
+    assert_module_evaluation_promise_driver(16, true);
 }
 
 #[test]
@@ -1153,6 +1158,18 @@ fn module_evaluation_promise_caches_rejection() {
         .load_module_graph(&mut loader, &specifier("memory:evaluation-rejection"))
         .unwrap();
     let promise = isolate.evaluate_module_promise(root).unwrap();
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(promise, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        if let core::task::Poll::Ready(Ok(PromiseOutcome::Rejected(_))) =
+            Pin::new(&mut driver).poll(&mut context)
+        {
+            break;
+        }
+    }
     let snapshot = isolate.promise_snapshot(promise).unwrap();
     assert_eq!(snapshot.state, PromiseState::Rejected);
     assert_eq!(snapshot.result, Value::from_i32(41));
@@ -1185,6 +1202,18 @@ fn module_evaluation_promise_is_shared_by_every_cycle_member() {
         .unwrap();
     let promise = isolate.evaluate_module_promise(left).unwrap();
     assert_eq!(isolate.evaluate_module_promise(right).unwrap(), promise);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(promise, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        if let core::task::Poll::Ready(Ok(PromiseOutcome::Fulfilled(_))) =
+            Pin::new(&mut driver).poll(&mut context)
+        {
+            break;
+        }
+    }
     assert_eq!(
         isolate.promise_snapshot(promise).unwrap().state,
         PromiseState::Fulfilled
@@ -1250,11 +1279,100 @@ fn vm_driver_waits_without_self_waking_for_host_pending_promise() {
     let counter = Arc::new(CountingWake::default());
     let waker = Waker::from(counter.clone());
     let mut context = Context::from_waker(&waker);
-    let mut driver = isolate
-        .drive_promise(evaluation, NonZeroU32::new(2).unwrap())
+    loop {
+        let before = counter.0.load(Ordering::Relaxed);
+        let mut driver = isolate
+            .drive_promise(evaluation, NonZeroU32::new(2).unwrap())
+            .unwrap();
+        assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
+        let after = counter.0.load(Ordering::Relaxed);
+        if after == before {
+            break;
+        }
+        assert_eq!(after, before + 1);
+    }
+}
+
+#[test]
+fn module_evaluation_promise_seeds_but_does_not_walk_a_large_graph() {
+    let mut isolate = fixtures::test_isolate();
+    let module_count = 64_u32;
+    let mut modules = Vec::new();
+    for index in 0..module_count {
+        let identity = format!("memory:bounded-start-{index}");
+        let source = if index + 1 < module_count {
+            format!("import 'memory:bounded-start-{}';", index + 1)
+        } else {
+            "export const value = 1;".to_owned()
+        };
+        modules.push((
+            specifier(&identity),
+            LoadedModule::precompiled(compile_source_module(2_100 + index, &identity, &source)),
+        ));
+    }
+    let root_identity = specifier("memory:bounded-start-0");
+    let mut loader = PrecompiledGraphLoader::new(modules);
+    let root = isolate
+        .load_module_graph(&mut loader, &root_identity)
         .unwrap();
-    assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
-    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+    let promise = isolate.evaluate_module_promise(root).unwrap();
+    assert_eq!(
+        isolate.module_graph.evaluation_start_snapshot(),
+        Some((ModuleStartPhase::Traverse, 1, 0, 0, 0))
+    );
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    {
+        let mut driver = isolate
+            .drive_promise(promise, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
+    }
+    assert_eq!(
+        isolate.module_graph.evaluation_start_snapshot(),
+        Some((ModuleStartPhase::Traverse, 2, 0, 0, 0))
+    );
+}
+
+#[test]
+fn module_evaluation_start_reuses_its_cycle_promise_and_rejects_another_graph() {
+    let mut isolate = fixtures::test_isolate();
+    let left = LoadedModule::precompiled(compile_source_module(
+        2_180,
+        "memory:start-cycle-left",
+        "import 'memory:start-cycle-right';",
+    ));
+    let right = LoadedModule::precompiled(compile_source_module(
+        2_181,
+        "memory:start-cycle-right",
+        "import 'memory:start-cycle-left'; await 0;",
+    ));
+    let other = LoadedModule::precompiled(compile_source_module(
+        2_182,
+        "memory:start-other",
+        "export const value = 1;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:start-cycle-left"), left),
+        (specifier("memory:start-cycle-right"), right),
+        (specifier("memory:start-other"), other),
+    ]);
+    let left = isolate
+        .load_module_graph(&mut loader, &specifier("memory:start-cycle-left"))
+        .unwrap();
+    let other = isolate
+        .load_module_graph(&mut loader, &specifier("memory:start-other"))
+        .unwrap();
+    let right = isolate
+        .module_graph
+        .find_specifier(&specifier("memory:start-cycle-right"))
+        .unwrap();
+    let promise = isolate.evaluate_module_promise(left).unwrap();
+    assert_eq!(isolate.evaluate_module_promise(right).unwrap(), promise);
+    assert_eq!(
+        isolate.evaluate_module_promise(other),
+        Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy))
+    );
 }
 
 /// Drives one host-resumed TLA body to completion with an exact scheduler quantum.

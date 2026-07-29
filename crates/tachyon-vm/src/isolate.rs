@@ -83,6 +83,11 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    #[inline(always)]
+    pub(crate) const fn driver_is_busy(&self) -> bool {
+        self.driver_active_work.is_some() || self.module_graph.evaluation_start_pending()
+    }
+
     /// Returns one Realm-local intrinsic without changing the active execution context.
     pub(crate) fn realm_intrinsic_prototype(
         &self,
