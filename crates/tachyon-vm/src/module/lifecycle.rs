@@ -415,6 +415,9 @@ impl Isolate {
 
     /// Evaluates linked synchronous dependencies once and returns the root's cached completion.
     pub fn evaluate_module(&mut self, root: ModuleId) -> Result<RunOutcome, ModuleEvaluationError> {
+        if self.driver_active_work.is_some() {
+            return Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy));
+        }
         self.evaluate_module_with_batch::<{ crate::tuning::dispatch::DEFAULT_DISPATCH_BATCH }>(root)
     }
 
@@ -433,24 +436,25 @@ impl Isolate {
         &mut self,
         root: ModuleId,
     ) -> Result<Value, ModuleEvaluationError> {
-        let (promise, published) = if let Some(promise) = self
+        if let Some(promise) = self
             .module_graph
             .evaluation_promise(root)
             .map_err(ModuleEvaluationError::Graph)?
         {
-            (promise, false)
-        } else {
-            let promise = self
-                .create_promise(
-                    crate::PromiseState::Pending,
-                    Value::from_immediate(tachyon_value::Immediate::Undefined),
-                )
-                .map_err(ModuleEvaluationError::Execution)?;
-            self.module_graph
-                .publish_evaluation_promise(root, promise)
-                .map_err(ModuleEvaluationError::Graph)?;
-            (promise, true)
-        };
+            return Ok(promise);
+        }
+        if self.driver_active_work.is_some() {
+            return Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy));
+        }
+        let promise = self
+            .create_promise(
+                crate::PromiseState::Pending,
+                Value::from_immediate(tachyon_value::Immediate::Undefined),
+            )
+            .map_err(ModuleEvaluationError::Execution)?;
+        self.module_graph
+            .publish_evaluation_promise(root, promise)
+            .map_err(ModuleEvaluationError::Graph)?;
         match self.evaluate_module_with_batch::<N>(root) {
             Ok(RunOutcome::Completed(_)) => {
                 if self
@@ -481,9 +485,7 @@ impl Isolate {
             Ok(RunOutcome::BudgetExhausted) => unreachable!("unbounded module evaluation"),
             Err(ModuleEvaluationError::AsyncEvaluationPending(_)) => {}
             Err(error) => {
-                if published {
-                    let _ = self.module_graph.clear_evaluation_promise(root, promise);
-                }
+                let _ = self.module_graph.clear_evaluation_promise(root, promise);
                 return Err(error);
             }
         }
@@ -584,15 +586,13 @@ impl Isolate {
         &mut self,
         module: ModuleId,
     ) -> Result<(), ModuleEvaluationError> {
-        let body = self.module_graph.records[module.index()].body.clone();
-        if !matches!(
-            self.module_graph.records[module.index()].evaluation,
-            ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Waiting
+        let outcome = match self.start_ready_module_with_budget::<N>(
+            module,
+            crate::ExecutionBudget {
+                fuel: u64::MAX,
+                quantum: u32::MAX,
+            },
         ) {
-            return Err(ModuleEvaluationError::Graph(ModuleError::InvalidLinkState));
-        }
-        self.module_graph.records[module.index()].evaluation = ModuleEvaluationState::Evaluating;
-        let outcome = match self.execute_module_body_with_batch::<N>(module, body) {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.module_graph.records[module.index()].evaluation =
@@ -601,6 +601,53 @@ impl Isolate {
                 return Err(ModuleEvaluationError::Execution(error));
             }
         };
+        self.finish_ready_module_outcome(module, outcome)
+            .map_err(ModuleEvaluationError::Execution)?;
+        Ok(())
+    }
+
+    /// Starts one dependency-ready module without draining work published by its body.
+    pub(crate) fn start_ready_module_with_budget<const N: usize>(
+        &mut self,
+        module: ModuleId,
+        budget: crate::ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
+        let body = self.module_graph.records[module.index()].body.clone();
+        if !matches!(
+            self.module_graph.records[module.index()].evaluation,
+            ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Waiting
+        ) {
+            return Err(ExecutionError::Module(ModuleError::InvalidLinkState));
+        }
+        self.module_graph.records[module.index()].evaluation = ModuleEvaluationState::Evaluating;
+        let outcome = match body {
+            ModuleBody::Synthetic => Ok(RunOutcome::Completed(Value::from_immediate(
+                tachyon_value::Immediate::Undefined,
+            ))),
+            ModuleBody::Precompiled(body) => {
+                let code = self.load_module(&body)?;
+                if self.module_graph.records[module.index()].has_top_level_await {
+                    self.begin_async_module_with_budget::<N>(code, module, budget)
+                        .map(|(_, outcome)| outcome)
+                } else {
+                    self.execute_loaded_module_with_budget::<N>(code, module, budget)
+                }
+            }
+        };
+        if outcome.is_err() {
+            self.module_graph.records[module.index()].evaluation =
+                ModuleEvaluationState::Unevaluated;
+            self.fiber = Fiber::default();
+        }
+        outcome
+    }
+
+    /// Transfers a completed driver Fiber into persistent module graph state.
+    pub(crate) fn finish_ready_module_outcome(
+        &mut self,
+        module: ModuleId,
+        outcome: RunOutcome,
+    ) -> Result<(), ExecutionError> {
         match outcome {
             RunOutcome::Completed(value)
                 if !matches!(
@@ -610,15 +657,14 @@ impl Isolate {
             {
                 self.module_graph
                     .complete_evaluation(module, Ok(value))
-                    .map_err(ModuleEvaluationError::Graph)?;
+                    .map_err(ExecutionError::Module)?;
             }
-            RunOutcome::Thrown(error) => {
-                self.module_graph
-                    .complete_evaluation(module, Err(error))
-                    .map_err(ModuleEvaluationError::Graph)?;
-            }
+            RunOutcome::Thrown(error) => self
+                .module_graph
+                .complete_evaluation(module, Err(error))
+                .map_err(ExecutionError::Module)?,
             RunOutcome::Completed(_) => {}
-            RunOutcome::BudgetExhausted => unreachable!("unbounded module evaluation"),
+            RunOutcome::BudgetExhausted => return Ok(()),
         }
         if !matches!(
             self.module_graph.records[module.index()].evaluation,
@@ -629,26 +675,40 @@ impl Isolate {
         Ok(())
     }
 
-    /// Loads and enters one already-marked module body without mutating its final state.
-    fn execute_module_body_with_batch<const N: usize>(
+    /// Settles the cycle-root evaluation Promise whose ModuleRecord is already terminal.
+    pub(crate) fn settle_completed_module_promise(
         &mut self,
-        module: ModuleId,
-        body: ModuleBody,
-    ) -> Result<RunOutcome, ExecutionError> {
-        match body {
-            ModuleBody::Synthetic => Ok(RunOutcome::Completed(Value::from_immediate(
-                tachyon_value::Immediate::Undefined,
-            ))),
-            ModuleBody::Precompiled(body) => {
-                let code = self.load_module(&body)?;
-                if self.module_graph.records[module.index()].has_top_level_await {
-                    self.begin_async_module_with_batch::<N>(code, module)
-                        .map(|(_, outcome)| outcome)
-                } else {
-                    self.execute_loaded_module_with_batch::<N>(code, module)
-                }
-            }
+        root: Option<ModuleId>,
+        promise: Value,
+    ) -> Result<(), ExecutionError> {
+        let Some(root) = root else {
+            return Ok(());
+        };
+        let record = self
+            .module_graph
+            .record(root)
+            .map_err(ExecutionError::Module)?;
+        if record.evaluation_promise != Some(promise) {
+            return Err(ExecutionError::Module(ModuleError::InvalidLinkState));
         }
+        let terminal = match record.evaluation {
+            ModuleEvaluationState::Evaluated(_) => Some((
+                crate::PromiseState::Fulfilled,
+                Value::from_immediate(tachyon_value::Immediate::Undefined),
+            )),
+            ModuleEvaluationState::Errored(error) => Some((crate::PromiseState::Rejected, error)),
+            ModuleEvaluationState::Unevaluated
+            | ModuleEvaluationState::Waiting
+            | ModuleEvaluationState::Evaluating
+            | ModuleEvaluationState::AsyncEvaluating(_) => None,
+        };
+        let Some((state, result)) = terminal else {
+            return Ok(());
+        };
+        if self.promise_snapshot(promise)?.state == crate::PromiseState::Pending {
+            self.settle_promise(promise, state, result)?;
+        }
+        Ok(())
     }
 
     /// Advances one Promise job and any bytecode Fiber it publishes or resumes.

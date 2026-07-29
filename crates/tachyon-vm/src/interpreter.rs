@@ -66,6 +66,9 @@ impl Isolate {
         module: &CompiledModule,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
+        if self.driver_active_work.is_some() {
+            return Err(ExecutionError::DriverBusy);
+        }
         let code = self.load_module(module)?;
         self.execute_loaded(code, budget)
     }
@@ -360,22 +363,19 @@ impl Isolate {
         self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None, None, None)
     }
 
-    /// Executes one compiled source module against its isolate-owned live binding environment.
-    pub(crate) fn execute_loaded_module_with_batch<const N: usize>(
+    /// Starts one module body with a bounded interpreter budget.
+    pub(crate) fn execute_loaded_module_with_budget<const N: usize>(
         &mut self,
         code: CodeId,
         module: ModuleId,
+        budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.execute_loaded_loop_with_parent::<N, true>(
-            code,
-            ExecutionBudget {
-                fuel: u64::MAX,
-                quantum: u32::MAX,
-            },
-            None,
-            None,
-            Some(module),
-        )
+        let unbounded = budget.fuel == u64::MAX && budget.quantum == u32::MAX;
+        if unbounded {
+            self.execute_loaded_loop_with_parent::<N, true>(code, budget, None, None, Some(module))
+        } else {
+            self.execute_loaded_loop_with_parent::<N, false>(code, budget, None, None, Some(module))
+        }
     }
 
     /// Instantiates all module function declarations before any module in the linked SCC runs.
@@ -596,15 +596,31 @@ impl Isolate {
     pub(crate) fn continue_active_module_with_batch<const N: usize>(
         &mut self,
     ) -> Result<RunOutcome, ExecutionError> {
+        self.continue_active_work_with_budget::<N>(ExecutionBudget {
+            fuel: u64::MAX,
+            quantum: u32::MAX,
+        })
+    }
+
+    /// Continues the current Fiber without rebuilding its entry frame.
+    pub(crate) fn continue_active_work_with_budget<const N: usize>(
+        &mut self,
+        mut budget: ExecutionBudget,
+    ) -> Result<RunOutcome, ExecutionError> {
         if N == 0 {
             return Err(ExecutionError::InvalidDispatchBatch { batch: N });
         }
-        let mut budget = ExecutionBudget {
-            fuel: u64::MAX,
-            quantum: u32::MAX,
-        };
+        let unbounded = budget.fuel == u64::MAX && budget.quantum == u32::MAX;
         loop {
-            if let Some(outcome) = self.execute_batch::<N, true>(&mut budget)? {
+            if !unbounded && (budget.fuel == 0 || budget.quantum == 0) {
+                return Ok(RunOutcome::BudgetExhausted);
+            }
+            let outcome = if unbounded {
+                self.execute_batch::<N, true>(&mut budget)?
+            } else {
+                self.execute_batch::<N, false>(&mut budget)?
+            };
+            if let Some(outcome) = outcome {
                 return Ok(outcome);
             }
             if self.fiber.frames.is_empty() {

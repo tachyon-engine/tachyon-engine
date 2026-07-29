@@ -430,6 +430,14 @@ impl ModuleGraph {
         Ok(self.record(self.cycle_root(module)?)?.evaluation_promise)
     }
 
+    /// Resolves a driver target to its cycle-root owner once, outside the poll hot path.
+    pub(crate) fn evaluation_root_for_promise(&self, promise: Value) -> Option<ModuleId> {
+        self.records
+            .iter()
+            .find(|record| record.evaluation_promise == Some(promise))
+            .map(|record| record.id)
+    }
+
     pub(crate) fn publish_evaluation_promise(
         &mut self,
         module: ModuleId,

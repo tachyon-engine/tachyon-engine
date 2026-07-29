@@ -1,5 +1,16 @@
 use super::*;
 use crate::module::*;
+use core::{
+    future::Future,
+    num::NonZeroU32,
+    pin::Pin,
+    task::{Context, Waker},
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::Wake;
 use tachyon_compiler::{
     CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
 };
@@ -1177,6 +1188,192 @@ fn module_evaluation_promise_is_shared_by_every_cycle_member() {
     assert_eq!(
         isolate.promise_snapshot(promise).unwrap().state,
         PromiseState::Fulfilled
+    );
+}
+
+#[derive(Default)]
+struct CountingWake(AtomicUsize);
+
+impl Wake for CountingWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Builds a host-gated TLA graph whose resumed body requires multiple driver quanta.
+fn host_gated_driver_fixture() -> (Isolate, ModuleId, Value, Value) {
+    let mut isolate = fixtures::test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let gate_promise = isolate
+        .create_promise(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )
+        .unwrap();
+    let dependency = LoadedModule::precompiled(compile_source_module(
+        2_020,
+        "memory:driver-gate",
+        "export let gate;",
+    ));
+    let root_module = LoadedModule::precompiled(compile_source_module(
+        2_021,
+        "memory:driver-root",
+        "import { gate } from 'memory:driver-gate'; let value = await gate; while (value < 100) { value = value + 1; } export { value };",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:driver-root"), root_module),
+        (specifier("memory:driver-gate"), dependency),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:driver-root"))
+        .unwrap();
+    let gate = isolate
+        .module_graph
+        .find_specifier(&specifier("memory:driver-gate"))
+        .unwrap();
+    isolate
+        .write_module_binding(gate, "gate", gate_promise)
+        .unwrap();
+    let evaluation = isolate.evaluate_module_promise(root).unwrap();
+    (isolate, root, gate_promise, evaluation)
+}
+
+#[test]
+fn vm_driver_waits_without_self_waking_for_host_pending_promise() {
+    let (mut isolate, _, _, evaluation) = host_gated_driver_fixture();
+    let counter = Arc::new(CountingWake::default());
+    let waker = Waker::from(counter.clone());
+    let mut context = Context::from_waker(&waker);
+    let mut driver = isolate
+        .drive_promise(evaluation, NonZeroU32::new(2).unwrap())
+        .unwrap();
+    assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
+    assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+}
+
+/// Drives one host-resumed TLA body to completion with an exact scheduler quantum.
+fn assert_vm_driver_quantum(quantum: u32) {
+    let (mut isolate, root, gate, evaluation) = host_gated_driver_fixture();
+    isolate
+        .settle_promise(gate, PromiseState::Fulfilled, Value::from_i32(0))
+        .unwrap();
+    let counter = Arc::new(CountingWake::default());
+    let waker = Waker::from(counter.clone());
+    let mut context = Context::from_waker(&waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(evaluation, NonZeroU32::new(quantum).unwrap())
+            .unwrap();
+        match Pin::new(&mut driver).poll(&mut context) {
+            core::task::Poll::Ready(Ok(PromiseOutcome::Fulfilled(value))) => {
+                assert_eq!(value.as_immediate(), Some(Immediate::Undefined));
+                break;
+            }
+            core::task::Poll::Pending => {}
+            outcome => panic!("unexpected driver outcome: {outcome:?}"),
+        }
+    }
+    assert_eq!(
+        isolate.read_module_binding(root, "value").unwrap(),
+        Value::from_i32(100)
+    );
+    assert!(isolate.driver_active_work.is_none());
+    assert!(isolate.promise_jobs.checkpoint_result.is_none());
+}
+
+#[test]
+fn vm_driver_supports_every_tuning_quantum() {
+    for quantum in [1, 2, 4, 8, 16] {
+        assert_vm_driver_quantum(quantum);
+    }
+}
+
+#[test]
+fn vm_driver_preserves_the_original_tla_rejection_reason() {
+    let (mut isolate, _, gate, evaluation) = host_gated_driver_fixture();
+    isolate
+        .settle_promise(gate, PromiseState::Rejected, Value::from_i32(41))
+        .unwrap();
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(evaluation, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        match Pin::new(&mut driver).poll(&mut context) {
+            core::task::Poll::Ready(Ok(PromiseOutcome::Rejected(reason))) => {
+                assert_eq!(reason, Value::from_i32(41));
+                break;
+            }
+            core::task::Poll::Pending => {}
+            outcome => panic!("unexpected driver outcome: {outcome:?}"),
+        }
+    }
+}
+
+#[test]
+// Test-only OS threads prove migration; the engine itself never creates or owns threads.
+#[allow(clippy::disallowed_methods)]
+fn vm_driver_can_be_dropped_recreated_and_moved_between_threads() {
+    let (mut isolate, root, gate, evaluation) = host_gated_driver_fixture();
+    isolate
+        .settle_promise(gate, PromiseState::Fulfilled, Value::from_i32(0))
+        .unwrap();
+    let counter = Arc::new(CountingWake::default());
+    let first_counter = counter.clone();
+    isolate = std::thread::spawn(move || {
+        let waker = Waker::from(first_counter.clone());
+        let mut context = Context::from_waker(&waker);
+        {
+            let mut driver = isolate
+                .drive_promise(evaluation, NonZeroU32::new(2).unwrap())
+                .unwrap();
+            assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
+        }
+        assert_eq!(first_counter.0.load(Ordering::Relaxed), 1);
+        assert_eq!(isolate.evaluate_module_promise(root).unwrap(), evaluation);
+        assert_eq!(
+            isolate.evaluate_module(root),
+            Err(ModuleEvaluationError::Execution(ExecutionError::DriverBusy))
+        );
+        isolate
+    })
+    .join()
+    .unwrap();
+
+    let second_counter = counter.clone();
+    isolate = std::thread::spawn(move || {
+        let waker = Waker::from(second_counter.clone());
+        let mut context = Context::from_waker(&waker);
+        loop {
+            let before = second_counter.0.load(Ordering::Relaxed);
+            let mut driver = isolate
+                .drive_promise(evaluation, NonZeroU32::new(2).unwrap())
+                .unwrap();
+            match Pin::new(&mut driver).poll(&mut context) {
+                core::task::Poll::Ready(Ok(PromiseOutcome::Fulfilled(value))) => {
+                    assert_eq!(value.as_immediate(), Some(Immediate::Undefined));
+                    break;
+                }
+                core::task::Poll::Pending => {
+                    assert_eq!(second_counter.0.load(Ordering::Relaxed), before + 1);
+                }
+                outcome => panic!("unexpected driver outcome: {outcome:?}"),
+            }
+        }
+        isolate
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        isolate.read_module_binding(root, "value").unwrap(),
+        Value::from_i32(100)
     );
 }
 

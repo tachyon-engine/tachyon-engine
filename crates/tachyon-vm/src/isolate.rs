@@ -3,7 +3,7 @@
 use core::mem;
 
 use super::*;
-use crate::module::ModuleGraph;
+use crate::{driver::DriverActiveWork, module::ModuleGraph};
 
 struct CollectionAllocationRoots<'a> {
     vm: VmRoots<'a>,
@@ -55,6 +55,7 @@ impl Trace for WeakCollectionAllocationRoots<'_> {
 /// A single-thread-owned ECMAScript execution state; `Cell` intentionally makes it `!Sync`.
 pub struct Isolate {
     pub(crate) fiber: Fiber,
+    pub(crate) driver_active_work: Option<DriverActiveWork>,
     pub(crate) finalization_jobs: finalization::FinalizationJobs,
     pub(crate) promise_jobs: PromiseJobQueue,
     pub(crate) atoms: AtomTable,
@@ -633,6 +634,7 @@ impl Isolate {
         let primitive_hint_strings = PrimitiveHintStrings::allocate(&mut heap, types.string)?;
         let mut isolate = Self {
             fiber: Fiber::default(),
+            driver_active_work: None,
             finalization_jobs: finalization::FinalizationJobs::new(),
             promise_jobs: PromiseJobQueue::new(),
             atoms: AtomTable::new(config.atom_table),

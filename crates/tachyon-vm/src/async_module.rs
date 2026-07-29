@@ -23,11 +23,12 @@ impl Trace for AsyncModuleState {
 }
 
 impl Isolate {
-    /// Allocates the module owner, installs its entry continuation, and starts the body.
-    pub(crate) fn begin_async_module_with_batch<const N: usize>(
+    /// Starts one TLA body with a bounded interpreter budget.
+    pub(crate) fn begin_async_module_with_budget<const N: usize>(
         &mut self,
         code: CodeId,
         module: ModuleId,
+        budget: ExecutionBudget,
     ) -> Result<(Value, RunOutcome), ExecutionError> {
         let mut roots = VmRoots {
             fiber: &mut self.fiber,
@@ -89,7 +90,7 @@ impl Isolate {
             .ok_or(ExecutionError::MissingEnvironment)?;
         frame.return_continuation = true;
         frame.completion_base = 1;
-        let outcome = match self.continue_active_module_with_batch::<N>() {
+        let outcome = match self.continue_active_work_with_budget::<N>(budget) {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.fiber = Fiber::default();

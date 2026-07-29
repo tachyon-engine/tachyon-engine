@@ -36,6 +36,7 @@ mod builtins;
 mod collection;
 mod collection_for_each;
 mod conversion;
+mod driver;
 mod error;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
@@ -77,6 +78,7 @@ pub use atom::{AtomHashSeed, AtomId, AtomTable, AtomTableConfig, AtomTableError,
 #[cfg(feature = "opcode-profile")]
 pub use execution_profile::{ExecutionProfile, OpcodeExecutionCounts};
 
+pub use driver::{PromiseOutcome, VmDriver};
 pub use finalization::{
     FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
     FinalizationSafepointStats,
@@ -393,6 +395,7 @@ pub enum RunOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionError {
     InvalidDispatchBatch { batch: usize },
+    DriverBusy,
     MissingWallClockProvider,
     WallClockProvider(HostProviderError),
     MissingTimeZoneProvider,
