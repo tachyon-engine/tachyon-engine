@@ -1360,6 +1360,8 @@ pub(crate) enum AsyncFromSyncIteratorStage {
     ReturnCall,
     ThrowGet,
     ThrowCall,
+    MissingThrowReturnGet,
+    MissingThrowReturnCall,
     DoneGet,
     ValueGet,
     PromiseConstructorGet,

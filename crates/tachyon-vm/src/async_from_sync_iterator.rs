@@ -232,6 +232,12 @@ impl Isolate {
             AsyncFromSyncIteratorStage::ThrowGet => {
                 self.finish_async_from_sync_method_get(site, state, value, true)
             }
+            AsyncFromSyncIteratorStage::MissingThrowReturnGet => {
+                self.resume_async_from_sync_missing_throw_return_get(site, state, value)
+            }
+            AsyncFromSyncIteratorStage::MissingThrowReturnCall => {
+                self.finish_async_from_sync_missing_throw_close(site, state, value)
+            }
             AsyncFromSyncIteratorStage::DoneGet => {
                 let done = self.is_truthy_value(value)?;
                 self.set_async_from_sync_done(state, done)?;
@@ -267,7 +273,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         if is_nullish(method) {
             if throwing {
-                return self.reject_async_from_sync_type_error(site, state);
+                return self.begin_async_from_sync_missing_throw_close(site, state);
             }
             let snapshot = self.native_call_state_snapshot(state)?;
             let result = self.create_iterator_result(snapshot.values[STATE_ARGUMENT], true)?;
@@ -275,7 +281,9 @@ impl Isolate {
             self.settle_promise(promise, PromiseState::Fulfilled, result)?;
             return self.write(site.caller_base, site.destination, promise);
         }
-        self.resolve_function_object(method)?;
+        if let Err(error) = self.resolve_function_object(method) {
+            return self.reject_async_from_sync_error(site, state, error);
+        }
         let iterator_value = self.native_call_state_snapshot(state)?.values[STATE_ITERATOR];
         let iterator = self.async_from_sync_iterator_snapshot(
             self.async_from_sync_iterator_reference(iterator_value)
@@ -292,6 +300,67 @@ impl Isolate {
                 AsyncFromSyncIteratorStage::ReturnCall
             },
         )
+    }
+
+    /// Starts IteratorClose with a normal completion when the sync iterator has no throw method.
+    fn begin_async_from_sync_missing_throw_close(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let wrapper = self.native_call_state_snapshot(state)?.values[STATE_ITERATOR];
+        let iterator = self.async_from_sync_iterator_snapshot(
+            self.async_from_sync_iterator_reference(wrapper)
+                .ok_or(ExecutionError::MissingNativeContinuation)?,
+        )?;
+        let key = self.intern_intrinsic_name(b"return")?;
+        self.dispatch_async_from_sync_read(
+            site,
+            state,
+            iterator.sync_iterator,
+            key.into(),
+            AsyncFromSyncIteratorStage::MissingThrowReturnGet,
+        )
+    }
+
+    /// Calls the close method without forwarding the original throw argument.
+    fn resume_async_from_sync_missing_throw_return_get(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        method: Value,
+    ) -> Result<(), ExecutionError> {
+        if is_nullish(method) {
+            return self.reject_async_from_sync_type_error(site, state);
+        }
+        if let Err(error) = self.resolve_function_object(method) {
+            return self.reject_async_from_sync_error(site, state, error);
+        }
+        let wrapper = self.native_call_state_snapshot(state)?.values[STATE_ITERATOR];
+        let iterator = self.async_from_sync_iterator_snapshot(
+            self.async_from_sync_iterator_reference(wrapper)
+                .ok_or(ExecutionError::MissingNativeContinuation)?,
+        )?;
+        self.dispatch_async_from_sync_no_argument_call(
+            site,
+            state,
+            method,
+            iterator.sync_iterator,
+            AsyncFromSyncIteratorStage::MissingThrowReturnCall,
+        )
+    }
+
+    /// Validates the IteratorClose result, then rejects for the missing throw protocol method.
+    fn finish_async_from_sync_missing_throw_close(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        result: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(result) {
+            return self.reject_async_from_sync_type_error(site, state);
+        }
+        self.reject_async_from_sync_type_error(site, state)
     }
 
     /// Starts the observable PromiseResolve constructor check for native Promise values.
@@ -479,6 +548,65 @@ impl Isolate {
             }
             return Ok(());
         }
+        let continuation = self.pop_native_continuation()?;
+        let result = self.read(site.caller_base, site.destination)?;
+        self.resume_async_from_sync_iterator(continuation, stage, result)
+    }
+
+    /// Dispatches one iterator cleanup method with an intentionally empty argument list.
+    fn dispatch_async_from_sync_no_argument_call(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        method: Value,
+        receiver: Value,
+        stage: AsyncFromSyncIteratorStage,
+    ) -> Result<(), ExecutionError> {
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        let retained = Value::from_heap_ref(state.raw());
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::async_from_sync_iterator(
+                site, stage, retained, method,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        if let Err(error) = self.call(CallSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            callee: method,
+            argument_base: 0,
+            argument_source: None,
+            argument_prefix: None,
+            argument_prefix_offset: 0,
+            argument_prefix_count: 0,
+            argument_count: 0,
+            this_value: receiver,
+            new_target: Value::from_immediate(Immediate::Undefined),
+            construct_receiver: None,
+            call_site: site.call_site,
+        }) {
+            let continuation = self.pop_native_continuation()?;
+            return self.reject_async_from_sync_error(continuation.site(), state, error);
+        }
+        let call_pending = self.fiber.completions.last_native().is_some_and(|entry| {
+            entry.kind() == NativeContinuationKind::AsyncFromSyncIterator(stage)
+                && entry.first() == retained
+                && entry.second() == method
+        });
+        if self.fiber.frames.len() != frames || !call_pending {
+            if self.fiber.frames.len() != frames {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("cleanup call frame exists");
+                frame.return_register = None;
+                frame.return_continuation = true;
+            }
+            return Ok(());
+        }
+        debug_assert!(self.fiber.completions.len() > depth);
         let continuation = self.pop_native_continuation()?;
         let result = self.read(site.caller_base, site.destination)?;
         self.resume_async_from_sync_iterator(continuation, stage, result)
