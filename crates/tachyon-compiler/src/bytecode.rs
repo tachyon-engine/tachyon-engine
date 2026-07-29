@@ -26,7 +26,7 @@ pub(crate) fn lower(
     hir: &HirProgram,
     options: crate::CompileOptions,
 ) -> Result<CompiledModule, CompileError> {
-    let environments = EnvironmentPlans::new(source, hir, options.direct_eval)?;
+    let environments = EnvironmentPlans::new(hir, options.direct_eval)?;
     let module_capacity = capacity::estimate_module(hir)?;
     let mut constants = Vec::with_capacity(module_capacity.constants);
     let mut scope_names = Vec::with_capacity(module_capacity.scope_names);
@@ -398,7 +398,7 @@ struct GlobalLexicalPlan {
 
 impl EnvironmentPlans {
     /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
-    fn new(source: &SourceText, hir: &HirProgram, direct_eval: bool) -> Result<Self, CompileError> {
+    fn new(hir: &HirProgram, direct_eval: bool) -> Result<Self, CompileError> {
         let module_entry = hir.kind() == ProgramKind::Module;
         let mut global_lexicals =
             Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
@@ -535,7 +535,6 @@ impl EnvironmentPlans {
                 }
             }
             collect_captured_slots(
-                source,
                 &function.body,
                 force_dynamic_bindings,
                 &forced_captures,
@@ -838,21 +837,6 @@ fn push_function_name_slot(
     Ok(())
 }
 
-/// Rejects destructuring at the bytecode boundary while preserving fully owned pattern HIR.
-#[inline(always)]
-fn simple_binding<'a>(
-    source: &SourceText,
-    pattern: &'a crate::HirPattern,
-) -> Result<&'a crate::HirBinding, CompileError> {
-    pattern
-        .binding()
-        .ok_or_else(|| CompileError::UnsupportedSyntax {
-            source_name: source.name().clone(),
-            span: pattern.span,
-            syntax: "destructuring pattern bytecode",
-        })
-}
-
 /// Collects every declaration leaf from an owned recursive pattern.
 fn pattern_bindings(pattern: &crate::HirPattern) -> Vec<crate::HirBinding> {
     let mut bindings = Vec::new();
@@ -886,7 +870,6 @@ fn collect_pattern_bindings(pattern: &crate::HirPattern, bindings: &mut Vec<crat
 
 /// Walks activation-owned declarations while nested function bodies remain separate stencils.
 fn collect_captured_slots(
-    source: &SourceText,
     statements: &[HirStatement],
     force_dynamic_bindings: bool,
     forced_captures: &[BindingId],
@@ -920,20 +903,15 @@ fn collect_captured_slots(
                     slots,
                 )?;
             }
-            HirStatementKind::Block(body) => collect_captured_slots(
-                source,
-                body,
-                force_dynamic_bindings,
-                forced_captures,
-                slots,
-            )?,
+            HirStatementKind::Block(body) => {
+                collect_captured_slots(body, force_dynamic_bindings, forced_captures, slots)?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
                 ..
             } => {
                 collect_captured_slots(
-                    source,
                     core::slice::from_ref(consequent),
                     force_dynamic_bindings,
                     forced_captures,
@@ -941,7 +919,6 @@ fn collect_captured_slots(
                 )?;
                 if let Some(alternate) = alternate {
                     collect_captured_slots(
-                        source,
                         core::slice::from_ref(alternate),
                         force_dynamic_bindings,
                         forced_captures,
@@ -969,7 +946,6 @@ fn collect_captured_slots(
                     }
                 }
                 collect_captured_slots(
-                    source,
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
@@ -994,7 +970,6 @@ fn collect_captured_slots(
                     }
                 }
                 collect_captured_slots(
-                    source,
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
@@ -1019,7 +994,6 @@ fn collect_captured_slots(
                     }
                 }
                 collect_captured_slots(
-                    source,
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
@@ -1028,7 +1002,6 @@ fn collect_captured_slots(
             }
             HirStatementKind::Loop { body, .. } => {
                 collect_captured_slots(
-                    source,
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
@@ -1038,7 +1011,6 @@ fn collect_captured_slots(
             HirStatementKind::Switch { cases, .. } => {
                 for case in cases.iter() {
                     collect_captured_slots(
-                        source,
                         &case.consequent,
                         force_dynamic_bindings,
                         forced_captures,
@@ -1051,26 +1023,21 @@ fn collect_captured_slots(
                 handler,
                 finalizer,
             } => {
-                collect_captured_slots(
-                    source,
-                    block,
-                    force_dynamic_bindings,
-                    forced_captures,
-                    slots,
-                )?;
+                collect_captured_slots(block, force_dynamic_bindings, forced_captures, slots)?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
-                        push_captured_slot(
-                            simple_binding(source, parameter)?,
-                            true,
-                            false,
-                            force_dynamic_bindings,
-                            forced_captures,
-                            slots,
-                        )?;
+                        for binding in pattern_bindings(parameter) {
+                            push_captured_slot(
+                                &binding,
+                                true,
+                                false,
+                                force_dynamic_bindings,
+                                forced_captures,
+                                slots,
+                            )?;
+                        }
                     }
                     collect_captured_slots(
-                        source,
                         &handler.body,
                         force_dynamic_bindings,
                         forced_captures,
@@ -1079,7 +1046,6 @@ fn collect_captured_slots(
                 }
                 if let Some(finalizer) = finalizer {
                     collect_captured_slots(
-                        source,
                         finalizer,
                         force_dynamic_bindings,
                         forced_captures,

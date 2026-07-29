@@ -1318,8 +1318,7 @@ impl Lowerer<'_> {
             )
             .map_err(CompileError::Builder)?;
         if let Some(parameter) = &handler.parameter {
-            let binding = self.simple_binding(parameter)?.clone();
-            self.add_local(&binding, Some(exception), true)?;
+            self.bind_pattern(parameter, exception, true)?;
         }
         Ok(offset)
     }

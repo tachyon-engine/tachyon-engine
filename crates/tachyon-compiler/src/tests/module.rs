@@ -255,6 +255,19 @@ fn module_for_await_uses_verified_await_suspend_points() {
 }
 
 #[test]
+/// Allows a catch binding default initializer to suspend a top-level module Fiber.
+fn module_catch_destructuring_can_contain_top_level_await() {
+    let module = compile_module("try {} catch ({ x = await 42 }) {};");
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(entry).unwrap();
+    assert!(disassembly.contains("LoadException"));
+    assert!(disassembly.contains("Await"));
+    assert_eq!(entry.suspend_points().len(), 1);
+}
+
+#[test]
 /// Prevents static module semantics from being attached to an ordinary script entry.
 fn script_cannot_carry_a_module_stencil() {
     let script = Compiler

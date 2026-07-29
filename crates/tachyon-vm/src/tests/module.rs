@@ -1141,6 +1141,37 @@ fn top_level_for_await_reuses_module_async_execution() {
     assert_tla_for_await_batch::<16>(true);
 }
 
+/// Suspends from a catch binding initializer without losing the pending handler Fiber.
+fn assert_tla_catch_pattern_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_700 + N as u32,
+        "memory:tla-catch-pattern",
+        "let result = 0; try { throw {}; } catch ({ x = await 42 }) { result = x; } result === 42;",
+    ));
+    let identity = specifier("memory:tla-catch-pattern");
+    let mut loader = PrecompiledGraphLoader::new(vec![(identity.clone(), module)]);
+    let root = isolate.load_module_graph(&mut loader, &identity).unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::True))
+    );
+}
+
+#[test]
+fn top_level_await_runs_inside_catch_destructuring() {
+    assert_tla_catch_pattern_batch::<1>(false);
+    assert_tla_catch_pattern_batch::<2>(false);
+    assert_tla_catch_pattern_batch::<4>(false);
+    assert_tla_catch_pattern_batch::<8>(true);
+    assert_tla_catch_pattern_batch::<16>(true);
+}
+
 #[test]
 fn top_level_await_rejection_propagates_through_shared_async_parents() {
     let mut isolate = fixtures::test_isolate();
