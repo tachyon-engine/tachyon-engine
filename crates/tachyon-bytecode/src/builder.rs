@@ -241,6 +241,7 @@ impl BytecodeBuilder {
     fn note_registers(&mut self, opcode: Opcode, operands: &[u32]) -> Result<(), BuilderError> {
         let indexes: &[usize] = match opcode {
             Opcode::Nop
+            | Opcode::InitialYield
             | Opcode::Jump
             | Opcode::EnterFinally
             | Opcode::ResumeCompletion

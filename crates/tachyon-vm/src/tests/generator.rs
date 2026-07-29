@@ -20,8 +20,8 @@ var instanceChain = Object.getPrototypeOf(generator) === ownPrototype;
 var functionChain = functionPrototype !== Function.prototype &&
     Object.getPrototypeOf(functionPrototype) === Function.prototype;
 var descriptor = Object.getOwnPropertyDescriptor(values, "prototype");
-var descriptorOk = descriptor.value === ownPrototype && !descriptor.writable &&
-    !descriptor.enumerable && descriptor.configurable;
+var descriptorOk = descriptor.value === ownPrototype && descriptor.writable &&
+    !descriptor.enumerable && !descriptor.configurable;
 var first = generator.next();
 var second = generator.next();
 var third = generator.next();
@@ -54,6 +54,35 @@ var afterReentry = reentrant.next();
 delayed && instanceChain && functionChain && nextMetadata && descriptorOk && completionOk &&
     brandRejected && newRejected && throwIdentity && afterThrow.done &&
     afterThrow.value === undefined && executingRejected && afterReentry.done;
+"#;
+
+const GENERATOR_INITIALIZATION_SOURCE: &str = r#"
+var trace = "";
+var marker = {};
+function boom() { throw marker; }
+function* initialized(value = (trace += "param|", initialized.prototype = null, 7)) {
+    trace += "body|";
+    return value;
+}
+var oldPrototype = initialized.prototype;
+var generator = initialized();
+var initializedBeforePublication = trace === "param|" &&
+    Object.getPrototypeOf(generator) !== oldPrototype;
+var first = generator.next(99);
+var firstNextIgnored = first.value === 7 && first.done && trace === "param|body|";
+
+async function* asyncFail(value = boom()) {}
+var asyncAbruptIsSynchronous = false;
+try { asyncFail(); }
+catch (error) { asyncAbruptIsSynchronous = error === marker; }
+
+async function* asyncInitialized(value = (asyncInitialized.prototype = null, 1)) {}
+var oldAsyncPrototype = asyncInitialized.prototype;
+var asyncGenerator = asyncInitialized();
+var asyncCreatedAfterParameters = Object.getPrototypeOf(asyncGenerator) !== oldAsyncPrototype;
+
+initializedBeforePublication && firstNextIgnored && asyncAbruptIsSynchronous &&
+    asyncCreatedAfterParameters;
 "#;
 
 const ASYNC_GENERATOR_QUEUE_SOURCE: &str = r#"
@@ -680,6 +709,20 @@ fn generator_state_and_arguments_survive_forced_major_collection() {
 }
 
 #[test]
+fn generator_initialization_boundary_runs_for_every_dispatch_batch() {
+    assert_generator_initialization::<1>(false);
+    assert_generator_initialization::<2>(false);
+    assert_generator_initialization::<4>(false);
+    assert_generator_initialization::<8>(false);
+    assert_generator_initialization::<16>(false);
+}
+
+#[test]
+fn generator_initialization_boundary_survives_forced_major_collection() {
+    assert_generator_initialization::<8>(true);
+}
+
+#[test]
 fn async_generator_request_queue_runs_for_every_dispatch_batch() {
     assert_async_generator_queue::<1>(false);
     assert_async_generator_queue::<2>(false);
@@ -954,6 +997,40 @@ fn assert_generator_source<const N: usize>(forced_major: bool) {
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Checks the synchronous parameter boundary without conflating it with body execution.
+fn assert_generator_initialization<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(2_550 + N as u32),
+                SourceName::new("generator-initialization-boundary"),
+                MediaType::JavaScript,
+                Arc::from(GENERATOR_INITIALIZATION_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("generator initialization fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 100_000,
+                quantum: 100_000,
+            },
+        )
+        .expect("generator initialization fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "initialization batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 

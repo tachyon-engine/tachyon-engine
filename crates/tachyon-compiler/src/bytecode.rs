@@ -1112,6 +1112,12 @@ fn lower_function(
             lowerer.local_function_declaration(declaration, statement.span)?;
         }
     }
+    if matches!(
+        function.kind,
+        HirFunctionKind::Generator | HirFunctionKind::AsyncGenerator
+    ) {
+        lowerer.emit(Opcode::InitialYield, &[], function.span)?;
+    }
     let mut terminal = synthetic_terminal;
     for statement in function.body.iter() {
         if matches!(statement.kind, HirStatementKind::FunctionDeclaration(_)) {

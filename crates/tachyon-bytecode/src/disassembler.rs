@@ -63,6 +63,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
     write!(output, "{opcode}")?;
     match opcode {
         Opcode::Nop
+        | Opcode::InitialYield
         | Opcode::ReturnUndefined
         | Opcode::EnterFinally
         | Opcode::ResumeCompletion

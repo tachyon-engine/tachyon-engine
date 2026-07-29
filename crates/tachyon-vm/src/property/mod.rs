@@ -135,10 +135,10 @@ impl Isolate {
         if self.is_function_prototype_property(receiver, key) {
             self.intrinsic_property_atoms.prototype = key.atom();
             let value = self.ensure_function_prototype(receiver)?;
-            let generator = self.is_generator_function(receiver)?;
+            let read_only = self.has_read_only_prototype(receiver)?;
             return Ok(Some((
                 value,
-                PropertyAttributes::data(!generator, false, generator),
+                PropertyAttributes::data(!read_only, false, false),
             )));
         }
         Ok(None)

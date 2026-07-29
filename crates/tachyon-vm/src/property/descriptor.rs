@@ -864,12 +864,11 @@ impl Isolate {
                 self.intrinsic_property_atoms.prototype = key.atom();
                 let value = self.ensure_function_prototype(receiver)?;
                 let read_only = self.has_read_only_prototype(receiver)?;
-                let generator = self.is_generator_function(receiver)?;
                 return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {
                     value: Some(value),
                     writable: Some(!read_only),
                     enumerable: Some(false),
-                    configurable: Some(generator),
+                    configurable: Some(false),
                 })));
             }
             return Ok(None);

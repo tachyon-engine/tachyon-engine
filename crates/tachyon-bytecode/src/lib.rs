@@ -756,6 +756,16 @@ pub enum ModuleBuildError {
         offset: WordOffset,
         opcode: Opcode,
     },
+    InitialYieldInIncompatibleFunction {
+        function: FunctionId,
+        kind: FunctionKind,
+        offset: WordOffset,
+    },
+    InvalidInitialYieldCount {
+        function: FunctionId,
+        kind: FunctionKind,
+        count: u32,
+    },
     VerifiedBytecodeDecodeInvariant {
         function: FunctionId,
         offset: WordOffset,

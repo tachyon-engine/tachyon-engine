@@ -1879,6 +1879,10 @@ impl Isolate {
                 })?;
                 return self.resume_restored_generator_native_caller();
             }
+            Opcode::InitialYield => {
+                self.suspend_generator_initialization()?;
+                return Ok(None);
+            }
             Opcode::EnterFinally => {
                 let (index, handler) = self
                     .find_covering_finally(instruction_offset)?
@@ -2501,7 +2505,8 @@ impl Isolate {
             NativeContinuationKind::ConversionCallRoot => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
-            NativeContinuationKind::GeneratorResume => {
+            NativeContinuationKind::GeneratorInitialize
+            | NativeContinuationKind::GeneratorResume => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::AsyncFunction => {
@@ -5394,7 +5399,7 @@ impl Isolate {
                         if site.new_target.as_immediate() != Some(Immediate::Undefined) {
                             return Err(ExecutionError::NonConstructor(site.callee));
                         }
-                        let generator = self.create_generator_from_site(
+                        return self.begin_generator_initialization(
                             &site,
                             ResolvedCallTarget {
                                 code,
@@ -5404,8 +5409,7 @@ impl Isolate {
                                 layout,
                                 strictness,
                             },
-                        )?;
-                        return self.write(site.caller_base, site.destination, generator);
+                        );
                     }
                     if kind == FunctionKind::Async {
                         if site.new_target.as_immediate() != Some(Immediate::Undefined) {
@@ -8178,6 +8182,9 @@ impl Isolate {
                 NativeContinuationKind::ConversionCallRoot => {
                     unreachable!("conversion call roots resume before native dispatch")
                 }
+                NativeContinuationKind::GeneratorInitialize => {
+                    unreachable!("generator initialization pauses before native return dispatch")
+                }
             };
             if let Err(error) = result {
                 if matches!(
@@ -8471,6 +8478,11 @@ impl Isolate {
                     if self.finish_generator_throw(continuation, value)? {
                         return Ok(None);
                     }
+                    instruction_offset = continuation.site().call_site;
+                    continue;
+                }
+                if continuation.kind() == NativeContinuationKind::GeneratorInitialize {
+                    self.finish_generator_initialization_throw(continuation)?;
                     instruction_offset = continuation.site().call_site;
                     continue;
                 }

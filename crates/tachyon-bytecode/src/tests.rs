@@ -48,6 +48,7 @@ fn operand_count_table_covers_every_opcode_once() {
             0,
             &[
                 Opcode::Nop,
+                Opcode::InitialYield,
                 Opcode::ReturnUndefined,
                 Opcode::EnterFinally,
                 Opcode::ResumeCompletion,
@@ -1302,8 +1303,14 @@ fn compiled_module_rejects_invalid_pool_and_suspend_references() {
 #[test]
 fn yield_with_kind_requires_generator_kind_and_adjacent_resume_registers() {
     let build = |kind, register_count| {
-        let mut words = encode_instruction(Opcode::YieldWithKind, &[0, 1, 0]).unwrap();
-        let instruction = decode_instruction(&words, WordOffset::new(0)).unwrap();
+        let mut words = if matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator) {
+            encode_instruction(Opcode::InitialYield, &[]).unwrap()
+        } else {
+            Vec::new()
+        };
+        let yield_offset = WordOffset::new(words.len() as u32);
+        words.extend(encode_instruction(Opcode::YieldWithKind, &[0, 1, 0]).unwrap());
+        let instruction = decode_instruction(&words, yield_offset).unwrap();
         words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
         let mut metadata = FunctionMetadata::new(
             kind,
@@ -1314,8 +1321,8 @@ fn yield_with_kind_requires_generator_kind_and_adjacent_resume_registers() {
         );
         metadata.suspend_points = vec![SuspendPoint {
             id: SuspendPointId::new(0),
-            instruction: WordOffset::new(0),
-            resume_offset: WordOffset::new(u32::from(instruction.word_len)),
+            instruction: yield_offset,
+            resume_offset: WordOffset::new(yield_offset.index() + u32::from(instruction.word_len)),
             destination: RegisterId::new(1),
             completion_depth: 0,
         }]
@@ -1348,6 +1355,83 @@ fn yield_with_kind_requires_generator_kind_and_adjacent_resume_registers() {
             error: VerifyError::RegisterOutOfRange { register: 2, .. },
             ..
         })
+    ));
+}
+
+#[test]
+fn initial_yield_requires_generator_kind_without_suspend_metadata() {
+    let span = SourceSpan { start: 0, end: 0 };
+    let mut builder = BytecodeBuilder::with_capacity(2, 0);
+    builder.emit(Opcode::InitialYield, &[], span).unwrap();
+    builder.emit(Opcode::ReturnUndefined, &[], span).unwrap();
+    let (_, _, register_count) = builder.finish().unwrap();
+    assert_eq!(register_count, 0);
+
+    let build = |kind| {
+        let mut words = encode_instruction(Opcode::InitialYield, &[]).unwrap();
+        words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+        CompiledModule::new(
+            Arc::from("initial-yield"),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                FunctionMetadata::new(kind, FunctionLayout::default()),
+            )],
+            FunctionId::new(0),
+        )
+    };
+
+    for kind in [FunctionKind::Generator, FunctionKind::AsyncGenerator] {
+        let module = build(kind).expect("generator initialization boundary verifies");
+        let function = &module.functions()[0];
+        assert!(function.suspend_points().is_empty());
+        assert!(disassemble(function).unwrap().contains("InitialYield"));
+    }
+    assert!(matches!(
+        build(FunctionKind::Ordinary),
+        Err(ModuleBuildError::InitialYieldInIncompatibleFunction {
+            kind: FunctionKind::Ordinary,
+            ..
+        })
+    ));
+
+    let missing = CompiledModule::new(
+        Arc::from("missing-initial-yield"),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+            FunctionMetadata::new(FunctionKind::Generator, FunctionLayout::default()),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        ModuleBuildError::InvalidInitialYieldCount { count: 0, .. }
+    ));
+
+    let mut duplicate_words = encode_instruction(Opcode::InitialYield, &[]).unwrap();
+    duplicate_words.extend(encode_instruction(Opcode::InitialYield, &[]).unwrap());
+    duplicate_words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+    let duplicate = CompiledModule::new(
+        Arc::from("duplicate-initial-yield"),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(duplicate_words),
+            FunctionMetadata::new(FunctionKind::Generator, FunctionLayout::default()),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        duplicate,
+        ModuleBuildError::InvalidInitialYieldCount { count: 2, .. }
     ));
 }
 

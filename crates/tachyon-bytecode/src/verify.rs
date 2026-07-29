@@ -725,6 +725,7 @@ fn validate_suspend_opcodes(
 ) -> Result<(), ModuleBuildError> {
     let words = bytecode.bytecode().words();
     let mut offset = 0u32;
+    let mut initial_yield_count = 0u32;
     while (offset as usize) < words.len() {
         let word_offset = WordOffset::new(offset);
         let decoded = decode_instruction(words, word_offset).map_err(|_| {
@@ -770,8 +771,26 @@ fn validate_suspend_opcodes(
                     id,
                 });
             }
+        } else if decoded.opcode == Opcode::InitialYield {
+            if !matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator) {
+                return Err(ModuleBuildError::InitialYieldInIncompatibleFunction {
+                    function,
+                    kind,
+                    offset: word_offset,
+                });
+            }
+            initial_yield_count = initial_yield_count.saturating_add(1);
         }
         offset += u32::from(decoded.word_len);
+    }
+    if matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
+        && initial_yield_count != 1
+    {
+        return Err(ModuleBuildError::InvalidInitialYieldCount {
+            function,
+            kind,
+            count: initial_yield_count,
+        });
     }
     Ok(())
 }
@@ -1057,6 +1076,7 @@ fn verify_instruction(
                 });
             }
         }
+        Opcode::InitialYield => {}
         Opcode::Await | Opcode::Yield => {
             check_register(operands[0])?;
             check_register(operands[1])?;

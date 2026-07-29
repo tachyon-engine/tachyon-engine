@@ -623,6 +623,7 @@ fn compiler_emits_generator_yield_suspend_points() {
         );
     }
     let disassembly = tachyon_bytecode::disassemble(function).unwrap();
+    assert_eq!(disassembly.matches("InitialYield").count(), 1);
     assert!(disassembly.contains("Yield"));
 
     let delegated = Compiler
@@ -651,6 +652,13 @@ fn compiler_emits_generator_yield_suspend_points() {
         tachyon_bytecode::disassemble(function)
             .unwrap()
             .contains("YieldWithKind")
+    );
+    assert_eq!(
+        tachyon_bytecode::disassemble(function)
+            .unwrap()
+            .matches("InitialYield")
+            .count(),
+        1
     );
 }
 
@@ -685,6 +693,7 @@ fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
     );
     let function = &module.functions()[1];
     let disassembly = tachyon_bytecode::disassemble(function).expect("bytecode disassembles");
+    assert_eq!(disassembly.matches("InitialYield").count(), 1);
     assert_eq!(disassembly.matches("Await").count(), 2);
     assert!(disassembly.contains("YieldWithKind"));
     assert!(disassembly.contains("Throw"));

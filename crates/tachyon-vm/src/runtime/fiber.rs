@@ -1465,6 +1465,7 @@ pub(crate) enum NativeContinuationKind {
     SignalWatcherHook,
     SignalComputed,
     SignalUntrack,
+    GeneratorInitialize,
     GeneratorResume,
     AsyncFunction,
     AsyncAwaitConstructor,
@@ -1498,6 +1499,21 @@ pub(crate) struct NativeContinuation {
 }
 
 impl NativeContinuation {
+    /// Roots an unpublished generator while its parameter prologue runs synchronously.
+    #[inline]
+    pub(crate) const fn generator_initialize(
+        site: NativeContinuationSite,
+        generator: Value,
+        callee: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::GeneratorInitialize,
+            first: generator,
+            second: callee,
+        }
+    }
+
     /// Roots the complete GC-owned JSON operation across one observable boundary.
     #[inline]
     pub(crate) const fn json_stringify(

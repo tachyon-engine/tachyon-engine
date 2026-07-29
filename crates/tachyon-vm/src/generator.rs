@@ -7,17 +7,15 @@ use tachyon_value::Value;
 
 use crate::{
     AllocationSpace, ExecutionError, FunctionKind, Immediate, Isolate, NativeErrorKind, ShapeId,
-    bound_function::BoundFunctionData,
     object::OrdinaryObject,
     runtime::{
         callable::{CallSite, ResolvedCallTarget},
         code::CodeId,
         completion::{CompletionKind, CompletionRecord},
-        environment::Environment,
         fiber::{Fiber, NativeContinuation, NativeContinuationSite, VmRoots},
     },
 };
-use tachyon_bytecode::{FunctionId, WordOffset};
+use tachyon_bytecode::WordOffset;
 
 #[derive(Clone, Copy, Debug)]
 enum GeneratorResume {
@@ -89,37 +87,10 @@ pub(crate) enum GeneratorState {
     Completed,
 }
 
-/// Fixed-size roots retained only until the first bytecode frame is successfully published.
-#[derive(Clone, Copy, Debug)]
-struct GeneratorActivation {
-    environment: Option<GcRef<Environment>>,
-    this_value: Value,
-    callee: Value,
-    argument_prefix: GcRef<BoundFunctionData>,
-    argument_count: u32,
-}
-
-impl Trace for GeneratorActivation {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.environment.trace(tracer);
-        self.this_value.trace(tracer);
-        self.callee.trace(tracer);
-        self.argument_prefix.trace(tracer);
-    }
-}
-
-/// GC-managed generator instance with a one-shot retained activation.
-///
-/// The first vertical slice retains the initial activation inputs until `.next()` publishes the
-/// explicit bytecode frame. A later yield implementation will add a paused-fiber handle without
-/// changing the public state machine or replaying the function body.
+/// GC-managed generator instance owning its paused bytecode Fiber.
 #[derive(Debug)]
 pub(crate) struct GeneratorObject {
     pub(crate) ordinary: OrdinaryObject,
-    pub(crate) code: CodeId,
-    pub(crate) function: FunctionId,
-    activation: Option<GeneratorActivation>,
     caller: Option<Fiber>,
     paused: Option<Fiber>,
     resume_destination: Option<u32>,
@@ -132,19 +103,10 @@ pub(crate) struct GeneratorObject {
 }
 
 impl GeneratorObject {
-    /// Creates one suspended-start activation with fixed backing and no hidden capacity.
-    fn new(
-        ordinary: OrdinaryObject,
-        code: CodeId,
-        function: FunctionId,
-        activation: GeneratorActivation,
-        is_async: bool,
-    ) -> Self {
+    /// Creates one unpublished generator used while its parameter prologue runs.
+    fn new(ordinary: OrdinaryObject, is_async: bool) -> Self {
         Self {
             ordinary,
-            code,
-            function,
-            activation: Some(activation),
             caller: None,
             paused: None,
             resume_destination: None,
@@ -162,8 +124,6 @@ impl GeneratorObject {
     #[inline(always)]
     fn header(&self) -> GeneratorHeader {
         GeneratorHeader {
-            code: self.code,
-            function: self.function,
             state: self.state,
             is_async: self.is_async,
         }
@@ -174,7 +134,6 @@ impl Trace for GeneratorObject {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.ordinary.trace(tracer);
-        self.activation.trace(tracer);
         for request in &mut self.async_requests {
             request.trace(tracer);
         }
@@ -190,20 +149,26 @@ impl Trace for GeneratorObject {
 
 #[derive(Clone, Copy, Debug)]
 struct GeneratorHeader {
-    code: CodeId,
-    function: FunctionId,
     state: GeneratorState,
     is_async: bool,
 }
 
 impl Isolate {
-    /// Captures a generator call without entering its body or publishing a JavaScript frame.
-    pub(crate) fn create_generator_from_site(
+    /// Starts a generator synchronously so parameter initialization precedes object publication.
+    pub(crate) fn begin_generator_initialization(
         &mut self,
         site: &CallSite,
         target: ResolvedCallTarget,
-    ) -> Result<Value, ExecutionError> {
-        let prototype = self.ensure_function_prototype(site.callee)?;
+    ) -> Result<(), ExecutionError> {
+        let prototype = if target.kind == FunctionKind::AsyncGenerator {
+            self.realm
+                .async_generator_prototype
+                .expect("async generator intrinsics initialize before generator calls")
+        } else {
+            self.realm
+                .generator_prototype
+                .expect("generator intrinsics initialize before generator calls")
+        };
         let mut arguments = Vec::new();
         arguments
             .try_reserve_exact(site.argument_count as usize)
@@ -217,6 +182,11 @@ impl Isolate {
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
         let argument_prefix =
             self.create_apply_argument_prefix(site.callee, this_value, arguments)?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(argument_prefix.raw()),
+        )?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             finalization_jobs: &mut self.finalization_jobs,
@@ -225,7 +195,8 @@ impl Isolate {
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let generator = self
+            .heap
             .try_allocate_with_gc(
                 self.types.generator_object,
                 0,
@@ -237,27 +208,264 @@ impl Isolate {
                         storage: None,
                         prototype,
                     },
-                    target.code,
-                    target.function,
-                    GeneratorActivation {
-                        environment: target.environment,
-                        this_value,
-                        callee: site.callee,
-                        argument_prefix,
-                        argument_count: site.argument_count,
-                    },
                     target.kind == FunctionKind::AsyncGenerator,
                 ),
                 AllocationSpace::Young,
                 roots,
             )
-            .map(|generator| Value::from_heap_ref(generator.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        let generator_value = Value::from_heap_ref(generator.raw());
+        self.write(site.caller_base, site.destination, generator_value)?;
+        let continuation = NativeContinuation::generator_initialize(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            generator_value,
+            site.callee,
+        );
+        let caller = core::mem::take(&mut self.fiber);
+        if let Err(rollback) = self.set_generator_caller(generator, caller) {
+            self.fiber = rollback.fiber;
+            return Err(rollback.error);
+        }
+        self.fiber
+            .completions
+            .set_limit(self.stack_limits.max_completions);
+        let pushed = self
+            .fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)
+            .and_then(|()| {
+                self.set_generator_state(generator, GeneratorState::Executing)?;
+                self.push_call_frame(
+                    target,
+                    CallSite {
+                        caller_base: site.caller_base,
+                        destination: site.destination,
+                        callee: site.callee,
+                        argument_base: 0,
+                        argument_source: None,
+                        argument_prefix: Some(argument_prefix),
+                        argument_prefix_offset: 0,
+                        argument_prefix_count: site.argument_count,
+                        argument_count: site.argument_count,
+                        this_value,
+                        new_target: Value::from_immediate(Immediate::Undefined),
+                        construct_receiver: None,
+                        call_site: site.call_site,
+                    },
+                )
+            });
+        if let Err(error) = pushed {
+            let _ = self.fiber.completions.pop_native();
+            self.set_generator_state(generator, GeneratorState::Completed)?;
+            self.restore_generator_caller_fiber(generator)?;
+            return Err(error);
+        }
+        self.fiber
+            .frames
+            .last_mut()
+            .expect("generator initialization publishes one bytecode frame")
+            .return_continuation = true;
+        Ok(())
     }
 
     /// Starts a suspended generator on the existing iterative frame machine.
     pub(crate) fn begin_generator_next(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
         self.begin_generator_next_kind(site, false, None)
+    }
+
+    /// Publishes a generator only after its parameter and declaration prologue has completed.
+    pub(crate) fn suspend_generator_initialization(&mut self) -> Result<(), ExecutionError> {
+        let frame = self
+            .fiber
+            .frames
+            .last()
+            .copied()
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let continuation_index = frame
+            .completion_base
+            .checked_sub(1)
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
+            as usize;
+        let continuation = self
+            .fiber
+            .completions
+            .native_at(continuation_index)
+            .filter(|continuation| {
+                continuation.kind()
+                    == crate::runtime::fiber::NativeContinuationKind::GeneratorInitialize
+            })
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let generator = self.generator_reference(continuation.first())?;
+        let function_prototype = self.ensure_function_prototype(continuation.second())?;
+        let prototype = if self.is_object_value(function_prototype) {
+            function_prototype
+        } else if self.generator_header(generator)?.is_async {
+            self.realm
+                .async_generator_prototype
+                .expect("async generator intrinsics initialize before generator calls")
+        } else {
+            self.realm
+                .generator_prototype
+                .expect("generator intrinsics initialize before generator calls")
+        };
+        self.set_generator_prototype(generator, prototype)?;
+        let continuation = self
+            .fiber
+            .completions
+            .native_at(continuation_index)
+            .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+        let generator = self.generator_reference(continuation.first())?;
+        let paused = core::mem::take(&mut self.fiber);
+        let mut paused = Some(paused);
+        let caller = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.state != GeneratorState::Executing
+                    || generator.paused.is_some()
+                    || generator.resume_destination.is_some()
+                    || generator.resume_instruction.is_some()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.paused = paused.take();
+                generator.state = GeneratorState::SuspendedStart;
+                generator
+                    .caller
+                    .take()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
+            })
+        });
+        let caller = match caller {
+            Ok(caller) => caller,
+            Err(error) => {
+                self.fiber = paused.expect("failed initialization pause retains Fiber ownership");
+                return Err(error);
+            }
+        };
+        self.fiber = caller;
+        self.write(
+            continuation.site().caller_base,
+            continuation.site().destination,
+            continuation.first(),
+        )
+    }
+
+    /// Restores the already-initialized Fiber; the first next argument is intentionally ignored.
+    fn resume_initialized_generator(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let header = self.generator_header(generator)?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let continuation = if header.is_async {
+            let request = self.active_async_generator_request(generator)?;
+            NativeContinuation::async_generator_resume(
+                continuation_site,
+                site.this_value,
+                request.promise,
+            )
+        } else {
+            NativeContinuation::generator_resume(continuation_site, site.this_value)
+        };
+        let caller = core::mem::take(&mut self.fiber);
+        let mut caller = Some(caller);
+        let resumed = self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let generator = no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if generator.state != GeneratorState::SuspendedStart
+                    || generator.caller.is_some()
+                    || generator.resume_destination.is_some()
+                    || generator.resume_instruction.is_some()
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                let paused = generator
+                    .paused
+                    .as_mut()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let frame = paused
+                    .frames
+                    .last()
+                    .copied()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
+                let continuation_index = frame
+                    .completion_base
+                    .checked_sub(1)
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?
+                    as usize;
+                if !paused
+                    .completions
+                    .replace_native(continuation_index, continuation)
+                {
+                    return Err(ExecutionError::UnsupportedGeneratorYieldResume);
+                }
+                generator.caller = caller.take();
+                generator.state = GeneratorState::Executing;
+                generator
+                    .paused
+                    .take()
+                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
+            })
+        });
+        match resumed {
+            Ok(resumed) => {
+                self.fiber = resumed;
+                Ok(())
+            }
+            Err(error) => {
+                self.fiber = caller.expect("failed initialized resume retains caller Fiber");
+                Err(error)
+            }
+        }
+    }
+
+    /// Restores the synchronous caller when parameter initialization throws.
+    pub(crate) fn finish_generator_initialization_throw(
+        &mut self,
+        continuation: NativeContinuation,
+    ) -> Result<(), ExecutionError> {
+        let generator = self.generator_reference(continuation.first())?;
+        self.set_generator_state(generator, GeneratorState::Completed)?;
+        self.restore_generator_caller_fiber(generator)
+    }
+
+    /// Replaces the unpublished generator's prototype and records the managed edge.
+    fn set_generator_prototype(
+        &mut self,
+        generator: GcRef<GeneratorObject>,
+        prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(generator, self.types.generator_object)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .ordinary
+                    .prototype = prototype;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(generator, prototype)
+                .map(|_| ())
+                .map_err(ExecutionError::HeapReference)
+        })
     }
 
     /// Enqueues one async-generator next request and returns its Promise before body execution.
@@ -506,98 +714,16 @@ impl Isolate {
             GeneratorState::Completed => {
                 let result =
                     self.create_iterator_result(Value::from_immediate(Immediate::Undefined), true)?;
-                return self.write(site.caller_base, site.destination, result);
+                self.write(site.caller_base, site.destination, result)
             }
             GeneratorState::Executing | GeneratorState::AwaitingReturn => {
-                return Err(ExecutionError::GeneratorExecuting);
+                Err(ExecutionError::GeneratorExecuting)
             }
             GeneratorState::SuspendedYield => {
-                return self.resume_generator_yield(generator, site, resume_value);
+                self.resume_generator_yield(generator, site, resume_value)
             }
-            GeneratorState::SuspendedStart => {}
+            GeneratorState::SuspendedStart => self.resume_initialized_generator(generator, site),
         }
-        let activation = self.generator_activation(generator)?;
-        let (layout, strictness) = {
-            let function = self
-                .loaded_code(header.code)?
-                .module
-                .function(header.function)
-                .ok_or(ExecutionError::MissingEntryFunction(header.function))?;
-            (function.layout(), function.strictness())
-        };
-        let continuation_site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site.destination,
-            call_site: site.call_site,
-        };
-        let continuation = if header.is_async {
-            let request = self.active_async_generator_request(generator)?;
-            NativeContinuation::async_generator_resume(
-                continuation_site,
-                site.this_value,
-                request.promise,
-            )
-        } else {
-            NativeContinuation::generator_resume(continuation_site, site.this_value)
-        };
-        let caller_fiber = core::mem::take(&mut self.fiber);
-        if let Err(rollback) = self.set_generator_caller(generator, caller_fiber) {
-            self.fiber = rollback.fiber;
-            return Err(rollback.error);
-        }
-        self.fiber
-            .completions
-            .set_limit(self.stack_limits.max_completions);
-        let pushed = self
-            .fiber
-            .completions
-            .push_native(continuation)
-            .map_err(Self::completion_stack_error)
-            .and_then(|()| {
-                self.set_generator_state(generator, GeneratorState::Executing)?;
-                self.push_call_frame(
-                    ResolvedCallTarget {
-                        code: header.code,
-                        function: header.function,
-                        environment: activation.environment,
-                        kind: if header.is_async {
-                            FunctionKind::AsyncGenerator
-                        } else {
-                            FunctionKind::Generator
-                        },
-                        layout,
-                        strictness,
-                    },
-                    CallSite {
-                        caller_base: site.caller_base,
-                        destination: site.destination,
-                        callee: activation.callee,
-                        argument_base: 0,
-                        argument_source: None,
-                        argument_prefix: Some(activation.argument_prefix),
-                        argument_prefix_offset: 0,
-                        argument_prefix_count: activation.argument_count,
-                        argument_count: activation.argument_count,
-                        this_value: activation.this_value,
-                        new_target: Value::from_immediate(Immediate::Undefined),
-                        construct_receiver: None,
-                        call_site: site.call_site,
-                    },
-                )
-            });
-        if let Err(error) = pushed {
-            let _ = self.fiber.completions.pop_native();
-            self.set_generator_state(generator, GeneratorState::SuspendedStart)?;
-            self.restore_generator_caller_fiber(generator)?;
-            return Err(error);
-        }
-        self.clear_generator_activation(generator)?;
-        self.fiber
-            .frames
-            .last_mut()
-            .expect("generator resume publishes one bytecode frame")
-            .return_continuation = true;
-        Ok(())
     }
 
     /// Injects a Return completion into a suspended generator or completes an inactive one.
@@ -724,23 +850,6 @@ impl Isolate {
                     .borrow(generator, self.types.generator_object)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 Ok(generator.header())
-            })
-        })
-    }
-
-    /// Copies the fixed activation header only for a verified suspended-start generator.
-    fn generator_activation(
-        &mut self,
-        generator: GcRef<GeneratorObject>,
-    ) -> Result<GeneratorActivation, ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(generator, self.types.generator_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .activation
-                    .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)
             })
         })
     }
@@ -891,13 +1000,10 @@ impl Isolate {
                 let generator = no_gc
                     .borrow_mut(generator, self.types.generator_object)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                if generator.state != GeneratorState::SuspendedStart
-                    || generator.caller.is_some()
-                    || generator.paused.is_some()
-                {
+                if generator.state != GeneratorState::SuspendedStart || generator.caller.is_some() {
                     return Err(ExecutionError::UnsupportedGeneratorYieldResume);
                 }
-                generator.activation = None;
+                generator.paused = None;
                 generator.state = GeneratorState::Completed;
                 Ok(())
             })
@@ -1555,24 +1661,7 @@ impl Isolate {
         self.restore_generator_caller_fiber(generator)
     }
 
-    /// Releases the creation-time roots after their ownership is visible through the frame.
-    fn clear_generator_activation(
-        &mut self,
-        generator: GcRef<GeneratorObject>,
-    ) -> Result<(), ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let generator = scope.root(generator).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(generator, self.types.generator_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .activation = None;
-                Ok(())
-            })
-        })
-    }
-
-    /// Reports the exact immutable argument backing retained by a generator in VM tests.
+    /// Reports the exact immutable argument backing retained by a paused generator in VM tests.
     #[cfg(test)]
     pub(crate) fn generator_retained_argument_capacity(
         &mut self,
@@ -1586,8 +1675,9 @@ impl Isolate {
                     .borrow(generator, self.types.generator_object)
                     .map_err(ExecutionError::NoGcBorrow)?;
                 Ok(generator
-                    .activation
-                    .map(|activation| activation.argument_prefix))
+                    .paused
+                    .as_ref()
+                    .and_then(|fiber| fiber.frames.last().and_then(|frame| frame.argument_prefix)))
             })
         })?;
         let Some(argument_prefix) = argument_prefix else {

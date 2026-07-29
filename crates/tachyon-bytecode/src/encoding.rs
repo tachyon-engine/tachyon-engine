@@ -313,9 +313,11 @@ pub enum Opcode {
     LoadAsyncIteratorSymbol = 133,
     /// Wraps one synchronous iterator record in the realm's Async-from-Sync exotic object.
     CreateAsyncFromSyncIterator = 134,
+    /// Suspends after generator declaration instantiation without producing a resume value.
+    InitialYield = 135,
 }
 
-pub(super) const OPCODE_COUNT: usize = 135;
+pub(super) const OPCODE_COUNT: usize = 136;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -452,10 +454,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DirectEvalSpread
     1, // LoadAsyncIteratorSymbol
     3, // CreateAsyncFromSyncIterator
+    0, // InitialYield
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::CreateAsyncFromSyncIterator as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::InitialYield as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -636,6 +639,7 @@ impl Opcode {
             68 => Some(Self::DirectEvalSpread),
             69 => Some(Self::LoadAsyncIteratorSymbol),
             70 => Some(Self::CreateAsyncFromSyncIterator),
+            71 => Some(Self::InitialYield),
             _ => None,
         }
     }

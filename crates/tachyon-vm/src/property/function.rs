@@ -389,10 +389,7 @@ impl Isolate {
             .kind();
         Ok(matches!(
             kind,
-            FunctionKind::DerivedClassConstructor
-                | FunctionKind::BaseClassConstructor
-                | FunctionKind::Generator
-                | FunctionKind::AsyncGenerator
+            FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
         ))
     }
 
@@ -522,15 +519,6 @@ impl Isolate {
         let function = roots.function;
         self.set_function_prototype(function, Value::from_heap_ref(prototype.raw()))?;
         Ok(Value::from_heap_ref(prototype.raw()))
-    }
-
-    /// Identifies generator bytecode without enlarging the hot function payload.
-    pub(crate) fn is_generator_function(
-        &mut self,
-        function: Value,
-    ) -> Result<bool, ExecutionError> {
-        self.generator_function_kind(function)
-            .map(|kind| kind == Some(FunctionKind::Generator))
     }
 
     /// Returns the immutable generator flavor without widening every function object.
