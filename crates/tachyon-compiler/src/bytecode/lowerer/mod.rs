@@ -971,11 +971,14 @@ impl Lowerer<'_> {
         span: SourceSpan,
     ) -> Result<(), CompileError> {
         match binding.storage {
-            LocalStorage::Environment { depth, slot } => self.emit(
-                Opcode::InitializeEnvironment,
-                &[value.index(), depth, slot],
-                span,
-            ),
+            LocalStorage::Environment { slot, .. } => {
+                let depth = self.environment_access_depth(binding)?;
+                self.emit(
+                    Opcode::InitializeEnvironment,
+                    &[value.index(), depth, slot],
+                    span,
+                )
+            }
             LocalStorage::Register(register) => {
                 self.emit(Opcode::Move, &[register.index(), value.index()], span)
             }
@@ -1262,7 +1265,8 @@ impl Lowerer<'_> {
     ) -> Result<RegisterId, CompileError> {
         match binding.storage {
             LocalStorage::Register(register) => Ok(register),
-            LocalStorage::Environment { depth, slot } => {
+            LocalStorage::Environment { slot, .. } => {
+                let depth = self.environment_access_depth(binding)?;
                 let destination = self.register()?;
                 self.emit(
                     Opcode::LoadEnvironment,
@@ -1303,12 +1307,27 @@ impl Lowerer<'_> {
             LocalStorage::Register(register) => {
                 self.emit(Opcode::Move, &[register.index(), value.index()], span)
             }
-            LocalStorage::Environment { depth, slot } => self.emit(
+            LocalStorage::Environment { slot, .. } => self.emit(
                 Opcode::StoreEnvironment,
-                &[value.index(), depth, slot],
+                &[value.index(), self.environment_access_depth(binding)?, slot],
                 span,
             ),
         }
+    }
+
+    /// Resolves a stable binding identity against the lexical environment active at this use.
+    fn environment_access_depth(&self, binding: &LocalBinding) -> Result<u32, CompileError> {
+        let LocalStorage::Environment { slot, .. } = binding.storage else {
+            return Err(CompileError::BindingOverflow);
+        };
+        let (depth, resolved_slot, _) = self
+            .environments
+            .reference_slot(self.active_scope, binding.id)
+            .ok_or(CompileError::BindingOverflow)?;
+        if resolved_slot.slot != slot {
+            return Err(CompileError::BindingOverflow);
+        }
+        Ok(depth)
     }
 
     /// Publishes one local binding and initializes promoted parameters through verified bytecode.

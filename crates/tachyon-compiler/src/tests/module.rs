@@ -205,6 +205,40 @@ fn anonymous_default_expression_infers_arrow_and_class_names() {
 }
 
 #[test]
+/// Rebases module cells across a named class environment surrounding suspended heritage code.
+fn module_binding_depth_accounts_for_class_heritage_environment() {
+    let module = compile_module(
+        "function fn() { return function() {}; } export class C extends fn(await 1) {}",
+    );
+    let entry = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(entry.contains("EnterClassEnvironment slots=1"));
+    assert!(entry.contains("LoadEnvironment r"));
+    assert!(entry.contains("depth=1, slot=1"));
+    assert!(entry.contains("Await"));
+}
+
+#[test]
+/// Resolves one module cell from both sides of a temporary named-class environment.
+fn module_binding_depth_is_not_cached_from_first_nested_use() {
+    let module =
+        compile_module("let value = 1; export default class C extends (value, Object) {} ; value;");
+    let entry = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(entry.contains("EnterClassEnvironment slots=1"));
+    assert!(entry.contains("depth=1, slot=1"));
+    assert!(entry.contains("depth=0, slot=1"));
+}
+
+#[test]
 /// Prevents static module semantics from being attached to an ordinary script entry.
 fn script_cannot_carry_a_module_stencil() {
     let script = Compiler

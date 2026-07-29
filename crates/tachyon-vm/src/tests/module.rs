@@ -1075,6 +1075,40 @@ fn importer_of_async_cycle_leaf_waits_for_cycle_root_completion() {
     assert_async_cycle_leaf_import_batch::<16>(true);
 }
 
+/// Executes suspended class heritage while retaining access to the outer module environment.
+fn assert_tla_class_heritage_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_500 + N as u32,
+        "memory:tla-class-heritage",
+        "function fn() { return function() {}; } \
+         export class C extends fn(await 1) {} C.name === 'C';",
+    ));
+    let mut loader =
+        PrecompiledGraphLoader::new(vec![(specifier("memory:tla-class-heritage"), module)]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tla-class-heritage"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::True))
+    );
+}
+
+#[test]
+fn top_level_await_class_heritage_rebases_module_bindings() {
+    assert_tla_class_heritage_batch::<1>(false);
+    assert_tla_class_heritage_batch::<2>(false);
+    assert_tla_class_heritage_batch::<4>(false);
+    assert_tla_class_heritage_batch::<8>(true);
+    assert_tla_class_heritage_batch::<16>(true);
+}
+
 #[test]
 fn top_level_await_rejection_propagates_through_shared_async_parents() {
     let mut isolate = fixtures::test_isolate();
