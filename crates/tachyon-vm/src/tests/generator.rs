@@ -294,6 +294,57 @@ yieldOk && completedOk && callerRegisterOk && callerReturnOk && startOk && suspe
     blockedTrace === "release|first:4:false|second:9:true|";
 "#;
 
+const ASYNC_GENERATOR_RETURN_TIMING_SOURCE: &str = r#"
+var actual = [];
+async function* g1() {}
+async function* g2() { return; }
+async function* g3() { return undefined; }
+async function* g4() { return void 0; }
+Promise.resolve(0)
+    .then(function() { actual.push("tick 1"); })
+    .then(function() { actual.push("tick 2"); });
+g1().next().then(function() { actual.push("g1 ret"); });
+g2().next().then(function() { actual.push("g2 ret"); });
+g3().next().then(function() { actual.push("g3 ret"); });
+g4().next().then(function() { actual.push("g4 ret"); });
+"#;
+
+const ASYNC_GENERATOR_YIELD_RETURN_TIMING_SOURCE: &str = r#"
+var actual = [];
+async function* values() {
+    actual.push("start");
+    yield 123;
+}
+Promise.resolve(0)
+    .then(function() { actual.push("tick 1"); })
+    .then(function() { actual.push("tick 2"); });
+var iterator = values();
+iterator.next();
+iterator.return({ get then() { actual.push("get then"); } });
+"#;
+
+const ASYNC_GENERATOR_DELEGATE_RETURN_TIMING_SOURCE: &str = r#"
+var actual = [];
+var asyncIterator = {
+    next: function() { return { done: false }; },
+    get return() { actual.push("get return"); }
+};
+asyncIterator[Symbol.asyncIterator] = function() { return this; };
+async function* values() {
+    actual.push("start");
+    yield* asyncIterator;
+}
+Promise.resolve(0)
+    .then(function() { actual.push("tick 1"); })
+    .then(function() { actual.push("tick 2"); })
+    .then(function() { actual.push("tick 3"); });
+var iterator = values();
+iterator.next();
+iterator.return({ get then() { actual.push("get then"); } });
+"#;
+
+const ASYNC_GENERATOR_TIMING_ASSERTION: &str = "actual.join('|');";
+
 const ASYNC_ITERATOR_INTRINSIC_SOURCE: &str = r#"
 var ag = (async function* () {})();
 var agPrototype = Object.getPrototypeOf(ag);
@@ -792,6 +843,20 @@ fn async_generator_await_survives_forced_major_collection() {
 }
 
 #[test]
+fn async_generator_microtask_order_runs_for_every_dispatch_batch() {
+    assert_async_generator_timing::<1>(false);
+    assert_async_generator_timing::<2>(false);
+    assert_async_generator_timing::<4>(false);
+    assert_async_generator_timing::<8>(false);
+    assert_async_generator_timing::<16>(false);
+}
+
+#[test]
+fn async_generator_microtask_order_survives_forced_major_collection() {
+    assert_async_generator_timing::<8>(true);
+}
+
+#[test]
 fn async_iterator_intrinsic_chain_is_published() {
     let module = Compiler
         .compile(
@@ -1124,9 +1189,99 @@ fn assert_async_generator_queue<const N: usize>(forced_major: bool) {
         .expect("async generator trace is a string");
     assert_eq!(
         String::from_utf16(&trace).expect("trace is valid UTF-16"),
-        "start|throw:11|resume:7|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
+        "start|resume:7|throw:11|first:1:false|return-first:3:false|queued:2:true|return:8:true|meta:true:true:false|",
         "async generator batch {N}, forced_major={forced_major}"
     );
+}
+
+/// Runs the three observable async-generator ordering traces under one dispatch policy.
+fn assert_async_generator_timing<const N: usize>(forced_major: bool) {
+    let cases = [
+        (
+            ASYNC_GENERATOR_RETURN_TIMING_SOURCE,
+            "tick 1|g1 ret|g2 ret|tick 2|g3 ret|g4 ret",
+            3_300,
+        ),
+        (
+            ASYNC_GENERATOR_YIELD_RETURN_TIMING_SOURCE,
+            "start|tick 1|get then|tick 2",
+            3_400,
+        ),
+        (
+            ASYNC_GENERATOR_DELEGATE_RETURN_TIMING_SOURCE,
+            "start|tick 1|get then|tick 2|get return|get then|tick 3",
+            3_500,
+        ),
+    ];
+    for (source, expected, source_id) in cases {
+        let actual = async_generator_timing_trace::<N>(source, source_id, forced_major);
+        assert_eq!(
+            actual, expected,
+            "async generator timing batch {N}, forced_major={forced_major}"
+        );
+    }
+}
+
+/// Executes setup through its Promise checkpoint, then reads the stable global trace.
+fn async_generator_timing_trace<const N: usize>(
+    source: &str,
+    source_id: u32,
+    forced_major: bool,
+) -> String {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id + N as u32),
+                SourceName::new("async-generator-timing"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator timing fixture compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id + 100 + N as u32),
+                SourceName::new("async-generator-timing-assertion"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_GENERATOR_TIMING_ASSERTION),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async generator timing assertion compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 200_000,
+                quantum: 200_000,
+            },
+        )
+        .expect("async generator timing fixture executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("async generator timing assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("async generator timing assertion did not complete: {outcome:?}");
+    };
+    let trace = isolate
+        .string_value_to_utf16(value)
+        .expect("async generator timing trace is a string");
+    String::from_utf16(&trace).expect("async generator timing trace is valid UTF-16")
 }
 
 /// Runs async delegated iteration through queued resumes, Promise assimilation, and abrupt close.

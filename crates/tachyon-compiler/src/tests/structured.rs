@@ -694,11 +694,11 @@ fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
     let function = &module.functions()[1];
     let disassembly = tachyon_bytecode::disassemble(function).expect("bytecode disassembles");
     assert_eq!(disassembly.matches("InitialYield").count(), 1);
-    assert_eq!(disassembly.matches("Await").count(), 2);
+    assert_eq!(disassembly.matches("Await").count(), 3);
     assert!(disassembly.contains("YieldWithKind"));
     assert!(disassembly.contains("Throw"));
     assert!(disassembly.contains("Return"));
-    assert_eq!(function.suspend_points().len(), 3);
+    assert_eq!(function.suspend_points().len(), 4);
 }
 
 #[test]

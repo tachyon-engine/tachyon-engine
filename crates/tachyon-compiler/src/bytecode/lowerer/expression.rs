@@ -166,12 +166,26 @@ impl Lowerer<'_> {
         self.emit_jump(process_result, span)?;
 
         self.bind_label(returning)?;
+        let received_return = if self.is_async_generator {
+            let awaited = self.register()?;
+            self.emit_suspend(Opcode::Await, received_value, awaited, span)?;
+            awaited
+        } else {
+            received_value
+        };
         self.load_delegate_method(iterator.iterator, "return", call_method, span)?;
         self.jump_if_not_nullish(call_method, have_return, span)?;
-        self.emit(Opcode::Return, &[received_value.index()], span)?;
+        let returned = if self.is_async_generator {
+            let awaited = self.register()?;
+            self.emit_suspend(Opcode::Await, received_return, awaited, span)?;
+            awaited
+        } else {
+            received_return
+        };
+        self.emit(Opcode::Return, &[returned.index()], span)?;
 
         self.bind_label(have_return)?;
-        self.prepare_delegate_argument(received_value, call_receiver, span)?;
+        self.prepare_delegate_argument(received_return, call_receiver, span)?;
         self.call_delegate(inner_result, call_receiver, 1, span)?;
         self.await_delegate_result(inner_result, span)?;
 

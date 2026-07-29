@@ -150,12 +150,6 @@ pub(crate) enum PromiseJob {
         thenable: Value,
         then: Value,
     },
-    AsyncGeneratorSettlement {
-        generator: Value,
-        promise: Value,
-        result: Value,
-        rejected: bool,
-    },
 }
 
 impl Trace for PromiseJob {
@@ -180,16 +174,6 @@ impl Trace for PromiseJob {
                 promise.trace(tracer);
                 thenable.trace(tracer);
                 then.trace(tracer);
-            }
-            Self::AsyncGeneratorSettlement {
-                generator,
-                promise,
-                result,
-                ..
-            } => {
-                generator.trace(tracer);
-                promise.trace(tracer);
-                result.trace(tracer);
             }
         }
     }

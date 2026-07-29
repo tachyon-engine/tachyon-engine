@@ -297,6 +297,13 @@ impl Lowerer<'_> {
                         self.tail_expression(argument)?;
                     } else {
                         let value = self.expression(argument)?;
+                        let value = if self.is_async_generator {
+                            let awaited = self.register()?;
+                            self.emit_suspend(Opcode::Await, value, awaited, statement.span)?;
+                            awaited
+                        } else {
+                            value
+                        };
                         self.emit(Opcode::Return, &[value.index()], statement.span)?;
                     }
                 } else {

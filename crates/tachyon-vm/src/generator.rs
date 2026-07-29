@@ -803,7 +803,7 @@ impl Isolate {
         let result = self.create_iterator_result(value, true)?;
         if continuation.second().as_immediate() != Some(Immediate::Undefined) {
             let generator = self.generator_reference(continuation.first())?;
-            return self.schedule_async_generator_settlement(generator, result, false);
+            return self.settle_and_resume_async_generator_request(generator, result, false);
         }
         let site = continuation.site();
         self.write(site.caller_base, site.destination, result)
@@ -822,7 +822,7 @@ impl Isolate {
             return Ok(false);
         }
         let generator = self.generator_reference(continuation.first())?;
-        self.schedule_async_generator_settlement(generator, reason, true)?;
+        self.settle_and_resume_async_generator_request(generator, reason, true)?;
         Ok(true)
     }
 
@@ -925,52 +925,18 @@ impl Isolate {
         )
     }
 
-    /// Defers iterator-result settlement so all same-job requests enter the generator FIFO first.
-    fn schedule_async_generator_settlement(
+    /// Resolves the active request in the current job and immediately consumes the FIFO head.
+    fn settle_and_resume_async_generator_request(
         &mut self,
         generator: GcRef<GeneratorObject>,
         result: Value,
         rejected: bool,
     ) -> Result<(), ExecutionError> {
-        let request = self.active_async_generator_request(generator)?;
-        self.promise_jobs
-            .push(crate::promise_state::PromiseJob::AsyncGeneratorSettlement {
-                generator: Value::from_heap_ref(generator.raw()),
-                promise: request.promise,
-                result,
-                rejected,
-            });
-        Ok(())
-    }
-
-    /// Settles one queued job, removes its request, then starts the next request if present.
-    pub(crate) fn finish_async_generator_settlement(
-        &mut self,
-        generator_value: Value,
-        promise: Value,
-        result: Value,
-        rejected: bool,
-        checkpoint_site: WordOffset,
-    ) -> Result<bool, ExecutionError> {
-        let generator = self.generator_reference(generator_value)?;
-        let active = self.active_async_generator_request(generator)?;
-        if active.promise != promise {
-            return Err(ExecutionError::UnsupportedGeneratorYieldResume);
-        }
         self.settle_active_async_generator_request(generator, result, rejected)?;
-        self.promise_jobs.finish_active();
-        if !self.has_queued_async_generator_request(generator)? {
-            return Ok(false);
+        if self.has_queued_async_generator_request(generator)? {
+            self.resume_next_async_generator_request(Value::from_heap_ref(generator.raw()))?;
         }
-        // A top-level Return may fall through to bytecode-end. Resume its caller at the Return
-        // instruction so the idempotent Promise checkpoint continues after generator suspension.
-        self.fiber
-            .frames
-            .last_mut()
-            .ok_or(ExecutionError::MissingEnvironment)?
-            .pc = checkpoint_site;
-        self.resume_next_async_generator_request(generator_value)?;
-        Ok(true)
+        Ok(())
     }
 
     /// Reports whether a settled async generator has another FIFO request to consume.
@@ -1387,7 +1353,7 @@ impl Isolate {
         };
         self.fiber = caller;
         if let Some(result) = async_result {
-            return self.schedule_async_generator_settlement(generator, result, false);
+            return self.settle_and_resume_async_generator_request(generator, result, false);
         }
         let result = if site.kind_destination.is_some() {
             value

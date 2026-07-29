@@ -1520,22 +1520,6 @@ impl Isolate {
                         return Ok(None);
                     }
                 }
-                PromiseJob::AsyncGeneratorSettlement {
-                    generator,
-                    promise,
-                    result,
-                    rejected,
-                } => {
-                    if self.finish_async_generator_settlement(
-                        generator,
-                        promise,
-                        result,
-                        rejected,
-                        return_site,
-                    )? {
-                        return Ok(None);
-                    }
-                }
             }
         }
     }
