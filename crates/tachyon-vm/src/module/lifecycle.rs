@@ -294,8 +294,22 @@ impl Isolate {
     }
 
     /// Reads a linked local/imported binding while preserving TDZ errors.
-    pub fn read_module_binding(&self, module: ModuleId, name: &str) -> Result<Value, ModuleError> {
-        self.module_graph.read_binding(module, name)
+    pub fn read_module_binding(
+        &mut self,
+        module: ModuleId,
+        name: &str,
+    ) -> Result<Value, ExecutionError> {
+        match self
+            .module_graph
+            .binding_target(module, name)
+            .map_err(ExecutionError::Module)?
+        {
+            ModuleBindingTarget::Cell(cell) => self
+                .module_graph
+                .read_namespace_cell(cell)
+                .map_err(ExecutionError::Module),
+            ModuleBindingTarget::Namespace(module) => self.get_module_namespace(module),
+        }
     }
 
     /// Resolves and loads a complete graph through host callbacks, then links it transactionally.

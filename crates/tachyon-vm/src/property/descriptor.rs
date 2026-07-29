@@ -192,6 +192,14 @@ impl Isolate {
         key: PropertyKey,
         descriptor: PropertyDescriptor,
     ) -> Result<(), ExecutionError> {
+        if self.is_module_namespace_value(receiver)
+            && self.module_namespace_has_export(receiver, key)?
+        {
+            if self.define_module_namespace_property(receiver, key, descriptor)? {
+                return Ok(());
+            }
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
         if self.is_typed_array_value(receiver) {
             match self.typed_array_index(key)? {
                 crate::builtins::typed_array::TypedArrayIndex::NonNumeric => {}
@@ -850,7 +858,12 @@ impl Isolate {
                 },
             )));
         }
-        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let (object, snapshot) = self.object_snapshot(receiver)?;
+        if matches!(object, ObjectReceiver::ModuleNamespace(_))
+            && let Some(descriptor) = self.module_namespace_property_descriptor(receiver, key)?
+        {
+            return Ok(Some(descriptor));
+        }
         let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
             if let Some(value) = self.function_metadata_property(receiver, key)? {
                 return Ok(Some(PropertyDescriptor::Data(DataPropertyDescriptor {

@@ -33,6 +33,12 @@ enum ResolveOutcome {
     Ambiguous,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct NamespaceResolution {
+    pub(super) name: ModuleExportName,
+    pub(super) binding: ResolvedBinding,
+}
+
 /// Deterministic SCC completion order for diagnostics and later instantiation scheduling.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct LinkReport {
@@ -381,6 +387,79 @@ impl ModuleGraph {
                 }
             }
         }
+    }
+
+    /// Collects star-reachable names and freezes each unambiguous resolution for one namespace.
+    pub(super) fn namespace_resolutions(
+        &self,
+        root: ModuleId,
+    ) -> Result<Vec<NamespaceResolution>, ModuleError> {
+        if !matches!(self.record(root)?.status, ModuleStatus::Linked { .. }) {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        let max_modules = self.records.len().max(1);
+        let max_export_work = self
+            .records
+            .len()
+            .checked_add(self.edge_count)
+            .ok_or(ModuleError::CapacityOverflow {
+                collection: "module namespace resolution work",
+            })?
+            .max(1);
+        let mut pending = try_work_vec(max_modules, "module namespace traversal")?;
+        let mut visited = try_work_vec(max_modules, "module namespace visited set")?;
+        let mut names = try_work_vec(max_export_work, "module namespace export names")?;
+        pending.push((root, false));
+        while let Some((module, through_star)) = pending.pop() {
+            if visited.contains(&module) {
+                continue;
+            }
+            reserve_work_push(&mut visited, max_modules, "module namespace visited set")?;
+            visited.push(module);
+            for export in &self.record(module)?.exports {
+                match export {
+                    ExportEntry::Local { export_name, .. }
+                    | ExportEntry::Indirect { export_name, .. } => {
+                        if through_star && export_name.is_default() {
+                            continue;
+                        }
+                        if !names.contains(export_name) {
+                            reserve_work_push(
+                                &mut names,
+                                max_export_work,
+                                "module namespace export names",
+                            )?;
+                            names.push(export_name.clone());
+                        }
+                    }
+                    ExportEntry::Star { module_request } => {
+                        let target = self.module_by_specifier(module_request)?;
+                        if !visited.contains(&target) {
+                            reserve_work_push(
+                                &mut pending,
+                                max_modules,
+                                "module namespace traversal",
+                            )?;
+                            pending.push((target, true));
+                        }
+                    }
+                }
+            }
+        }
+        names.sort_unstable();
+        let mut visits = try_work_vec(max_export_work, "module namespace resolve visits")?;
+        let mut frames = try_work_vec(max_export_work, "module namespace resolve frames")?;
+        let mut resolutions = try_work_vec(names.len().max(1), "module namespace resolutions")?;
+        for name in names {
+            match self.resolve_export(root, &name, &mut visits, &mut frames, max_export_work)? {
+                ResolveOutcome::Found(binding) => {
+                    resolutions.push(NamespaceResolution { name, binding });
+                }
+                ResolveOutcome::Ambiguous => {}
+                ResolveOutcome::NotFound => return Err(ModuleError::MissingExport),
+            }
+        }
+        Ok(resolutions)
     }
 
     fn requested_module(

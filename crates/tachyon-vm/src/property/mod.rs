@@ -78,7 +78,12 @@ impl Isolate {
             if let Some(value) = self.dense_array_value(current, key)? {
                 return Ok(Some(value));
             }
-            let (_, snapshot) = self.object_snapshot(current)?;
+            let (object, snapshot) = self.object_snapshot(current)?;
+            if matches!(object, ObjectReceiver::ModuleNamespace(_))
+                && let Some(value) = self.module_namespace_property(current, key)?
+            {
+                return Ok(Some(value));
+            }
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 if let Some(value) = self.property_value_from_snapshot(snapshot, property)? {
                     return Ok(Some(value));
@@ -123,7 +128,18 @@ impl Isolate {
         if let Some(indexed) = self.typed_array_index_get(receiver, key)? {
             return Ok(indexed.map(|value| (value, PropertyAttributes::data(true, true, true))));
         }
-        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let (object, snapshot) = self.object_snapshot(receiver)?;
+        if matches!(object, ObjectReceiver::ModuleNamespace(_))
+            && let Some(descriptor) = self.module_namespace_property_descriptor(receiver, key)?
+            && let PropertyDescriptor::Data(descriptor) = descriptor
+        {
+            return Ok(Some((
+                descriptor
+                    .value
+                    .expect("complete namespace descriptor has a value"),
+                PropertyAttributes::data(true, true, false),
+            )));
+        }
         if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
             return Ok(self
                 .property_value_from_snapshot(snapshot, property)?

@@ -441,6 +441,7 @@ pub enum ExecutionError {
     LoadedModuleLimit { limit: u32 },
     RealmLimit { limit: u32 },
     LoadedCodeAllocationFailed,
+    Module(ModuleError),
     ScopeNameAllocationFailed,
     ScopeNameAtom(AtomTableError),
     ScopeNameString(StringAllocationError),

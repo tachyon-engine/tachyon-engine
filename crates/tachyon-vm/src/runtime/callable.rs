@@ -5,6 +5,7 @@ use crate::async_function::AsyncFunctionState;
 use crate::builtins::signals::PendingSignalWatcherOperation;
 use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::generator::GeneratorObject;
+use crate::module::ModuleNamespaceObject;
 use crate::object::{
     ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
 };
@@ -1979,6 +1980,7 @@ impl Trace for AccessorPair {
 #[derive(Clone, Copy)]
 pub(crate) enum ObjectReceiver {
     Ordinary(GcRef<OrdinaryObject>),
+    ModuleNamespace(GcRef<ModuleNamespaceObject>),
     ArrayBuffer(GcRef<ArrayBufferObject>),
     DataView(GcRef<DataViewObject>),
     TypedArray(GcRef<TypedArrayObject>),
@@ -2015,6 +2017,7 @@ impl ObjectReceiver {
     pub(crate) fn value(self) -> Value {
         match self {
             Self::Ordinary(object) => Value::from_heap_ref(object.raw()),
+            Self::ModuleNamespace(namespace) => Value::from_heap_ref(namespace.raw()),
             Self::ArrayBuffer(buffer) => Value::from_heap_ref(buffer.raw()),
             Self::DataView(view) => Value::from_heap_ref(view.raw()),
             Self::TypedArray(array) => Value::from_heap_ref(array.raw()),
@@ -2255,6 +2258,7 @@ pub(crate) struct VmTypes {
     pub(crate) string_object: GcType<StringObject>,
     pub(crate) symbol_object: GcType<SymbolObject>,
     pub(crate) ordinary_object: GcType<OrdinaryObject>,
+    pub(crate) module_namespace_object: GcType<ModuleNamespaceObject>,
     pub(crate) pending_property_descriptor: GcType<PendingPropertyDescriptor>,
     pub(crate) pending_define_properties: GcType<PendingDefineProperties>,
     pub(crate) pending_get_own_property_descriptors: GcType<PendingGetOwnPropertyDescriptors>,

@@ -826,6 +826,328 @@ fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
 }
 
 #[test]
+/// Materializes one namespace identity while preserving live cells and exotic mutations.
+fn module_namespace_materializes_live_exports_and_exotic_descriptors() {
+    let mut isolate = fixtures::test_isolate();
+    let exporter = isolate
+        .module_graph
+        .insert(record(
+            "memory:exporter",
+            &[],
+            vec![],
+            vec![local_export("value", "value")],
+            &["value"],
+        ))
+        .unwrap();
+    let consumer = isolate
+        .module_graph
+        .insert(record(
+            "memory:consumer",
+            &["memory:exporter"],
+            vec![namespace_import("memory:exporter", "namespace")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    isolate.module_graph.link(consumer).unwrap();
+    isolate
+        .write_module_binding(exporter, "value", Value::from_i32(1))
+        .unwrap();
+
+    let namespace = isolate.read_module_binding(consumer, "namespace").unwrap();
+    assert_eq!(
+        isolate.read_module_binding(consumer, "namespace").unwrap(),
+        namespace
+    );
+    let value = isolate.intern_intrinsic_name(b"value").unwrap();
+    assert_eq!(
+        isolate.get_data_property(namespace, value).unwrap(),
+        Some(Value::from_i32(1))
+    );
+    isolate
+        .write_module_binding(exporter, "value", Value::from_i32(2))
+        .unwrap();
+    assert_eq!(
+        isolate.get_data_property(namespace, value).unwrap(),
+        Some(Value::from_i32(2))
+    );
+
+    let descriptor = isolate
+        .complete_own_property_descriptor(namespace, value)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        descriptor,
+        PropertyDescriptor::Data(DataPropertyDescriptor {
+            value: Some(current),
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(false),
+        }) if current == Value::from_i32(2)
+    ));
+    assert!(matches!(
+        isolate.resolve_property_write(namespace, value.into(), Value::from_i32(3)),
+        Ok(PropertyWrite::Complete(false))
+    ));
+    assert!(!isolate.delete_own_data_property(namespace, value).unwrap());
+    isolate
+        .define_data_property(
+            namespace,
+            value,
+            DataPropertyDescriptor {
+                value: Some(Value::from_i32(2)),
+                ..DataPropertyDescriptor::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        isolate.define_data_property(
+            namespace,
+            value,
+            DataPropertyDescriptor {
+                value: Some(Value::from_i32(3)),
+                ..DataPropertyDescriptor::default()
+            },
+        ),
+        Err(ExecutionError::InvalidPropertyRedefinition(target)) if target == namespace
+    ));
+    let (_, ordinary) = isolate.object_snapshot(namespace).unwrap();
+    assert_eq!(ordinary.prototype.as_immediate(), Some(Immediate::Null));
+    assert!(!ordinary.extensible);
+    assert!(
+        isolate
+            .ordinary_set_prototype_of(namespace, Value::from_immediate(Immediate::Null))
+            .unwrap()
+    );
+    let replacement_prototype = isolate.create_ordinary_object().unwrap();
+    assert!(
+        !isolate
+            .ordinary_set_prototype_of(namespace, replacement_prototype)
+            .unwrap()
+    );
+    let tag = isolate.module_namespace_to_string_tag_key().unwrap();
+    assert!(matches!(
+        isolate
+            .complete_own_property_descriptor(namespace, tag)
+            .unwrap(),
+        Some(PropertyDescriptor::Data(DataPropertyDescriptor {
+            writable: Some(false),
+            enumerable: Some(false),
+            configurable: Some(true),
+            ..
+        }))
+    ));
+}
+
+#[test]
+/// Filters ambiguous stars and preserves UTF-16 lexical ordering in namespace own keys.
+fn module_namespace_own_keys_follow_exported_names_and_utf16_order() {
+    let mut isolate = fixtures::test_isolate();
+    let left = isolate
+        .module_graph
+        .insert(record(
+            "memory:left",
+            &[],
+            vec![],
+            vec![local_export("shared", "left")],
+            &["left"],
+        ))
+        .unwrap();
+    let right = isolate
+        .module_graph
+        .insert(record(
+            "memory:right",
+            &[],
+            vec![],
+            vec![local_export("shared", "right")],
+            &["right"],
+        ))
+        .unwrap();
+    let root = isolate
+        .module_graph
+        .insert(record(
+            "memory:root",
+            &["memory:left", "memory:right"],
+            vec![],
+            vec![
+                local_export("default", "default_value"),
+                local_export("z", "z"),
+                local_export_name(
+                    ModuleExportName::try_from_utf16(&[0xd800]).unwrap(),
+                    "surrogate",
+                ),
+                star_export("memory:left"),
+                star_export("memory:right"),
+            ],
+            &["default_value", "z", "surrogate"],
+        ))
+        .unwrap();
+    isolate.module_graph.link(root).unwrap();
+    isolate
+        .write_module_binding(left, "left", Value::from_i32(1))
+        .unwrap();
+    isolate
+        .write_module_binding(right, "right", Value::from_i32(2))
+        .unwrap();
+    for (name, value) in [
+        ("default_value", Value::from_i32(3)),
+        ("z", Value::from_i32(4)),
+        ("surrogate", Value::from_i32(5)),
+    ] {
+        isolate.write_module_binding(root, name, value).unwrap();
+    }
+
+    let namespace = isolate.get_module_namespace(root).unwrap();
+    let (_, snapshot) = isolate.object_snapshot(namespace).unwrap();
+    let keys = isolate
+        .ordinary_own_property_keys(namespace, snapshot)
+        .unwrap()
+        .collect::<Vec<_>>();
+    let default = isolate.intern_intrinsic_name(b"default").unwrap();
+    let z = isolate.intern_intrinsic_name(b"z").unwrap();
+    let surrogate = isolate
+        .atoms
+        .try_intern(JsString::try_from_utf16(&[0xd800]).unwrap())
+        .unwrap();
+    let tag = isolate.module_namespace_to_string_tag_key().unwrap();
+    assert_eq!(keys, vec![default.into(), z.into(), surrogate.into(), tag]);
+    let shared = isolate.intern_intrinsic_name(b"shared").unwrap();
+    assert_eq!(isolate.get_data_property(namespace, shared).unwrap(), None);
+    assert_eq!(
+        isolate.get_data_property(namespace, surrogate).unwrap(),
+        Some(Value::from_i32(5))
+    );
+}
+
+#[test]
+/// Keeps the cached namespace and its live exported object rooted through forced major GC.
+fn module_namespace_cache_and_live_values_survive_forced_major_collection() {
+    let mut isolate = fixtures::test_isolate();
+    let root = isolate
+        .module_graph
+        .insert(record(
+            "memory:root",
+            &[],
+            vec![],
+            vec![local_export("object", "object")],
+            &["object"],
+        ))
+        .unwrap();
+    isolate.module_graph.link(root).unwrap();
+    let object = isolate.create_ordinary_object().unwrap();
+    isolate
+        .write_module_binding(root, "object", object)
+        .unwrap();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let namespace = isolate.get_module_namespace(root).unwrap();
+    let object_key = isolate.intern_intrinsic_name(b"object").unwrap();
+    for _ in 0..8 {
+        isolate.create_ordinary_object().unwrap();
+    }
+    let cached = isolate.get_module_namespace(root).unwrap();
+    assert_eq!(cached, namespace);
+    let retained = isolate
+        .get_data_property(cached, object_key)
+        .unwrap()
+        .unwrap();
+    let raw = retained.as_heap_ref().unwrap();
+    assert!(
+        isolate
+            .heap
+            .checked_reference(raw, isolate.types.ordinary_object)
+            .is_ok()
+    );
+}
+
+#[test]
+fn module_namespace_property_read_runs_for_every_dispatch_batch() {
+    assert_module_namespace_dispatch_batch::<1>(2_301);
+    assert_module_namespace_dispatch_batch::<2>(2_302);
+    assert_module_namespace_dispatch_batch::<4>(2_304);
+    assert_module_namespace_dispatch_batch::<8>(2_308);
+    assert_module_namespace_dispatch_batch::<16>(2_316);
+}
+
+#[test]
+/// Exercises the tuned atom-index path used once namespace exports exceed the linear limit.
+fn module_namespace_large_export_table_uses_indexed_live_lookup() {
+    const NAMES: [&str; 10] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+    let mut isolate = fixtures::test_isolate();
+    let root = isolate
+        .module_graph
+        .insert(record(
+            "memory:root",
+            &[],
+            vec![],
+            NAMES.iter().map(|name| local_export(name, name)).collect(),
+            &NAMES,
+        ))
+        .unwrap();
+    isolate.module_graph.link(root).unwrap();
+    isolate
+        .write_module_binding(root, "j", Value::from_i32(10))
+        .unwrap();
+    let namespace = isolate.get_module_namespace(root).unwrap();
+    let key = isolate.intern_intrinsic_name(b"j").unwrap();
+    assert_eq!(
+        isolate.get_data_property(namespace, key).unwrap(),
+        Some(Value::from_i32(10))
+    );
+}
+
+/// Publishes a namespace into the global object and executes a real property-read opcode.
+fn assert_module_namespace_dispatch_batch<const N: usize>(source_id: u32) {
+    let mut isolate = fixtures::test_isolate();
+    let root = isolate
+        .module_graph
+        .insert(record(
+            "memory:root",
+            &[],
+            vec![],
+            vec![local_export("value", "value")],
+            &["value"],
+        ))
+        .unwrap();
+    isolate.module_graph.link(root).unwrap();
+    isolate
+        .write_module_binding(root, "value", Value::from_i32(7))
+        .unwrap();
+    let namespace = isolate.get_module_namespace(root).unwrap();
+    let namespace_atom = isolate.intern_intrinsic_name(b"namespace").unwrap();
+    isolate.realm.set(namespace_atom, namespace).unwrap();
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(source_id),
+                SourceName::new("module-namespace-dispatch"),
+                MediaType::JavaScript,
+                "namespace.value === 7;".into(),
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 128,
+                quantum: 128,
+            },
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            RunOutcome::Completed(value)
+                if value.as_immediate() == Some(Immediate::True)
+        ),
+        "dispatch batch {N} returned {outcome:?}"
+    );
+}
+
+#[test]
 fn module_live_cells_are_roots_at_allocation_triggered_major_collections() {
     let mut isolate = fixtures::test_isolate();
     let mut loader = MemoryLoader::new(vec![loaded(

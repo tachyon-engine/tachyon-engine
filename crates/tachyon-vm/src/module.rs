@@ -2,6 +2,9 @@
 
 mod lifecycle;
 mod link;
+mod namespace;
+
+pub(crate) use namespace::ModuleNamespaceObject;
 
 pub use lifecycle::{
     LoadedModule, ModuleEvaluationError, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
@@ -225,6 +228,12 @@ enum ResolvedBindingName {
     Namespace,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModuleBindingTarget {
+    Cell(BindingCellId),
+    Namespace(ModuleId),
+}
+
 /// Inputs already counted and frozen by the compiler or synthetic-module builder.
 #[derive(Debug)]
 pub struct ModuleRecordInit {
@@ -264,6 +273,7 @@ pub(crate) struct ModuleRecord {
     evaluation: ModuleEvaluationState,
     body: ModuleBody,
     has_top_level_await: bool,
+    namespace: Option<Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -506,6 +516,7 @@ impl ModuleGraph {
             evaluation: ModuleEvaluationState::Unevaluated,
             body,
             has_top_level_await: init.has_top_level_await,
+            namespace: None,
         });
         self.edge_count = next_edge_count;
         Ok(id)
@@ -595,13 +606,26 @@ impl ModuleGraph {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn read_binding(&self, module: ModuleId, name: &str) -> Result<Value, ModuleError> {
+        match self.binding_target(module, name)? {
+            ModuleBindingTarget::Cell(cell) => self.cells[cell.index()].read(),
+            ModuleBindingTarget::Namespace(_) => Err(ModuleError::NamespaceObjectRequired),
+        }
+    }
+
+    /// Resolves a local/import alias without forcing namespace object allocation in the graph.
+    fn binding_target(
+        &self,
+        module: ModuleId,
+        name: &str,
+    ) -> Result<ModuleBindingTarget, ModuleError> {
         let record = self.record(module)?;
         let local = record
             .local_bindings
             .iter()
             .find(|binding| binding.name.as_str() == name)
-            .map(|binding| binding.cell);
+            .map(|binding| ModuleBindingTarget::Cell(binding.cell));
         let imported = record
             .imports
             .iter()
@@ -615,13 +639,14 @@ impl ModuleGraph {
                     .local_bindings
                     .iter()
                     .find(|binding| binding.name == *name)
-                    .map(|binding| binding.cell)
+                    .map(|binding| ModuleBindingTarget::Cell(binding.cell))
                     .ok_or(ModuleError::MissingLocalBinding),
-                ResolvedBindingName::Namespace => Err(ModuleError::NamespaceObjectRequired),
+                ResolvedBindingName::Namespace => {
+                    Ok(ModuleBindingTarget::Namespace(resolved.module))
+                }
             })
             .transpose()?;
-        let cell = local.or(imported).ok_or(ModuleError::MissingLocalBinding)?;
-        self.cells[cell.index()].read()
+        local.or(imported).ok_or(ModuleError::MissingLocalBinding)
     }
 }
 
@@ -631,6 +656,7 @@ impl Trace for ModuleGraph {
             cell.trace(tracer);
         }
         for record in &mut self.records {
+            record.namespace.trace(tracer);
             match &mut record.evaluation {
                 ModuleEvaluationState::Evaluated(value) | ModuleEvaluationState::Errored(value) => {
                     value.trace(tracer)

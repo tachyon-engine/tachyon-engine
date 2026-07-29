@@ -399,6 +399,7 @@ impl Isolate {
                         .map_err(ExecutionError::HeapReference)
                 })?;
             }
+            ObjectReceiver::ModuleNamespace(_) => return Ok(false),
             ObjectReceiver::Function(_) => {
                 self.set_function_internal_prototype(target, prototype)?;
             }
@@ -686,6 +687,11 @@ impl Isolate {
         key: impl Into<PropertyKey>,
     ) -> Result<bool, ExecutionError> {
         let key = key.into();
+        if self.is_module_namespace_value(receiver)
+            && self.module_namespace_has_export(receiver, key)?
+        {
+            return Ok(false);
+        }
         if self.is_typed_array_value(receiver) {
             match self.typed_array_index(key)? {
                 TypedArrayIndex::Valid(index) => {
@@ -1405,20 +1411,26 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::Error(error), ordinary));
         }
-        let function = self
+        if let Ok(function) = self.heap.checked_reference(raw, self.types.function) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let local = scope.root(function).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(local, self.types.function)
+                        .map(|function| function.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::Function(function), ordinary));
+        }
+        if let Ok(namespace) = self
             .heap
-            .checked_reference(raw, self.types.function)
-            .map_err(|_| ExecutionError::NotObject(value))?;
-        let ordinary = self.heap.with_running_scope(|scope| {
-            let local = scope.root(function).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(local, self.types.function)
-                    .map(|function| function.ordinary)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })?;
-        Ok((ObjectReceiver::Function(function), ordinary))
+            .checked_reference(raw, self.types.module_namespace_object)
+        {
+            let ordinary = self.module_namespace_ordinary(value)?;
+            return Ok((ObjectReceiver::ModuleNamespace(namespace), ordinary));
+        }
+        Err(ExecutionError::NotObject(value))
     }
 
     /// Mutates the shared ordinary-object state for either object payload representation.
@@ -1434,6 +1446,17 @@ impl Isolate {
                     no_gc
                         .borrow_mut(object, self.types.ordinary_object)
                         .map_err(ExecutionError::NoGcBorrow)?
+                        .extensible = extensible;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::ModuleNamespace(namespace) => self.heap.with_running_scope(|scope| {
+                let namespace = scope.root(namespace).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(namespace, self.types.module_namespace_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
                         .extensible = extensible;
                     Ok(())
                 })
@@ -1779,6 +1802,17 @@ impl Isolate {
                     no_gc
                         .borrow_mut(object, self.types.ordinary_object)
                         .map_err(ExecutionError::NoGcBorrow)?
+                        .shape = shape;
+                    Ok(())
+                })
+            }),
+            ObjectReceiver::ModuleNamespace(namespace) => self.heap.with_running_scope(|scope| {
+                let namespace = scope.root(namespace).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow_mut(namespace, self.types.module_namespace_object)
+                        .map_err(ExecutionError::NoGcBorrow)?
+                        .ordinary
                         .shape = shape;
                     Ok(())
                 })
@@ -2136,6 +2170,27 @@ impl Isolate {
                 if let Some(storage) = storage_local {
                     scope
                         .write_barrier(object, storage)
+                        .map_err(ExecutionError::HeapReference)?;
+                }
+                Ok(())
+            }),
+            ObjectReceiver::ModuleNamespace(namespace) => self.heap.with_running_scope(|scope| {
+                let namespace = scope.root(namespace).map_err(ExecutionError::Root)?;
+                let storage_local = storage
+                    .map(|storage| scope.root(storage))
+                    .transpose()
+                    .map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let namespace = no_gc
+                        .borrow_mut(namespace, self.types.module_namespace_object)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    namespace.ordinary.shape = shape;
+                    namespace.ordinary.storage = storage;
+                    Ok::<(), ExecutionError>(())
+                })?;
+                if let Some(storage) = storage_local {
+                    scope
+                        .write_barrier(namespace, storage)
                         .map_err(ExecutionError::HeapReference)?;
                 }
                 Ok(())
@@ -2869,6 +2924,10 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.collection_iterator)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.module_namespace_object)
                 .is_ok()
     }
 }

@@ -547,7 +547,12 @@ impl Isolate {
             if let Some(value) = self.dense_array_value(current, key)? {
                 return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
             }
-            let (_, snapshot) = self.object_snapshot(current)?;
+            let (object, snapshot) = self.object_snapshot(current)?;
+            if matches!(object, ObjectReceiver::ModuleNamespace(_))
+                && let Some(value) = self.module_namespace_property(current, key)?
+            {
+                return Ok(PropertyReadResolution::Read(PropertyRead::Data(value)));
+            }
             if let Some(property) = self.shapes.lookup(snapshot.shape, key) {
                 match self.stored_property_from_snapshot(snapshot, property)? {
                     Some(StoredProperty::Data(value)) => {
@@ -682,13 +687,18 @@ impl Isolate {
             receiver
         };
         loop {
-            let snapshot = match self.object_snapshot(current) {
-                Ok((_, snapshot)) => snapshot,
+            let (object, snapshot) = match self.object_snapshot(current) {
+                Ok(snapshot) => snapshot,
                 Err(_error) if self.is_proxy_value(current) => {
                     return Ok(PropertyWriteResolution::Proxy(current));
                 }
                 Err(error) => return Err(error),
             };
+            if matches!(object, ObjectReceiver::ModuleNamespace(_)) {
+                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                    false,
+                )));
+            }
             if self.dense_array_value(current, key)?.is_some() {
                 return self
                     .write_data_property_boolean(receiver, key, value)
@@ -827,6 +837,11 @@ impl Isolate {
         }
         let mut current = target;
         loop {
+            if self.is_module_namespace_value(current) {
+                return Ok(PropertyWriteResolution::Write(PropertyWrite::Complete(
+                    false,
+                )));
+            }
             let descriptor = match self.complete_own_property_descriptor(current, key) {
                 Ok(descriptor) => descriptor,
                 Err(_error) if self.is_proxy_value(current) => {

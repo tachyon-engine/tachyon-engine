@@ -58,6 +58,9 @@ impl Isolate {
         receiver: Value,
         snapshot: OrdinaryObject,
     ) -> Result<OrdinaryOwnPropertyKeys, ExecutionError> {
+        if self.is_module_namespace_value(receiver) {
+            return self.module_namespace_own_property_keys(receiver, snapshot);
+        }
         let virtual_keys = self.function_virtual_property_keys(receiver)?;
         let string_length = self
             .is_string_wrapper(receiver)
@@ -157,6 +160,55 @@ impl Isolate {
             });
         }
         keys.sort_unstable_by_key(|entry| entry.rank);
+        Ok(OrdinaryOwnPropertyKeys {
+            keys: keys.into_iter(),
+        })
+    }
+
+    /// Preserves the namespace's UTF-16 sorted export order before its ordinary Symbol keys.
+    fn module_namespace_own_property_keys(
+        &mut self,
+        receiver: Value,
+        snapshot: OrdinaryObject,
+    ) -> Result<OrdinaryOwnPropertyKeys, ExecutionError> {
+        let exports = self.module_namespace_export_keys(receiver)?;
+        let mut structural = self
+            .shapes
+            .own_keys(snapshot.shape)
+            .map_err(ExecutionError::Shape)?;
+        let capacity = exports
+            .len()
+            .checked_add(structural.len())
+            .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(capacity)
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        for (ordinal, atom) in exports.into_iter().enumerate() {
+            let rank = u64::try_from(ordinal)
+                .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+            keys.push(RankedPropertyKey {
+                key: PropertyKey::Atom(atom),
+                property: None,
+                rank,
+            });
+        }
+        let mut symbol_order = 0_u64;
+        while let Some(entry) = structural.next_entry() {
+            if !self.property_is_present_from_snapshot(snapshot, entry.property)? {
+                continue;
+            }
+            let rank = SYMBOL_KEY_RANK
+                .checked_add(symbol_order)
+                .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
+            symbol_order = symbol_order
+                .checked_add(1)
+                .ok_or(ExecutionError::OwnPropertyKeyAllocationFailed)?;
+            keys.push(RankedPropertyKey {
+                key: entry.key,
+                property: Some(entry.property),
+                rank,
+            });
+        }
         Ok(OrdinaryOwnPropertyKeys {
             keys: keys.into_iter(),
         })
