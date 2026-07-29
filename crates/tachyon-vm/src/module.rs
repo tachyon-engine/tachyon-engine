@@ -3,9 +3,12 @@
 mod lifecycle;
 mod link;
 
-pub use lifecycle::{LoadedModule, ModuleEvaluationError, ModuleLoadError, ModuleLoader};
+pub use lifecycle::{
+    LoadedModule, ModuleEvaluationError, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
+};
 
 use core::num::NonZeroU32;
+use std::sync::Arc;
 
 use tachyon_gc::{Trace, Tracer};
 
@@ -54,33 +57,80 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<ModuleId>>()];
 const _: [(); 4] = [(); core::mem::size_of::<BindingCellId>()];
 const _: [(); 4] = [(); core::mem::size_of::<Option<BindingCellId>>()];
 
-/// Canonical, host-resolved module identity retained independently of source storage.
+/// Canonical host-resolved module identity preserving exact ECMAScript string code units.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ModuleSpecifier(Box<str>);
+pub struct ModuleIdentity(Arc<[u8]>);
 
-impl ModuleSpecifier {
+impl ModuleIdentity {
     pub fn try_new(value: &str) -> Result<Self, ModuleError> {
-        try_owned_str(value, "module specifier").map(Self)
+        Self::try_from_bytes(value.as_bytes())
+    }
+
+    pub fn try_from_bytes(value: &[u8]) -> Result<Self, ModuleError> {
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| ModuleError::AllocationFailed {
+                collection: "module identity",
+            })?;
+        owned.extend_from_slice(value);
+        Ok(Self(owned.into()))
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
 
-/// Tachyon-owned binding name; no parser arena or isolate atom is retained.
+/// Identifier binding name, which cannot contain lone surrogates by ECMAScript grammar.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct BindingName(Box<str>);
+pub struct ModuleBindingName(Arc<str>);
 
-impl BindingName {
+impl ModuleBindingName {
     pub fn try_new(value: &str) -> Result<Self, ModuleError> {
-        try_owned_str(value, "module binding name").map(Self)
+        try_owned_str(value, "module binding name").map(|name| Self(name.into()))
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Public import/export name preserving exact ECMAScript string code units.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ModuleExportName(Arc<[u16]>);
+
+impl ModuleExportName {
+    pub fn try_new(value: &str) -> Result<Self, ModuleError> {
+        try_owned_units(
+            value.encode_utf16(),
+            value.encode_utf16().count(),
+            "module export name",
+        )
+        .map(Self)
+    }
+
+    pub fn try_from_utf16(value: &[u16]) -> Result<Self, ModuleError> {
+        try_owned_units(value.iter().copied(), value.len(), "module export name").map(Self)
+    }
+
+    #[must_use]
+    pub fn as_utf16(&self) -> &[u16] {
+        &self.0
+    }
+
+    fn is_default(&self) -> bool {
+        const DEFAULT: &[u16] = &[0x64, 0x65, 0x66, 0x61, 0x75, 0x6c, 0x74];
+        self.0.as_ref() == DEFAULT
+    }
+}
+
+/// Import target where namespace is a semantic sentinel, never the string `"*"`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModuleImportName {
+    Name(ModuleExportName),
+    Namespace,
 }
 
 fn try_owned_str(value: &str, collection: &'static str) -> Result<Box<str>, ModuleError> {
@@ -92,85 +142,101 @@ fn try_owned_str(value: &str, collection: &'static str) -> Result<Box<str>, Modu
     Ok(owned.into_boxed_str())
 }
 
+fn try_owned_units(
+    value: impl Iterator<Item = u16>,
+    unit_len: usize,
+    collection: &'static str,
+) -> Result<Arc<[u16]>, ModuleError> {
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(unit_len)
+        .map_err(|_| ModuleError::AllocationFailed { collection })?;
+    owned.extend(value);
+    Ok(owned.into())
+}
+
 /// One named import whose local alias resolves to the exporting module's cell during linking.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportEntry {
-    module_request: ModuleSpecifier,
-    import_name: BindingName,
-    local_name: BindingName,
-    resolved_cell: Option<BindingCellId>,
+    module_request: ModuleIdentity,
+    import_name: ModuleImportName,
+    local_name: ModuleBindingName,
+    resolved: Option<ResolvedBinding>,
 }
 
 impl ImportEntry {
     pub const fn new(
-        module_request: ModuleSpecifier,
-        import_name: BindingName,
-        local_name: BindingName,
+        module_request: ModuleIdentity,
+        import_name: ModuleImportName,
+        local_name: ModuleBindingName,
     ) -> Self {
         Self {
             module_request,
             import_name,
             local_name,
-            resolved_cell: None,
+            resolved: None,
         }
     }
 
     #[cfg(test)]
-    pub(crate) const fn resolved_cell(&self) -> Option<BindingCellId> {
-        self.resolved_cell
+    pub(crate) const fn resolved(&self) -> Option<&ResolvedBinding> {
+        self.resolved.as_ref()
     }
 }
 
-/// Local or indirect named export. Star and namespace exports remain a later M8.4 slice.
+/// Local, indirect, or star export with namespace represented by `ModuleImportName`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExportEntry {
     Local {
-        export_name: BindingName,
-        local_name: BindingName,
+        export_name: ModuleExportName,
+        local_name: ModuleBindingName,
     },
     Indirect {
-        export_name: BindingName,
-        module_request: ModuleSpecifier,
-        import_name: BindingName,
+        export_name: ModuleExportName,
+        module_request: ModuleIdentity,
+        import_name: ModuleImportName,
+    },
+    Star {
+        module_request: ModuleIdentity,
     },
 }
 
 impl ExportEntry {
-    pub(crate) fn export_name(&self) -> &BindingName {
+    pub(crate) fn export_name(&self) -> Option<&ModuleExportName> {
         match self {
-            Self::Local { export_name, .. } | Self::Indirect { export_name, .. } => export_name,
+            Self::Local { export_name, .. } | Self::Indirect { export_name, .. } => {
+                Some(export_name)
+            }
+            Self::Star { .. } => None,
         }
     }
+}
+
+/// Specification-level resolved binding used for star equality and namespace propagation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedBinding {
+    module: ModuleId,
+    binding: ResolvedBindingName,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolvedBindingName {
+    Local(ModuleBindingName),
+    Namespace,
 }
 
 /// Inputs already counted and frozen by the compiler or synthetic-module builder.
 #[derive(Debug)]
 pub struct ModuleRecordInit {
-    pub(crate) specifier: ModuleSpecifier,
-    pub(crate) requested_modules: Box<[ModuleSpecifier]>,
+    pub(crate) specifier: ModuleIdentity,
+    pub(crate) requested_modules: Box<[ModuleIdentity]>,
     pub(crate) imports: Box<[ImportEntry]>,
     pub(crate) exports: Box<[ExportEntry]>,
-    pub(crate) local_bindings: Box<[BindingName]>,
+    pub(crate) local_bindings: Box<[ModuleBindingName]>,
+    pub(crate) has_top_level_await: bool,
 }
 
-impl ModuleRecordInit {
-    #[must_use]
-    pub const fn new(
-        specifier: ModuleSpecifier,
-        requested_modules: Box<[ModuleSpecifier]>,
-        imports: Box<[ImportEntry]>,
-        exports: Box<[ExportEntry]>,
-        local_bindings: Box<[BindingName]>,
-    ) -> Self {
-        Self {
-            specifier,
-            requested_modules,
-            imports,
-            exports,
-            local_bindings,
-        }
-    }
-}
+impl ModuleRecordInit {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModuleStatus {
@@ -181,7 +247,7 @@ pub(crate) enum ModuleStatus {
 
 #[derive(Debug)]
 struct LocalBinding {
-    name: BindingName,
+    name: ModuleBindingName,
     cell: BindingCellId,
 }
 
@@ -189,14 +255,15 @@ struct LocalBinding {
 #[derive(Debug)]
 pub(crate) struct ModuleRecord {
     id: ModuleId,
-    specifier: ModuleSpecifier,
-    requested_modules: Box<[ModuleSpecifier]>,
+    specifier: ModuleIdentity,
+    requested_modules: Box<[ModuleIdentity]>,
     imports: Box<[ImportEntry]>,
     exports: Box<[ExportEntry]>,
     local_bindings: Box<[LocalBinding]>,
     status: ModuleStatus,
     evaluation: ModuleEvaluationState,
     body: ModuleBody,
+    has_top_level_await: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,11 +275,11 @@ enum ModuleEvaluationState {
 }
 
 /// Executable content supplied by a host loader after canonical identity resolution.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub enum ModuleBody {
+pub(crate) enum ModuleBody {
     Synthetic,
     Precompiled(CompiledModule),
-    AsyncPrecompiled(CompiledModule),
 }
 
 impl ModuleRecord {
@@ -284,12 +351,12 @@ pub enum ModuleError {
     UnknownModule(ModuleId),
     MissingModule,
     MissingExport,
-    CircularExport,
+    AmbiguousExport,
     ImportedBinding,
     UninitializedBinding,
     UnlinkedImport,
+    NamespaceObjectRequired,
     InvalidLinkState,
-    LoaderIdentityMismatch,
     EvaluationOrderLimit { limit: u32 },
 }
 
@@ -438,6 +505,7 @@ impl ModuleGraph {
             status: ModuleStatus::Unlinked,
             evaluation: ModuleEvaluationState::Unevaluated,
             body,
+            has_top_level_await: init.has_top_level_await,
         });
         self.edge_count = next_edge_count;
         Ok(id)
@@ -470,29 +538,26 @@ impl ModuleGraph {
             }
         }
         for (index, export) in init.exports.iter().enumerate() {
-            if init.exports[..index]
-                .iter()
-                .any(|entry| entry.export_name() == export.export_name())
+            if export.export_name().is_some()
+                && init.exports[..index]
+                    .iter()
+                    .any(|entry| entry.export_name() == export.export_name())
             {
                 return Err(ModuleError::DuplicateExport);
             }
             match export {
                 ExportEntry::Local { local_name, .. } => {
-                    if !init.local_bindings.iter().any(|name| name == local_name)
-                        && !init
-                            .imports
-                            .iter()
-                            .any(|entry| &entry.local_name == local_name)
-                    {
+                    if !init.local_bindings.iter().any(|name| name == local_name) {
                         return Err(ModuleError::MissingLocalBinding);
                     }
                 }
                 ExportEntry::Indirect { module_request, .. }
+                | ExportEntry::Star { module_request }
                     if !contains_request(&init.requested_modules, module_request) =>
                 {
                     return Err(ModuleError::UndeclaredModuleRequest);
                 }
-                ExportEntry::Indirect { .. } => {}
+                ExportEntry::Indirect { .. } | ExportEntry::Star { .. } => {}
             }
         }
         Ok(())
@@ -541,7 +606,19 @@ impl ModuleGraph {
             .imports
             .iter()
             .find(|entry| entry.local_name.as_str() == name)
-            .map(|entry| entry.resolved_cell.ok_or(ModuleError::UnlinkedImport))
+            .map(|entry| entry.resolved.as_ref().ok_or(ModuleError::UnlinkedImport))
+            .transpose()?;
+        let imported = imported
+            .map(|resolved| match &resolved.binding {
+                ResolvedBindingName::Local(name) => self
+                    .record(resolved.module)?
+                    .local_bindings
+                    .iter()
+                    .find(|binding| binding.name == *name)
+                    .map(|binding| binding.cell)
+                    .ok_or(ModuleError::MissingLocalBinding),
+                ResolvedBindingName::Namespace => Err(ModuleError::NamespaceObjectRequired),
+            })
             .transpose()?;
         let cell = local.or(imported).ok_or(ModuleError::MissingLocalBinding)?;
         self.cells[cell.index()].read()
@@ -564,11 +641,11 @@ impl Trace for ModuleGraph {
     }
 }
 
-fn contains_request(requests: &[ModuleSpecifier], request: &ModuleSpecifier) -> bool {
+fn contains_request(requests: &[ModuleIdentity], request: &ModuleIdentity) -> bool {
     requests.iter().any(|candidate| candidate == request)
 }
 
-fn ensure_unique_specifiers(requests: &[ModuleSpecifier]) -> Result<(), ModuleError> {
+fn ensure_unique_specifiers(requests: &[ModuleIdentity]) -> Result<(), ModuleError> {
     for (index, request) in requests.iter().enumerate() {
         if requests[..index].iter().any(|existing| existing == request) {
             return Err(ModuleError::DuplicateRequestedModule);
@@ -577,7 +654,7 @@ fn ensure_unique_specifiers(requests: &[ModuleSpecifier]) -> Result<(), ModuleEr
     Ok(())
 }
 
-fn ensure_unique_bindings(bindings: &[BindingName]) -> Result<(), ModuleError> {
+fn ensure_unique_bindings(bindings: &[ModuleBindingName]) -> Result<(), ModuleError> {
     for (index, binding) in bindings.iter().enumerate() {
         if bindings[..index].iter().any(|existing| existing == binding) {
             return Err(ModuleError::DuplicateBinding);

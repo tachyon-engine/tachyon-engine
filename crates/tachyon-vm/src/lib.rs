@@ -83,9 +83,8 @@ pub use finalization::{
 pub use host::{HostProviderError, HostProviders, TimeZoneProvider, WallClockProvider};
 pub use isolate::Isolate;
 pub use module::{
-    BindingName, ExportEntry, ImportEntry, LoadedModule, ModuleBody, ModuleError,
-    ModuleEvaluationError, ModuleId, ModuleLimits, ModuleLoadError, ModuleLoader, ModuleRecordInit,
-    ModuleSpecifier,
+    LoadedModule, ModuleError, ModuleEvaluationError, ModuleExportName, ModuleId, ModuleIdentity,
+    ModuleLimits, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
 };
 pub use object::ShapeError;
 pub use runtime::{callable::NativeErrorKind, code::CodeId};

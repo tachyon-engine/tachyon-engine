@@ -1,15 +1,22 @@
 use super::*;
 use crate::module::*;
+use tachyon_compiler::{
+    CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
+};
 
-fn specifier(value: &str) -> ModuleSpecifier {
-    ModuleSpecifier::try_new(value).expect("test module specifier allocates")
+fn specifier(value: &str) -> ModuleIdentity {
+    ModuleIdentity::try_new(value).expect("test module specifier allocates")
 }
 
-fn binding(value: &str) -> BindingName {
-    BindingName::try_new(value).expect("test module binding allocates")
+fn binding(value: &str) -> ModuleBindingName {
+    ModuleBindingName::try_new(value).expect("test module binding allocates")
 }
 
-fn request_list(values: &[&str]) -> Box<[ModuleSpecifier]> {
+fn public_name(value: &str) -> ModuleExportName {
+    ModuleExportName::try_new(value).expect("test module export name allocates")
+}
+
+fn request_list(values: &[&str]) -> Box<[ModuleIdentity]> {
     values
         .iter()
         .map(|value| specifier(value))
@@ -17,7 +24,7 @@ fn request_list(values: &[&str]) -> Box<[ModuleSpecifier]> {
         .into_boxed_slice()
 }
 
-fn binding_list(values: &[&str]) -> Box<[BindingName]> {
+fn binding_list(values: &[&str]) -> Box<[ModuleBindingName]> {
     values
         .iter()
         .map(|value| binding(value))
@@ -26,24 +33,58 @@ fn binding_list(values: &[&str]) -> Box<[BindingName]> {
 }
 
 fn local_export(export_name: &str, local_name: &str) -> ExportEntry {
+    local_export_name(public_name(export_name), local_name)
+}
+
+fn local_export_name(export_name: ModuleExportName, local_name: &str) -> ExportEntry {
     ExportEntry::Local {
-        export_name: binding(export_name),
+        export_name,
         local_name: binding(local_name),
     }
 }
 
 fn indirect_export(export_name: &str, module_request: &str, import_name: &str) -> ExportEntry {
     ExportEntry::Indirect {
-        export_name: binding(export_name),
+        export_name: public_name(export_name),
         module_request: specifier(module_request),
-        import_name: binding(import_name),
+        import_name: ModuleImportName::Name(public_name(import_name)),
     }
 }
 
 fn named_import(module_request: &str, import_name: &str, local_name: &str) -> ImportEntry {
+    named_import_name(module_request, public_name(import_name), local_name)
+}
+
+fn named_import_name(
+    module_request: &str,
+    import_name: ModuleExportName,
+    local_name: &str,
+) -> ImportEntry {
     ImportEntry::new(
         specifier(module_request),
-        binding(import_name),
+        ModuleImportName::Name(import_name),
+        binding(local_name),
+    )
+}
+
+fn star_export(module_request: &str) -> ExportEntry {
+    ExportEntry::Star {
+        module_request: specifier(module_request),
+    }
+}
+
+fn namespace_export(export_name: &str, module_request: &str) -> ExportEntry {
+    ExportEntry::Indirect {
+        export_name: public_name(export_name),
+        module_request: specifier(module_request),
+        import_name: ModuleImportName::Namespace,
+    }
+}
+
+fn namespace_import(module_request: &str, local_name: &str) -> ImportEntry {
+    ImportEntry::new(
+        specifier(module_request),
+        ModuleImportName::Namespace,
         binding(local_name),
     )
 }
@@ -61,6 +102,7 @@ fn record(
         imports: imports.into_boxed_slice(),
         exports: exports.into_boxed_slice(),
         local_bindings: binding_list(locals),
+        has_top_level_await: false,
     }
 }
 
@@ -105,7 +147,7 @@ fn module_imports_share_the_exporting_live_binding_cell() {
     );
     assert!(
         graph.record(importer).unwrap().imports()[0]
-            .resolved_cell()
+            .resolved()
             .is_some()
     );
 
@@ -292,8 +334,246 @@ fn module_indirect_exports_resolve_to_the_original_cell_and_detect_cycles() {
             &[],
         ))
         .unwrap();
-    assert_eq!(cycle.link(left), Err(ModuleError::CircularExport));
+    assert_eq!(cycle.link(left), Err(ModuleError::MissingExport));
     assert_eq!(cycle.record(left).unwrap().status(), ModuleStatus::Unlinked);
+}
+
+#[test]
+/// Star cycles are ignored per branch, while a concrete sibling remains resolvable.
+fn module_star_resolution_ignores_cycles_and_finds_concrete_siblings() {
+    let mut graph = test_graph();
+    let source = graph
+        .insert(record(
+            "memory:source",
+            &[],
+            vec![],
+            vec![local_export("x", "x")],
+            &["x"],
+        ))
+        .unwrap();
+    graph
+        .insert(record(
+            "memory:right",
+            &["memory:left"],
+            vec![],
+            vec![star_export("memory:left")],
+            &[],
+        ))
+        .unwrap();
+    graph
+        .insert(record(
+            "memory:left",
+            &["memory:right", "memory:source"],
+            vec![],
+            vec![star_export("memory:right"), star_export("memory:source")],
+            &[],
+        ))
+        .unwrap();
+    let consumer = graph
+        .insert(record(
+            "memory:consumer",
+            &["memory:left"],
+            vec![named_import("memory:left", "x", "seen")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    graph
+        .write_binding(source, "x", Value::from_i32(17))
+        .unwrap();
+
+    graph.link(consumer).unwrap();
+    assert_eq!(
+        graph.read_binding(consumer, "seen").unwrap().as_i32(),
+        Some(17)
+    );
+}
+
+#[test]
+/// Diamond stars accept the same origin binding but reject two distinct origins.
+fn module_star_resolution_compares_resolved_origin_identity() {
+    let mut same = test_graph();
+    let source = same
+        .insert(record(
+            "memory:source",
+            &[],
+            vec![],
+            vec![local_export("x", "x")],
+            &["x"],
+        ))
+        .unwrap();
+    for side in ["memory:left", "memory:right"] {
+        same.insert(record(
+            side,
+            &["memory:source"],
+            vec![],
+            vec![star_export("memory:source")],
+            &[],
+        ))
+        .unwrap();
+    }
+    same.insert(record(
+        "memory:bridge",
+        &["memory:left", "memory:right"],
+        vec![],
+        vec![star_export("memory:left"), star_export("memory:right")],
+        &[],
+    ))
+    .unwrap();
+    let consumer = same
+        .insert(record(
+            "memory:consumer",
+            &["memory:bridge"],
+            vec![named_import("memory:bridge", "x", "seen")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    same.write_binding(source, "x", Value::from_i32(23))
+        .unwrap();
+    same.link(consumer).unwrap();
+    assert_eq!(
+        same.read_binding(consumer, "seen").unwrap().as_i32(),
+        Some(23)
+    );
+
+    let mut ambiguous = test_graph();
+    for side in ["memory:left", "memory:right"] {
+        ambiguous
+            .insert(record(
+                side,
+                &[],
+                vec![],
+                vec![local_export("x", "x")],
+                &["x"],
+            ))
+            .unwrap();
+    }
+    ambiguous
+        .insert(record(
+            "memory:bridge",
+            &["memory:left", "memory:right"],
+            vec![],
+            vec![star_export("memory:left"), star_export("memory:right")],
+            &[],
+        ))
+        .unwrap();
+    let consumer = ambiguous
+        .insert(record(
+            "memory:consumer",
+            &["memory:bridge"],
+            vec![named_import("memory:bridge", "x", "seen")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(ambiguous.link(consumer), Err(ModuleError::AmbiguousExport));
+}
+
+#[test]
+/// Star excludes default but treats the literal name `"*"` as an ordinary export name.
+fn module_star_resolution_distinguishes_default_and_literal_star() {
+    let mut graph = test_graph();
+    graph
+        .insert(record(
+            "memory:source",
+            &[],
+            vec![],
+            vec![
+                local_export("default", "default"),
+                local_export("*", "star"),
+            ],
+            &["default", "star"],
+        ))
+        .unwrap();
+    graph
+        .insert(record(
+            "memory:bridge",
+            &["memory:source"],
+            vec![],
+            vec![star_export("memory:source")],
+            &[],
+        ))
+        .unwrap();
+    let star_consumer = graph
+        .insert(record(
+            "memory:star-consumer",
+            &["memory:bridge"],
+            vec![named_import("memory:bridge", "*", "seen")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    graph.link(star_consumer).unwrap();
+
+    let default_consumer = graph
+        .insert(record(
+            "memory:default-consumer",
+            &["memory:bridge"],
+            vec![named_import("memory:bridge", "default", "seen")],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(
+        graph.link(default_consumer),
+        Err(ModuleError::MissingExport)
+    );
+}
+
+#[test]
+/// Namespace is a binding variant and UTF-16 lone surrogates remain exact names.
+fn module_namespace_and_utf16_export_names_remain_distinct() {
+    let mut graph = test_graph();
+    let lone = ModuleExportName::try_from_utf16(&[0xd800]).unwrap();
+    graph
+        .insert(record(
+            "memory:source",
+            &[],
+            vec![],
+            vec![local_export_name(lone.clone(), "lone")],
+            &["lone"],
+        ))
+        .unwrap();
+    graph
+        .insert(record(
+            "memory:bridge",
+            &["memory:source"],
+            vec![],
+            vec![
+                namespace_export("ns", "memory:source"),
+                star_export("memory:source"),
+            ],
+            &[],
+        ))
+        .unwrap();
+    let consumer = graph
+        .insert(record(
+            "memory:consumer",
+            &["memory:bridge", "memory:source"],
+            vec![
+                named_import("memory:bridge", "ns", "namespace"),
+                named_import_name("memory:bridge", lone, "lone"),
+                namespace_import("memory:source", "direct_namespace"),
+            ],
+            vec![],
+            &[],
+        ))
+        .unwrap();
+
+    graph.link(consumer).unwrap();
+    assert_eq!(
+        graph.read_binding(consumer, "namespace"),
+        Err(ModuleError::NamespaceObjectRequired)
+    );
+    assert!(
+        graph
+            .record(consumer)
+            .unwrap()
+            .imports()
+            .iter()
+            .all(|entry| entry.resolved().is_some())
+    );
 }
 
 #[test]
@@ -347,6 +627,7 @@ fn module_linking_uses_iterative_worklists_for_deep_graphs() {
                 imports: Box::new([]),
                 exports: Box::new([]),
                 local_bindings: Box::new([]),
+                has_top_level_await: false,
             })
             .unwrap();
         root.get_or_insert(id);
@@ -362,7 +643,7 @@ fn module_linking_uses_iterative_worklists_for_deep_graphs() {
 }
 
 struct MemoryLoader {
-    modules: Vec<(ModuleSpecifier, Option<LoadedModule>)>,
+    modules: Vec<(ModuleIdentity, Option<LoadedModule>)>,
 }
 
 impl MemoryLoader {
@@ -370,7 +651,7 @@ impl MemoryLoader {
         Self {
             modules: modules
                 .into_iter()
-                .map(|module| (module.record.specifier.clone(), Some(module)))
+                .map(|module| (module.identity().clone(), Some(module)))
                 .collect(),
         }
     }
@@ -381,18 +662,51 @@ impl ModuleLoader for MemoryLoader {
 
     fn resolve(
         &mut self,
-        request: &ModuleSpecifier,
-        _referrer: Option<&ModuleSpecifier>,
-    ) -> Result<ModuleSpecifier, Self::Error> {
-        Ok(request.clone())
+        request: &tachyon_bytecode::ModuleRequest,
+        _referrer: Option<&ModuleIdentity>,
+    ) -> Result<ModuleIdentity, Self::Error> {
+        let text = String::from_utf16(request.specifier.as_ref()).map_err(|_| ())?;
+        Ok(specifier(&text))
     }
 
-    fn load(&mut self, resolved: &ModuleSpecifier) -> Result<Option<LoadedModule>, Self::Error> {
+    fn load(
+        &mut self,
+        resolved: ResolvedModuleRequest<'_>,
+    ) -> Result<Option<LoadedModule>, Self::Error> {
         Ok(self
             .modules
             .iter_mut()
-            .find(|(specifier, _)| specifier == resolved)
+            .find(|(specifier, _)| specifier == resolved.identity())
             .and_then(|(_, module)| module.take()))
+    }
+}
+
+struct PrecompiledLoader {
+    identity: ModuleIdentity,
+    module: Option<LoadedModule>,
+}
+
+impl ModuleLoader for PrecompiledLoader {
+    type Error = ();
+
+    fn resolve(
+        &mut self,
+        request: &tachyon_bytecode::ModuleRequest,
+        _referrer: Option<&ModuleIdentity>,
+    ) -> Result<ModuleIdentity, Self::Error> {
+        let text = String::from_utf16(request.specifier.as_ref()).map_err(|_| ())?;
+        Ok(specifier(&text))
+    }
+
+    fn load(
+        &mut self,
+        resolved: ResolvedModuleRequest<'_>,
+    ) -> Result<Option<LoadedModule>, Self::Error> {
+        if resolved.identity() == &self.identity {
+            Ok(self.module.take())
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -440,17 +754,19 @@ fn isolate_owned_module_pipeline_loads_links_and_evaluates_once() {
 }
 
 #[test]
-fn module_loader_rejects_identity_substitution_before_publication() {
+fn module_loader_uses_the_resolved_identity_as_the_publication_key() {
     let mut isolate = fixtures::test_isolate();
     let mut loader = MemoryLoader::new(vec![loaded(
-        record("memory:other", &[], vec![], vec![], &[]),
+        record("memory:root", &[], vec![], vec![], &[]),
         ModuleBody::Synthetic,
     )]);
-    loader.modules[0].0 = specifier("memory:root");
-    assert!(matches!(
-        isolate.load_module_graph(&mut loader, &specifier("memory:root")),
-        Err(ModuleLoadError::Graph(ModuleError::LoaderIdentityMismatch))
-    ));
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:root"))
+        .expect("resolved identity is authoritative");
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_immediate(Immediate::Undefined))
+    );
 }
 
 #[test]
@@ -482,10 +798,24 @@ fn failed_module_load_rolls_back_every_record_from_the_transaction() {
 #[test]
 fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
     let mut isolate = fixtures::test_isolate();
-    let mut loader = MemoryLoader::new(vec![loaded(
-        record("memory:async", &[], vec![], vec![], &[]),
-        ModuleBody::AsyncPrecompiled(fixtures::arithmetic_module()),
-    )]);
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1),
+                SourceName::new("memory:async"),
+                MediaType::Mjs,
+                "await 1;".into(),
+            ),
+            CompileOptions {
+                source_mode: SourceMode::Module,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("top-level await module should compile");
+    let mut loader = PrecompiledLoader {
+        identity: specifier("memory:async"),
+        module: Some(LoadedModule::precompiled(module)),
+    };
     let root = isolate
         .load_module_graph(&mut loader, &specifier("memory:async"))
         .unwrap();

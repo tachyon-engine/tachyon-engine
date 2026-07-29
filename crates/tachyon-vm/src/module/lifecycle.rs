@@ -3,17 +3,67 @@
 use super::*;
 use crate::{ExecutionBudget, ExecutionError, Isolate, RunOutcome};
 
-/// One complete loader result. Source parsing remains outside this VM-owned lifecycle slice.
+/// Loader content; precompiled records are derived exclusively from verified module stencils.
 #[derive(Debug)]
 pub struct LoadedModule {
-    pub(crate) record: ModuleRecordInit,
-    pub(crate) body: ModuleBody,
+    kind: LoadedModuleKind,
 }
 
 impl LoadedModule {
     #[must_use]
-    pub const fn new(record: ModuleRecordInit, body: ModuleBody) -> Self {
-        Self { record, body }
+    pub const fn precompiled(module: CompiledModule) -> Self {
+        Self {
+            kind: LoadedModuleKind::Precompiled(module),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new(record: ModuleRecordInit, body: ModuleBody) -> Self {
+        Self {
+            kind: LoadedModuleKind::Legacy(record, body),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity(&self) -> &ModuleIdentity {
+        match &self.kind {
+            LoadedModuleKind::Legacy(record, _) => &record.specifier,
+            LoadedModuleKind::Precompiled(_) => {
+                panic!("test identity is only defined for legacy modules")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LoadedModuleKind {
+    Precompiled(CompiledModule),
+    #[cfg(test)]
+    Legacy(ModuleRecordInit, ModuleBody),
+}
+
+/// One resolved edge passed to `load` without discarding its source request or referrer.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedModuleRequest<'a> {
+    identity: &'a ModuleIdentity,
+    request: Option<&'a tachyon_bytecode::ModuleRequest>,
+    referrer: Option<&'a ModuleIdentity>,
+}
+
+impl<'a> ResolvedModuleRequest<'a> {
+    #[must_use]
+    pub const fn identity(self) -> &'a ModuleIdentity {
+        self.identity
+    }
+
+    #[must_use]
+    pub const fn request(self) -> Option<&'a tachyon_bytecode::ModuleRequest> {
+        self.request
+    }
+
+    #[must_use]
+    pub const fn referrer(self) -> Option<&'a ModuleIdentity> {
+        self.referrer
     }
 }
 
@@ -23,17 +73,20 @@ pub trait ModuleLoader {
 
     fn resolve(
         &mut self,
-        request: &ModuleSpecifier,
-        referrer: Option<&ModuleSpecifier>,
-    ) -> Result<ModuleSpecifier, Self::Error>;
+        request: &tachyon_bytecode::ModuleRequest,
+        referrer: Option<&ModuleIdentity>,
+    ) -> Result<ModuleIdentity, Self::Error>;
 
-    fn load(&mut self, resolved: &ModuleSpecifier) -> Result<Option<LoadedModule>, Self::Error>;
+    fn load(
+        &mut self,
+        resolved: ResolvedModuleRequest<'_>,
+    ) -> Result<Option<LoadedModule>, Self::Error>;
 }
 
 #[derive(Debug)]
 pub enum ModuleLoadError<E> {
     Loader(E),
-    Missing(ModuleSpecifier),
+    Missing(ModuleIdentity),
     Graph(ModuleError),
 }
 
@@ -44,32 +97,122 @@ pub enum ModuleEvaluationError {
     AsyncEvaluationRequired(ModuleId),
 }
 
-impl ModuleRecordInit {
-    /// Resolves each distinct request once and rewrites all import/export references consistently.
-    fn resolve_requests<E>(&mut self, loader: &mut impl ModuleLoader<Error = E>) -> Result<(), E> {
-        for request_index in 0..self.requested_modules.len() {
-            let original = self.requested_modules[request_index].clone();
-            let resolved = loader.resolve(&original, Some(&self.specifier))?;
-            self.requested_modules[request_index] = resolved.clone();
-            for import in &mut self.imports {
-                if import.module_request == original {
-                    import.module_request = resolved.clone();
-                }
-            }
-            for export in &mut self.exports {
-                if let ExportEntry::Indirect { module_request, .. } = export
-                    && *module_request == original
-                {
-                    *module_request = resolved.clone();
-                }
-            }
-        }
-        Ok(())
+#[derive(Debug)]
+struct PendingModule {
+    identity: ModuleIdentity,
+    request: Option<tachyon_bytecode::ModuleRequest>,
+    referrer: Option<ModuleIdentity>,
+}
+
+/// Converts one verified compiler stencil into VM-owned record tables without lossy names.
+fn prepare_precompiled_module<E>(
+    identity: ModuleIdentity,
+    module: CompiledModule,
+    loader: &mut impl ModuleLoader<Error = E>,
+) -> Result<(ModuleRecordInit, ModuleBody, Vec<PendingModule>), ModuleLoadError<E>> {
+    let stencil = module
+        .module_stencil()
+        .ok_or(ModuleLoadError::Graph(ModuleError::MissingModule))?;
+    let mut requests = Vec::with_capacity(stencil.requested_modules().len());
+    let mut dependencies = Vec::with_capacity(stencil.requested_modules().len());
+    for request in stencil.requested_modules() {
+        let request = request.clone();
+        let resolved = loader
+            .resolve(&request, Some(&identity))
+            .map_err(ModuleLoadError::Loader)?;
+        requests.push(resolved.clone());
+        dependencies.push(PendingModule {
+            identity: resolved,
+            request: Some(request),
+            referrer: Some(identity.clone()),
+        });
     }
+    let imports = stencil
+        .imports()
+        .iter()
+        .map(|entry| {
+            let request = requests
+                .get(entry.module_request.index() as usize)
+                .cloned()
+                .ok_or(ModuleLoadError::Graph(ModuleError::MissingModule))?;
+            let import_name = match &entry.import_name {
+                tachyon_bytecode::ModuleImportName::Name(name) => ModuleImportName::Name(
+                    ModuleExportName::try_from_utf16(name)
+                        .map_err(|error| ModuleLoadError::Graph(error))?,
+                ),
+                tachyon_bytecode::ModuleImportName::Namespace => ModuleImportName::Namespace,
+            };
+            Ok(ImportEntry::new(
+                request,
+                import_name,
+                ModuleBindingName::try_new(&entry.local_name)
+                    .map_err(|error| ModuleLoadError::Graph(error))?,
+            ))
+        })
+        .collect::<Result<Vec<_>, ModuleLoadError<E>>>()?;
+    let exports = stencil
+        .exports()
+        .iter()
+        .map(|entry| match entry {
+            tachyon_bytecode::ModuleExportEntry::Local {
+                export_name,
+                local_name,
+            } => Ok(ExportEntry::Local {
+                export_name: ModuleExportName::try_from_utf16(export_name)?,
+                local_name: ModuleBindingName::try_new(local_name)?,
+            }),
+            tachyon_bytecode::ModuleExportEntry::Indirect {
+                export_name,
+                module_request,
+                import_name,
+            } => {
+                let request = requests
+                    .get(module_request.index() as usize)
+                    .cloned()
+                    .ok_or(ModuleError::MissingModule)?;
+                let import_name = match import_name {
+                    tachyon_bytecode::ModuleImportName::Name(name) => {
+                        ModuleImportName::Name(ModuleExportName::try_from_utf16(name)?)
+                    }
+                    tachyon_bytecode::ModuleImportName::Namespace => ModuleImportName::Namespace,
+                };
+                Ok(ExportEntry::Indirect {
+                    export_name: ModuleExportName::try_from_utf16(export_name)?,
+                    module_request: request,
+                    import_name,
+                })
+            }
+            tachyon_bytecode::ModuleExportEntry::Star { module_request } => {
+                let request = requests
+                    .get(module_request.index() as usize)
+                    .cloned()
+                    .ok_or(ModuleError::MissingModule)?;
+                Ok(ExportEntry::Star {
+                    module_request: request,
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, ModuleError>>()
+        .map_err(ModuleLoadError::Graph)?;
+    let local_bindings = stencil
+        .local_bindings()
+        .iter()
+        .map(|name| ModuleBindingName::try_new(name))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ModuleLoadError::Graph)?;
+    let record = ModuleRecordInit {
+        specifier: identity,
+        requested_modules: requests.into_boxed_slice(),
+        imports: imports.into_boxed_slice(),
+        exports: exports.into_boxed_slice(),
+        local_bindings: local_bindings.into_boxed_slice(),
+        has_top_level_await: stencil.has_top_level_await(),
+    };
+    Ok((record, ModuleBody::Precompiled(module), dependencies))
 }
 
 impl ModuleGraph {
-    fn find_specifier(&self, specifier: &ModuleSpecifier) -> Option<ModuleId> {
+    fn find_specifier(&self, specifier: &ModuleIdentity) -> Option<ModuleId> {
         self.records
             .iter()
             .find(|record| &record.specifier == specifier)
@@ -159,10 +302,10 @@ impl Isolate {
     pub fn load_module_graph<L: ModuleLoader>(
         &mut self,
         loader: &mut L,
-        root_request: &ModuleSpecifier,
+        root_identity: &ModuleIdentity,
     ) -> Result<ModuleId, ModuleLoadError<L::Error>> {
         let checkpoint = self.module_graph.checkpoint();
-        let result = self.load_module_graph_inner(loader, root_request);
+        let result = self.load_module_graph_inner(loader, root_identity);
         if result.is_err() {
             self.module_graph.rollback(checkpoint);
         }
@@ -173,11 +316,9 @@ impl Isolate {
     fn load_module_graph_inner<L: ModuleLoader>(
         &mut self,
         loader: &mut L,
-        root_request: &ModuleSpecifier,
+        root_identity: &ModuleIdentity,
     ) -> Result<ModuleId, ModuleLoadError<L::Error>> {
-        let root = loader
-            .resolve(root_request, None)
-            .map_err(ModuleLoadError::Loader)?;
+        let root = root_identity.clone();
         let max_work = self.module_graph.limits.max_edges.max(1) as usize;
         let mut pending = Vec::new();
         pending
@@ -187,41 +328,65 @@ impl Isolate {
                     collection: "pending module loads",
                 })
             })?;
-        pending.push(root.clone());
-        while let Some(specifier) = pending.pop() {
-            if self.module_graph.find_specifier(&specifier).is_some() {
+        pending.push(PendingModule {
+            identity: root.clone(),
+            request: None,
+            referrer: None,
+        });
+        while let Some(pending_module) = pending.pop() {
+            if self
+                .module_graph
+                .find_specifier(&pending_module.identity)
+                .is_some()
+            {
                 continue;
             }
-            let mut loaded = loader
-                .load(&specifier)
+            let request = ResolvedModuleRequest {
+                identity: &pending_module.identity,
+                request: pending_module.request.as_ref(),
+                referrer: pending_module.referrer.as_ref(),
+            };
+            let loaded = loader
+                .load(request)
                 .map_err(ModuleLoadError::Loader)?
-                .ok_or_else(|| ModuleLoadError::Missing(specifier.clone()))?;
-            if loaded.record.specifier != specifier {
-                return Err(ModuleLoadError::Graph(ModuleError::LoaderIdentityMismatch));
-            }
-            loaded
-                .record
-                .resolve_requests(loader)
-                .map_err(ModuleLoadError::Loader)?;
+                .ok_or_else(|| ModuleLoadError::Missing(pending_module.identity.clone()))?;
+            let (record, body, dependencies) = match loaded.kind {
+                LoadedModuleKind::Precompiled(module) => {
+                    prepare_precompiled_module(pending_module.identity.clone(), module, loader)?
+                }
+                #[cfg(test)]
+                LoadedModuleKind::Legacy(mut record, body) => {
+                    record.specifier = pending_module.identity.clone();
+                    let dependencies = record
+                        .requested_modules
+                        .iter()
+                        .cloned()
+                        .map(|identity| PendingModule {
+                            identity,
+                            request: None,
+                            referrer: Some(record.specifier.clone()),
+                        })
+                        .collect();
+                    (record, body, dependencies)
+                }
+            };
             if pending
                 .len()
-                .checked_add(loaded.record.requested_modules.len())
+                .checked_add(dependencies.len())
                 .is_none_or(|work| work > max_work)
             {
                 return Err(ModuleLoadError::Graph(ModuleError::EdgeLimit {
                     limit: self.module_graph.limits.max_edges,
                 }));
             }
-            pending
-                .try_reserve_exact(loaded.record.requested_modules.len())
-                .map_err(|_| {
-                    ModuleLoadError::Graph(ModuleError::AllocationFailed {
-                        collection: "pending module loads",
-                    })
-                })?;
-            pending.extend(loaded.record.requested_modules.iter().rev().cloned());
+            pending.try_reserve_exact(dependencies.len()).map_err(|_| {
+                ModuleLoadError::Graph(ModuleError::AllocationFailed {
+                    collection: "pending module loads",
+                })
+            })?;
+            pending.extend(dependencies.into_iter().rev());
             self.module_graph
-                .insert_with_body(loaded.record, loaded.body)
+                .insert_with_body(record, body)
                 .map_err(ModuleLoadError::Graph)?;
         }
         let root = self
@@ -271,7 +436,7 @@ impl Isolate {
                 }
                 ModuleEvaluationState::Unevaluated => {}
             }
-            if matches!(body, ModuleBody::AsyncPrecompiled(_)) {
+            if self.module_graph.records[module.index()].has_top_level_await {
                 return Err(ModuleEvaluationError::AsyncEvaluationRequired(module));
             }
             self.module_graph.records[module.index()].evaluation =
@@ -289,7 +454,6 @@ impl Isolate {
                         },
                     )
                 }),
-                ModuleBody::AsyncPrecompiled(_) => unreachable!("async bodies return above"),
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,

@@ -9,6 +9,30 @@ struct LinkFrame {
     pending_child: Option<ModuleId>,
 }
 
+#[derive(Debug)]
+struct ResolveFrame {
+    module: ModuleId,
+    name: ModuleExportName,
+    state: ResolveFrameState,
+}
+
+#[derive(Debug)]
+enum ResolveFrameState {
+    Enter,
+    AwaitIndirect,
+    Stars {
+        next_export: usize,
+        candidate: Option<ResolvedBinding>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ResolveOutcome {
+    Found(ResolvedBinding),
+    NotFound,
+    Ambiguous,
+}
+
 /// Deterministic SCC completion order for diagnostics and later instantiation scheduling.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct LinkReport {
@@ -36,13 +60,21 @@ impl ModuleGraph {
         }
 
         let max_work = self.records.len();
-        let max_export_work = self.edge_count.max(1);
+        let max_export_work = self
+            .records
+            .len()
+            .checked_add(self.edge_count)
+            .ok_or(ModuleError::CapacityOverflow {
+                collection: "module export resolution work",
+            })?
+            .max(1);
         let mut frames = try_work_vec(max_work, "module link frames")?;
         let mut component_stack = try_work_vec(max_work, "module SCC stack")?;
         let mut touched = try_work_vec(max_work, "module link rollback")?;
         let mut components = try_work_vec(max_work, "module link components")?;
-        let mut export_visits = try_work_vec(max_work, "module export visits")?;
-        let mut import_cells = try_work_vec(max_work, "module import cells")?;
+        let mut export_visits = try_work_vec(max_export_work, "module export visits")?;
+        let mut export_frames = try_work_vec(max_export_work, "module export frames")?;
+        let mut import_resolutions = try_work_vec(max_work, "module import resolutions")?;
         let mut next_index = 0u32;
 
         let result = (|| {
@@ -92,7 +124,8 @@ impl ModuleGraph {
                 self.resolve_imports(
                     module,
                     &mut export_visits,
-                    &mut import_cells,
+                    &mut export_frames,
+                    &mut import_resolutions,
                     max_export_work,
                 )?;
                 let (dfs_index, ancestor_index) = match self.record(module)?.status {
@@ -172,15 +205,16 @@ impl ModuleGraph {
     fn resolve_imports(
         &mut self,
         module: ModuleId,
-        export_visits: &mut Vec<(ModuleId, usize)>,
-        import_cells: &mut Vec<BindingCellId>,
+        export_visits: &mut Vec<(ModuleId, ModuleExportName)>,
+        export_frames: &mut Vec<ResolveFrame>,
+        import_resolutions: &mut Vec<ResolvedBinding>,
         max_export_work: usize,
     ) -> Result<(), ModuleError> {
-        import_cells.clear();
+        import_resolutions.clear();
         let import_count = self.record(module)?.imports.len();
-        if import_cells.capacity() < import_count {
-            import_cells
-                .try_reserve_exact(import_count - import_cells.capacity())
+        if import_resolutions.capacity() < import_count {
+            import_resolutions
+                .try_reserve_exact(import_count - import_resolutions.capacity())
                 .map_err(|_| ModuleError::AllocationFailed {
                     collection: "module import resolutions",
                 })?;
@@ -189,69 +223,161 @@ impl ModuleGraph {
             let record = self.record(module)?;
             let import = &record.imports[import_index];
             let requested = self.module_by_specifier(&import.module_request)?;
-            export_visits.clear();
-            let cell = self.resolve_export(
-                requested,
-                import.import_name.as_str(),
-                export_visits,
-                max_export_work,
-            )?;
-            import_cells.push(cell);
+            let resolution = match &import.import_name {
+                ModuleImportName::Namespace => ResolvedBinding {
+                    module: requested,
+                    binding: ResolvedBindingName::Namespace,
+                },
+                ModuleImportName::Name(name) => {
+                    match self.resolve_export(
+                        requested,
+                        name,
+                        export_visits,
+                        export_frames,
+                        max_export_work,
+                    )? {
+                        ResolveOutcome::Found(resolution) => resolution,
+                        ResolveOutcome::NotFound => return Err(ModuleError::MissingExport),
+                        ResolveOutcome::Ambiguous => return Err(ModuleError::AmbiguousExport),
+                    }
+                }
+            };
+            import_resolutions.push(resolution);
         }
-        for (import, cell) in self.records[module.index()]
+        for (import, resolution) in self.records[module.index()]
             .imports
             .iter_mut()
-            .zip(import_cells.iter().copied())
+            .zip(import_resolutions.iter().cloned())
         {
-            import.resolved_cell = Some(cell);
+            import.resolved = Some(resolution);
         }
         Ok(())
     }
 
-    /// Follows local-import and indirect-export aliases iteratively without trusting graph depth.
-    fn resolve_export<'a>(
-        &'a self,
-        mut module: ModuleId,
-        mut name: &'a str,
-        visits: &mut Vec<(ModuleId, usize)>,
+    /// Implements ResolveExport with explicit frames so star graphs never consume the Rust stack.
+    fn resolve_export(
+        &self,
+        module: ModuleId,
+        name: &ModuleExportName,
+        visits: &mut Vec<(ModuleId, ModuleExportName)>,
+        frames: &mut Vec<ResolveFrame>,
         max_work: usize,
-    ) -> Result<BindingCellId, ModuleError> {
+    ) -> Result<ResolveOutcome, ModuleError> {
+        visits.clear();
+        frames.clear();
+        reserve_work_push(frames, max_work, "module export frames")?;
+        frames.push(ResolveFrame {
+            module,
+            name: name.clone(),
+            state: ResolveFrameState::Enter,
+        });
+        let mut completed = None;
         loop {
-            let record = self.record(module)?;
-            let export_index = record
-                .exports
-                .iter()
-                .position(|entry| entry.export_name().as_str() == name)
-                .ok_or(ModuleError::MissingExport)?;
-            if visits.contains(&(module, export_index)) {
-                return Err(ModuleError::CircularExport);
-            }
-            reserve_work_push(visits, max_work, "module export visits")?;
-            visits.push((module, export_index));
-            match &record.exports[export_index] {
-                ExportEntry::Local { local_name, .. } => {
-                    if let Some(local) = record
-                        .local_bindings
-                        .iter()
-                        .find(|binding| binding.name == *local_name)
-                    {
-                        return Ok(local.cell);
-                    }
-                    let import = record
-                        .imports
-                        .iter()
-                        .find(|entry| entry.local_name == *local_name)
-                        .ok_or(ModuleError::MissingLocalBinding)?;
-                    module = self.module_by_specifier(&import.module_request)?;
-                    name = import.import_name.as_str();
+            if let Some(outcome) = completed.take() {
+                frames.pop().ok_or(ModuleError::InvalidLinkState)?;
+                let Some(parent) = frames.last_mut() else {
+                    return Ok(outcome);
+                };
+                match &mut parent.state {
+                    ResolveFrameState::AwaitIndirect => completed = Some(outcome),
+                    ResolveFrameState::Stars { candidate, .. } => match outcome {
+                        ResolveOutcome::Found(found) => {
+                            if candidate.as_ref().is_some_and(|saved| saved != &found) {
+                                completed = Some(ResolveOutcome::Ambiguous);
+                            } else {
+                                *candidate = Some(found);
+                            }
+                        }
+                        ResolveOutcome::NotFound => {}
+                        ResolveOutcome::Ambiguous => completed = Some(ResolveOutcome::Ambiguous),
+                    },
+                    ResolveFrameState::Enter => return Err(ModuleError::InvalidLinkState),
                 }
-                ExportEntry::Indirect {
-                    module_request,
-                    import_name,
-                    ..
+                continue;
+            }
+
+            let frame = frames.last_mut().ok_or(ModuleError::InvalidLinkState)?;
+            match &mut frame.state {
+                ResolveFrameState::Enter => {
+                    let key = (frame.module, frame.name.clone());
+                    if visits.contains(&key) {
+                        completed = Some(ResolveOutcome::NotFound);
+                        continue;
+                    }
+                    reserve_work_push(visits, max_work, "module export visits")?;
+                    visits.push(key);
+                    let record = self.record(frame.module)?;
+                    if let Some(export) = record
+                        .exports
+                        .iter()
+                        .find(|entry| entry.export_name() == Some(&frame.name))
+                    {
+                        match export {
+                            ExportEntry::Local { local_name, .. } => {
+                                completed = Some(ResolveOutcome::Found(ResolvedBinding {
+                                    module: frame.module,
+                                    binding: ResolvedBindingName::Local(local_name.clone()),
+                                }));
+                            }
+                            ExportEntry::Indirect {
+                                module_request,
+                                import_name,
+                                ..
+                            } => {
+                                let target = self.module_by_specifier(module_request)?;
+                                match import_name {
+                                    ModuleImportName::Namespace => {
+                                        completed = Some(ResolveOutcome::Found(ResolvedBinding {
+                                            module: target,
+                                            binding: ResolvedBindingName::Namespace,
+                                        }));
+                                    }
+                                    ModuleImportName::Name(name) => {
+                                        frame.state = ResolveFrameState::AwaitIndirect;
+                                        push_resolve_frame(frames, target, name.clone(), max_work)?;
+                                    }
+                                }
+                            }
+                            ExportEntry::Star { .. } => unreachable!("star export has no name"),
+                        }
+                        continue;
+                    }
+                    if frame.name.is_default() {
+                        completed = Some(ResolveOutcome::NotFound);
+                    } else {
+                        frame.state = ResolveFrameState::Stars {
+                            next_export: 0,
+                            candidate: None,
+                        };
+                    }
+                }
+                ResolveFrameState::AwaitIndirect => return Err(ModuleError::InvalidLinkState),
+                ResolveFrameState::Stars {
+                    next_export,
+                    candidate,
                 } => {
-                    module = self.module_by_specifier(module_request)?;
-                    name = import_name.as_str();
+                    let record = self.record(frame.module)?;
+                    let Some((index, request)) = record
+                        .exports
+                        .iter()
+                        .enumerate()
+                        .skip(*next_export)
+                        .find_map(|(index, export)| match export {
+                            ExportEntry::Star { module_request } => Some((index, module_request)),
+                            ExportEntry::Local { .. } | ExportEntry::Indirect { .. } => None,
+                        })
+                    else {
+                        completed = Some(
+                            candidate
+                                .clone()
+                                .map_or(ResolveOutcome::NotFound, ResolveOutcome::Found),
+                        );
+                        continue;
+                    };
+                    *next_export = index + 1;
+                    let target = self.module_by_specifier(request)?;
+                    let name = frame.name.clone();
+                    push_resolve_frame(frames, target, name, max_work)?;
                 }
             }
         }
@@ -270,7 +396,7 @@ impl ModuleGraph {
         self.module_by_specifier(request)
     }
 
-    fn module_by_specifier(&self, specifier: &ModuleSpecifier) -> Result<ModuleId, ModuleError> {
+    fn module_by_specifier(&self, specifier: &ModuleIdentity) -> Result<ModuleId, ModuleError> {
         self.records
             .iter()
             .find(|record| record.specifier == *specifier)
@@ -313,11 +439,26 @@ impl ModuleGraph {
             if matches!(record.status, ModuleStatus::Linking { .. }) {
                 record.status = ModuleStatus::Unlinked;
                 for import in &mut record.imports {
-                    import.resolved_cell = None;
+                    import.resolved = None;
                 }
             }
         }
     }
+}
+
+fn push_resolve_frame(
+    frames: &mut Vec<ResolveFrame>,
+    module: ModuleId,
+    name: ModuleExportName,
+    max_work: usize,
+) -> Result<(), ModuleError> {
+    reserve_work_push(frames, max_work, "module export frames")?;
+    frames.push(ResolveFrame {
+        module,
+        name,
+        state: ResolveFrameState::Enter,
+    });
+    Ok(())
 }
 
 fn try_work_vec<T>(max_work: usize, collection: &'static str) -> Result<Vec<T>, ModuleError> {
