@@ -13,6 +13,13 @@ const CONSTRUCTOR_EXECUTOR: usize = 0;
 const CONSTRUCTOR_NEW_TARGET: usize = 1;
 const CONSTRUCTOR_PROTOTYPE: usize = 2;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseCheckpointProgress {
+    Progressed,
+    Suspended,
+    Completed(RunOutcome),
+}
+
 struct PromiseConstructorRoots<'a> {
     vm: VmRoots<'a>,
     pending: NativeCallState,
@@ -1438,80 +1445,93 @@ impl Isolate {
         Ok(())
     }
 
-    /// Drains Promise reactions at one ECMAScript job boundary without recursive VM entry.
+    /// Drains a complete ECMAScript checkpoint for synchronous embedding entry points.
     pub(crate) fn promise_checkpoint(
         &mut self,
         result: Value,
         return_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        self.promise_jobs.begin_checkpoint(result);
         loop {
-            let Some(job) = self.promise_jobs.begin_next() else {
-                if self.begin_finalization_cleanup_job(return_site)? {
-                    return Ok(None);
-                }
-                if self.finalization_jobs.has_pending_work(&self.heap) {
-                    continue;
-                }
-                let result = self
-                    .promise_jobs
-                    .finish_checkpoint()
-                    .expect("checkpoint retains the original completion");
-                return Ok(Some(RunOutcome::Completed(result)));
-            };
-            match job {
-                PromiseJob::Reaction {
-                    handler,
-                    capability,
-                    argument,
-                    rejected,
-                } => {
-                    if self.is_async_function_state(capability) {
-                        return self.resume_async_function_job(
-                            capability,
-                            argument,
-                            rejected,
-                            return_site,
-                        );
-                    }
-                    if self.is_async_module_state(capability) {
-                        return self.resume_async_module_job(capability, argument, rejected);
-                    }
-                    if self.is_async_generator_await(capability) {
-                        return self.resume_async_generator_await_job(
-                            capability,
-                            argument,
-                            rejected,
-                            return_site,
-                        );
-                    }
-                    if self.resolve_function_object(handler).is_err() {
-                        let site = self.promise_job_site(return_site)?;
-                        if self.begin_promise_reaction_settlement(
-                            capability, argument, rejected, site,
-                        )? {
-                            return Ok(None);
-                        }
-                        continue;
-                    }
-                    return self.call_promise_reaction_handler(
-                        handler,
-                        capability,
-                        argument,
-                        return_site,
-                    );
-                }
-                PromiseJob::Thenable {
-                    promise,
-                    thenable,
-                    then,
-                } => {
-                    if self.begin_promise_thenable_job(promise, thenable, then, return_site)? {
-                        return Ok(None);
-                    }
-                }
+            match self.promise_checkpoint_step(result, return_site)? {
+                PromiseCheckpointProgress::Progressed => {}
+                PromiseCheckpointProgress::Suspended => return Ok(None),
+                PromiseCheckpointProgress::Completed(outcome) => return Ok(Some(outcome)),
             }
         }
+    }
+
+    /// Claims and advances at most one Promise or finalization job.
+    pub(crate) fn promise_checkpoint_step(
+        &mut self,
+        result: Value,
+        return_site: WordOffset,
+    ) -> Result<PromiseCheckpointProgress, ExecutionError> {
+        self.promise_jobs.begin_checkpoint(result);
+        let Some(job) = self.promise_jobs.begin_next() else {
+            if self.begin_finalization_cleanup_job(return_site)? {
+                return Ok(PromiseCheckpointProgress::Suspended);
+            }
+            if self.finalization_jobs.has_pending_work(&self.heap) {
+                return Ok(PromiseCheckpointProgress::Progressed);
+            }
+            let result = self
+                .promise_jobs
+                .finish_checkpoint()
+                .expect("checkpoint retains the original completion");
+            return Ok(PromiseCheckpointProgress::Completed(RunOutcome::Completed(
+                result,
+            )));
+        };
+        let outcome = match job {
+            PromiseJob::Reaction {
+                handler,
+                capability,
+                argument,
+                rejected,
+            } => {
+                if self.is_async_function_state(capability) {
+                    self.resume_async_function_job(capability, argument, rejected, return_site)?
+                } else if self.is_async_module_state(capability) {
+                    self.resume_async_module_job(capability, argument, rejected)?
+                } else if self.is_async_generator_await(capability) {
+                    self.resume_async_generator_await_job(
+                        capability,
+                        argument,
+                        rejected,
+                        return_site,
+                    )?
+                } else if self.resolve_function_object(handler).is_err() {
+                    let site = self.promise_job_site(return_site)?;
+                    let suspended = self
+                        .begin_promise_reaction_settlement(capability, argument, rejected, site)?;
+                    return Ok(if suspended {
+                        PromiseCheckpointProgress::Suspended
+                    } else {
+                        PromiseCheckpointProgress::Progressed
+                    });
+                } else {
+                    self.call_promise_reaction_handler(handler, capability, argument, return_site)?
+                }
+            }
+            PromiseJob::Thenable {
+                promise,
+                thenable,
+                then,
+            } => {
+                return Ok(
+                    if self.begin_promise_thenable_job(promise, thenable, then, return_site)? {
+                        PromiseCheckpointProgress::Suspended
+                    } else {
+                        PromiseCheckpointProgress::Progressed
+                    },
+                );
+            }
+        };
+        Ok(match outcome {
+            Some(outcome) => PromiseCheckpointProgress::Completed(outcome),
+            None if self.fiber.frames.is_empty() => PromiseCheckpointProgress::Progressed,
+            None => PromiseCheckpointProgress::Suspended,
+        })
     }
 
     /// Calls one reaction handler and leaves its active job rooted until continuation completion.
@@ -1573,12 +1593,7 @@ impl Isolate {
             if self.fiber.completions.len() > completion_depth {
                 return Ok(None);
             }
-            return self.promise_checkpoint(
-                self.promise_jobs
-                    .checkpoint_result
-                    .expect("completed reaction retains its checkpoint result"),
-                return_site,
-            );
+            return Ok(None);
         }
         debug_assert!(self.fiber.completions.len() > completion_depth);
         let continuation = self
@@ -1592,12 +1607,7 @@ impl Isolate {
         if self.fiber.frames.len() != settlement_frame_depth {
             return Ok(None);
         }
-        self.promise_checkpoint(
-            self.promise_jobs
-                .checkpoint_result
-                .expect("active checkpoint retains its result"),
-            return_site,
-        )
+        Ok(None)
     }
 
     /// Calls one thenable job with fresh resolving functions and no recursive interpreter entry.

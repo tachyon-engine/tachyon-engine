@@ -7,7 +7,10 @@ use core::{
     task::{Context, Poll},
 };
 
-use crate::{ExecutionBudget, ExecutionError, Isolate, ModuleId, PromiseState, RunOutcome, Value};
+use crate::{
+    ExecutionBudget, ExecutionError, Isolate, ModuleId, PromiseState, RunOutcome, Value,
+    promise::PromiseCheckpointProgress,
+};
 
 /// Identifies the isolate-owned Fiber currently consuming a driver quantum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,12 +132,17 @@ impl Isolate {
             return self.finish_driver_work(DriverActiveWork::Module(module), outcome);
         }
         if self.promise_jobs.has_pending() || self.promise_jobs.checkpoint_result.is_some() {
-            let checkpoint = self.promise_checkpoint(
+            let checkpoint = self.promise_checkpoint_step(
                 Value::from_immediate(tachyon_value::Immediate::Undefined),
                 tachyon_bytecode::WordOffset::new(0),
             )?;
-            if checkpoint.is_none() && !self.fiber.frames.is_empty() {
-                self.driver_active_work = Some(DriverActiveWork::PromiseJob);
+            match checkpoint {
+                PromiseCheckpointProgress::Suspended if !self.fiber.frames.is_empty() => {
+                    self.driver_active_work = Some(DriverActiveWork::PromiseJob);
+                }
+                PromiseCheckpointProgress::Progressed
+                | PromiseCheckpointProgress::Completed(_)
+                | PromiseCheckpointProgress::Suspended => {}
             }
             return Ok(DriverProgress::Progressed);
         }

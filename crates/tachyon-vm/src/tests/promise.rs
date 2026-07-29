@@ -1,4 +1,14 @@
-use std::sync::Arc;
+use core::{
+    future::Future,
+    num::NonZeroU32,
+    pin::Pin,
+    task::{Context, Waker},
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::Wake;
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 use tachyon_gc::{ForcedCollectionMode, SPAN_SIZE_BYTES};
 
@@ -39,6 +49,51 @@ fn promise_jobs_move_through_the_traced_active_slot_in_fifo_order() {
         queue.begin_next(),
         Some(PromiseJob::Thenable { then, .. }) if then.as_i32() == Some(6)
     ));
+}
+
+#[derive(Default)]
+struct DriverWakeCount(AtomicUsize);
+
+impl Wake for DriverWakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn vm_driver_consumes_only_one_native_promise_job_per_poll() {
+    let mut isolate = test_isolate();
+    let undefined = Value::from_immediate(Immediate::Undefined);
+    let source = isolate
+        .create_promise(PromiseState::Fulfilled, Value::from_i32(7))
+        .unwrap();
+    for _ in 0..3 {
+        let capability = isolate
+            .create_promise(PromiseState::Pending, undefined)
+            .unwrap();
+        isolate
+            .perform_promise_then_with_capability(source, None, None, capability)
+            .unwrap();
+    }
+    let target = isolate
+        .create_promise(PromiseState::Pending, undefined)
+        .unwrap();
+    assert_eq!(isolate.promise_jobs.len(), 3);
+    let counter = Arc::new(DriverWakeCount::default());
+    let waker = Waker::from(counter.clone());
+    let mut context = Context::from_waker(&waker);
+    {
+        let mut driver = isolate
+            .drive_promise(target, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        assert!(Pin::new(&mut driver).poll(&mut context).is_pending());
+    }
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    assert_eq!(isolate.promise_jobs.len(), 2);
 }
 
 #[test]
