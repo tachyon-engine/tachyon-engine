@@ -361,6 +361,7 @@ fn composed_test(
             name: path.into(),
             source,
         },
+        modules: Vec::new(),
         source_sha256,
     })
 }

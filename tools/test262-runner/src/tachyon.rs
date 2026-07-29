@@ -6,8 +6,9 @@ use tachyon_compiler::{
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
     AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, HostProviderError,
-    HostProviders, Isolate, IsolateConfig, RealmId, RealmLimits, RunOutcome, StackLimits,
-    TimeZoneProvider, Value, WallClockProvider,
+    HostProviders, Isolate, IsolateConfig, LoadedModule, ModuleError, ModuleIdentity,
+    ModuleLoadError, ModuleLoader, RealmId, RealmLimits, ResolvedModuleRequest, RunOutcome,
+    StackLimits, TimeZoneProvider, Value, WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -223,7 +224,16 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         Ok(module) => module,
         Err(error) => return body_compile_error(error),
     };
-    if let Some(outcome) = execute_module(&mut isolate, &module) {
+    if request.is_module {
+        if let Some(outcome) = execute_source_module(
+            &mut isolate,
+            &module,
+            &request.test.body,
+            &request.test.modules,
+        ) {
+            return outcome;
+        }
+    } else if let Some(outcome) = execute_module(&mut isolate, &module) {
         return outcome;
     }
     if request.is_async {
@@ -315,7 +325,179 @@ fn execute_async_probe(isolate: &mut Isolate) -> EngineOutcome {
     }
 }
 
-/// Maps the current VM outcomes without treating missing exception objects as a successful test.
+/// Loads and evaluates one module graph exclusively from the suite's owned source units.
+fn execute_source_module(
+    isolate: &mut Isolate,
+    module: &tachyon_bytecode::CompiledModule,
+    body: &SourceUnit,
+    fixtures: &[SourceUnit],
+) -> Option<EngineOutcome> {
+    let root = match ModuleIdentity::try_new(&body.name) {
+        Ok(identity) => identity,
+        Err(error) => return Some(unsupported(format!("invalid module identity: {error:?}"))),
+    };
+    let mut loader = Test262ModuleLoader::new(root.clone(), module.clone(), fixtures);
+    let root_id = match isolate.load_module_graph(&mut loader, &root) {
+        Ok(root_id) => root_id,
+        Err(error) => return Some(classify_module_load_error(error)),
+    };
+    match isolate.evaluate_module(root_id) {
+        Ok(RunOutcome::Completed(_)) => None,
+        Ok(outcome) => classify_run_outcome(isolate, outcome),
+        Err(error) => Some(unsupported(format!("module evaluation failed: {error:?}"))),
+    }
+}
+
+/// Deterministic source-module loader with no filesystem or ambient host capabilities.
+struct Test262ModuleLoader {
+    root: ModuleIdentity,
+    root_module: Option<tachyon_bytecode::CompiledModule>,
+    sources: Vec<SourceUnit>,
+}
+
+#[derive(Debug)]
+enum Test262ModuleLoaderError {
+    Compile(CompileError),
+    Invalid(Box<str>),
+}
+
+impl Test262ModuleLoader {
+    fn new(
+        root: ModuleIdentity,
+        root_module: tachyon_bytecode::CompiledModule,
+        fixtures: &[SourceUnit],
+    ) -> Self {
+        Self {
+            root,
+            root_module: Some(root_module),
+            sources: fixtures.to_vec(),
+        }
+    }
+}
+
+impl ModuleLoader for Test262ModuleLoader {
+    type Error = Test262ModuleLoaderError;
+
+    fn resolve(
+        &mut self,
+        request: &tachyon_bytecode::ModuleRequest,
+        referrer: Option<&ModuleIdentity>,
+    ) -> Result<ModuleIdentity, Self::Error> {
+        let specifier = String::from_utf16(request.specifier.as_ref()).map_err(|_| {
+            Test262ModuleLoaderError::Invalid(
+                "module request contains an invalid UTF-16 sequence".into(),
+            )
+        })?;
+        let identity = if specifier.starts_with("./") || specifier.starts_with("../") {
+            let referrer = referrer.ok_or_else(|| {
+                Test262ModuleLoaderError::Invalid("relative module request has no referrer".into())
+            })?;
+            let referrer = String::from_utf8(referrer.as_bytes().to_vec()).map_err(|_| {
+                Test262ModuleLoaderError::Invalid("module referrer is not UTF-8".into())
+            })?;
+            normalize_module_path(&referrer, &specifier)
+                .map_err(Test262ModuleLoaderError::Invalid)?
+        } else {
+            specifier
+        };
+        ModuleIdentity::try_new(&identity)
+            .map_err(|error| Test262ModuleLoaderError::Invalid(format!("{error:?}").into()))
+    }
+
+    fn load(
+        &mut self,
+        resolved: ResolvedModuleRequest<'_>,
+    ) -> Result<Option<LoadedModule>, Self::Error> {
+        if resolved.identity() == &self.root {
+            return Ok(self.root_module.take().map(LoadedModule::precompiled));
+        }
+        let Some(source) = self
+            .sources
+            .iter()
+            .find(|source| source.name.as_bytes() == resolved.identity().as_bytes())
+        else {
+            return Ok(None);
+        };
+        let compiled = Compiler
+            .compile(
+                source_text(source_id(source.name.len(), 100), source),
+                options(SourceMode::Module),
+            )
+            .map_err(Test262ModuleLoaderError::Compile)?;
+        Ok(Some(LoadedModule::precompiled(compiled)))
+    }
+}
+
+/// Converts dependency parse/link failures into Test262's Resolution phase.
+fn classify_module_load_error(error: ModuleLoadError<Test262ModuleLoaderError>) -> EngineOutcome {
+    match error {
+        ModuleLoadError::Graph(ModuleError::MissingExport | ModuleError::AmbiguousExport)
+        | ModuleLoadError::Loader(Test262ModuleLoaderError::Compile(CompileError::Diagnostics(
+            _,
+        ))) => EngineOutcome::Error {
+            phase: Phase::Resolution,
+            error_type: "SyntaxError".into(),
+            message: "Tachyon module resolution failed".into(),
+        },
+        ModuleLoadError::Loader(Test262ModuleLoaderError::Invalid(message)) => {
+            unsupported(format!("module loader rejected request: {message}"))
+        }
+        other => unsupported(format!("module load failed: {other:?}")),
+    }
+}
+
+/// Resolves a relative Test262 fixture path without consulting the filesystem.
+fn normalize_module_path(referrer: &str, specifier: &str) -> Result<String, Box<str>> {
+    let mut components = referrer.split('/').collect::<Vec<_>>();
+    components.pop();
+    for component in specifier.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components
+                    .pop()
+                    .ok_or_else(|| Box::<str>::from("module path escapes checkout root"))?;
+            }
+            value => components.push(value),
+        }
+    }
+    Ok(components.join("/"))
+}
+
+/// Maps VM outcomes without treating missing exception objects as a successful test.
+fn classify_run_outcome(isolate: &mut Isolate, outcome: RunOutcome) -> Option<EngineOutcome> {
+    match outcome {
+        RunOutcome::Completed(_) => None,
+        RunOutcome::Thrown(value) => {
+            let kind = match isolate.native_error_kind(value) {
+                Ok(Some(kind)) => kind,
+                Ok(None) => {
+                    return Some(EngineOutcome::Error {
+                        phase: Phase::Runtime,
+                        error_type: "Error".into(),
+                        message: format!("Tachyon threw non-native value {value:?}").into(),
+                    });
+                }
+                Err(error) => {
+                    return Some(unsupported(format!(
+                        "Tachyon could not classify thrown value: {error:?}"
+                    )));
+                }
+            };
+            Some(EngineOutcome::Error {
+                phase: Phase::Runtime,
+                error_type: kind.as_str().into(),
+                message: format!("Tachyon threw native {}", kind.as_str()).into(),
+            })
+        }
+        RunOutcome::BudgetExhausted => Some(EngineOutcome::Timeout {
+            message: format!("Tachyon exhausted the {EXECUTION_FUEL_LIMIT} instruction fuel limit")
+                .into(),
+        }),
+    }
+}
+
+/// Executes one ordinary script-compiled module through the bounded adapter entry point.
 fn execute_module(
     isolate: &mut Isolate,
     module: &tachyon_bytecode::CompiledModule,
@@ -334,35 +516,7 @@ fn execute_module(
             )));
         }
     };
-    match outcome {
-        RunOutcome::Completed(_) => None,
-        RunOutcome::Thrown(value) => {
-            let kind = match isolate.native_error_kind(value) {
-                Ok(Some(kind)) => kind,
-                Ok(None) => {
-                    return Some(EngineOutcome::Error {
-                        phase: Phase::Runtime,
-                        error_type: "Error".into(),
-                        message: format!("Tachyon threw non-native value {value:?}").into(),
-                    });
-                }
-                Err(error) => {
-                    return Some(unsupported(format!(
-                        "Tachyon could not classify thrown value {value:?}: {error:?}"
-                    )));
-                }
-            };
-            Some(EngineOutcome::Error {
-                phase: Phase::Runtime,
-                error_type: kind.as_str().into(),
-                message: format!("Tachyon threw native {}", kind.as_str()).into(),
-            })
-        }
-        RunOutcome::BudgetExhausted => Some(EngineOutcome::Timeout {
-            message: format!("Tachyon exhausted the {EXECUTION_FUEL_LIMIT} instruction fuel limit")
-                .into(),
-        }),
-    }
+    classify_run_outcome(isolate, outcome)
 }
 
 fn body_compile_error(error: CompileError) -> EngineOutcome {
@@ -400,8 +554,8 @@ fn unsupported(reason: impl Into<Box<str>>) -> EngineOutcome {
 mod tests {
     use super::TachyonAdapter;
     use crate::{
-        ComposedTest, EngineAdapter, EngineOutcome, ExecutionRequest, SourceUnit, TestVariant,
-        VariantKind,
+        ComposedTest, EngineAdapter, EngineOutcome, ExecutionRequest, Phase, SourceUnit,
+        TestVariant, VariantKind,
     };
 
     /// Builds one content-independent adapter fixture without touching the checkout or filesystem.
@@ -424,6 +578,7 @@ mod tests {
                 name: "test.js".into(),
                 source: body.into(),
             },
+            modules: Vec::new(),
             source_sha256: "fixture".into(),
         }
     }
@@ -437,6 +592,42 @@ mod tests {
                 is_async: test.variant.is_async,
             })
             .outcome
+    }
+
+    /// Proves module variants use the in-memory fixture graph and classify link failures correctly.
+    #[test]
+    fn adapter_loads_module_fixtures_without_ambient_io() {
+        let mut test = composed(
+            "import { value } from './dependency_FIXTURE.js'; value;",
+            &[],
+            false,
+        );
+        test.body.name = "test/module/root.js".into();
+        test.set_modules(vec![SourceUnit {
+            name: "test/module/dependency_FIXTURE.js".into(),
+            source: "export const value = 42;".into(),
+        }]);
+        let execute_module = |test: &ComposedTest| {
+            TachyonAdapter
+                .execute(ExecutionRequest {
+                    test,
+                    can_block: false,
+                    is_module: true,
+                    is_async: false,
+                })
+                .outcome
+        };
+        assert_eq!(execute_module(&test), EngineOutcome::Completed);
+
+        test.body.source = "import { missing } from './dependency_FIXTURE.js';".into();
+        assert!(matches!(
+            execute_module(&test),
+            EngineOutcome::Error {
+                phase: Phase::Resolution,
+                ref error_type,
+                ..
+            } if error_type.as_ref() == "SyntaxError"
+        ));
     }
 
     #[test]

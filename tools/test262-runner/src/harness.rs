@@ -28,6 +28,8 @@ pub struct ComposedTest {
     pub preludes: Vec<SourceUnit>,
     /// Test body after strict directive injection, if any.
     pub body: SourceUnit,
+    /// Same-directory Test262 module fixtures made available to the deterministic loader.
+    pub modules: Vec<SourceUnit>,
     /// SHA-256 over length-delimited names and all final source bytes.
     pub source_sha256: Box<str>,
 }
@@ -108,11 +110,12 @@ impl Harness {
             name: test_name.into(),
             source: body_source,
         };
-        let source_sha256 = hash_sources(&preludes, &body).into_boxed_str();
+        let source_sha256 = hash_sources(&preludes, &body, &[]).into_boxed_str();
         Ok(ComposedTest {
             variant,
             preludes,
             body,
+            modules: Vec::new(),
             source_sha256,
         })
     }
@@ -130,10 +133,19 @@ impl Harness {
     }
 }
 
+impl ComposedTest {
+    /// Attaches deterministic module inputs and includes them in the reproducibility hash.
+    pub(crate) fn set_modules(&mut self, modules: Vec<SourceUnit>) {
+        self.modules = modules;
+        self.source_sha256 =
+            hash_sources(&self.preludes, &self.body, &self.modules).into_boxed_str();
+    }
+}
+
 /// Hashes length-delimited names and source bytes so concatenation boundaries cannot collide.
-fn hash_sources(preludes: &[SourceUnit], body: &SourceUnit) -> String {
+fn hash_sources(preludes: &[SourceUnit], body: &SourceUnit, modules: &[SourceUnit]) -> String {
     let mut hasher = Sha256::new();
-    for unit in preludes.iter().chain(core::iter::once(body)) {
+    for unit in preludes.iter().chain(core::iter::once(body)).chain(modules) {
         let name = unit.name.as_bytes();
         let source = unit.source.as_bytes();
         hasher.update((name.len() as u64).to_le_bytes());
@@ -215,5 +227,26 @@ mod tests {
                 .preludes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn module_fixtures_participate_in_the_source_hash() {
+        let metadata =
+            TestMetadata::parse("/*---\ndescription: module hash\nflags: [module]\n---*/").unwrap();
+        let variant = metadata.variants().unwrap().remove(0);
+        let mut composed = harness()
+            .compose(
+                "root.js",
+                "import './dep_FIXTURE.js';".into(),
+                &metadata,
+                variant,
+            )
+            .unwrap();
+        let root_hash = composed.source_sha256.clone();
+        composed.set_modules(vec![super::SourceUnit {
+            name: "dep_FIXTURE.js".into(),
+            source: "export {};".into(),
+        }]);
+        assert_ne!(composed.source_sha256, root_hash);
     }
 }

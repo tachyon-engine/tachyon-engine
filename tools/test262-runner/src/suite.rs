@@ -17,8 +17,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Applicability, EngineAdapter, FeatureCatalog, Harness, Phase, ResultKind, SpecEdition,
-    Test262Config, TestClassification, TestMetadata, TestResult, run_test,
+    Applicability, EngineAdapter, FeatureCatalog, Harness, Phase, ResultKind, SourceUnit,
+    SpecEdition, Test262Config, TestClassification, TestMetadata, TestResult, run_test,
 };
 
 /// Stable traversal, selection, scheduling, and randomization policy for one suite run.
@@ -130,6 +130,7 @@ struct LoadedTest {
     source: Arc<str>,
     metadata: TestMetadata,
     classification: TestClassification,
+    modules: Vec<SourceUnit>,
 }
 
 /// Loads the checkout, executes all selected variants, and restores path/variant order after parallel work.
@@ -261,6 +262,7 @@ fn load_tests(
     }
     paths.sort();
     let mut tests = Vec::with_capacity(paths.len());
+    let mut fixture_cache: BTreeMap<PathBuf, Vec<SourceUnit>> = BTreeMap::new();
     for path in paths {
         if path
             .file_stem()
@@ -287,11 +289,25 @@ fn load_tests(
                 path: path.clone(),
                 message: error.to_string().into(),
             })?;
+        let directory = path.parent().ok_or_else(|| SuiteError {
+            path: path.clone(),
+            message: "test path has no parent directory".into(),
+        })?;
+        if !fixture_cache.contains_key(directory) {
+            fixture_cache.insert(
+                directory.to_owned(),
+                load_same_directory_fixtures(checkout, &path)?,
+            );
+        }
         tests.push(LoadedTest {
             relative_path: relative_path.into(),
             source: source.into(),
             metadata,
             classification,
+            modules: fixture_cache
+                .get(directory)
+                .expect("fixture directory was cached")
+                .clone(),
         });
     }
     Ok(tests)
@@ -320,6 +336,8 @@ fn execute_loaded(
                 path: PathBuf::from(&*loaded.relative_path),
                 message: error.to_string().into(),
             })?;
+        let mut composed = composed;
+        composed.set_modules(loaded.modules.clone());
         results.push(run_test(
             adapter,
             &loaded.relative_path,
@@ -367,6 +385,41 @@ fn relative_utf8(root: &Path, path: &Path) -> Result<String, SuiteError> {
 
 fn read_utf8(path: &Path) -> Result<String, SuiteError> {
     fs::read_to_string(path).map_err(|error| io_error(path, error))
+}
+
+/// Loads adjacent Test262 fixture modules into owned memory for the engine's deterministic loader.
+fn load_same_directory_fixtures(
+    checkout: &Path,
+    test_path: &Path,
+) -> Result<Vec<SourceUnit>, SuiteError> {
+    let directory = test_path.parent().ok_or_else(|| SuiteError {
+        path: test_path.to_owned(),
+        message: "test path has no parent directory".into(),
+    })?;
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|error| io_error(directory, error))? {
+        let entry = entry.map_err(|error| io_error(directory, error))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+        if !file_type.is_file()
+            || path.extension() != Some(OsStr::new("js"))
+            || !path
+                .file_stem()
+                .is_some_and(|stem| stem.as_encoded_bytes().ends_with(b"FIXTURE"))
+        {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    let mut modules = Vec::with_capacity(paths.len());
+    for path in paths {
+        modules.push(SourceUnit {
+            name: relative_utf8(checkout, &path)?.into(),
+            source: read_utf8(&path)?.into(),
+        });
+    }
+    Ok(modules)
 }
 
 /// Rejects checkout drift before a report can claim results for the configured revision.
