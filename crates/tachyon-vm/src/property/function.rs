@@ -201,7 +201,8 @@ impl Isolate {
             }
             FunctionExecutable::PromiseFinallyHandler { .. }
             | FunctionExecutable::PromiseCombinatorHandler { .. }
-            | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => {
+            | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. }
+            | FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => {
                 if key == self.length_atom()? {
                     return Ok(Some(Value::from_i32(1)));
                 }
@@ -357,7 +358,8 @@ impl Isolate {
                 | FunctionExecutable::PromiseFinallyHandler { .. }
                 | FunctionExecutable::PromiseFinallyResultHandler { .. }
                 | FunctionExecutable::PromiseCombinatorHandler { .. }
-                | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => false,
+                | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. }
+                | FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => false,
             })
     }
 

@@ -1932,6 +1932,10 @@ pub(crate) enum FunctionExecutable {
     AsyncFromSyncIteratorUnwrap {
         done: bool,
     },
+    /// Rejection callback that closes the captured synchronous iterator.
+    AsyncFromSyncIteratorCloseOnReject {
+        iterator: Value,
+    },
 }
 
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
@@ -2193,6 +2197,11 @@ impl Trace for FunctionObject {
         }
         if let FunctionExecutable::PromiseCombinatorHandler { element, .. } = &mut self.executable {
             element.trace(tracer);
+        }
+        if let FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { iterator } =
+            &mut self.executable
+        {
+            iterator.trace(tracer);
         }
         self.prototype_or_home_object.trace(tracer);
         self.ordinary.trace(tracer);

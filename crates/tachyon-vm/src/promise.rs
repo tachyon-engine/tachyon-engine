@@ -1593,7 +1593,13 @@ impl Isolate {
             frame.return_continuation = true;
             return Ok(None);
         }
-        if self.fiber.completions.len() <= completion_depth {
+        let reaction_pending = self.fiber.completions.last_native().is_some_and(|entry| {
+            entry.kind() == NativeContinuationKind::PromiseReaction && entry.first() == capability
+        });
+        if !reaction_pending {
+            if self.fiber.completions.len() > completion_depth {
+                return Ok(None);
+            }
             return self.promise_checkpoint(
                 self.promise_jobs
                     .checkpoint_result
@@ -1601,6 +1607,7 @@ impl Isolate {
                 return_site,
             );
         }
+        debug_assert!(self.fiber.completions.len() > completion_depth);
         let continuation = self
             .fiber
             .completions

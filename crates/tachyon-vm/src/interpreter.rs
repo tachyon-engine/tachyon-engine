@@ -1848,7 +1848,7 @@ impl Isolate {
                     suspend_id: operands[2],
                     base,
                 })?;
-                return Ok(None);
+                return self.resume_restored_generator_native_caller();
             }
             Opcode::YieldDelegate => {
                 self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
@@ -1860,7 +1860,7 @@ impl Isolate {
                     suspend_id: operands[2],
                     base,
                 })?;
-                return Ok(None);
+                return self.resume_restored_generator_native_caller();
             }
             Opcode::EnterFinally => {
                 let (index, handler) = self
@@ -2493,6 +2493,9 @@ impl Isolate {
             NativeContinuationKind::AsyncAwaitConstructor
             | NativeContinuationKind::AsyncFromSyncIterator(_) => {
                 (continuation.second(), 0, None, 0)
+            }
+            NativeContinuationKind::AsyncFromSyncCloseOnReject(_) => {
+                (continuation.first(), 0, None, 0)
             }
             NativeContinuationKind::RegExpReplace => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -4847,6 +4850,9 @@ impl Isolate {
                 FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
             }
         };
         if derived {
@@ -5531,6 +5537,12 @@ impl Isolate {
                         .unwrap_or(Value::from_immediate(Immediate::Undefined));
                     let result = self.create_iterator_result(value, done)?;
                     return self.write(site.caller_base, site.destination, result);
+                }
+                FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { iterator } => {
+                    let reason = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    return self.begin_async_from_sync_close_on_reject(&site, iterator, reason);
                 }
                 FunctionExecutable::Native(NativeFunction::FunctionPrototype) => {
                     return self.write(
@@ -7155,6 +7167,7 @@ impl Isolate {
             FunctionExecutable::PromiseFinallyResultHandler { .. } => false,
             FunctionExecutable::PromiseCombinatorHandler { .. } => false,
             FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => false,
+            FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => false,
             FunctionExecutable::Bytecode { code, function, .. } => {
                 let kind = self
                     .loaded_code(code)?
@@ -8089,6 +8102,9 @@ impl Isolate {
                 NativeContinuationKind::AsyncFromSyncIterator(stage) => {
                     self.resume_async_from_sync_iterator(continuation, stage, value)
                 }
+                NativeContinuationKind::AsyncFromSyncCloseOnReject(stage) => {
+                    self.resume_async_from_sync_close_on_reject(continuation, stage, value)
+                }
                 NativeContinuationKind::PromiseExecutor => {
                     self.write(site.caller_base, site.destination, continuation.first())
                 }
@@ -8164,6 +8180,13 @@ impl Isolate {
                     self.reject_async_from_sync(site, state, reason)?;
                     return Ok(None);
                 }
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::AsyncFromSyncCloseOnReject(_)
+                ) {
+                    self.finish_async_from_sync_close_on_reject(continuation.second())?;
+                    return Ok(None);
+                }
                 if continuation.kind() == NativeContinuationKind::SignalWatcherHook
                     && let ExecutionError::HostThrown(thrown) = &error
                 {
@@ -8194,7 +8217,10 @@ impl Isolate {
                 };
                 return self.throw_native_error(kind, site.call_site);
             }
-            if self.fiber.frames.len() != frame_depth {
+            let restored_sync_generator_caller = continuation.kind()
+                == NativeContinuationKind::GeneratorResume
+                && continuation.second().as_immediate() == Some(Immediate::Undefined);
+            if self.fiber.frames.len() != frame_depth && !restored_sync_generator_caller {
                 return Ok(None);
             }
             if continuation.kind()
@@ -8228,6 +8254,27 @@ impl Isolate {
             value = self.read(parent_site.caller_base, parent_site.destination)?;
             continuation = parent;
         }
+    }
+
+    /// Drains a native caller immediately after a Yield opcode restores its Fiber.
+    fn resume_restored_generator_native_caller(
+        &mut self,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let frame_completion_base = self
+            .fiber
+            .frames
+            .last()
+            .ok_or(ExecutionError::MissingEnvironment)?
+            .completion_base as usize;
+        if self.fiber.completions.len() <= frame_completion_base {
+            return Ok(None);
+        }
+        let Some(continuation) = self.fiber.completions.pop_native() else {
+            return Ok(None);
+        };
+        let site = continuation.site();
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_native_continuation(continuation, value)
     }
 
     /// Propagates a thrown value through explicit frames until an immutable handler range matches.
@@ -8426,6 +8473,13 @@ impl Isolate {
                     self.reject_async_from_sync(continuation.site(), state, value)?;
                     return Ok(None);
                 }
+                if matches!(
+                    continuation.kind(),
+                    NativeContinuationKind::AsyncFromSyncCloseOnReject(_)
+                ) {
+                    self.finish_async_from_sync_close_on_reject(continuation.second())?;
+                    return Ok(None);
+                }
                 if continuation.kind() == NativeContinuationKind::PromiseExecutor {
                     self.reject_promise_executor(continuation, value)?;
                     let site = continuation.site();
@@ -8511,6 +8565,16 @@ impl Isolate {
                     let parent = self.pop_native_continuation()?;
                     let state = self.native_call_state_reference(parent.first())?;
                     self.reject_async_from_sync(parent.site(), state, value)?;
+                    return Ok(None);
+                }
+                if let Some(parent) = self.fiber.completions.last_native()
+                    && matches!(
+                        parent.kind(),
+                        NativeContinuationKind::AsyncFromSyncCloseOnReject(_)
+                    )
+                {
+                    let parent = self.pop_native_continuation()?;
+                    self.finish_async_from_sync_close_on_reject(parent.second())?;
                     return Ok(None);
                 }
             }

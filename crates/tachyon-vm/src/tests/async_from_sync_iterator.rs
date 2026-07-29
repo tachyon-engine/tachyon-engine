@@ -69,6 +69,47 @@ consume();
 result;
 "#;
 
+const ASYNC_FROM_SYNC_CLOSE_ON_REJECT_SOURCE: &str = r#"
+var result = "";
+
+function* generated() {
+    try {
+        yield Promise.reject("generator");
+    } finally {
+        result += "generator-close|";
+    }
+}
+
+var iterable = {};
+iterable[Symbol.iterator] = function() {
+    return {
+        next: function() {
+            return { done: false, value: Promise.reject("object") };
+        },
+        return: function() {
+            result += "object-close|";
+            return {};
+        }
+    };
+};
+
+async function consume() {
+    try {
+        for await (var value of generated());
+    } catch (error) {
+        result += "caught:" + error + "|";
+    }
+    try {
+        for await (var value of iterable);
+    } catch (error) {
+        result += "caught:" + error + "|";
+    }
+    result += "done|";
+}
+consume();
+result;
+"#;
+
 #[test]
 fn async_from_sync_assimilates_thenables_and_rejects_sync_throws() {
     assert_async_from_sync_source::<1>(ASYNC_FROM_SYNC_PROTOCOL_SOURCE, "3|caught:boom|", false);
@@ -94,6 +135,29 @@ fn ordinary_await_rejection_preserves_promise_chain_order() {
         ORDINARY_AWAIT_REJECTION_ORDER_SOURCE,
         "tick1|catch|tick2|",
         false,
+    );
+}
+
+#[test]
+fn async_from_sync_rejection_close_runs_for_every_dispatch_batch() {
+    assert_async_from_sync_rejection_close::<1>(false);
+    assert_async_from_sync_rejection_close::<2>(false);
+    assert_async_from_sync_rejection_close::<4>(false);
+    assert_async_from_sync_rejection_close::<8>(false);
+    assert_async_from_sync_rejection_close::<16>(false);
+}
+
+#[test]
+fn async_from_sync_rejection_close_survives_forced_major_collection() {
+    assert_async_from_sync_rejection_close::<8>(true);
+}
+
+/// Checks generator and ordinary-iterator close ownership across one dispatch configuration.
+fn assert_async_from_sync_rejection_close<const N: usize>(forced_major: bool) {
+    assert_async_from_sync_source::<N>(
+        ASYNC_FROM_SYNC_CLOSE_ON_REJECT_SOURCE,
+        "generator-close|caught:generator|object-close|caught:object|done|",
+        forced_major,
     );
 }
 

@@ -1967,7 +1967,8 @@ impl Isolate {
                     | FunctionExecutable::PromiseFinallyHandler { .. }
                     | FunctionExecutable::PromiseFinallyResultHandler { .. }
                     | FunctionExecutable::PromiseCombinatorHandler { .. }
-                    | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => 2,
+                    | FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. }
+                    | FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => 2,
                     FunctionExecutable::Bytecode { .. } | FunctionExecutable::ClassBytecode(_) => 3,
                 },
                 Err(_) => 0,

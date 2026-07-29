@@ -381,11 +381,22 @@ impl Isolate {
         self.root_async_from_sync_state(site, state)?;
         let callback = self.allocate_async_from_sync_unwrap(flags & RESULT_DONE != 0)?;
         self.set_promise_then_value(state, STATE_ARGUMENT, callback)?;
+        let operation = flags & 0b11;
+        let close_on_rejection = flags & RESULT_DONE == 0 && operation != OP_RETURN;
+        if close_on_rejection {
+            let wrapper = self.native_call_state_snapshot(state)?.values[STATE_ITERATOR];
+            let wrapper = self.async_from_sync_iterator_snapshot(
+                self.async_from_sync_iterator_reference(wrapper)
+                    .ok_or(ExecutionError::MissingNativeContinuation)?,
+            )?;
+            let callback = self.allocate_async_from_sync_close_on_reject(wrapper.sync_iterator)?;
+            self.set_promise_then_value(state, STATE_FLAGS, callback)?;
+        }
         let snapshot = self.native_call_state_snapshot(state)?;
         self.perform_promise_then_with_capability(
             snapshot.values[STATE_RESULT],
             Some(snapshot.values[STATE_ARGUMENT]),
-            None,
+            close_on_rejection.then_some(snapshot.values[STATE_FLAGS]),
             snapshot.values[STATE_PROMISE],
         )?;
         self.write(
@@ -656,6 +667,228 @@ impl Isolate {
             )
             .map(|function| Value::from_heap_ref(function.raw()))
             .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Allocates the rejection callback that closes the captured synchronous iterator.
+    fn allocate_async_from_sync_close_on_reject(
+        &mut self,
+        iterator: Value,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before iterator close callbacks");
+        let mut roots = AsyncFromSyncAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            iterator,
+            next_method: Value::from_immediate(Immediate::Undefined),
+            prototype,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.function,
+                0,
+                0,
+                FunctionObject {
+                    executable: FunctionExecutable::AsyncFromSyncIteratorCloseOnReject {
+                        iterator: roots.iterator,
+                    },
+                    prototype_or_home_object: None,
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|function| Value::from_heap_ref(function.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Starts IteratorClose for a rejected sync value while retaining the original reason.
+    pub(crate) fn begin_async_from_sync_close_on_reject(
+        &mut self,
+        site: &CallSite,
+        iterator: Value,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        let key = PropertyKey::Atom(self.intern_intrinsic_name(b"return")?);
+        let continuation = NativeContinuation::async_from_sync_close_on_reject(
+            native_site,
+            CollectionIteratorCloseStage::ReturnGetter,
+            iterator,
+            reason,
+        );
+        match self.resolve_property_read_until_proxy(iterator, key) {
+            Err(_) | Ok(PropertyReadResolution::Read(PropertyRead::Missing)) => {
+                return self.finish_async_from_sync_close_on_reject(reason);
+            }
+            Ok(PropertyReadResolution::Read(PropertyRead::Data(value))) => {
+                return self.resume_async_from_sync_close_on_reject(
+                    continuation,
+                    CollectionIteratorCloseStage::ReturnGetter,
+                    value,
+                );
+            }
+            Ok(PropertyReadResolution::Read(PropertyRead::Accessor(getter)))
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                return self.finish_async_from_sync_close_on_reject(reason);
+            }
+            Ok(PropertyReadResolution::Read(PropertyRead::Accessor(getter))) => {
+                return self
+                    .dispatch_property_callback(continuation, getter)
+                    .map(|_| ());
+            }
+            Ok(PropertyReadResolution::Proxy(_)) => {}
+        }
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        if self
+            .dispatch_proxy_aware_property_read(native_site, iterator, iterator, key)
+            .is_err()
+        {
+            if self.fiber.completions.len() > depth {
+                self.pop_native_continuation()?;
+            }
+            return self.finish_async_from_sync_close_on_reject(reason);
+        }
+        if self.fiber.frames.len() != frames || self.fiber.completions.len() <= depth {
+            return Ok(());
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_async_from_sync_close_on_reject(
+            continuation,
+            CollectionIteratorCloseStage::ReturnGetter,
+            value,
+        )
+    }
+
+    /// Resumes the close getter or call and always preserves the original rejection reason.
+    pub(crate) fn resume_async_from_sync_close_on_reject(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: CollectionIteratorCloseStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let reason = continuation.second();
+        match stage {
+            CollectionIteratorCloseStage::ReturnGetter => {
+                if is_nullish(value) || self.resolve_function_object(value).is_err() {
+                    return self.finish_async_from_sync_close_on_reject(reason);
+                }
+                self.dispatch_async_from_sync_close_call(
+                    continuation.site(),
+                    continuation.first(),
+                    reason,
+                    value,
+                )
+            }
+            CollectionIteratorCloseStage::ReturnCall => {
+                self.finish_async_from_sync_close_on_reject(reason)
+            }
+        }
+    }
+
+    /// Calls the synchronous iterator's return method through the iterative frame machinery.
+    fn dispatch_async_from_sync_close_call(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+        reason: Value,
+        callee: Value,
+    ) -> Result<(), ExecutionError> {
+        let depth = self.fiber.completions.len();
+        let frames = self.fiber.frames.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::async_from_sync_close_on_reject(
+                site,
+                CollectionIteratorCloseStage::ReturnCall,
+                iterator,
+                reason,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        if self
+            .call(CallSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                callee,
+                argument_base: 0,
+                argument_source: None,
+                argument_prefix: None,
+                argument_prefix_offset: 0,
+                argument_prefix_count: 0,
+                argument_count: 0,
+                this_value: iterator,
+                new_target: Value::from_immediate(Immediate::Undefined),
+                construct_receiver: None,
+                call_site: site.call_site,
+            })
+            .is_err()
+        {
+            self.pop_native_continuation()?;
+            return self.finish_async_from_sync_close_on_reject(reason);
+        }
+        let close_call_pending = self.fiber.completions.last_native().is_some_and(|entry| {
+            entry.kind()
+                == NativeContinuationKind::AsyncFromSyncCloseOnReject(
+                    CollectionIteratorCloseStage::ReturnCall,
+                )
+                && entry.first() == iterator
+                && entry.second() == reason
+        });
+        if self.fiber.frames.len() != frames || !close_call_pending {
+            if self.fiber.frames.len() != frames {
+                let frame = self
+                    .fiber
+                    .frames
+                    .last_mut()
+                    .expect("close call frame exists");
+                frame.return_register = None;
+                frame.return_continuation = true;
+            }
+            return Ok(());
+        }
+        debug_assert!(self.fiber.completions.len() > depth);
+        let continuation = self.pop_native_continuation()?;
+        self.resume_async_from_sync_close_on_reject(
+            continuation,
+            CollectionIteratorCloseStage::ReturnCall,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Rejects the parent Promise reaction capability with the original sync value error.
+    pub(crate) fn finish_async_from_sync_close_on_reject(
+        &mut self,
+        reason: Value,
+    ) -> Result<(), ExecutionError> {
+        let reaction = self.pop_native_continuation()?;
+        if reaction.kind() != NativeContinuationKind::PromiseReaction {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
+        self.begin_promise_reaction_rejection(reaction, reason)
     }
 
     #[inline(always)]

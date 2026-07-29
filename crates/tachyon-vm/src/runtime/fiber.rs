@@ -1467,6 +1467,7 @@ pub(crate) enum NativeContinuationKind {
     AsyncFunction,
     AsyncAwaitConstructor,
     AsyncFromSyncIterator(AsyncFromSyncIteratorStage),
+    AsyncFromSyncCloseOnReject(CollectionIteratorCloseStage),
     PromiseExecutor,
     PromiseReaction,
     PromiseCapabilityCall,
@@ -1590,6 +1591,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::AsyncFromSyncIterator(stage),
             first: state,
             second: retained,
+        }
+    }
+
+    /// Retains the sync iterator and original rejection while IteratorClose runs.
+    #[inline]
+    pub(crate) const fn async_from_sync_close_on_reject(
+        site: NativeContinuationSite,
+        stage: CollectionIteratorCloseStage,
+        iterator: Value,
+        reason: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::AsyncFromSyncCloseOnReject(stage),
+            first: iterator,
+            second: reason,
         }
     }
 
