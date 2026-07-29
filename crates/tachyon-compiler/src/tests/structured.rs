@@ -686,6 +686,28 @@ fn compiler_accepts_async_functions_and_generators_as_distinct_kinds() {
 }
 
 #[test]
+/// Confirms async-function `for await...of` emits async iterator lookup and Await suspension.
+fn compiler_lowers_async_for_await_of_iterator_step() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "async function collect(values) { var out = []; for await (const value of values) out.push(value); return out; } collect;",
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async for-await-of fixture compiles");
+    let function = module
+        .functions()
+        .iter()
+        .find(|function| function.kind() == tachyon_bytecode::FunctionKind::Async)
+        .expect("async function is published");
+    let disassembly = tachyon_bytecode::disassemble(function).expect("bytecode disassembles");
+    assert!(disassembly.contains("LoadAsyncIteratorSymbol"));
+    assert!(disassembly.contains("Await"));
+}
+
+#[test]
 fn compiler_freezes_derived_class_and_super_call_contracts() {
     let hir = Compiler
         .lower_to_hir(

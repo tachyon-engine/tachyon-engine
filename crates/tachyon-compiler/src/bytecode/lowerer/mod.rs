@@ -234,6 +234,39 @@ impl Lowerer<'_> {
         })
     }
 
+    /// Obtains an async iterator record through the realm's `Symbol.asyncIterator`.
+    pub(super) fn get_async_iterator(
+        &mut self,
+        object: RegisterId,
+        span: SourceSpan,
+    ) -> Result<IteratorRegisters, CompileError> {
+        let iterator_key = self.register()?;
+        self.emit(
+            Opcode::LoadAsyncIteratorSymbol,
+            &[iterator_key.index()],
+            span,
+        )?;
+        self.prepare_property_key(iterator_key, object, false, span)?;
+        let iterator = self.computed_method_call(object, iterator_key, span)?;
+        self.emit(Opcode::CheckObject, &[iterator.index()], span)?;
+        let receiver = self.register()?;
+        self.emit(Opcode::Move, &[receiver.index(), iterator.index()], span)?;
+        let next = self.register()?;
+        let next_atom = self.scope_name(&std::sync::Arc::from("next"))?;
+        self.emit(
+            Opcode::GetById,
+            &[next.index(), receiver.index(), next_atom],
+            span,
+        )?;
+        let done = self.load_boolean(false, span)?;
+        Ok(IteratorRegisters {
+            iterator,
+            receiver,
+            next,
+            done,
+        })
+    }
+
     /// Calls cached `next`, then updates the record's done register from its result object.
     pub(super) fn iterator_next(
         &mut self,

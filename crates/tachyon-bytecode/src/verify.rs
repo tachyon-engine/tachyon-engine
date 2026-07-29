@@ -876,6 +876,7 @@ fn verify_instruction(
         | Opcode::SuperConstructForwardAll
         | Opcode::CheckConstructor
         | Opcode::LoadIteratorSymbol
+        | Opcode::LoadAsyncIteratorSymbol
         | Opcode::CheckObject
         | Opcode::LoadSuperBase => check_register(operands[0])?,
         Opcode::InitializeClassEnvironment => {

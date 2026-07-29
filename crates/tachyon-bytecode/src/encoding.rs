@@ -309,9 +309,11 @@ pub enum Opcode {
     TailCallSpreadWithReceiver = 131,
     /// Performs syntactic direct eval with an engine-private argument Array.
     DirectEvalSpread = 132,
+    /// Loads the current realm's immutable well-known `Symbol.asyncIterator` identity.
+    LoadAsyncIteratorSymbol = 133,
 }
 
-pub(super) const OPCODE_COUNT: usize = 133;
+pub(super) const OPCODE_COUNT: usize = 134;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -446,10 +448,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // CallSpreadWithReceiver
     3, // TailCallSpreadWithReceiver
     3, // DirectEvalSpread
+    1, // LoadAsyncIteratorSymbol
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DirectEvalSpread as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LoadAsyncIteratorSymbol as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -628,6 +631,7 @@ impl Opcode {
             66 => Some(Self::CallSpreadWithReceiver),
             67 => Some(Self::TailCallSpreadWithReceiver),
             68 => Some(Self::DirectEvalSpread),
+            69 => Some(Self::LoadAsyncIteratorSymbol),
             _ => None,
         }
     }

@@ -43,7 +43,7 @@ struct PendingInstanceElement {
 
 impl Lowerer<'_> {
     /// Emits one suspend instruction and its immutable resume metadata side-table entry.
-    fn emit_suspend(
+    pub(super) fn emit_suspend(
         &mut self,
         opcode: Opcode,
         source: RegisterId,

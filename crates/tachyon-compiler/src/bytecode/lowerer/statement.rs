@@ -354,10 +354,13 @@ impl Lowerer<'_> {
                 right,
                 body,
             } => {
-                if *r#await {
-                    return Err(self.unsupported(statement.span, "for-await-of bytecode"));
-                }
-                self.function_for_of_statement(left, right, body, statement.span)?;
+                self.function_for_await_or_of_statement(
+                    *r#await,
+                    left,
+                    right,
+                    body,
+                    statement.span,
+                )?;
                 Ok(false)
             }
             HirStatementKind::Loop {
@@ -557,6 +560,65 @@ impl Lowerer<'_> {
             .map_err(CompileError::Builder)?;
         self.finally_depth -= 1;
         self.publish_iterator_close_handler(finally_slot, protected_start, finalizer, handler_end)?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        self.restore_for_in_scope(left, checkpoint);
+        Ok(())
+    }
+
+    /// Emits the initial async-iterator lowering using Await for each iterator result.
+    pub(in crate::bytecode) fn function_for_await_or_of_statement(
+        &mut self,
+        is_async: bool,
+        left: &HirForInLeft,
+        right: &HirExpression,
+        body: &HirStatement,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        if !is_async {
+            return self.function_for_of_statement(left, right, body, span);
+        }
+        let checkpoint = self.locals.len();
+        let source = self.expression(right)?;
+        let iterator = self.get_async_iterator(source, span)?;
+        self.prepare_for_in_binding(left, span)?;
+        let condition = self.builder.new_label().map_err(CompileError::Builder)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .bind_label(condition)
+            .map_err(CompileError::Builder)?;
+        let promise = self.call_receiver(iterator.receiver, iterator.next, span)?;
+        let result = self.register()?;
+        self.emit_suspend(tachyon_bytecode::Opcode::Await, promise, result, span)?;
+        self.emit(Opcode::CheckObject, &[result.index()], span)?;
+        let done = self.pattern_property(
+            result,
+            &crate::HirObjectPropertyKey::Static("done".into()),
+            span,
+        )?;
+        self.builder
+            .emit_jump_if_true(
+                done,
+                end,
+                BytecodeSourceSpan {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .map_err(CompileError::Builder)?;
+        let value = self.pattern_property(
+            result,
+            &crate::HirObjectPropertyKey::Static("value".into()),
+            span,
+        )?;
+        self.store_for_in_left(left, value, span)?;
+        self.continue_targets.push(self.control_target(condition));
+        self.break_targets.push(self.control_target(end));
+        self.function_statement(body)?;
+        self.break_targets.pop();
+        self.continue_targets.pop();
+        self.emit_jump(condition, span)?;
         self.builder
             .bind_label(end)
             .map_err(CompileError::Builder)?;

@@ -1087,6 +1087,14 @@ impl Isolate {
                     .expect("Symbol.iterator initializes before bytecode execution");
                 self.write(base, operands[0], symbol)?;
             }
+            Opcode::LoadAsyncIteratorSymbol => {
+                let symbol = self
+                    .realm
+                    .well_known_symbols
+                    .async_iterator
+                    .expect("Symbol.asyncIterator initializes before bytecode execution");
+                self.write(base, operands[0], symbol)?;
+            }
             Opcode::CheckObject => {
                 let value = self.read(base, operands[0])?;
                 if !self.is_object_value(value) {

@@ -114,7 +114,7 @@ var asyncIdentity = asyncIteratorPrototype[asyncSymbol];
 var intrinsicAsyncIterator = Object.getPrototypeOf(asyncIteratorPrototype) === iteratorPrototype;
 var chainOk = iteratorPrototype[Symbol.iterator].call(agPrototype) === agPrototype;
 var identityOk = asyncIdentity.call(agPrototype) === agPrototype;
-var tagOk = asyncIteratorPrototype[Symbol.toStringTag] === "AsyncIterator";
+var tagOk = iteratorPrototype[Symbol.toStringTag] === "AsyncIterator";
 (intrinsicAsyncIterator ? 1 : 0) + (chainOk ? 2 : 0) + (identityOk ? 4 : 0) + (tagOk ? 8 : 0);
 "#;
 

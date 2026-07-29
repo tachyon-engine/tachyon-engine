@@ -266,6 +266,7 @@ impl BytecodeBuilder {
             | Opcode::InitializeClassEnvironment
             | Opcode::CreatePrivateName
             | Opcode::LoadIteratorSymbol
+            | Opcode::LoadAsyncIteratorSymbol
             | Opcode::CheckObject
             | Opcode::Return
             | Opcode::Throw => &[0],

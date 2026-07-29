@@ -207,6 +207,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::LoadSuperBase,
                 Opcode::InitializeInstanceElements,
                 Opcode::LoadIteratorSymbol,
+                Opcode::LoadAsyncIteratorSymbol,
                 Opcode::CheckObject,
             ],
         ),
