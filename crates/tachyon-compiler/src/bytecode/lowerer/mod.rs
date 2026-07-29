@@ -726,9 +726,12 @@ impl Lowerer<'_> {
             .bind_label(use_initializer)
             .map_err(CompileError::Builder)?;
         let initialized = self.expression(initializer)?;
-        if matches!(initializer.kind, HirExpressionKind::Function(_))
-            && let Some(name) = inferred_name
-        {
+        let anonymous = match &initializer.kind {
+            HirExpressionKind::Function(function) => function.anonymous,
+            HirExpressionKind::Class(class) => class.name.is_none(),
+            _ => false,
+        };
+        if anonymous && let Some(name) = inferred_name {
             let name = self.scope_name(name)?;
             self.emit(
                 Opcode::SetFunctionName,

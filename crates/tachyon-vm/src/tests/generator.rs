@@ -723,6 +723,33 @@ fn generator_initialization_boundary_survives_forced_major_collection() {
 }
 
 #[test]
+/// Checks inferred names for every anonymous definition accepted by binding defaults.
+fn generator_destructuring_defaults_infer_anonymous_names() {
+    let source = r#"
+function* inspect([
+    fn = function() {},
+    namedFn = function explicitFn() {},
+    gen = function*() {},
+    namedGen = function* explicitGen() {},
+    cls = class {},
+    namedCls = class ExplicitClass {}
+]) {
+    return fn.name + "|" + namedFn.name + "|" + gen.name + "|" + namedGen.name +
+        "|" + cls.name + "|" + namedCls.name;
+}
+inspect([]).next().value;
+"#;
+    let (mut isolate, outcome) = execute_generator_fixture(2_549, source);
+    let actual = isolate
+        .string_value_to_utf16(outcome)
+        .expect("inferred-name result is a string");
+    assert_eq!(
+        String::from_utf16(&actual).expect("inferred names are valid UTF-16"),
+        "fn|explicitFn|gen|explicitGen|cls|ExplicitClass"
+    );
+}
+
+#[test]
 fn async_generator_request_queue_runs_for_every_dispatch_batch() {
     assert_async_generator_queue::<1>(false);
     assert_async_generator_queue::<2>(false);

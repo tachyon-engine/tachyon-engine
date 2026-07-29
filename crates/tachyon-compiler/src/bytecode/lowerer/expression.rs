@@ -718,6 +718,7 @@ impl Lowerer<'_> {
             HirExpressionKind::Function(function) => {
                 let destination = self.register()?;
                 let function = function
+                    .stencil
                     .index()
                     .checked_add(1)
                     .ok_or(CompileError::RegisterOverflow)?;

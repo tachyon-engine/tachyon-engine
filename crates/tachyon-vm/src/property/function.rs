@@ -286,6 +286,11 @@ impl Isolate {
         ) {
             return Ok(());
         }
+        let name_key = self.name_atom()?;
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        if self.shapes.lookup(snapshot.shape, name_key).is_some() {
+            return Ok(());
+        }
         let text = self
             .atoms
             .get(name)
@@ -296,7 +301,6 @@ impl Isolate {
         }
         .map_err(ExecutionError::PropertyKeyString)?;
         let value = self.allocate_runtime_string(text)?;
-        let name_key = self.name_atom()?;
         self.define_fresh_data_property(
             receiver,
             name_key,

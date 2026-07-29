@@ -3109,21 +3109,62 @@ impl Isolate {
         let Some((environment, slot)) = self.dynamic_environment_binding(atom)? else {
             return Ok(false);
         };
-        self.heap.with_running_scope(|scope| {
+        let result = self.heap.with_running_scope(|scope| {
             scope.with_no_gc_scope(|no_gc| {
-                no_gc
+                let environment = no_gc
                     .borrow_reference_mut(environment, self.types.environment)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .store(slot, value)
-                    .map_err(|error| environment_access_error(0, slot, error))
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                Ok::<_, ExecutionError>(environment.store(slot, value))
             })
         })?;
+        match result {
+            Ok(()) => {}
+            Err(EnvironmentAccessError::Immutable)
+                if self.sloppy_dynamic_self_assignment(environment, slot)? =>
+            {
+                return Ok(true);
+            }
+            Err(error) => return Err(environment_access_error(0, slot, error)),
+        }
         if let Some(target) = value.as_heap_ref() {
             self.heap
                 .write_barrier(environment.raw(), target)
                 .map_err(ExecutionError::HeapReference)?;
         }
         Ok(true)
+    }
+
+    /// Recognizes the sole non-strict immutable declarative binding on the cold eval path.
+    fn sloppy_dynamic_self_assignment(
+        &mut self,
+        environment: GcRef<Environment>,
+        slot: u32,
+    ) -> Result<bool, ExecutionError> {
+        if self
+            .fiber
+            .frames
+            .last()
+            .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict)
+        {
+            return Ok(false);
+        }
+        let owner = self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .map(Environment::owner)
+            })
+        })?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        let function = self
+            .loaded_code(owner.code)?
+            .module
+            .function(owner.function)
+            .ok_or(ExecutionError::MissingEntryFunction(owner.function))?;
+        Ok(function.layout().self_binding_slot == Some(slot))
     }
 
     /// Writes through a cached global slot or publishes the binding once on the cold path.

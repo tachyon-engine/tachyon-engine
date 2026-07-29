@@ -65,6 +65,12 @@ pub struct HirExpression {
     pub kind: HirExpressionKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HirFunctionExpression {
+    pub stencil: FunctionStencilId,
+    pub anonymous: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HirClass {
     pub name: Option<Arc<str>>,
@@ -191,7 +197,7 @@ pub enum HirExpressionKind {
     Boolean(bool),
     Null,
     Identifier(HirIdentifierReference),
-    Function(FunctionStencilId),
+    Function(HirFunctionExpression),
     Class(HirClass),
     This,
     NewTarget,
@@ -399,24 +405,31 @@ pub(super) fn lower_expression(
             HirExpressionKind::Identifier(new_reference(identifier, source, semantic)?)
         }
         Expression::FunctionExpression(function) => {
+            let anonymous = function.id.is_none();
             let self_binding = function
                 .id
                 .as_ref()
                 .map(|identifier| new_binding(identifier, source, semantic))
                 .transpose()?;
             let name = self_binding.as_ref().map(|binding| binding.name.clone());
-            HirExpressionKind::Function(lower_function_stencil(
-                function,
-                name,
-                self_binding,
-                source,
-                semantic,
-                functions,
-            )?)
+            HirExpressionKind::Function(HirFunctionExpression {
+                stencil: lower_function_stencil(
+                    function,
+                    name,
+                    self_binding,
+                    source,
+                    semantic,
+                    functions,
+                )?,
+                anonymous,
+            })
         }
-        Expression::ArrowFunctionExpression(function) => HirExpressionKind::Function(
-            lower_arrow_function_stencil(function, source, semantic, functions)?,
-        ),
+        Expression::ArrowFunctionExpression(function) => {
+            HirExpressionKind::Function(HirFunctionExpression {
+                stencil: lower_arrow_function_stencil(function, source, semantic, functions)?,
+                anonymous: true,
+            })
+        }
         Expression::ThisExpression(_) => HirExpressionKind::This,
         Expression::MetaProperty(property)
             if property.meta.name == "new" && property.property.name == "target" =>
@@ -584,9 +597,12 @@ pub(super) fn lower_expression(
                     }
                     HirObjectPropertyValue::Data(HirExpression {
                         span: source_span(function.span),
-                        kind: HirExpressionKind::Function(lower_function_stencil(
-                            function, None, None, source, semantic, functions,
-                        )?),
+                        kind: HirExpressionKind::Function(HirFunctionExpression {
+                            stencil: lower_function_stencil(
+                                function, None, None, source, semantic, functions,
+                            )?,
+                            anonymous: false,
+                        }),
                     })
                 } else {
                     HirObjectPropertyValue::Data(lower_expression(

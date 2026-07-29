@@ -82,7 +82,9 @@ fn assert_direct_eval_batch<const N: usize>(module: &CompiledModule, forced_majo
                 quantum: 16_384,
             },
         )
-        .expect("direct eval fixture executes");
+        .unwrap_or_else(|error| {
+            panic!("batch {N} direct eval forced_major={forced_major} failed: {error:?}")
+        });
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "batch {N} direct eval returned {outcome:?}"
@@ -279,6 +281,62 @@ fn direct_eval_lexical_record_enforces_tdz_const_and_escaping_closure_capture() 
     assert_direct_eval_batch::<4>(&module, false);
     assert_direct_eval_batch::<8>(&module, true);
     assert_direct_eval_batch::<16>(&module, true);
+}
+
+#[test]
+/// Keeps named-function self bindings non-strict without weakening strict immutable bindings.
+fn direct_eval_reassignment_obeys_function_name_binding_strictness() {
+    let module = compile_source(
+        r#"
+var ordinary;
+ordinary = function OrdinaryName() {
+    eval("OrdinaryName = 1");
+    return OrdinaryName === ordinary;
+};
+var strictOrdinary = function StrictOrdinaryName() {
+    "use strict";
+    try { eval("StrictOrdinaryName = 1"); }
+    catch (error) { return error instanceof TypeError; }
+    return false;
+};
+function constBindingRemainsStrict() {
+    const fixed = 1;
+    try { eval("fixed = 2"); }
+    catch (error) { return error instanceof TypeError; }
+    return false;
+}
+ordinary() && strictOrdinary() && constBindingRemainsStrict();
+"#,
+        1_176,
+    );
+    assert_direct_eval_batch::<1>(&module, false);
+    assert_direct_eval_batch::<2>(&module, false);
+    assert_direct_eval_batch::<4>(&module, false);
+    assert_direct_eval_batch::<8>(&module, true);
+    assert_direct_eval_batch::<16>(&module, true);
+
+    let generator = compile_source(
+        r#"
+var generator;
+generator = function* GeneratorName() {
+    eval("GeneratorName = 1");
+    return GeneratorName === generator;
+};
+var strictGenerator = function* StrictGeneratorName() {
+    "use strict";
+    try { eval("StrictGeneratorName = 1"); }
+    catch (error) { return error instanceof TypeError; }
+    return false;
+};
+generator().next().value && strictGenerator().next().value;
+"#,
+        1_177,
+    );
+    assert_direct_eval_batch::<1>(&generator, false);
+    assert_direct_eval_batch::<2>(&generator, false);
+    assert_direct_eval_batch::<4>(&generator, false);
+    assert_direct_eval_batch::<8>(&generator, false);
+    assert_direct_eval_batch::<16>(&generator, false);
 }
 
 #[test]
