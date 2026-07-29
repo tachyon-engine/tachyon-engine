@@ -1011,6 +1011,70 @@ fn top_level_await_releases_diamond_ancestors_once_in_evaluation_order() {
     assert_top_level_await_diamond_batch::<16>(true);
 }
 
+/// A later importer of an async cycle leaf waits for the cycle root, not only the leaf body.
+fn assert_async_cycle_leaf_import_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let modules = [
+        (
+            "memory:cycle-entry",
+            "import 'memory:cycle-setup'; import 'memory:cycle-root'; \
+             import 'memory:cycle-leaf-importer'; globalThis.order;",
+        ),
+        ("memory:cycle-setup", "globalThis.order = 0;"),
+        (
+            "memory:cycle-root",
+            "import 'memory:cycle-leaf'; globalThis.order = globalThis.order * 10 + 3; \
+             await 0; globalThis.order = globalThis.order * 10 + 4;",
+        ),
+        (
+            "memory:cycle-leaf",
+            "import 'memory:cycle-root'; globalThis.order = globalThis.order * 10 + 1; \
+             await 0; globalThis.order = globalThis.order * 10 + 2;",
+        ),
+        (
+            "memory:cycle-leaf-importer",
+            "import 'memory:cycle-leaf'; globalThis.order = globalThis.order * 10 + 5;",
+        ),
+    ];
+    let mut loader = PrecompiledGraphLoader::new(
+        modules
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, source))| {
+                (
+                    specifier(name),
+                    LoadedModule::precompiled(compile_source_module(
+                        2_300 + N as u32 * 10 + index as u32,
+                        name,
+                        source,
+                    )),
+                )
+            })
+            .collect(),
+    );
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:cycle-entry"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(12_345))
+    );
+}
+
+#[test]
+fn importer_of_async_cycle_leaf_waits_for_cycle_root_completion() {
+    assert_async_cycle_leaf_import_batch::<1>(false);
+    assert_async_cycle_leaf_import_batch::<2>(false);
+    assert_async_cycle_leaf_import_batch::<4>(false);
+    assert_async_cycle_leaf_import_batch::<8>(true);
+    assert_async_cycle_leaf_import_batch::<16>(true);
+}
+
 #[test]
 fn top_level_await_rejection_propagates_through_shared_async_parents() {
     let mut isolate = fixtures::test_isolate();

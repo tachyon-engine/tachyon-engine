@@ -342,12 +342,13 @@ impl ModuleGraph {
             state.finish_module();
             return Ok(false);
         }
+        // An order marks a dependency whose evaluation postorder entry was already processed.
+        // This distinguishes an async cycle leaf from an unprocessed SCC back-edge.
         let pending = if dependency_root == cycle_root {
-            matches!(
-                dependency_record.evaluation,
-                ModuleEvaluationState::Waiting | ModuleEvaluationState::AsyncEvaluating(_)
-            )
-            .then_some(dependency)
+            dependency_record
+                .async_evaluation_order
+                .is_some()
+                .then_some(dependency)
         } else if !matches!(
             self.record(dependency_root)?.evaluation,
             ModuleEvaluationState::Evaluated(_)
