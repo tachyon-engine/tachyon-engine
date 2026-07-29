@@ -48,6 +48,86 @@ const ASYNC_FUNCTION_ASSERTION: &str = r#"
 trace;
 "#;
 
+const ASYNC_COMPLETION_MATRIX_SOURCE: &str = r#"
+var completionTrace = "";
+
+async function returnThenReject() {
+    try {
+        return "try-return";
+    } finally {
+        await Promise.reject("finally-reject");
+    }
+}
+
+async function rejectThenReturn() {
+    try {
+        await Promise.reject("try-reject");
+    } finally {
+        return "finally-return";
+    }
+}
+
+async function throwThenAwait() {
+    try {
+        throw "try-throw";
+    } finally {
+        await 0;
+        completionTrace += "finally-await|";
+    }
+}
+
+async function rejectThenThrow() {
+    try {
+        await Promise.reject("try-reject");
+    } finally {
+        throw "finally-throw";
+    }
+}
+
+async function nestedLeaf() {
+    await 0;
+    throw "leaf";
+}
+
+async function nestedMiddle() {
+    try {
+        await nestedLeaf();
+    } catch (error) {
+        await 0;
+        return error + "-middle";
+    } finally {
+        completionTrace += "middle-finally|";
+    }
+}
+
+async function nestedOuter() {
+    try {
+        var value = await nestedMiddle();
+        completionTrace += value + "|";
+        return value;
+    } finally {
+        await 0;
+        completionTrace += "outer-finally|";
+    }
+}
+
+async function runCompletionMatrix() {
+    try { await returnThenReject(); }
+    catch (error) { completionTrace += error + "|"; }
+    completionTrace += await rejectThenReturn() + "|";
+    try { await throwThenAwait(); }
+    catch (error) { completionTrace += error + "|"; }
+    try { await rejectThenThrow(); }
+    catch (error) { completionTrace += error + "|"; }
+    var nested = await nestedOuter();
+    completionTrace += nested + "|";
+}
+
+runCompletionMatrix();
+"#;
+
+const ASYNC_COMPLETION_MATRIX_EXPECTED: &str = "finally-reject|finally-return|finally-await|try-throw|finally-throw|middle-finally|leaf-middle|outer-finally|leaf-middle|";
+
 const NAMED_ASYNC_PARAMETER_SOURCE: &str = r#"
 var result = "";
 var original;
@@ -174,6 +254,20 @@ fn async_function_state_survives_forced_major_collection() {
     assert_async_function_source::<4>(true);
     assert_async_function_source::<8>(true);
     assert_async_function_source::<16>(true);
+}
+
+#[test]
+fn async_completion_precedence_runs_for_every_dispatch_batch() {
+    assert_async_completion_matrix::<1>(false);
+    assert_async_completion_matrix::<2>(false);
+    assert_async_completion_matrix::<4>(false);
+    assert_async_completion_matrix::<8>(false);
+    assert_async_completion_matrix::<16>(false);
+}
+
+#[test]
+fn async_completion_precedence_survives_forced_major_collection() {
+    assert_async_completion_matrix::<8>(true);
 }
 
 #[test]
@@ -491,6 +585,74 @@ fn assert_async_function_source<const N: usize>(forced_major: bool) {
         String::from_utf16(&trace).expect("trace is valid UTF-16"),
         "body|caller|before|return:5|after:7|caught|finally|paused:8|rejected:9|arrow:3|",
         "async function batch {N}, forced_major={forced_major}"
+    );
+}
+
+/// Exercises abrupt-completion precedence and nested async Fiber handoff under one policy.
+fn assert_async_completion_matrix<const N: usize>(forced_major: bool) {
+    let compiler = Compiler;
+    let setup = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(4_000 + N as u32),
+                SourceName::new("async-completion-matrix"),
+                MediaType::JavaScript,
+                Arc::from(ASYNC_COMPLETION_MATRIX_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async completion matrix compiles");
+    let assertion = compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(4_100 + N as u32),
+                SourceName::new("async-completion-matrix-assertion"),
+                MediaType::JavaScript,
+                Arc::from("completionTrace;"),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("async completion matrix assertion compiles");
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(57, 58)),
+        HeapLimit::new(192 * SPAN_SIZE_BYTES),
+        StackLimits::new(128, 12_288),
+        RealmLimits::new(96, 2_048),
+    ))
+    .expect("async completion isolate initializes");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    isolate
+        .execute_with_batch::<N>(
+            &setup,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("async completion matrix executes");
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &assertion,
+            ExecutionBudget {
+                fuel: 8_192,
+                quantum: 8_192,
+            },
+        )
+        .expect("async completion assertion executes");
+    let RunOutcome::Completed(value) = outcome else {
+        panic!("async completion assertion did not complete: {outcome:?}");
+    };
+    let trace = isolate
+        .string_value_to_utf16(value)
+        .expect("async completion trace is a string");
+    assert_eq!(
+        String::from_utf16(&trace).expect("async completion trace is valid UTF-16"),
+        ASYNC_COMPLETION_MATRIX_EXPECTED,
+        "async completion batch {N}, forced_major={forced_major}"
     );
 }
 
