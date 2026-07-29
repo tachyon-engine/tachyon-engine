@@ -38,6 +38,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) next_register: u32,
     pub(super) source_name: SourceName,
     pub(super) script_scope: bool,
+    pub(super) module_scope: bool,
     pub(super) root_scope: ScopeId,
     pub(super) function_scope: Option<ScopeId>,
     pub(super) is_arrow: bool,
@@ -789,6 +790,26 @@ impl Lowerer<'_> {
         Ok(())
     }
 
+    /// Initializes a pre-instantiated module function cell before source-order evaluation begins.
+    pub(super) fn module_function_declaration(
+        &mut self,
+        declaration: &HirFunctionDeclaration,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let register = self.register()?;
+        let function = declaration
+            .function
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        let binding = self
+            .local_by_id(declaration.binding.id)
+            .cloned()
+            .ok_or(CompileError::BindingOverflow)?;
+        self.emit(Opcode::CreateClosure, &[register.index(), function], span)?;
+        self.initialize_local(&binding, register, span)
+    }
+
     /// Instantiates one direct function-body declaration before ordinary statement execution.
     pub(super) fn local_function_declaration(
         &mut self,
@@ -1321,9 +1342,13 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         self.add_binding_plan(BindingPlanEntry {
             name: slot.name.clone(),
-            location: BindingLocation::Environment {
-                depth: 0,
-                slot: slot.slot,
+            location: if self.module_scope {
+                BindingLocation::ModuleCell { slot: slot.slot }
+            } else {
+                BindingLocation::Environment {
+                    depth: 0,
+                    slot: slot.slot,
+                }
             },
             mutable: slot.mutable,
         })?;

@@ -153,6 +153,7 @@ fn lower_entry(
     constants: &mut Vec<BytecodeConstant>,
     scope_names: &mut Vec<std::sync::Arc<str>>,
 ) -> Result<CompiledFunctionTemplate, CompileError> {
+    let module_scope = hir.kind() == ProgramKind::Module;
     let var_bindings = var_declared_bindings(hir.statements())?;
     let has_control_flow = hir.statements().iter().any(|statement| {
         matches!(
@@ -199,6 +200,7 @@ fn lower_entry(
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: true,
+        module_scope,
         root_scope: hir.root_scope(),
         function_scope: Some(hir.root_scope()),
         is_arrow: false,
@@ -223,16 +225,22 @@ fn lower_entry(
     }
     for statement in hir.statements() {
         if let HirStatementKind::FunctionDeclaration(declaration) = &statement.kind {
-            lowerer.function_declaration(declaration, statement.span)?;
+            if module_scope {
+                lowerer.module_function_declaration(declaration, statement.span)?;
+            } else {
+                lowerer.function_declaration(declaration, statement.span)?;
+            }
         }
     }
-    for binding in &var_bindings {
-        let scope_name = lowerer.global_binding(&binding.name, true)?;
-        lowerer.emit(
-            Opcode::DeclareScope,
-            &[scope_name],
-            SourceSpan { start: 0, end: 0 },
-        )?;
+    if !module_scope {
+        for binding in &var_bindings {
+            let scope_name = lowerer.global_binding(&binding.name, true)?;
+            lowerer.emit(
+                Opcode::DeclareScope,
+                &[scope_name],
+                SourceSpan { start: 0, end: 0 },
+            )?;
+        }
     }
     let result = if has_control_flow {
         let result = lowerer.load_undefined(SourceSpan { start: 0, end: 0 })?;
@@ -323,7 +331,9 @@ fn lower_entry(
         suspend_points,
         feedback_sites: Default::default(),
         binding_plan,
-        environment_record_kind: if environments.entry_slots.is_empty() {
+        environment_record_kind: if module_scope {
+            EnvironmentRecordKind::Module
+        } else if environments.entry_slots.is_empty() {
             EnvironmentRecordKind::for_function_kind(kind)
         } else {
             EnvironmentRecordKind::Declarative
@@ -389,42 +399,48 @@ struct GlobalLexicalPlan {
 impl EnvironmentPlans {
     /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
     fn new(source: &SourceText, hir: &HirProgram, direct_eval: bool) -> Result<Self, CompileError> {
+        let module_entry = hir.kind() == ProgramKind::Module;
         let mut global_lexicals =
             Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
-        let mut entry_slots =
-            Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?);
-        for statement in hir.statements() {
-            let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
-                continue;
-            };
-            if !matches!(
-                declaration.kind,
-                HirVariableDeclarationKind::Let | HirVariableDeclarationKind::Const
-            ) {
-                continue;
-            }
-            for declarator in declaration.declarators.iter() {
-                let bindings = pattern_bindings(&declarator.pattern);
-                for binding in bindings {
-                    if binding.scope == hir.root_scope() {
-                        if direct_eval {
-                            let slot = u32::try_from(entry_slots.len())
-                                .map_err(|_| CompileError::BindingOverflow)?;
-                            entry_slots.push(CapturedSlot {
-                                id: binding.id,
-                                slot,
-                                name: binding.name.clone(),
-                                mutable: declaration.kind == HirVariableDeclarationKind::Let,
-                                initialized: false,
-                                parameter: false,
-                            });
-                        } else {
-                            global_lexicals.push(GlobalLexicalPlan {
-                                id: binding.id,
-                                name: binding.name.clone(),
-                                mutable: declaration.kind == HirVariableDeclarationKind::Let,
-                                span: declarator.span,
-                            });
+        let mut entry_slots = if module_entry {
+            module_entry_slots(hir)?
+        } else {
+            Vec::with_capacity(capacity::estimate_var_bindings(hir.statements())?)
+        };
+        if !module_entry {
+            for statement in hir.statements() {
+                let HirStatementKind::VariableDeclaration(declaration) = &statement.kind else {
+                    continue;
+                };
+                if !matches!(
+                    declaration.kind,
+                    HirVariableDeclarationKind::Let | HirVariableDeclarationKind::Const
+                ) {
+                    continue;
+                }
+                for declarator in declaration.declarators.iter() {
+                    let bindings = pattern_bindings(&declarator.pattern);
+                    for binding in bindings {
+                        if binding.scope == hir.root_scope() {
+                            if direct_eval {
+                                let slot = u32::try_from(entry_slots.len())
+                                    .map_err(|_| CompileError::BindingOverflow)?;
+                                entry_slots.push(CapturedSlot {
+                                    id: binding.id,
+                                    slot,
+                                    name: binding.name.clone(),
+                                    mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                                    initialized: false,
+                                    parameter: false,
+                                });
+                            } else {
+                                global_lexicals.push(GlobalLexicalPlan {
+                                    id: binding.id,
+                                    name: binding.name.clone(),
+                                    mutable: declaration.kind == HirVariableDeclarationKind::Let,
+                                    span: declarator.span,
+                                });
+                            }
                         }
                     }
                 }
@@ -699,6 +715,82 @@ impl EnvironmentPlans {
         }
         None
     }
+}
+
+/// Builds the compiler/runtime shared module-slot order: imports first, then sorted local names.
+fn module_entry_slots(hir: &HirProgram) -> Result<Vec<CapturedSlot>, CompileError> {
+    let stencil = hir.module_stencil().ok_or(CompileError::BindingOverflow)?;
+    let capacity = stencil
+        .imports
+        .len()
+        .checked_add(stencil.local_bindings.len())
+        .ok_or(CompileError::BindingOverflow)?;
+    let mut slots = Vec::with_capacity(capacity);
+    for import in stencil.imports.iter() {
+        let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
+        slots.push(CapturedSlot {
+            id: import.binding,
+            slot,
+            name: import.local_name.clone(),
+            mutable: false,
+            initialized: true,
+            parameter: false,
+        });
+    }
+    let var_bindings = var_declared_bindings(hir.statements())?;
+    for name in stencil.local_bindings.iter() {
+        let (binding, mutable, initialized) =
+            module_local_binding(hir, &var_bindings, name).ok_or(CompileError::BindingOverflow)?;
+        let slot = u32::try_from(slots.len()).map_err(|_| CompileError::BindingOverflow)?;
+        slots.push(CapturedSlot {
+            id: binding.id,
+            slot,
+            name: name.clone(),
+            mutable,
+            initialized,
+            parameter: false,
+        });
+    }
+    Ok(slots)
+}
+
+/// Recovers declaration state for one normalized local module binding.
+fn module_local_binding(
+    hir: &HirProgram,
+    var_bindings: &[crate::HirBinding],
+    name: &str,
+) -> Option<(crate::HirBinding, bool, bool)> {
+    if let Some(binding) = var_bindings
+        .iter()
+        .find(|binding| binding.name.as_ref() == name)
+    {
+        return Some((binding.clone(), true, true));
+    }
+    for statement in hir.statements() {
+        match &statement.kind {
+            HirStatementKind::VariableDeclaration(declaration) => {
+                for declarator in declaration.declarators.iter() {
+                    if let Some(binding) = pattern_bindings(&declarator.pattern)
+                        .into_iter()
+                        .find(|binding| binding.name.as_ref() == name)
+                    {
+                        return Some((
+                            binding,
+                            declaration.kind != HirVariableDeclarationKind::Const,
+                            false,
+                        ));
+                    }
+                }
+            }
+            HirStatementKind::FunctionDeclaration(declaration)
+                if declaration.binding.name.as_ref() == name =>
+            {
+                return Some((declaration.binding.clone(), true, false));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn push_captured_slot(
@@ -1047,6 +1139,7 @@ fn lower_function(
         next_register: 0,
         source_name: source.name().clone(),
         script_scope: false,
+        module_scope: false,
         root_scope,
         function_scope: Some(function.scope),
         is_arrow: function.is_arrow,

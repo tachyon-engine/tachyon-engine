@@ -98,7 +98,7 @@ impl ModuleGraph {
         }
     }
 
-    pub(super) fn read_namespace_cell(&self, cell: BindingCellId) -> Result<Value, ModuleError> {
+    pub(crate) fn read_namespace_cell(&self, cell: BindingCellId) -> Result<Value, ModuleError> {
         self.cells
             .get(cell.index())
             .ok_or(ModuleError::MissingLocalBinding)?

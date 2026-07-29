@@ -472,6 +472,7 @@ pub enum ExecutionError {
     InvalidScopeName { code: CodeId, scope_name: u32 },
     InvalidAtom(AtomId),
     MissingEnvironment,
+    MissingModuleContext,
     InvalidEnvironmentSlot { depth: u32, slot: u32 },
     UninitializedEnvironmentBinding { depth: u32, slot: u32 },
     ImmutableEnvironmentBinding { depth: u32, slot: u32 },

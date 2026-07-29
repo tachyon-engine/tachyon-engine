@@ -686,6 +686,45 @@ struct PrecompiledLoader {
     module: Option<LoadedModule>,
 }
 
+struct PrecompiledGraphLoader {
+    modules: Vec<(ModuleIdentity, Option<LoadedModule>)>,
+}
+
+impl PrecompiledGraphLoader {
+    fn new(modules: Vec<(ModuleIdentity, LoadedModule)>) -> Self {
+        Self {
+            modules: modules
+                .into_iter()
+                .map(|(identity, module)| (identity, Some(module)))
+                .collect(),
+        }
+    }
+}
+
+impl ModuleLoader for PrecompiledGraphLoader {
+    type Error = ();
+
+    fn resolve(
+        &mut self,
+        request: &tachyon_bytecode::ModuleRequest,
+        _referrer: Option<&ModuleIdentity>,
+    ) -> Result<ModuleIdentity, Self::Error> {
+        let text = String::from_utf16(request.specifier.as_ref()).map_err(|_| ())?;
+        Ok(specifier(&text))
+    }
+
+    fn load(
+        &mut self,
+        resolved: ResolvedModuleRequest<'_>,
+    ) -> Result<Option<LoadedModule>, Self::Error> {
+        Ok(self
+            .modules
+            .iter_mut()
+            .find(|(identity, _)| identity == resolved.identity())
+            .and_then(|(_, module)| module.take()))
+    }
+}
+
 impl ModuleLoader for PrecompiledLoader {
     type Error = ();
 
@@ -822,6 +861,156 @@ fn top_level_await_stops_at_the_explicit_async_evaluation_boundary() {
     assert_eq!(
         isolate.evaluate_module(root),
         Err(ModuleEvaluationError::AsyncEvaluationRequired(root))
+    );
+}
+
+#[test]
+/// Executes a compiled source module against live cells instead of the realm global object.
+fn compiled_source_module_initializes_and_reads_module_cells() {
+    let mut isolate = fixtures::test_isolate();
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1_001),
+                SourceName::new("memory:source-module"),
+                MediaType::Mjs,
+                "export const value = 41; value + 1;".into(),
+            ),
+            CompileOptions {
+                source_mode: SourceMode::Module,
+                ..CompileOptions::default()
+            },
+        )
+        .expect("source module should compile");
+    let mut loader = PrecompiledLoader {
+        identity: specifier("memory:source-module"),
+        module: Some(LoadedModule::precompiled(module)),
+    };
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:source-module"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+    assert_eq!(
+        isolate.read_module_binding(root, "value").unwrap(),
+        Value::from_i32(41)
+    );
+}
+
+#[test]
+/// A compiled importer reads the exporter cell and observes the linked live value.
+fn compiled_source_modules_share_imported_live_bindings() {
+    let mut isolate = fixtures::test_isolate();
+    let compile = |id: u32, name: &str, source: &str| {
+        Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(id),
+                    SourceName::new(name),
+                    MediaType::Mjs,
+                    source.into(),
+                ),
+                CompileOptions {
+                    source_mode: SourceMode::Module,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect("source module should compile")
+    };
+    let dependency =
+        LoadedModule::precompiled(compile(1_001, "memory:dep", "export let value = 41;"));
+    let root = LoadedModule::precompiled(compile(
+        1_002,
+        "memory:root",
+        "import { value } from 'memory:dep'; value + 1;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:root"), root),
+        (specifier("memory:dep"), dependency),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
+    );
+    let dep = isolate
+        .module_graph
+        .find_specifier(&specifier("memory:dep"))
+        .unwrap();
+    isolate
+        .write_module_binding(dep, "value", Value::from_i32(99))
+        .unwrap();
+    assert_eq!(
+        isolate.read_module_binding(root, "value").unwrap(),
+        Value::from_i32(99)
+    );
+}
+
+#[test]
+/// Lexical module bindings remain in TDZ until their declaration initializer executes.
+fn compiled_source_module_preserves_tdz() {
+    let mut isolate = fixtures::test_isolate();
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1_003),
+                SourceName::new("memory:tdz"),
+                MediaType::Mjs,
+                "value; export let value = 1;".into(),
+            ),
+            CompileOptions {
+                source_mode: SourceMode::Module,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+    let mut loader = PrecompiledLoader {
+        identity: specifier("memory:tdz"),
+        module: Some(LoadedModule::precompiled(module)),
+    };
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tdz"))
+        .unwrap();
+    assert!(matches!(
+        isolate.evaluate_module(root),
+        Err(ModuleEvaluationError::Execution(ExecutionError::Module(
+            ModuleError::UninitializedBinding
+        )))
+    ));
+}
+
+#[test]
+/// Module function declarations are initialized before source-order statements run.
+fn compiled_source_module_hoists_function_declarations() {
+    let mut isolate = fixtures::test_isolate();
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(1_004),
+                SourceName::new("memory:function"),
+                MediaType::Mjs,
+                "export function answer() { return 42; } answer();".into(),
+            ),
+            CompileOptions {
+                source_mode: SourceMode::Module,
+                ..CompileOptions::default()
+            },
+        )
+        .unwrap();
+    let mut loader = PrecompiledLoader {
+        identity: specifier("memory:function"),
+        module: Some(LoadedModule::precompiled(module)),
+    };
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:function"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(42))
     );
 }
 

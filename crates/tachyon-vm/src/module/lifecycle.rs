@@ -1,7 +1,7 @@
 //! Host-driven in-memory module loading and synchronous evaluation lifecycle.
 
 use super::*;
-use crate::{ExecutionBudget, ExecutionError, Isolate, RunOutcome};
+use crate::{ExecutionError, Isolate, RunOutcome};
 
 /// Loader content; precompiled records are derived exclusively from verified module stencils.
 #[derive(Debug)]
@@ -212,7 +212,7 @@ fn prepare_precompiled_module<E>(
 }
 
 impl ModuleGraph {
-    fn find_specifier(&self, specifier: &ModuleIdentity) -> Option<ModuleId> {
+    pub(crate) fn find_specifier(&self, specifier: &ModuleIdentity) -> Option<ModuleId> {
         self.records
             .iter()
             .find(|record| &record.specifier == specifier)
@@ -459,15 +459,9 @@ impl Isolate {
                 ModuleBody::Synthetic => Ok(RunOutcome::Completed(Value::from_immediate(
                     tachyon_value::Immediate::Undefined,
                 ))),
-                ModuleBody::Precompiled(body) => self.load_module(&body).and_then(|code| {
-                    self.execute_loaded_with_batch::<N>(
-                        code,
-                        ExecutionBudget {
-                            fuel: u64::MAX,
-                            quantum: u32::MAX,
-                        },
-                    )
-                }),
+                ModuleBody::Precompiled(body) => self
+                    .load_module(&body)
+                    .and_then(|code| self.execute_loaded_module_with_batch::<N>(code, module)),
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,

@@ -13,13 +13,14 @@ use oxc::{
 
 use crate::{CompileError, SourceText};
 
+use super::pattern::new_binding;
 use super::statement::{
     StatementContext, lower_class_declaration, lower_function_declaration, lower_statement,
     lower_variable_declaration,
 };
 use super::{
-    HirFunction, HirStatement, HirStatementKind, StatementCompletion, copy_string_literal,
-    source_span, unsupported,
+    BindingId, HirFunction, HirStatement, HirStatementKind, StatementCompletion,
+    copy_string_literal, source_span, unsupported,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +46,7 @@ pub struct HirModuleImportEntry {
     pub module_request: u32,
     pub import_name: HirModuleImportName,
     pub local_name: Arc<str>,
+    pub binding: BindingId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,7 +82,7 @@ pub(super) fn lower_module(
     functions: &mut Vec<HirFunction>,
 ) -> Result<(HirModuleStencil, Vec<HirStatement>), CompileError> {
     let mut builder = ModuleStencilBuilder::new(program.body.len());
-    builder.collect_requests_and_imports(program, source)?;
+    builder.collect_requests_and_imports(program, source, semantic)?;
     let mut statements = Vec::with_capacity(program.body.len());
     for statement in &program.body {
         statements.push(builder.lower_item(statement, source, semantic, functions)?);
@@ -135,11 +137,12 @@ impl ModuleStencilBuilder {
         &mut self,
         program: &Program<'_>,
         source: &SourceText,
+        semantic: &Semantic<'_>,
     ) -> Result<(), CompileError> {
         for statement in &program.body {
             match statement {
                 Statement::ImportDeclaration(declaration) => {
-                    self.collect_import(declaration, source)?;
+                    self.collect_import(declaration, source, semantic)?;
                 }
                 Statement::ExportAllDeclaration(declaration) => {
                     self.intern_request(
@@ -168,6 +171,7 @@ impl ModuleStencilBuilder {
         &mut self,
         declaration: &oxc::ast::ast::ImportDeclaration<'_>,
         source: &SourceText,
+        semantic: &Semantic<'_>,
     ) -> Result<(), CompileError> {
         if declaration.phase.is_some() {
             return Err(unsupported(
@@ -182,24 +186,25 @@ impl ModuleStencilBuilder {
             source,
         )?;
         for specifier in declaration.specifiers.iter().flatten() {
-            let (import_name, local_name) = match specifier {
+            let (import_name, local) = match specifier {
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
                     HirModuleImportName::Name(copy_module_name(&specifier.imported, source)?),
-                    Arc::from(specifier.local.name.as_str()),
+                    &specifier.local,
                 ),
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => (
                     HirModuleImportName::Name(units("default")),
-                    Arc::from(specifier.local.name.as_str()),
+                    &specifier.local,
                 ),
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => (
-                    HirModuleImportName::Namespace,
-                    Arc::from(specifier.local.name.as_str()),
-                ),
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    (HirModuleImportName::Namespace, &specifier.local)
+                }
             };
+            let binding = new_binding(local, source, semantic)?;
             self.imports.push(HirModuleImportEntry {
                 module_request: request,
                 import_name,
-                local_name,
+                local_name: binding.name,
+                binding: binding.id,
             });
         }
         Ok(())

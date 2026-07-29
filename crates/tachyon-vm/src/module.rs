@@ -229,7 +229,7 @@ enum ResolvedBindingName {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ModuleBindingTarget {
+pub(crate) enum ModuleBindingTarget {
     Cell(BindingCellId),
     Namespace(ModuleId),
 }
@@ -318,6 +318,22 @@ impl LiveBindingCell {
     pub(crate) fn write(&mut self, value: Value) {
         self.value = Some(value);
     }
+
+    pub(crate) fn initialize(&mut self, value: Value) -> Result<(), ModuleError> {
+        if self.value.is_some() {
+            return Err(ModuleError::AlreadyInitializedBinding);
+        }
+        self.value = Some(value);
+        Ok(())
+    }
+
+    pub(crate) fn store(&mut self, value: Value) -> Result<(), ModuleError> {
+        if self.value.is_none() {
+            return Err(ModuleError::UninitializedBinding);
+        }
+        self.value = Some(value);
+        Ok(())
+    }
 }
 
 impl Trace for LiveBindingCell {
@@ -366,6 +382,7 @@ pub enum ModuleError {
     UninitializedBinding,
     UnlinkedImport,
     NamespaceObjectRequired,
+    AlreadyInitializedBinding,
     InvalidLinkState,
     EvaluationOrderLimit { limit: u32 },
 }
@@ -647,6 +664,68 @@ impl ModuleGraph {
             })
             .transpose()?;
         local.or(imported).ok_or(ModuleError::MissingLocalBinding)
+    }
+
+    /// Maps the compiler/runtime shared module slot order to a live cell or namespace target.
+    pub(crate) fn binding_target_at_slot(
+        &self,
+        module: ModuleId,
+        slot: u32,
+    ) -> Result<ModuleBindingTarget, ModuleError> {
+        let record = self.record(module)?;
+        let slot = usize::try_from(slot).map_err(|_| ModuleError::MissingLocalBinding)?;
+        if let Some(import) = record.imports.get(slot) {
+            let resolved = import
+                .resolved
+                .as_ref()
+                .ok_or(ModuleError::UnlinkedImport)?;
+            return match resolved.binding {
+                ResolvedBindingName::Local(ref name) => self
+                    .record(resolved.module)?
+                    .local_bindings
+                    .iter()
+                    .find(|binding| binding.name == *name)
+                    .map(|binding| ModuleBindingTarget::Cell(binding.cell))
+                    .ok_or(ModuleError::MissingLocalBinding),
+                ResolvedBindingName::Namespace => {
+                    Ok(ModuleBindingTarget::Namespace(resolved.module))
+                }
+            };
+        }
+        let local_index = slot
+            .checked_sub(record.imports.len())
+            .ok_or(ModuleError::MissingLocalBinding)?;
+        record
+            .local_bindings
+            .get(local_index)
+            .map(|binding| ModuleBindingTarget::Cell(binding.cell))
+            .ok_or(ModuleError::MissingLocalBinding)
+    }
+
+    pub(crate) fn import_count(&self, module: ModuleId) -> Result<usize, ModuleError> {
+        Ok(self.record(module)?.imports.len())
+    }
+
+    pub(crate) fn initialize_cell(
+        &mut self,
+        cell: BindingCellId,
+        value: Value,
+    ) -> Result<(), ModuleError> {
+        self.cells
+            .get_mut(cell.index())
+            .ok_or(ModuleError::MissingLocalBinding)?
+            .initialize(value)
+    }
+
+    pub(crate) fn store_cell(
+        &mut self,
+        cell: BindingCellId,
+        value: Value,
+    ) -> Result<(), ModuleError> {
+        self.cells
+            .get_mut(cell.index())
+            .ok_or(ModuleError::MissingLocalBinding)?
+            .store(value)
     }
 }
 

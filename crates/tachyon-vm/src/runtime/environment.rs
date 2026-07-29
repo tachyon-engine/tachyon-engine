@@ -67,6 +67,9 @@ const _: [(); 1] = [(); core::mem::size_of::<BindingState>()];
 #[derive(Debug)]
 enum EnvironmentStorage {
     Captured(Box<[Value]>),
+    Module {
+        module: ModuleId,
+    },
     Dynamic {
         names: Box<[AtomId]>,
         values: Box<[Value]>,
@@ -149,6 +152,22 @@ impl Environment {
         })
     }
 
+    /// Allocates a module environment whose slots resolve through the isolate-owned module graph.
+    pub(crate) const fn try_module(
+        module: ModuleId,
+        parent: Option<GcRef<Self>>,
+        owner: Option<EnvironmentOwner>,
+        slot_count: NonZeroU32,
+    ) -> Self {
+        let _ = slot_count;
+        Self {
+            parent,
+            owner,
+            kind: EnvironmentKind::Module,
+            storage: EnvironmentStorage::Module { module },
+        }
+    }
+
     /// Allocates one exact named var record for a direct-eval declaration set.
     pub(crate) fn try_dynamic(
         parent: Option<GcRef<Self>>,
@@ -179,6 +198,16 @@ impl Environment {
     }
 
     #[inline(always)]
+    pub(crate) const fn module(&self) -> Option<ModuleId> {
+        match &self.storage {
+            EnvironmentStorage::Module { module, .. } => Some(*module),
+            EnvironmentStorage::Captured(_)
+            | EnvironmentStorage::Dynamic { .. }
+            | EnvironmentStorage::Bindings { .. } => None,
+        }
+    }
+
+    #[inline(always)]
     pub(crate) const fn owner(&self) -> Option<EnvironmentOwner> {
         self.owner
     }
@@ -201,7 +230,9 @@ impl Environment {
             EnvironmentStorage::Bindings { states, .. } => states
                 .get(slot as usize)
                 .is_some_and(|state| !state.is_mutable()),
-            EnvironmentStorage::Captured(_) | EnvironmentStorage::Dynamic { .. } => false,
+            EnvironmentStorage::Captured(_)
+            | EnvironmentStorage::Module { .. }
+            | EnvironmentStorage::Dynamic { .. } => false,
         }
     }
 
@@ -214,6 +245,7 @@ impl Environment {
                 .get(index)
                 .copied()
                 .ok_or(EnvironmentAccessError::InvalidSlot),
+            EnvironmentStorage::Module { .. } => Err(EnvironmentAccessError::InvalidSlot),
             EnvironmentStorage::Dynamic { values, .. } => values
                 .get(index)
                 .copied()
@@ -242,6 +274,7 @@ impl Environment {
                     .ok_or(EnvironmentAccessError::InvalidSlot)?;
                 *target = value;
             }
+            EnvironmentStorage::Module { .. } => return Err(EnvironmentAccessError::InvalidSlot),
             EnvironmentStorage::Dynamic { values, .. } => {
                 let target = values
                     .get_mut(index)
@@ -296,6 +329,7 @@ impl Environment {
             EnvironmentStorage::Captured(values)
             | EnvironmentStorage::Dynamic { values, .. }
             | EnvironmentStorage::Bindings { values, .. } => values.len(),
+            EnvironmentStorage::Module { .. } => 0,
         }
     }
 }
@@ -307,6 +341,7 @@ impl Trace for Environment {
             EnvironmentStorage::Captured(values)
             | EnvironmentStorage::Dynamic { values, .. }
             | EnvironmentStorage::Bindings { values, .. } => values.trace(tracer),
+            EnvironmentStorage::Module { .. } => {}
         }
     }
 }
@@ -318,6 +353,7 @@ impl GcExternalMemory for Environment {
             .saturating_mul(core::mem::size_of::<Value>());
         let state_bytes = match &self.storage {
             EnvironmentStorage::Captured(_) => 0,
+            EnvironmentStorage::Module { .. } => 0,
             EnvironmentStorage::Dynamic { names, .. } => {
                 names.len().saturating_mul(core::mem::size_of::<AtomId>())
             }

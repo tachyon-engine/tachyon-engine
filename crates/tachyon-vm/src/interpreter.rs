@@ -1,6 +1,7 @@
 //! Bytecode loading and explicit-fiber interpreter state machine.
 
 use super::*;
+use crate::module::ModuleBindingTarget;
 use crate::property::TypedArrayIndexSetMode;
 
 #[inline(always)]
@@ -356,7 +357,25 @@ impl Isolate {
         code: CodeId,
         budget: ExecutionBudget,
     ) -> Result<RunOutcome, ExecutionError> {
-        self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None, None)
+        self.execute_loaded_loop_with_parent::<N, UNBOUNDED>(code, budget, None, None, None)
+    }
+
+    /// Executes one compiled source module against its isolate-owned live binding environment.
+    pub(crate) fn execute_loaded_module_with_batch<const N: usize>(
+        &mut self,
+        code: CodeId,
+        module: ModuleId,
+    ) -> Result<RunOutcome, ExecutionError> {
+        self.execute_loaded_loop_with_parent::<N, true>(
+            code,
+            ExecutionBudget {
+                fuel: u64::MAX,
+                quantum: u32::MAX,
+            },
+            None,
+            None,
+            Some(module),
+        )
     }
 
     /// Runs eval code with an explicitly retained caller lexical environment.
@@ -372,6 +391,7 @@ impl Isolate {
             budget,
             parent,
             eval_var_environment,
+            None,
         )
     }
 
@@ -507,10 +527,11 @@ impl Isolate {
         mut budget: ExecutionBudget,
         parent: Option<GcRef<Environment>>,
         eval_var_environment: Option<GcRef<Environment>>,
+        module: Option<ModuleId>,
     ) -> Result<RunOutcome, ExecutionError> {
         let entry_function = self.loaded_code(code)?.module.entry_function();
         let dynamic_scope = parent.is_some() || eval_var_environment.is_some();
-        self.enter_with_parent(code, entry_function, parent)?;
+        self.enter_with_parent(code, entry_function, parent, module)?;
         self.fiber.dynamic_scope = dynamic_scope;
         self.fiber.direct_eval = dynamic_scope;
         if let Some(environment) = eval_var_environment {
@@ -3314,6 +3335,9 @@ impl Isolate {
 
     fn load_environment(&mut self, depth: u32, slot: u32) -> Result<Value, ExecutionError> {
         let environment = self.environment_at_depth(depth)?;
+        if let Some(module) = self.environment_module(environment)? {
+            return self.load_module_environment_slot(module, slot);
+        }
         self.heap.with_running_scope(|scope| {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
@@ -3333,6 +3357,16 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let environment = self.environment_at_depth(depth)?;
+        if let Some(module) = self.environment_module(environment)? {
+            if !self.environment_slot_mutable(environment, slot)? {
+                return Err(environment_access_error(
+                    depth,
+                    slot,
+                    EnvironmentAccessError::Immutable,
+                ));
+            }
+            return self.store_module_environment_slot(module, slot, value);
+        }
         self.heap.with_running_scope(|scope| {
             scope.with_no_gc_scope(|no_gc| {
                 let environment = no_gc
@@ -3359,6 +3393,9 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         let environment = self.environment_at_depth(depth)?;
+        if let Some(module) = self.environment_module(environment)? {
+            return self.initialize_module_environment_slot(module, slot, value);
+        }
         self.heap.with_running_scope(|scope| {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
@@ -3374,6 +3411,98 @@ impl Isolate {
                 .map_err(ExecutionError::HeapReference)?;
         }
         Ok(())
+    }
+
+    /// Reads the optional module identity without retaining a GC payload borrow across graph work.
+    fn environment_module(
+        &mut self,
+        environment: GcRef<Environment>,
+    ) -> Result<Option<ModuleId>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map(Environment::module)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    /// Uses the module entry's verified metadata as the mutability authority for aliased slots.
+    fn environment_slot_mutable(
+        &mut self,
+        environment: GcRef<Environment>,
+        slot: u32,
+    ) -> Result<bool, ExecutionError> {
+        let owner = self.heap.with_running_scope(|scope| {
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_reference(environment, self.types.environment)
+                    .map(Environment::owner)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let owner = owner.ok_or(ExecutionError::MissingModuleContext)?;
+        self.loaded_code(owner.code)?
+            .module
+            .function(owner.function)
+            .and_then(|function| function.environment_slots().get(slot as usize))
+            .map(|metadata| metadata.mutable)
+            .ok_or(ExecutionError::InvalidEnvironmentSlot { depth: 0, slot })
+    }
+
+    fn load_module_environment_slot(
+        &mut self,
+        module: ModuleId,
+        slot: u32,
+    ) -> Result<Value, ExecutionError> {
+        match self
+            .module_graph
+            .binding_target_at_slot(module, slot)
+            .map_err(ExecutionError::Module)?
+        {
+            ModuleBindingTarget::Cell(cell) => self
+                .module_graph
+                .read_namespace_cell(cell)
+                .map_err(ExecutionError::Module),
+            ModuleBindingTarget::Namespace(target) => self.get_module_namespace(target),
+        }
+    }
+
+    fn initialize_module_environment_slot(
+        &mut self,
+        module: ModuleId,
+        slot: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let ModuleBindingTarget::Cell(cell) = self
+            .module_graph
+            .binding_target_at_slot(module, slot)
+            .map_err(ExecutionError::Module)?
+        else {
+            return Err(ExecutionError::Module(ModuleError::ImportedBinding));
+        };
+        self.module_graph
+            .initialize_cell(cell, value)
+            .map_err(ExecutionError::Module)
+    }
+
+    fn store_module_environment_slot(
+        &mut self,
+        module: ModuleId,
+        slot: u32,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let target = self
+            .module_graph
+            .binding_target_at_slot(module, slot)
+            .map_err(ExecutionError::Module)?;
+        let ModuleBindingTarget::Cell(cell) = target else {
+            return Err(ExecutionError::Module(ModuleError::ImportedBinding));
+        };
+        self.module_graph
+            .store_cell(cell, value)
+            .map_err(ExecutionError::Module)
     }
 
     /// Enters one exact immutable environment for class name and private-name identities.
@@ -3543,6 +3672,7 @@ impl Isolate {
         kind: FunctionKind,
         slot_count: NonZeroU32,
         self_binding: Option<(u32, Value)>,
+        module: Option<ModuleId>,
     ) -> Result<(), ExecutionError> {
         let frame = self
             .fiber
@@ -3554,8 +3684,14 @@ impl Isolate {
             code: frame.code,
             function: frame.function,
         };
-        let environment =
-            self.allocate_activation_environment(kind, parent, owner, slot_count, self_binding)?;
+        let environment = self.allocate_activation_environment(
+            kind,
+            parent,
+            owner,
+            slot_count,
+            self_binding,
+            module,
+        )?;
         self.fiber
             .frames
             .last_mut()
@@ -3572,9 +3708,11 @@ impl Isolate {
         owner: EnvironmentOwner,
         slot_count: NonZeroU32,
         self_binding: Option<(u32, Value)>,
+        module: Option<ModuleId>,
     ) -> Result<GcRef<Environment>, ExecutionError> {
         let environment_kind = EnvironmentKind::for_activation(kind, parent.is_some());
-        let metadata_states = if kind != FunctionKind::Module {
+        let module_environment = kind == FunctionKind::Module && module.is_some();
+        let metadata_states = if !module_environment {
             let function = self
                 .loaded_code(owner.code)?
                 .module
@@ -3599,10 +3737,13 @@ impl Isolate {
         } else {
             None
         };
-        let mut environment = if kind == FunctionKind::Module {
-            Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |_| {
-                BindingState::new(true, false)
-            })
+        let mut environment = if module_environment {
+            Ok(Environment::try_module(
+                module.ok_or(ExecutionError::MissingModuleContext)?,
+                parent,
+                Some(owner),
+                slot_count,
+            ))
         } else if let Some(states) = metadata_states.as_ref() {
             Environment::try_bindings(environment_kind, parent, Some(owner), slot_count, |slot| {
                 if self_binding.is_some_and(|(self_slot, _)| slot == self_slot) {
@@ -3615,13 +3756,46 @@ impl Isolate {
             Environment::try_captured(environment_kind, parent, Some(owner), slot_count)
         }
         .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
-        if kind == FunctionKind::Module {
-            for slot in 0..slot_count.get() {
-                environment
-                    .initialize(slot, Value::from_immediate(Immediate::Undefined))
-                    .expect("fresh module binding slots initialize exactly once");
+        if module_environment {
+            let module = module.ok_or(ExecutionError::MissingModuleContext)?;
+            let import_count = self
+                .module_graph
+                .import_count(module)
+                .map_err(ExecutionError::Module)?;
+            let slot_count = self
+                .loaded_code(owner.code)?
+                .module
+                .function(owner.function)
+                .ok_or(ExecutionError::MissingEntryFunction(owner.function))?
+                .environment_slots()
+                .len();
+            for slot in import_count..slot_count {
+                let initialized = self
+                    .loaded_code(owner.code)?
+                    .module
+                    .function(owner.function)
+                    .ok_or(ExecutionError::MissingEntryFunction(owner.function))?
+                    .environment_slots()[slot]
+                    .initialized;
+                if initialized {
+                    let target = self
+                        .module_graph
+                        .binding_target_at_slot(module, slot as u32)
+                        .map_err(ExecutionError::Module)?;
+                    let ModuleBindingTarget::Cell(cell) = target else {
+                        return Err(ExecutionError::Module(ModuleError::ImportedBinding));
+                    };
+                    match self
+                        .module_graph
+                        .initialize_cell(cell, Value::from_immediate(Immediate::Undefined))
+                    {
+                        Ok(()) | Err(ModuleError::AlreadyInitializedBinding) => {}
+                        Err(error) => return Err(ExecutionError::Module(error)),
+                    }
+                }
             }
-        } else if let Some((self_slot, value)) = self_binding {
+        }
+        if !module_environment && let Some((self_slot, value)) = self_binding {
             environment
                 .initialize(self_slot, value)
                 .expect("fresh named function binding initializes exactly once");
@@ -3707,7 +3881,7 @@ impl Isolate {
         code: CodeId,
         function_id: FunctionId,
     ) -> Result<(), ExecutionError> {
-        self.enter_with_parent(code, function_id, None)
+        self.enter_with_parent(code, function_id, None, None)
     }
 
     /// Initializes one entry frame and optionally exposes a suspended direct-eval parent chain.
@@ -3716,6 +3890,7 @@ impl Isolate {
         code: CodeId,
         function_id: FunctionId,
         parent: Option<GcRef<Environment>>,
+        module: Option<ModuleId>,
     ) -> Result<(), ExecutionError> {
         let (layout, kind, strictness) = {
             let function = self
@@ -3790,7 +3965,7 @@ impl Isolate {
         let Some(slot_count) = NonZeroU32::new(layout.environment_slot_count) else {
             return Ok(());
         };
-        self.allocate_current_environment(kind, slot_count, None)
+        self.allocate_current_environment(kind, slot_count, None, module)
     }
 
     /// Allocates a real GC-managed callable instead of encoding FunctionId in a reserved Value tag.
@@ -5163,6 +5338,7 @@ impl Isolate {
                             .layout
                             .self_binding_slot
                             .map(|slot| (slot, site.callee)),
+                        None,
                     )?,
                 )
             } else {
@@ -7688,6 +7864,7 @@ impl Isolate {
                     .layout
                     .self_binding_slot
                     .map(|slot| (slot, site.callee)),
+                None,
             )
         {
             self.fiber.frames.pop();
