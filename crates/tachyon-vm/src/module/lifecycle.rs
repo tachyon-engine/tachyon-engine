@@ -427,6 +427,9 @@ impl Isolate {
             .module_graph
             .evaluation_order(root)
             .map_err(ModuleEvaluationError::Graph)?;
+        self.module_graph
+            .prepare_evaluation(order.len())
+            .map_err(ModuleEvaluationError::Graph)?;
         for &module in &order {
             let (state, body) = {
                 let record = self
@@ -446,34 +449,35 @@ impl Isolate {
                     .map_err(ModuleEvaluationError::Execution)?;
             }
         }
-        loop {
-            let mut progressed = false;
-            for &module in &order {
-                if self.module_graph.records[module.index()].evaluation
-                    != ModuleEvaluationState::Unevaluated
-                {
-                    continue;
-                }
-                if let Some(error) = self
-                    .module_graph
-                    .dependency_error(module)
-                    .map_err(ModuleEvaluationError::Graph)?
-                {
-                    self.module_graph.records[module.index()].evaluation =
-                        ModuleEvaluationState::Errored(error);
-                    progressed = true;
-                    continue;
-                }
-                if !self
-                    .module_graph
-                    .dependencies_ready(module)
-                    .map_err(ModuleEvaluationError::Graph)?
-                {
-                    continue;
-                }
-                progressed = true;
-                self.execute_ready_module_with_batch::<N>(module)?;
+        for &module in &order {
+            if self.module_graph.records[module.index()].evaluation
+                != ModuleEvaluationState::Unevaluated
+            {
+                continue;
             }
+            if let Some(error) = self
+                .module_graph
+                .dependency_error(module)
+                .map_err(ModuleEvaluationError::Graph)?
+            {
+                self.module_graph
+                    .complete_evaluation(module, Err(error))
+                    .map_err(ModuleEvaluationError::Graph)?;
+                continue;
+            }
+            let pending = self
+                .module_graph
+                .pending_dependency_owners(module)
+                .map_err(ModuleEvaluationError::Graph)?;
+            if pending.is_empty() {
+                self.execute_ready_module_with_batch::<N>(module)?;
+            } else {
+                self.module_graph
+                    .wait_for_dependencies(module, &pending)
+                    .map_err(ModuleEvaluationError::Graph)?;
+            }
+        }
+        loop {
             match self.module_graph.records[root.index()].evaluation {
                 ModuleEvaluationState::Evaluated(value) => {
                     self.finish_async_module_checkpoint::<N>()
@@ -486,17 +490,20 @@ impl Isolate {
                     return Ok(RunOutcome::Thrown(error));
                 }
                 ModuleEvaluationState::Unevaluated
+                | ModuleEvaluationState::Waiting
                 | ModuleEvaluationState::Evaluating
                 | ModuleEvaluationState::AsyncEvaluating(_) => {}
+            }
+            if let Some(module) = self.module_graph.take_ready_module() {
+                self.execute_ready_module_with_batch::<N>(module)?;
+                continue;
             }
             if self.promise_jobs.has_pending() {
                 self.advance_async_module_turn::<N>()
                     .map_err(ModuleEvaluationError::Execution)?;
                 continue;
             }
-            if !progressed {
-                return Err(ModuleEvaluationError::AsyncEvaluationPending(root));
-            }
+            return Err(ModuleEvaluationError::AsyncEvaluationPending(root));
         }
     }
 
@@ -506,6 +513,12 @@ impl Isolate {
         module: ModuleId,
     ) -> Result<(), ModuleEvaluationError> {
         let body = self.module_graph.records[module.index()].body.clone();
+        if !matches!(
+            self.module_graph.records[module.index()].evaluation,
+            ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Waiting
+        ) {
+            return Err(ModuleEvaluationError::Graph(ModuleError::InvalidLinkState));
+        }
         self.module_graph.records[module.index()].evaluation = ModuleEvaluationState::Evaluating;
         let outcome = match self.execute_module_body_with_batch::<N>(module, body) {
             Ok(outcome) => outcome,
@@ -523,12 +536,14 @@ impl Isolate {
                     ModuleEvaluationState::AsyncEvaluating(_)
                 ) =>
             {
-                self.module_graph.records[module.index()].evaluation =
-                    ModuleEvaluationState::Evaluated(value);
+                self.module_graph
+                    .complete_evaluation(module, Ok(value))
+                    .map_err(ModuleEvaluationError::Graph)?;
             }
             RunOutcome::Thrown(error) => {
-                self.module_graph.records[module.index()].evaluation =
-                    ModuleEvaluationState::Errored(error);
+                self.module_graph
+                    .complete_evaluation(module, Err(error))
+                    .map_err(ModuleEvaluationError::Graph)?;
             }
             RunOutcome::Completed(_) => {}
             RunOutcome::BudgetExhausted => unreachable!("unbounded module evaluation"),

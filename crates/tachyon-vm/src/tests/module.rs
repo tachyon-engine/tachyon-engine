@@ -943,6 +943,110 @@ fn synchronous_parent_waits_for_top_level_await_dependency() {
     assert_top_level_await_dependency_batch::<16>(true);
 }
 
+/// Exercises one async leaf releasing two synchronous parents before their shared root.
+fn assert_top_level_await_diamond_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let modules = [
+        (
+            "memory:tla-diamond-root",
+            "import { left } from 'memory:tla-left'; import { right } from 'memory:tla-right'; left + right;",
+        ),
+        (
+            "memory:tla-left",
+            "import { value } from 'memory:tla-leaf'; export const left = value + 1;",
+        ),
+        (
+            "memory:tla-right",
+            "import { value } from 'memory:tla-leaf'; export const right = value + 2;",
+        ),
+        ("memory:tla-leaf", "export const value = await 40;"),
+    ];
+    let mut loader = PrecompiledGraphLoader::new(
+        modules
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, source))| {
+                (
+                    specifier(name),
+                    LoadedModule::precompiled(compile_source_module(
+                        1_600 + N as u32 * 10 + index as u32,
+                        name,
+                        source,
+                    )),
+                )
+            })
+            .collect(),
+    );
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tla-diamond-root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap(),
+        RunOutcome::Completed(Value::from_i32(83))
+    );
+}
+
+#[test]
+fn top_level_await_releases_diamond_ancestors_once_in_evaluation_order() {
+    assert_top_level_await_diamond_batch::<1>(false);
+    assert_top_level_await_diamond_batch::<2>(false);
+    assert_top_level_await_diamond_batch::<4>(false);
+    assert_top_level_await_diamond_batch::<8>(true);
+    assert_top_level_await_diamond_batch::<16>(true);
+}
+
+#[test]
+fn top_level_await_rejection_propagates_through_shared_async_parents() {
+    let mut isolate = fixtures::test_isolate();
+    let modules = [
+        (
+            "memory:tla-reject-root",
+            "import 'memory:tla-reject-left'; import 'memory:tla-reject-right'; 0;",
+        ),
+        (
+            "memory:tla-reject-left",
+            "import 'memory:tla-reject-leaf'; 1;",
+        ),
+        (
+            "memory:tla-reject-right",
+            "import 'memory:tla-reject-leaf'; 2;",
+        ),
+        ("memory:tla-reject-leaf", "await Promise.reject(41);"),
+    ];
+    let mut loader = PrecompiledGraphLoader::new(
+        modules
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, source))| {
+                (
+                    specifier(name),
+                    LoadedModule::precompiled(compile_source_module(
+                        1_800 + index as u32,
+                        name,
+                        source,
+                    )),
+                )
+            })
+            .collect(),
+    );
+    let root = isolate
+        .load_module_graph(&mut loader, &specifier("memory:tla-reject-root"))
+        .unwrap();
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Thrown(Value::from_i32(41))
+    );
+    assert_eq!(
+        isolate.evaluate_module(root).unwrap(),
+        RunOutcome::Thrown(Value::from_i32(41))
+    );
+}
+
 #[test]
 fn top_level_await_rejection_enters_module_catch_and_caches_uncaught_error() {
     let mut caught_isolate = fixtures::test_isolate();

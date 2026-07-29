@@ -271,6 +271,9 @@ pub(crate) struct ModuleRecord {
     local_bindings: Box<[LocalBinding]>,
     status: ModuleStatus,
     evaluation: ModuleEvaluationState,
+    async_parents: Vec<ModuleId>,
+    pending_async_dependencies: u32,
+    async_evaluation_order: Option<u64>,
     body: ModuleBody,
     has_top_level_await: bool,
     namespace: Option<Value>,
@@ -279,6 +282,7 @@ pub(crate) struct ModuleRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ModuleEvaluationState {
     Unevaluated,
+    Waiting,
     Evaluating,
     AsyncEvaluating(Value),
     Evaluated(Value),
@@ -395,6 +399,9 @@ pub(crate) struct ModuleGraph {
     cells: Vec<LiveBindingCell>,
     limits: ModuleLimits,
     edge_count: usize,
+    next_async_evaluation_order: u64,
+    ready_async_modules: Vec<ModuleId>,
+    rejection_worklist: Vec<ModuleId>,
 }
 
 #[derive(Clone, Copy)]
@@ -405,6 +412,21 @@ struct ModuleGraphCheckpoint {
 }
 
 impl ModuleGraph {
+    /// Reserves completion worklists before any module body can produce observable effects.
+    pub(crate) fn prepare_evaluation(&mut self, module_count: usize) -> Result<(), ModuleError> {
+        self.ready_async_modules
+            .try_reserve(module_count)
+            .map_err(|_| ModuleError::AllocationFailed {
+                collection: "ready async modules",
+            })?;
+        self.rejection_worklist
+            .try_reserve(module_count)
+            .map_err(|_| ModuleError::AllocationFailed {
+                collection: "module rejection worklist",
+            })?;
+        Ok(())
+    }
+
     /// Returns the first failed external dependency through its canonical cycle root.
     pub(crate) fn dependency_error(&self, module: ModuleId) -> Result<Option<Value>, ModuleError> {
         let record = self.record(module)?;
@@ -433,12 +455,21 @@ impl ModuleGraph {
         Ok(None)
     }
 
-    /// Reports whether every dependency outside the linked SCC has completed successfully.
-    pub(crate) fn dependencies_ready(&self, module: ModuleId) -> Result<bool, ModuleError> {
+    /// Collects unresolved dependency owners in source order without duplicating graph edges.
+    pub(crate) fn pending_dependency_owners(
+        &self,
+        module: ModuleId,
+    ) -> Result<Vec<ModuleId>, ModuleError> {
         let record = self.record(module)?;
         let ModuleStatus::Linked { cycle_root } = record.status else {
             return Err(ModuleError::InvalidLinkState);
         };
+        let mut pending = Vec::new();
+        pending
+            .try_reserve_exact(record.requested_modules.len())
+            .map_err(|_| ModuleError::AllocationFailed {
+                collection: "module pending dependencies",
+            })?;
         for request in &record.requested_modules {
             let dependency = self
                 .find_specifier(request)
@@ -453,9 +484,10 @@ impl ModuleGraph {
             if dependency_root == cycle_root {
                 if matches!(
                     dependency_record.evaluation,
-                    ModuleEvaluationState::AsyncEvaluating(_)
-                ) {
-                    return Ok(false);
+                    ModuleEvaluationState::Waiting | ModuleEvaluationState::AsyncEvaluating(_)
+                ) && !pending.contains(&dependency)
+                {
+                    pending.push(dependency);
                 }
                 continue;
             }
@@ -463,11 +495,52 @@ impl ModuleGraph {
             if !matches!(
                 dependency_cycle_root.evaluation,
                 ModuleEvaluationState::Evaluated(_)
-            ) {
-                return Ok(false);
+            ) && !pending.contains(&dependency_root)
+            {
+                pending.push(dependency_root);
             }
         }
-        Ok(true)
+        Ok(pending)
+    }
+
+    /// Publishes reverse async edges only after every required allocation succeeds.
+    pub(crate) fn wait_for_dependencies(
+        &mut self,
+        module: ModuleId,
+        dependencies: &[ModuleId],
+    ) -> Result<(), ModuleError> {
+        if dependencies.is_empty()
+            || self.record(module)?.evaluation != ModuleEvaluationState::Unevaluated
+        {
+            return Err(ModuleError::InvalidLinkState);
+        }
+        let pending =
+            u32::try_from(dependencies.len()).map_err(|_| ModuleError::CapacityOverflow {
+                collection: "module pending dependency count",
+            })?;
+        for &dependency in dependencies {
+            let parents = &mut self.record_mut(dependency)?.async_parents;
+            if parents.capacity() == parents.len() {
+                parents
+                    .try_reserve_exact(INITIAL_ASYNC_PARENT_CAPACITY.max(1))
+                    .map_err(|_| ModuleError::AllocationFailed {
+                        collection: "module async parents",
+                    })?;
+            }
+        }
+        let order = self.next_async_evaluation_order;
+        self.next_async_evaluation_order =
+            order.checked_add(1).ok_or(ModuleError::CapacityOverflow {
+                collection: "module async evaluation order",
+            })?;
+        for &dependency in dependencies {
+            self.record_mut(dependency)?.async_parents.push(module);
+        }
+        let record = self.record_mut(module)?;
+        record.pending_async_dependencies = pending;
+        record.async_evaluation_order = Some(order);
+        record.evaluation = ModuleEvaluationState::Waiting;
+        Ok(())
     }
 
     fn record_mut(&mut self, id: ModuleId) -> Result<&mut ModuleRecord, ModuleError> {
@@ -481,11 +554,28 @@ impl ModuleGraph {
         module: ModuleId,
         state: Value,
     ) -> Result<(), ModuleError> {
+        let needs_order = {
+            let record = self.record(module)?;
+            if record.evaluation != ModuleEvaluationState::Evaluating {
+                return Err(ModuleError::InvalidLinkState);
+            }
+            record.async_evaluation_order.is_none()
+        };
+        let order = if needs_order {
+            let order = self.next_async_evaluation_order;
+            let next = order.checked_add(1).ok_or(ModuleError::CapacityOverflow {
+                collection: "module async evaluation order",
+            })?;
+            Some((order, next))
+        } else {
+            None
+        };
         let record = self.record_mut(module)?;
-        if record.evaluation != ModuleEvaluationState::Evaluating {
-            return Err(ModuleError::InvalidLinkState);
-        }
         record.evaluation = ModuleEvaluationState::AsyncEvaluating(state);
+        if let Some((order, next)) = order {
+            record.async_evaluation_order = Some(order);
+            self.next_async_evaluation_order = next;
+        }
         Ok(())
     }
 
@@ -494,15 +584,88 @@ impl ModuleGraph {
         module: ModuleId,
         result: Result<Value, Value>,
     ) -> Result<(), ExecutionError> {
-        let record = self.record_mut(module).map_err(ExecutionError::Module)?;
-        if !matches!(record.evaluation, ModuleEvaluationState::AsyncEvaluating(_)) {
+        if !matches!(
+            self.record(module)
+                .map_err(ExecutionError::Module)?
+                .evaluation,
+            ModuleEvaluationState::AsyncEvaluating(_)
+        ) {
             return Err(ExecutionError::Module(ModuleError::InvalidLinkState));
         }
-        record.evaluation = match result {
-            Ok(value) => ModuleEvaluationState::Evaluated(value),
-            Err(error) => ModuleEvaluationState::Errored(error),
-        };
+        self.complete_evaluation(module, result)
+            .map_err(ExecutionError::Module)
+    }
+
+    /// Completes one module and iteratively releases or rejects its registered ancestors.
+    pub(crate) fn complete_evaluation(
+        &mut self,
+        module: ModuleId,
+        result: Result<Value, Value>,
+    ) -> Result<(), ModuleError> {
+        match result {
+            Ok(value) => {
+                let parents = core::mem::take(&mut self.record_mut(module)?.async_parents);
+                self.record_mut(module)?.evaluation = ModuleEvaluationState::Evaluated(value);
+                for parent in parents {
+                    let record = self.record_mut(parent)?;
+                    if record.evaluation != ModuleEvaluationState::Waiting
+                        || record.pending_async_dependencies == 0
+                    {
+                        continue;
+                    }
+                    record.pending_async_dependencies -= 1;
+                    if record.pending_async_dependencies == 0 {
+                        self.ready_async_modules.push(parent);
+                    }
+                }
+            }
+            Err(error) => self.reject_evaluation_tree(module, error)?,
+        }
         Ok(())
+    }
+
+    /// Propagates one rejection without using the native stack.
+    fn reject_evaluation_tree(
+        &mut self,
+        module: ModuleId,
+        error: Value,
+    ) -> Result<(), ModuleError> {
+        self.rejection_worklist.clear();
+        self.rejection_worklist.push(module);
+        while let Some(current) = self.rejection_worklist.pop() {
+            if matches!(
+                self.record(current)?.evaluation,
+                ModuleEvaluationState::Errored(_)
+            ) {
+                continue;
+            }
+            let parents = core::mem::take(&mut self.record_mut(current)?.async_parents);
+            self.record_mut(current)?.evaluation = ModuleEvaluationState::Errored(error);
+            for parent in parents {
+                if !matches!(
+                    self.record(parent)?.evaluation,
+                    ModuleEvaluationState::Errored(_)
+                ) && !self.rejection_worklist.contains(&parent)
+                {
+                    self.rejection_worklist.push(parent);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes the earliest ready ancestor while retaining the queue allocation.
+    pub(crate) fn take_ready_module(&mut self) -> Option<ModuleId> {
+        let (index, _) =
+            self.ready_async_modules
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, module)| {
+                    self.records[module.index()]
+                        .async_evaluation_order
+                        .unwrap_or(u64::MAX)
+                })?;
+        Some(self.ready_async_modules.swap_remove(index))
     }
 
     pub(crate) fn reset_async_evaluation(&mut self, module: ModuleId) -> Result<(), ModuleError> {
@@ -546,6 +709,9 @@ impl ModuleGraph {
             cells,
             limits,
             edge_count: 0,
+            next_async_evaluation_order: 0,
+            ready_async_modules: Vec::with_capacity(INITIAL_ASYNC_READY_CAPACITY),
+            rejection_worklist: Vec::with_capacity(INITIAL_ASYNC_READY_CAPACITY),
         })
     }
 
@@ -641,6 +807,9 @@ impl ModuleGraph {
             local_bindings: local_bindings.into_boxed_slice(),
             status: ModuleStatus::Unlinked,
             evaluation: ModuleEvaluationState::Unevaluated,
+            async_parents: Vec::new(),
+            pending_async_dependencies: 0,
+            async_evaluation_order: None,
             body,
             has_top_level_await: init.has_top_level_await,
             namespace: None,
@@ -850,7 +1019,9 @@ impl Trace for ModuleGraph {
                 ModuleEvaluationState::AsyncEvaluating(value)
                 | ModuleEvaluationState::Evaluated(value)
                 | ModuleEvaluationState::Errored(value) => value.trace(tracer),
-                ModuleEvaluationState::Unevaluated | ModuleEvaluationState::Evaluating => {}
+                ModuleEvaluationState::Unevaluated
+                | ModuleEvaluationState::Waiting
+                | ModuleEvaluationState::Evaluating => {}
             }
         }
     }
