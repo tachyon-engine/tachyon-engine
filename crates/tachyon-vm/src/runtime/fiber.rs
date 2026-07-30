@@ -1261,6 +1261,25 @@ pub(crate) enum IteratorPrototypeSetterStage {
     Set,
 }
 
+/// Observable boundaries in `Iterator.from` and its valid-iterator wrapper.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IteratorFromStage {
+    IteratorMethodGet,
+    IteratorMethodCall,
+    NextGet,
+    HasInstance,
+}
+
+/// Observable boundaries in `%WrapForValidIteratorPrototype%` methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum WrapForValidIteratorStage {
+    NextCall,
+    ReturnGet,
+    ReturnCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ObjectToLocaleStringStage {
@@ -1488,6 +1507,8 @@ pub(crate) enum NativeContinuationKind {
         key: IteratorPrototypeSetterKey,
         stage: IteratorPrototypeSetterStage,
     },
+    IteratorFrom(IteratorFromStage),
+    WrapForValidIterator(WrapForValidIteratorStage),
     DynamicFunctionPrototype,
     ObjectToString,
     ObjectIsPrototypeOf,
@@ -2063,6 +2084,37 @@ impl NativeContinuation {
             kind: NativeContinuationKind::IteratorPrototypeSetter { key, stage },
             first: receiver,
             second: value,
+        }
+    }
+
+    /// Retains the two live iterator-record operands across one `Iterator.from` boundary.
+    #[inline]
+    pub(crate) const fn iterator_from(
+        site: NativeContinuationSite,
+        stage: IteratorFromStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IteratorFrom(stage),
+            first,
+            second,
+        }
+    }
+
+    /// Retains the underlying iterator while a wrapper Get or Call executes.
+    #[inline]
+    pub(crate) const fn wrap_for_valid_iterator(
+        site: NativeContinuationSite,
+        stage: WrapForValidIteratorStage,
+        iterator: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::WrapForValidIterator(stage),
+            first: iterator,
+            second: Value::from_immediate(Immediate::Undefined),
         }
     }
 

@@ -2548,6 +2548,11 @@ impl Isolate {
             self.allocate_native_function(NativeFunction::IteratorConstructor, function_object())?;
         self.realm.iterator_constructor = Some(constructor);
         self.set_function_prototype(constructor, iterator_prototype)?;
+        let from =
+            self.allocate_native_function(NativeFunction::IteratorFrom, function_object())?;
+        self.realm.iterator_from = Some(from);
+        let from_atom = self.intern_intrinsic_name(b"from")?;
+        self.set_intrinsic_data_property(constructor, from_atom, from, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,
@@ -2596,7 +2601,29 @@ impl Isolate {
                 enumerable: Some(false),
                 configurable: Some(true),
             }),
-        )
+        )?;
+
+        let wrapper_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        self.realm.wrap_for_valid_iterator_prototype = Some(wrapper_prototype);
+        let next = self.allocate_native_function(
+            NativeFunction::WrapForValidIteratorNext,
+            function_object(),
+        )?;
+        self.realm.wrap_for_valid_iterator_next = Some(next);
+        let next_atom = self.intern_intrinsic_name(b"next")?;
+        self.set_intrinsic_data_property(wrapper_prototype, next_atom, next, true)?;
+        let return_method = self.allocate_native_function(
+            NativeFunction::WrapForValidIteratorReturn,
+            function_object(),
+        )?;
+        self.realm.wrap_for_valid_iterator_return = Some(return_method);
+        let return_atom = self.intern_intrinsic_name(b"return")?;
+        self.set_intrinsic_data_property(wrapper_prototype, return_atom, return_method, true)
     }
 
     /// Builds `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and Array `values`/`@@iterator`.

@@ -2568,6 +2568,14 @@ impl Isolate {
             NativeContinuationKind::IteratorPrototypeSetter { .. } => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::IteratorFrom(IteratorFromStage::IteratorMethodCall)
+            | NativeContinuationKind::WrapForValidIterator(
+                WrapForValidIteratorStage::NextCall | WrapForValidIteratorStage::ReturnCall,
+            ) => (continuation.first(), 0, None, 0),
+            NativeContinuationKind::IteratorFrom(_)
+            | NativeContinuationKind::WrapForValidIterator(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectToString => (continuation.first(), 0, None, 0),
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -7571,6 +7579,15 @@ impl Isolate {
                         IteratorPrototypeSetterKey::ToStringTag,
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorFrom) => {
+                    return self.begin_iterator_from(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WrapForValidIteratorNext) => {
+                    return self.begin_wrap_for_valid_iterator_next(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::WrapForValidIteratorReturn) => {
+                    return self.begin_wrap_for_valid_iterator_return(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {
                     return self.begin_json_parse(&site);
                 }
@@ -8476,6 +8493,12 @@ impl Isolate {
                 }
                 NativeContinuationKind::IteratorPrototypeSetter { key, stage } => {
                     self.resume_iterator_prototype_setter(continuation, key, stage, value)
+                }
+                NativeContinuationKind::IteratorFrom(stage) => {
+                    self.resume_iterator_from(continuation, stage, value)
+                }
+                NativeContinuationKind::WrapForValidIterator(stage) => {
+                    self.resume_wrap_for_valid_iterator(continuation, stage, value)
                 }
                 NativeContinuationKind::DynamicFunctionPrototype => {
                     self.resume_dynamic_function_prototype(continuation, value)

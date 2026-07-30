@@ -295,7 +295,7 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IteratorFromStage,
         IteratorPrototypeSetterKey, IteratorPrototypeSetterStage, JsonStringifyStage,
         NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
@@ -308,7 +308,7 @@ use runtime::{
         RegExpSearchStage, RegExpStringIteratorStage, RegExpTestStage, SignalStateStage,
         StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
         TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
-        TypedArraySubarrayStage, VmRoots, next_to_primitive_stage,
+        TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

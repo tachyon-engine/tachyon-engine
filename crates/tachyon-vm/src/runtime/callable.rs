@@ -562,6 +562,9 @@ pub(crate) enum NativeFunction {
     IteratorConstructorSetter,
     IteratorToStringTagGetter,
     IteratorToStringTagSetter,
+    IteratorFrom,
+    WrapForValidIteratorNext,
+    WrapForValidIteratorReturn,
     IteratorIdentity,
     MapConstructor,
     MapGet,
@@ -1337,8 +1340,12 @@ impl NativeFunction {
             | Self::IteratorConstructor
             | Self::IteratorConstructorGetter
             | Self::IteratorToStringTagGetter
+            | Self::WrapForValidIteratorNext
+            | Self::WrapForValidIteratorReturn
             | Self::IteratorIdentity => 0,
-            Self::IteratorConstructorSetter | Self::IteratorToStringTagSetter => 1,
+            Self::IteratorConstructorSetter
+            | Self::IteratorToStringTagSetter
+            | Self::IteratorFrom => 1,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
             | Self::SymbolValueOf
@@ -1678,6 +1685,9 @@ impl NativeFunction {
             Self::IteratorConstructorSetter => "set constructor",
             Self::IteratorToStringTagGetter => "get [Symbol.toStringTag]",
             Self::IteratorToStringTagSetter => "set [Symbol.toStringTag]",
+            Self::IteratorFrom => "from",
+            Self::WrapForValidIteratorNext => "next",
+            Self::WrapForValidIteratorReturn => "return",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",
             Self::MapGet => "get",

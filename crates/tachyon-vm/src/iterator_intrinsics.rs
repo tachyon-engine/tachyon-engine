@@ -2,7 +2,157 @@
 
 use super::*;
 
+struct WrapForValidIteratorAllocationRoots<'a> {
+    vm: VmRoots<'a>,
+    iterator: Value,
+    next_method: Value,
+    prototype: Value,
+}
+
+impl Trace for WrapForValidIteratorAllocationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.iterator.trace(tracer);
+        self.next_method.trace(tracer);
+        self.prototype.trace(tracer);
+    }
+}
+
 impl Isolate {
+    /// Starts GetIteratorFlattenable in iterate-string-primitives mode.
+    pub(crate) fn begin_iterator_from(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        if !self.is_object_value(source) && !self.is_string_value(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let symbol = self
+            .agent
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before Iterator.from");
+        let key = self.property_key(symbol)?;
+        self.dispatch_iterator_from_get(
+            Self::native_site(site),
+            IteratorFromStage::IteratorMethodGet,
+            source,
+            Value::from_immediate(Immediate::Undefined),
+            source,
+            key,
+        )
+    }
+
+    /// Resumes one observable step of Iterator.from without a Rust-stack callback chain.
+    pub(crate) fn resume_iterator_from(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: IteratorFromStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        match stage {
+            IteratorFromStage::IteratorMethodGet => {
+                let source = continuation.first();
+                if is_nullish(value) {
+                    return self.continue_iterator_from_record(site, source);
+                }
+                self.resolve_function_object(value)?;
+                self.dispatch_property_callback(
+                    NativeContinuation::iterator_from(
+                        site,
+                        IteratorFromStage::IteratorMethodCall,
+                        source,
+                        value,
+                    ),
+                    value,
+                )
+                .map(|_| ())
+            }
+            IteratorFromStage::IteratorMethodCall => {
+                self.continue_iterator_from_record(site, value)
+            }
+            IteratorFromStage::NextGet => {
+                self.begin_iterator_from_has_instance(site, continuation.first(), value)
+            }
+            IteratorFromStage::HasInstance => {
+                let iterator = continuation.first();
+                if self.is_truthy_value(value)? {
+                    return self.write(site.caller_base, site.destination, iterator);
+                }
+                let wrapper =
+                    self.allocate_wrap_for_valid_iterator(iterator, continuation.second())?;
+                self.write(site.caller_base, site.destination, wrapper)
+            }
+        }
+    }
+
+    /// Calls the cached next method of a branded valid-iterator wrapper.
+    pub(crate) fn begin_wrap_for_valid_iterator_next(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.wrap_for_valid_iterator_snapshot(site.this_value)?;
+        self.dispatch_property_callback(
+            NativeContinuation::wrap_for_valid_iterator(
+                Self::native_site(site),
+                WrapForValidIteratorStage::NextCall,
+                snapshot.iterator,
+            ),
+            snapshot.next_method,
+        )
+        .map(|_| ())
+    }
+
+    /// Looks up the underlying return method afresh for every wrapper return call.
+    pub(crate) fn begin_wrap_for_valid_iterator_return(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.wrap_for_valid_iterator_snapshot(site.this_value)?;
+        let return_atom = self.intern_intrinsic_name(b"return")?;
+        self.dispatch_wrap_for_valid_iterator_get(
+            Self::native_site(site),
+            snapshot.iterator,
+            return_atom.into(),
+        )
+    }
+
+    /// Completes the wrapper next/return protocol after one callback boundary.
+    pub(crate) fn resume_wrap_for_valid_iterator(
+        &mut self,
+        continuation: NativeContinuation,
+        stage: WrapForValidIteratorStage,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let site = continuation.site();
+        match stage {
+            WrapForValidIteratorStage::NextCall | WrapForValidIteratorStage::ReturnCall => {
+                self.write(site.caller_base, site.destination, value)
+            }
+            WrapForValidIteratorStage::ReturnGet => {
+                if is_nullish(value) {
+                    let result = self.create_iterator_result(
+                        Value::from_immediate(Immediate::Undefined),
+                        true,
+                    )?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
+                self.resolve_function_object(value)?;
+                self.dispatch_property_callback(
+                    NativeContinuation::wrap_for_valid_iterator(
+                        site,
+                        WrapForValidIteratorStage::ReturnCall,
+                        continuation.first(),
+                    ),
+                    value,
+                )
+                .map(|_| ())
+            }
+        }
+    }
+
     /// Returns the constructor from the accessor function's defining Realm.
     pub(crate) fn iterator_constructor_getter(
         &mut self,
@@ -139,6 +289,212 @@ impl Isolate {
     /// Looks up one Realm's `%IteratorPrototype%` without extending isolate-wide kinds.
     fn iterator_prototype_for_realm(&self, realm: RealmId) -> Option<Value> {
         self.realm_record(realm)?.iterator_prototype
+    }
+
+    /// Continues GetIteratorFlattenable after selecting or calling @@iterator.
+    fn continue_iterator_from_record(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+    ) -> Result<(), ExecutionError> {
+        if !self.is_object_value(iterator) {
+            return Err(ExecutionError::NotObject(iterator));
+        }
+        let next = self.intern_intrinsic_name(b"next")?;
+        self.dispatch_iterator_from_get(
+            site,
+            IteratorFromStage::NextGet,
+            iterator,
+            Value::from_immediate(Immediate::Undefined),
+            iterator,
+            next.into(),
+        )
+    }
+
+    /// Runs OrdinaryHasInstance while preserving the cached iterator record as its parent.
+    fn begin_iterator_from_has_instance(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+        next_method: Value,
+    ) -> Result<(), ExecutionError> {
+        let constructor = self
+            .realm
+            .iterator_constructor
+            .expect("Iterator constructor initializes before Iterator.from");
+        let depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::iterator_from(
+                site,
+                IteratorFromStage::HasInstance,
+                iterator,
+                next_method,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = self.begin_ordinary_has_instance(site, constructor, iterator);
+        self.finish_immediate_iterator_from_dispatch(depth, frame_depth, outcome)
+    }
+
+    /// Performs a Proxy/accessor-aware property Get below an Iterator.from parent.
+    fn dispatch_iterator_from_get(
+        &mut self,
+        site: NativeContinuationSite,
+        stage: IteratorFromStage,
+        first: Value,
+        second: Value,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        let depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::iterator_from(
+                site, stage, first, second,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = self.dispatch_proxy_aware_property_read(site, target, target, key);
+        self.finish_immediate_iterator_from_dispatch(depth, frame_depth, outcome)
+    }
+
+    /// Performs wrapper return's observable GetMethod lookup below its typed parent.
+    fn dispatch_wrap_for_valid_iterator_get(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+        key: PropertyKey,
+    ) -> Result<(), ExecutionError> {
+        let depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::wrap_for_valid_iterator(
+                site,
+                WrapForValidIteratorStage::ReturnGet,
+                iterator,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = self.dispatch_proxy_aware_property_read(site, iterator, iterator, key);
+        self.finish_immediate_iterator_from_dispatch(depth, frame_depth, outcome)
+    }
+
+    /// Resumes a parent immediately when its nested operation did not create a JS frame.
+    fn finish_immediate_iterator_from_dispatch(
+        &mut self,
+        completion_depth: usize,
+        frame_depth: usize,
+        outcome: Result<Option<RunOutcome>, ExecutionError>,
+    ) -> Result<(), ExecutionError> {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(());
+        }
+        debug_assert!(outcome.is_none());
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(
+            continuation.site().caller_base,
+            continuation.site().destination,
+        )?;
+        match continuation.kind() {
+            NativeContinuationKind::IteratorFrom(stage) => {
+                self.resume_iterator_from(continuation, stage, value)
+            }
+            NativeContinuationKind::WrapForValidIterator(stage) => {
+                self.resume_wrap_for_valid_iterator(continuation, stage, value)
+            }
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
+    /// Allocates the compact wrapper only after all observable Iterator.from steps finish.
+    fn allocate_wrap_for_valid_iterator(
+        &mut self,
+        iterator: Value,
+        next_method: Value,
+    ) -> Result<Value, ExecutionError> {
+        let prototype = self
+            .realm
+            .wrap_for_valid_iterator_prototype
+            .expect("valid-iterator wrapper prototype initializes before Iterator.from");
+        let mut roots = WrapForValidIteratorAllocationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            iterator,
+            next_method,
+            prototype,
+        };
+        self.heap
+            .try_allocate_with_gc(
+                self.types.wrap_for_valid_iterator,
+                0,
+                0,
+                WrapForValidIteratorObject {
+                    ordinary: OrdinaryObject {
+                        shape: ShapeId::EMPTY,
+                        extensible: true,
+                        storage: None,
+                        prototype: roots.prototype,
+                    },
+                    iterator: roots.iterator,
+                    next_method: roots.next_method,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map(|wrapper| Value::from_heap_ref(wrapper.raw()))
+            .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Reads a wrapper payload by value so no heap borrow crosses a callback boundary.
+    fn wrap_for_valid_iterator_snapshot(
+        &mut self,
+        value: Value,
+    ) -> Result<WrapForValidIteratorObject, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.wrap_for_valid_iterator)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        self.heap.with_running_scope(|scope| {
+            let wrapper = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(wrapper, self.types.wrap_for_valid_iterator)
+                    .copied()
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
+    #[inline(always)]
+    const fn native_site(site: &CallSite) -> NativeContinuationSite {
+        NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        }
     }
 
     /// Returns a Realm record from either the active slot or inactive Realm table.

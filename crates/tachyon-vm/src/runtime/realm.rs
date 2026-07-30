@@ -161,6 +161,10 @@ pub(crate) struct Realm {
     pub(crate) iterator_constructor_setter: Option<Value>,
     pub(crate) iterator_to_string_tag_getter: Option<Value>,
     pub(crate) iterator_to_string_tag_setter: Option<Value>,
+    pub(crate) iterator_from: Option<Value>,
+    pub(crate) wrap_for_valid_iterator_prototype: Option<Value>,
+    pub(crate) wrap_for_valid_iterator_next: Option<Value>,
+    pub(crate) wrap_for_valid_iterator_return: Option<Value>,
     pub(crate) array_iterator_next: Option<Value>,
     pub(crate) iterator_identity: Option<Value>,
     pub(crate) string_iterator_prototype: Option<Value>,
@@ -347,6 +351,10 @@ impl Realm {
             iterator_constructor_setter: None,
             iterator_to_string_tag_getter: None,
             iterator_to_string_tag_setter: None,
+            iterator_from: None,
+            wrap_for_valid_iterator_prototype: None,
+            wrap_for_valid_iterator_next: None,
+            wrap_for_valid_iterator_return: None,
             array_iterator_next: None,
             iterator_identity: None,
             string_iterator_prototype: None,
@@ -800,6 +808,10 @@ impl Trace for Realm {
         self.iterator_constructor_setter.trace(tracer);
         self.iterator_to_string_tag_getter.trace(tracer);
         self.iterator_to_string_tag_setter.trace(tracer);
+        self.iterator_from.trace(tracer);
+        self.wrap_for_valid_iterator_prototype.trace(tracer);
+        self.wrap_for_valid_iterator_next.trace(tracer);
+        self.wrap_for_valid_iterator_return.trace(tracer);
         self.array_iterator_next.trace(tracer);
         self.iterator_identity.trace(tracer);
         self.string_iterator_prototype.trace(tracer);

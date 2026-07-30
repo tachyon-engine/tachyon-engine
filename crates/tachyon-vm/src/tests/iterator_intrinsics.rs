@@ -134,6 +134,89 @@ var result = Reflect.construct(Iterator, [], foreignNewTarget);
 Object.getPrototypeOf(result) === foreignIteratorPrototype;
 "#;
 
+const ITERATOR_FROM_SOURCE: &str = r#"
+var fromDescriptor = Object.getOwnPropertyDescriptor(Iterator, "from");
+var shapeOk = typeof Iterator.from === "function" && Iterator.from.name === "from" &&
+  Iterator.from.length === 1 && fromDescriptor.writable === true &&
+  fromDescriptor.enumerable === false && fromDescriptor.configurable === true;
+
+var nextGets = 0;
+var nextCalls = 0;
+var returnGets = 0;
+var base = {
+  get next() {
+    nextGets++;
+    return function() {
+      nextCalls++;
+      return { value: 17, done: false, receiver: this === base };
+    };
+  },
+  get return() {
+    returnGets++;
+    return function() { return { value: 23, done: true, receiver: this === base }; };
+  }
+};
+var wrapper = Iterator.from(base);
+var first = wrapper.next();
+var returned = wrapper.return();
+var wrapperOk = wrapper !== base && wrapper instanceof Iterator && nextGets === 1 &&
+  nextCalls === 1 && first.value === 17 && first.receiver === true &&
+  returnGets === 1 && returned.value === 23 && returned.receiver === true;
+
+var noReturnBase = { next: function() { return { done: true }; } };
+var noReturn = Iterator.from(noReturnBase).return();
+var missingReturnOk = noReturn.value === undefined && noReturn.done === true &&
+  Object.getPrototypeOf(noReturn) === Object.prototype;
+
+var iteratorMethodCalls = 0;
+var iterableNextGets = 0;
+var yielded = { next: function() { return { done: true }; } };
+var iterable = {
+  [Symbol.iterator]: function() { iteratorMethodCalls++; return yielded; }
+};
+Object.defineProperty(yielded, "next", {
+  configurable: true,
+  get: function() { iterableNextGets++; return function() { return { done: true }; }; }
+});
+var iterableWrapper = Iterator.from(iterable);
+var iterableOk = iteratorMethodCalls === 1 && iterableNextGets === 1 &&
+  iterableWrapper !== yielded && iterableWrapper.next().done === true;
+
+var ownNextGets = 0;
+var alreadyIterator = Object.create(Iterator.prototype);
+Object.defineProperty(alreadyIterator, "next", {
+  get: function() { ownNextGets++; return function() { return { done: true }; }; }
+});
+var identityOk = Iterator.from(alreadyIterator) === alreadyIterator && ownNextGets === 1;
+
+var invalidThis = false;
+try { Object.getPrototypeOf(wrapper).next.call({}); } catch (error) {
+  invalidThis = error instanceof TypeError;
+}
+var primitiveThrows = 0;
+try { Iterator.from(undefined); } catch (error) { if (error instanceof TypeError) primitiveThrows++; }
+try { Iterator.from(null); } catch (error) { if (error instanceof TypeError) primitiveThrows++; }
+try { Iterator.from(1); } catch (error) { if (error instanceof TypeError) primitiveThrows++; }
+var stringIterator = Iterator.from("ab");
+var stringOk = stringIterator.next().value === "a" && stringIterator.next().value === "b";
+var originalStringIterator = String.prototype[Symbol.iterator];
+var observedStringReceiver = "";
+Object.defineProperty(String.prototype, Symbol.iterator, {
+  configurable: true,
+  get: function() {
+    "use strict";
+    observedStringReceiver += typeof this;
+    return originalStringIterator;
+  }
+});
+Iterator.from("");
+Iterator.from(new String(""));
+var primitiveReceiverOk = observedStringReceiver === "stringobject";
+
+shapeOk && wrapperOk && missingReturnOk && iterableOk && identityOk && invalidThis &&
+  primitiveThrows === 3 && stringOk && primitiveReceiverOk;
+"#;
+
 #[test]
 fn iterator_intrinsics_are_stable_for_every_dispatch_batch() {
     assert_iterator_intrinsics::<1>(8_901, false);
@@ -211,6 +294,20 @@ fn iterator_constructor_fallback_uses_the_new_target_realm() {
     );
 }
 
+#[test]
+fn iterator_from_and_wrapper_are_stable_for_every_dispatch_batch() {
+    assert_iterator_from::<1>(8_941, false);
+    assert_iterator_from::<2>(8_942, false);
+    assert_iterator_from::<4>(8_944, false);
+    assert_iterator_from::<8>(8_948, false);
+    assert_iterator_from::<16>(8_956, false);
+}
+
+#[test]
+fn iterator_from_roots_survive_forced_major_collection() {
+    assert_iterator_from::<8>(8_960, true);
+}
+
 /// Compiles and executes the Iterator intrinsic graph under one dispatch and GC policy.
 fn assert_iterator_intrinsics<const N: usize>(source_id: u32, forced_major: bool) {
     let module = compile_iterator_intrinsics(source_id);
@@ -242,6 +339,34 @@ fn assert_iterator_intrinsics<const N: usize>(source_id: u32, forced_major: bool
 /// Compiles the shared Iterator fixture independently from isolate collection policy.
 fn compile_iterator_intrinsics(source_id: u32) -> CompiledModule {
     compile_iterator_source(ITERATOR_INTRINSICS_SOURCE, source_id)
+}
+
+/// Executes Iterator.from's full observable protocol under one dispatch and GC policy.
+fn assert_iterator_from<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_iterator_source(ITERATOR_FROM_SOURCE, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Iterator.from fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
 }
 
 /// Compiles one Iterator source fixture.
