@@ -633,6 +633,55 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             }
             Ok(count)
         }
+        HirExpressionKind::OptionalChain { base, links } => {
+            let mut count = checked_count_add(
+                expression_instruction_count(base)?,
+                6,
+                "bytecode instructions",
+            )?;
+            for link in links.iter() {
+                if link.optional {
+                    count = checked_count_add(count, 2, "bytecode instructions")?;
+                }
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::StaticMember(_) => {
+                        count = checked_count_add(count, 2, "bytecode instructions")?;
+                    }
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        count = checked_count_add(
+                            count,
+                            expression_instruction_count(property)?,
+                            "bytecode instructions",
+                        )?;
+                        count = checked_count_add(count, 3, "bytecode instructions")?;
+                    }
+                    crate::HirOptionalChainLinkKind::PrivateMember(_) => {
+                        count = checked_count_add(count, 3, "bytecode instructions")?;
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        count = checked_count_add(count, 5, "bytecode instructions")?;
+                        for argument in arguments.iter() {
+                            let (expression, own) = match argument {
+                                crate::hir::HirArrayExpressionPart::Element(expression) => {
+                                    (expression, 1)
+                                }
+                                crate::hir::HirArrayExpressionPart::Spread(expression) => {
+                                    (expression, 16)
+                                }
+                                crate::hir::HirArrayExpressionPart::Elision => continue,
+                            };
+                            count = checked_count_add(
+                                count,
+                                expression_instruction_count(expression)?,
+                                "bytecode instructions",
+                            )?;
+                            count = checked_count_add(count, own, "bytecode instructions")?;
+                        }
+                    }
+                }
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = checked_count_add(
                 expression_instruction_count(callee)?,

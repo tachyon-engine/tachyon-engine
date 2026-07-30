@@ -10,9 +10,9 @@ pub use expression::{
     HirArrayExpressionPart, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
     HirClass, HirClassElement, HirClassField, HirClassMethod, HirClassMethodKind, HirExpression,
     HirExpressionKind, HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty,
-    HirObjectPropertyKey, HirObjectPropertyValue, HirPrivateAccessor, HirPrivateField,
-    HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirTemplateElement, HirUnaryOperator,
-    HirUpdateOperator,
+    HirObjectPropertyKey, HirObjectPropertyValue, HirOptionalChainLink, HirOptionalChainLinkKind,
+    HirPrivateAccessor, HirPrivateField, HirPrivateMethod, HirPrivateName, HirPrivateNameId,
+    HirTemplateElement, HirUnaryOperator, HirUpdateOperator,
 };
 pub use module::{
     HirModuleAttribute, HirModuleExportEntry, HirModuleImportEntry, HirModuleImportName,

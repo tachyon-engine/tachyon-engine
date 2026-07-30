@@ -331,6 +331,29 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
             expression_suspend_point_count(tag)?,
             expression_list_count(substitutions)?,
         ),
+        HirExpressionKind::OptionalChain { base, links } => {
+            let mut count = expression_suspend_point_count(base)?;
+            for link in links.iter() {
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        count = add(count, expression_suspend_point_count(property)?)?;
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        for argument in arguments.iter() {
+                            let expression = match argument {
+                                HirArrayExpressionPart::Element(expression)
+                                | HirArrayExpressionPart::Spread(expression) => expression,
+                                HirArrayExpressionPart::Elision => continue,
+                            };
+                            count = add(count, expression_suspend_point_count(expression)?)?;
+                        }
+                    }
+                    crate::HirOptionalChainLinkKind::StaticMember(_)
+                    | crate::HirOptionalChainLinkKind::PrivateMember(_) => {}
+                }
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_suspend_point_count(callee)?;
             for argument in arguments.iter() {

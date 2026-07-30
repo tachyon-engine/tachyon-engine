@@ -73,6 +73,23 @@ pub struct HirTemplateElement {
     pub raw: Arc<[u16]>,
 }
 
+/// One ordered operation in a continuous optional chain.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirOptionalChainLink {
+    pub span: SourceSpan,
+    pub optional: bool,
+    pub kind: HirOptionalChainLinkKind,
+}
+
+/// The operation payload retained independently from its optional boundary bit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HirOptionalChainLinkKind {
+    StaticMember(Arc<str>),
+    ComputedMember(HirExpression),
+    PrivateMember(HirPrivateName),
+    Call(Arc<[HirArrayExpressionPart]>),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HirFunctionExpression {
     pub stencil: FunctionStencilId,
@@ -280,6 +297,11 @@ pub enum HirExpressionKind {
         elements: Arc<[HirTemplateElement]>,
         substitutions: Arc<[HirExpression]>,
     },
+    /// A flat base-plus-operations chain whose optional links share one short-circuit target.
+    OptionalChain {
+        base: Box<HirExpression>,
+        links: Arc<[HirOptionalChainLink]>,
+    },
     /// A call whose ordered argument list contains at least one iterator spread.
     CallSpread {
         callee: Box<HirExpression>,
@@ -454,6 +476,16 @@ pub(super) fn lower_expression(
                 )?),
                 elements: elements.into(),
                 substitutions: substitutions.into(),
+            }
+        }
+        Expression::ChainExpression(chain) => {
+            let lowered = lower_chain_element(&chain.expression, source, semantic, functions)?;
+            let ChainLowered::Chain { base, links } = lowered else {
+                return Err(unsupported(source.name(), span, "optional chain"));
+            };
+            HirExpressionKind::OptionalChain {
+                base: Box::new(base),
+                links: links.into(),
             }
         }
         Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
@@ -955,6 +987,282 @@ pub(super) fn lower_expression(
         _ => return Err(unsupported(source.name(), span, "expression")),
     };
     Ok(HirExpression { span, kind })
+}
+
+enum ChainLowered {
+    Prefix(HirExpression),
+    Chain {
+        base: HirExpression,
+        links: Vec<HirOptionalChainLink>,
+    },
+}
+
+/// Flattens Oxc's outer chain element while retaining the first optional boundary.
+fn lower_chain_element(
+    element: &oxc::ast::ast::ChainElement<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    use oxc::ast::ast::ChainElement;
+    match element {
+        ChainElement::CallExpression(call) => lower_chain_call(call, source, semantic, functions),
+        ChainElement::StaticMemberExpression(member) => {
+            lower_chain_static_member(member, source, semantic, functions)
+        }
+        ChainElement::ComputedMemberExpression(member) => {
+            lower_chain_computed_member(member, source, semantic, functions)
+        }
+        ChainElement::PrivateFieldExpression(member) => {
+            lower_chain_private_member(member, source, semantic, functions)
+        }
+        ChainElement::TSNonNullExpression(_) => Err(unsupported(
+            source.name(),
+            source_span(element.span()),
+            "TypeScript non-null optional chain",
+        )),
+    }
+}
+
+/// Descends through chain-shaped expression nodes but treats nested ChainExpression as a boundary.
+fn lower_chain_operand(
+    expression: &Expression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    match expression {
+        Expression::CallExpression(call) => lower_chain_call(call, source, semantic, functions),
+        Expression::StaticMemberExpression(member) => {
+            lower_chain_static_member(member, source, semantic, functions)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            lower_chain_computed_member(member, source, semantic, functions)
+        }
+        Expression::PrivateFieldExpression(member) => {
+            lower_chain_private_member(member, source, semantic, functions)
+        }
+        _ => Ok(ChainLowered::Prefix(lower_expression(
+            expression, source, semantic, functions,
+        )?)),
+    }
+}
+
+/// Appends a link once a chain has started, or constructs a non-optional member prefix.
+fn lower_chain_static_member(
+    member: &oxc::ast::ast::StaticMemberExpression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    let span = source_span(member.span);
+    let property: Arc<str> = Arc::from(member.property.name.as_str());
+    if matches!(member.object, Expression::Super(_)) {
+        if member.optional {
+            return Err(unsupported(source.name(), span, "optional super property"));
+        }
+        return Ok(ChainLowered::Prefix(HirExpression {
+            span,
+            kind: HirExpressionKind::SuperStaticMember(property),
+        }));
+    }
+    let operand = lower_chain_operand(&member.object, source, semantic, functions)?;
+    append_chain_link(
+        operand,
+        HirOptionalChainLink {
+            span,
+            optional: member.optional,
+            kind: HirOptionalChainLinkKind::StaticMember(property),
+        },
+        |object, link| HirExpressionKind::StaticMember {
+            object: Box::new(object),
+            property: match link.kind {
+                HirOptionalChainLinkKind::StaticMember(property) => property,
+                _ => unreachable!("static-member link retains its kind"),
+            },
+        },
+    )
+}
+
+/// Preserves a computed key as a deferred chain operation so guards run before the key.
+fn lower_chain_computed_member(
+    member: &oxc::ast::ast::ComputedMemberExpression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    let span = source_span(member.span);
+    let property = lower_expression(&member.expression, source, semantic, functions)?;
+    if matches!(member.object, Expression::Super(_)) {
+        if member.optional {
+            return Err(unsupported(source.name(), span, "optional super property"));
+        }
+        return Ok(ChainLowered::Prefix(HirExpression {
+            span,
+            kind: HirExpressionKind::SuperComputedMember(Box::new(property)),
+        }));
+    }
+    let operand = lower_chain_operand(&member.object, source, semantic, functions)?;
+    append_chain_link(
+        operand,
+        HirOptionalChainLink {
+            span,
+            optional: member.optional,
+            kind: HirOptionalChainLinkKind::ComputedMember(property),
+        },
+        |object, link| HirExpressionKind::ComputedMember {
+            object: Box::new(object),
+            property: Box::new(match link.kind {
+                HirOptionalChainLinkKind::ComputedMember(property) => property,
+                _ => unreachable!("computed-member link retains its kind"),
+            }),
+        },
+    )
+}
+
+/// Retains private-name identity while sharing the same flat chain representation.
+fn lower_chain_private_member(
+    member: &oxc::ast::ast::PrivateFieldExpression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    let span = source_span(member.span);
+    let name = private_name_reference(&member.field, source, semantic)?;
+    let operand = lower_chain_operand(&member.object, source, semantic, functions)?;
+    append_chain_link(
+        operand,
+        HirOptionalChainLink {
+            span,
+            optional: member.optional,
+            kind: HirOptionalChainLinkKind::PrivateMember(name),
+        },
+        |object, link| HirExpressionKind::PrivateMember {
+            object: Box::new(object),
+            name: match link.kind {
+                HirOptionalChainLinkKind::PrivateMember(name) => name,
+                _ => unreachable!("private-member link retains its kind"),
+            },
+        },
+    )
+}
+
+/// Retains ordered call arguments, including spread, without recognizing optional eval as direct eval.
+fn lower_chain_call(
+    call: &oxc::ast::ast::CallExpression<'_>,
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<ChainLowered, CompileError> {
+    let span = source_span(call.span);
+    if call.type_arguments.is_some() {
+        return Err(unsupported(source.name(), span, "optional chain call"));
+    }
+    if matches!(call.callee, Expression::Super(_)) {
+        if call.optional {
+            return Err(unsupported(source.name(), span, "optional super call"));
+        }
+        let mut arguments = Vec::with_capacity(call.arguments.len());
+        for argument in &call.arguments {
+            let argument = argument.as_expression().ok_or_else(|| {
+                unsupported(
+                    source.name(),
+                    source_span(argument.span()),
+                    "spread super argument",
+                )
+            })?;
+            arguments.push(lower_expression(argument, source, semantic, functions)?);
+        }
+        return Ok(ChainLowered::Prefix(HirExpression {
+            span,
+            kind: HirExpressionKind::SuperCall(arguments.into()),
+        }));
+    }
+    let callee = lower_chain_operand(&call.callee, source, semantic, functions)?;
+    let arguments = lower_chain_arguments(&call.arguments, source, semantic, functions)?;
+    append_chain_link(
+        callee,
+        HirOptionalChainLink {
+            span,
+            optional: call.optional,
+            kind: HirOptionalChainLinkKind::Call(arguments),
+        },
+        |callee, link| match link.kind {
+            HirOptionalChainLinkKind::Call(arguments)
+                if arguments
+                    .iter()
+                    .any(|argument| matches!(argument, HirArrayExpressionPart::Spread(_))) =>
+            {
+                HirExpressionKind::CallSpread {
+                    callee: Box::new(callee),
+                    arguments,
+                }
+            }
+            HirOptionalChainLinkKind::Call(arguments) => HirExpressionKind::Call {
+                callee: Box::new(callee),
+                arguments: arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        HirArrayExpressionPart::Element(expression) => expression.clone(),
+                        HirArrayExpressionPart::Elision | HirArrayExpressionPart::Spread(_) => {
+                            unreachable!("plain optional prefix excludes spread and elision")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            _ => unreachable!("call link retains its kind"),
+        },
+    )
+}
+
+/// Copies call arguments into the common ordered element/spread representation.
+fn lower_chain_arguments(
+    arguments: &[Argument<'_>],
+    source: &SourceText,
+    semantic: &Semantic<'_>,
+    functions: &mut Vec<HirFunction>,
+) -> Result<Arc<[HirArrayExpressionPart]>, CompileError> {
+    let mut lowered = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        if let Some(expression) = argument.as_expression() {
+            lowered.push(HirArrayExpressionPart::Element(lower_expression(
+                expression, source, semantic, functions,
+            )?));
+        } else if let Argument::SpreadElement(spread) = argument {
+            lowered.push(HirArrayExpressionPart::Spread(lower_expression(
+                &spread.argument,
+                source,
+                semantic,
+                functions,
+            )?));
+        } else {
+            unreachable!("Oxc call arguments are expressions or spread elements");
+        }
+    }
+    Ok(lowered.into())
+}
+
+/// Starts a chain at the first optional operation and otherwise preserves an ordinary prefix.
+fn append_chain_link(
+    operand: ChainLowered,
+    link: HirOptionalChainLink,
+    prefix: impl FnOnce(HirExpression, HirOptionalChainLink) -> HirExpressionKind,
+) -> Result<ChainLowered, CompileError> {
+    match operand {
+        ChainLowered::Chain { base, mut links } => {
+            links.push(link);
+            Ok(ChainLowered::Chain { base, links })
+        }
+        ChainLowered::Prefix(base) if link.optional => Ok(ChainLowered::Chain {
+            base,
+            links: vec![link],
+        }),
+        ChainLowered::Prefix(base) => Ok(ChainLowered::Prefix(HirExpression {
+            span: link.span,
+            kind: prefix(base, link),
+        })),
+    }
 }
 
 /// Copies raw template text while defensively applying ECMAScript CR and CRLF normalization.

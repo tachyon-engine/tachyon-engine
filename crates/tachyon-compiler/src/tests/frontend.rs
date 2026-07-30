@@ -213,6 +213,66 @@ fn hir_lowering_normalizes_actual_crlf_in_tagged_raw_text() {
 }
 
 #[test]
+fn hir_lowering_flattens_one_continuous_optional_chain() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "base?.first.second?.(argument).third;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let HirStatementKind::Expression(HirExpression {
+        kind: HirExpressionKind::OptionalChain { base, links },
+        ..
+    }) = &hir.statements()[0].kind
+    else {
+        panic!("expected flat optional-chain HIR");
+    };
+    assert!(matches!(base.kind, HirExpressionKind::Identifier(_)));
+    assert_eq!(links.len(), 4);
+    assert_eq!(
+        links.iter().map(|link| link.optional).collect::<Vec<_>>(),
+        [true, false, true, false]
+    );
+    assert!(matches!(
+        links[0].kind,
+        HirOptionalChainLinkKind::StaticMember(_)
+    ));
+    assert!(matches!(
+        links[1].kind,
+        HirOptionalChainLinkKind::StaticMember(_)
+    ));
+    assert!(matches!(links[2].kind, HirOptionalChainLinkKind::Call(_)));
+    assert!(matches!(
+        links[3].kind,
+        HirOptionalChainLinkKind::StaticMember(_)
+    ));
+}
+
+#[test]
+fn hir_lowering_keeps_parentheses_as_an_optional_chain_boundary() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(MediaType::JavaScript, "(base?.member).outside;"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let HirStatementKind::Expression(HirExpression {
+        kind: HirExpressionKind::StaticMember { object, .. },
+        ..
+    }) = &hir.statements()[0].kind
+    else {
+        panic!("parentheses must end the optional chain");
+    };
+    assert!(matches!(
+        object.kind,
+        HirExpressionKind::OptionalChain { .. }
+    ));
+}
+
+#[test]
 /// Confirms logical structure and operator identity survive after the Oxc arena is dropped.
 fn hir_lowering_owns_logical_expression_and_operator() {
     let hir = Compiler

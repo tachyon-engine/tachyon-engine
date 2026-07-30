@@ -467,6 +467,41 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::OptionalChain { base, links } => {
+            let mut count = expression_scope_name_count(base)?;
+            for link in links.iter() {
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::StaticMember(_) => {
+                        count = checked_count_add(count, 1, "scope names")?;
+                    }
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        count = checked_count_add(
+                            count,
+                            expression_scope_name_count(property)?,
+                            "scope names",
+                        )?;
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        for argument in arguments.iter() {
+                            let expression = match argument {
+                                crate::hir::HirArrayExpressionPart::Element(expression)
+                                | crate::hir::HirArrayExpressionPart::Spread(expression) => {
+                                    expression
+                                }
+                                crate::hir::HirArrayExpressionPart::Elision => continue,
+                            };
+                            count = checked_count_add(
+                                count,
+                                expression_scope_name_count(expression)?,
+                                "scope names",
+                            )?;
+                        }
+                    }
+                    crate::HirOptionalChainLinkKind::PrivateMember(_) => {}
+                }
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_scope_name_count(callee)?;
             for argument in arguments.iter() {
@@ -906,6 +941,39 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                     expression_literal_count(substitution)?,
                     "bytecode constants",
                 )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::OptionalChain { base, links } => {
+            let mut count = expression_literal_count(base)?;
+            for link in links.iter() {
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        count = checked_count_add(
+                            count,
+                            expression_literal_count(property)?,
+                            "bytecode constants",
+                        )?;
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        for argument in arguments.iter() {
+                            let expression = match argument {
+                                crate::hir::HirArrayExpressionPart::Element(expression)
+                                | crate::hir::HirArrayExpressionPart::Spread(expression) => {
+                                    expression
+                                }
+                                crate::hir::HirArrayExpressionPart::Elision => continue,
+                            };
+                            count = checked_count_add(
+                                count,
+                                expression_literal_count(expression)?,
+                                "bytecode constants",
+                            )?;
+                        }
+                    }
+                    crate::HirOptionalChainLinkKind::StaticMember(_)
+                    | crate::HirOptionalChainLinkKind::PrivateMember(_) => {}
+                }
             }
             Ok(count)
         }

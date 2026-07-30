@@ -970,6 +970,46 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             }
             Ok(count)
         }
+        HirExpressionKind::OptionalChain { base, links } => {
+            let mut count = expression_label_count(base)?;
+            count = checked_count_add(count, 1, "bytecode labels")?;
+            for link in links.iter() {
+                if link.optional {
+                    count = checked_count_add(count, 1, "bytecode labels")?;
+                }
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        count = checked_count_add(
+                            count,
+                            expression_label_count(property)?,
+                            "bytecode labels",
+                        )?;
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        for argument in arguments.iter() {
+                            let (expression, own) = match argument {
+                                crate::hir::HirArrayExpressionPart::Element(expression) => {
+                                    (expression, 0)
+                                }
+                                crate::hir::HirArrayExpressionPart::Spread(expression) => {
+                                    (expression, 2)
+                                }
+                                crate::hir::HirArrayExpressionPart::Elision => continue,
+                            };
+                            count = checked_count_add(
+                                count,
+                                expression_label_count(expression)?,
+                                "bytecode labels",
+                            )?;
+                            count = checked_count_add(count, own, "bytecode labels")?;
+                        }
+                    }
+                    crate::HirOptionalChainLinkKind::StaticMember(_)
+                    | crate::HirOptionalChainLinkKind::PrivateMember(_) => {}
+                }
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_label_count(callee)?;
             for argument in arguments.iter() {

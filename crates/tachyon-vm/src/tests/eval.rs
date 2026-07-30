@@ -11,7 +11,7 @@ use super::{
 };
 
 /// Compiles and executes a host-provided eval script in the selected Realm.
-fn eval_script_callback(
+pub(super) fn eval_script_callback(
     isolate: &mut Isolate,
     realm: RealmId,
     kind: EvalKind,
@@ -60,7 +60,7 @@ fn eval_script_callback(
     }
 }
 
-fn dynamic_function_callback(
+pub(super) fn dynamic_function_callback(
     isolate: &mut Isolate,
     realm: RealmId,
     kind: crate::DynamicFunctionKind,

@@ -250,6 +250,29 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 collect_expression(substitution, bindings);
             }
         }
+        HirExpressionKind::OptionalChain { base, links } => {
+            collect_expression(base, bindings);
+            for link in links.iter() {
+                match &link.kind {
+                    crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                        collect_expression(property, bindings);
+                    }
+                    crate::HirOptionalChainLinkKind::Call(arguments) => {
+                        for argument in arguments.iter() {
+                            match argument {
+                                HirArrayExpressionPart::Element(expression)
+                                | HirArrayExpressionPart::Spread(expression) => {
+                                    collect_expression(expression, bindings);
+                                }
+                                HirArrayExpressionPart::Elision => {}
+                            }
+                        }
+                    }
+                    crate::HirOptionalChainLinkKind::StaticMember(_)
+                    | crate::HirOptionalChainLinkKind::PrivateMember(_) => {}
+                }
+            }
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             collect_expression(callee, bindings);
             for argument in arguments.iter() {

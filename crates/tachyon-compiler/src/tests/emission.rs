@@ -155,6 +155,112 @@ fn compiler_preserves_private_and_super_tag_receivers() {
 }
 
 #[test]
+fn compiler_emits_optional_chain_guards_before_deferred_operands() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "base?.[computed()]?.method(argument());",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    let first_guard = disassembly
+        .find("JumpIfNotNullish")
+        .expect("optional member must emit a guard");
+    let computed_call = disassembly[first_guard..]
+        .find("Call")
+        .map(|offset| first_guard + offset)
+        .expect("computed key must be called after the guard");
+    let second_guard = disassembly[computed_call..]
+        .find("JumpIfNotNullish")
+        .map(|offset| computed_call + offset)
+        .expect("optional method access must emit a second guard");
+    let argument_call = disassembly[second_guard..]
+        .find("Call")
+        .map(|offset| second_guard + offset)
+        .expect("argument must be called after the second guard");
+    assert!(first_guard < computed_call && computed_call < second_guard);
+    assert!(second_guard < argument_call);
+}
+
+#[test]
+fn compiler_preserves_optional_call_receivers_and_indirect_eval() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "receiver.method?.(); (receiver?.method)(); eval?.('source');",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.matches("CallWithReceiver").count() >= 2);
+    assert!(!disassembly.contains("DirectEval"));
+}
+
+#[test]
+fn compiler_supports_super_new_target_delete_and_tail_optional_calls() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "delete target?.property; function ordinary() { return new.target?.(); } class Base { method() {} } class Derived extends Base { method() { return super.method?.(); } }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassemblies = module
+        .functions()
+        .iter()
+        .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+        .collect::<Vec<_>>();
+    assert!(disassemblies.iter().any(|text| text.contains("DeleteById")));
+    assert!(
+        disassemblies
+            .iter()
+            .any(|text| text.contains("LoadNewTarget") && text.contains("Call"))
+    );
+    assert!(
+        disassemblies
+            .iter()
+            .any(|text| { text.contains("GetSuperById") && text.contains("TailCallWithReceiver") })
+    );
+}
+
+#[test]
+fn compiler_supports_spread_inside_an_optional_call_after_its_guard() {
+    let module = Compiler
+        .compile(
+            source(MediaType::JavaScript, "callable?.(...argumentsList);"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    let guard = disassembly.find("JumpIfNotNullish").unwrap();
+    let iterator = disassembly.find("CreateArray").unwrap();
+    let call = disassembly.find("CallSpread").unwrap();
+    assert!(guard < iterator && iterator < call);
+}
+
+#[test]
 fn compiler_preserves_lone_surrogates_in_directives_and_property_keys() {
     let module = Compiler
         .compile(

@@ -27,11 +27,12 @@ pub use hir::{
     HirFunctionDeclaration, HirFunctionKind, HirFunctionRole, HirIdentifierReference,
     HirLogicalOperator, HirModuleAttribute, HirModuleExportEntry, HirModuleImportEntry,
     HirModuleImportName, HirModuleRequest, HirModuleStencil, HirObjectProperty,
-    HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind, HirPatternProperty,
-    HirPrivateAccessor, HirPrivateField, HirPrivateMethod, HirPrivateName, HirPrivateNameId,
-    HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase,
-    HirTemplateElement, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
-    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirObjectPropertyKey, HirObjectPropertyValue, HirOptionalChainLink, HirOptionalChainLinkKind,
+    HirPattern, HirPatternKind, HirPatternProperty, HirPrivateAccessor, HirPrivateField,
+    HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirProgram, HirScope, HirScopeFlags,
+    HirStatement, HirStatementKind, HirSwitchCase, HirTemplateElement, HirUnaryOperator,
+    HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind, HirVariableDeclarator,
+    ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};

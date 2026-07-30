@@ -18,6 +18,13 @@ struct PendingStaticField {
     span: SourceSpan,
 }
 
+#[derive(Clone, Copy)]
+struct OptionalChainState {
+    receiver: RegisterId,
+    value: RegisterId,
+    has_receiver: bool,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum PendingStaticFieldKind {
     Public,
@@ -417,6 +424,10 @@ impl Lowerer<'_> {
                 )?;
                 self.emit(Opcode::Return, &[result.index()], expression.span)
             }
+            HirExpressionKind::OptionalChain { base, links } => {
+                let result = self.optional_chain(base, links, expression.span, true)?;
+                self.emit(Opcode::Return, &[result.value.index()], expression.span)
+            }
             HirExpressionKind::CallSpread { callee, arguments } => {
                 let result =
                     self.call_spread_expression(callee, arguments, expression.span, true)?;
@@ -640,6 +651,9 @@ impl Lowerer<'_> {
                 operator: HirUnaryOperator::Delete,
                 argument,
             } => match &argument.kind {
+                HirExpressionKind::OptionalChain { base, links } => {
+                    self.delete_optional_chain(base, links, expression.span)
+                }
                 HirExpressionKind::StaticMember { object, property } => {
                     let receiver = self.expression(object)?;
                     let destination = self.register()?;
@@ -1093,6 +1107,9 @@ impl Lowerer<'_> {
                 expression.span,
                 false,
             ),
+            HirExpressionKind::OptionalChain { base, links } => self
+                .optional_chain(base, links, expression.span, false)
+                .map(|state| state.value),
             HirExpressionKind::CallSpread { callee, arguments } => {
                 self.call_spread_expression(callee, arguments, expression.span, false)
             }
@@ -2379,6 +2396,10 @@ impl Lowerer<'_> {
         span: SourceSpan,
         tail: bool,
     ) -> Result<RegisterId, CompileError> {
+        if let HirExpressionKind::OptionalChain { base, links } = &callee.kind {
+            let state = self.optional_chain(base, links, callee.span, false)?;
+            return self.emit_optional_chain_call(state, arguments, span, tail);
+        }
         if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
             return self.method_call_expression(object, property, arguments, span, tail);
         }
@@ -2438,6 +2459,429 @@ impl Lowerer<'_> {
             &[destination.index(), call_base.index(), argument_count],
             span,
         )?;
+        Ok(destination)
+    }
+
+    /// Evaluates one flat chain with a shared short-circuit target and receiver/value state.
+    fn optional_chain(
+        &mut self,
+        base: &HirExpression,
+        links: &[crate::HirOptionalChainLink],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<OptionalChainState, CompileError> {
+        let destination = self.load_undefined(span)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let mut state = self.optional_chain_base(base, span)?;
+        for (index, link) in links.iter().enumerate() {
+            if link.optional {
+                self.optional_chain_guard(state.value, end, link.span)?;
+            }
+            let final_tail = tail && index + 1 == links.len();
+            state = match &link.kind {
+                crate::HirOptionalChainLinkKind::StaticMember(property) => {
+                    self.optional_static_member(state, property, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                    self.optional_computed_member(state, property, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::PrivateMember(name) => {
+                    self.optional_private_member(state, name, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::Call(arguments) => {
+                    self.optional_chain_call(state, arguments, link.span, final_tail)?
+                }
+            };
+        }
+        self.emit(
+            Opcode::Move,
+            &[destination.index(), state.value.index()],
+            span,
+        )?;
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        state.value = destination;
+        Ok(state)
+    }
+
+    /// Evaluates a chain base while preserving a property reference's receiver for a following call.
+    fn optional_chain_base(
+        &mut self,
+        base: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<OptionalChainState, CompileError> {
+        match &base.kind {
+            HirExpressionKind::OptionalChain { base, links } => {
+                self.optional_chain(base, links, base.span, false)
+            }
+            HirExpressionKind::StaticMember { object, property } => {
+                let object = self.expression(object)?;
+                let receiver = self.register()?;
+                self.emit(Opcode::Move, &[receiver.index(), object.index()], span)?;
+                let value = self.register()?;
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::GetById,
+                    &[value.index(), receiver.index(), property],
+                    span,
+                )?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: true,
+                })
+            }
+            HirExpressionKind::ComputedMember { object, property } => {
+                let object = self.expression(object)?;
+                let property = self.expression(property)?;
+                self.prepare_property_key(property, object, false, span)?;
+                let receiver = self.register()?;
+                self.emit(Opcode::Move, &[receiver.index(), object.index()], span)?;
+                let value = self.register()?;
+                self.emit(
+                    Opcode::GetByValue,
+                    &[value.index(), receiver.index(), property.index()],
+                    span,
+                )?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: true,
+                })
+            }
+            HirExpressionKind::PrivateMember { object, name } => {
+                let object = self.expression(object)?;
+                let key = self.load_private_name(name, span)?;
+                let receiver = self.register()?;
+                self.emit(Opcode::Move, &[receiver.index(), object.index()], span)?;
+                let value = self.register()?;
+                self.emit(
+                    Opcode::GetPrivate,
+                    &[value.index(), receiver.index(), key.index()],
+                    span,
+                )?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: true,
+                })
+            }
+            HirExpressionKind::SuperStaticMember(property) => {
+                let receiver = self.register()?;
+                self.emit(Opcode::LoadThis, &[receiver.index()], span)?;
+                let value = self.register()?;
+                let property = self.scope_name(property)?;
+                self.emit(Opcode::GetSuperById, &[value.index(), property], span)?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: true,
+                })
+            }
+            HirExpressionKind::SuperComputedMember(property) => {
+                let receiver = self.register()?;
+                self.emit(Opcode::LoadThis, &[receiver.index()], span)?;
+                let super_base = self.register()?;
+                self.emit(Opcode::LoadSuperBase, &[super_base.index()], span)?;
+                let property = self.expression(property)?;
+                self.prepare_property_key(property, super_base, false, span)?;
+                let value = self.register()?;
+                self.emit(
+                    Opcode::GetSuperByValue,
+                    &[value.index(), super_base.index(), property.index()],
+                    span,
+                )?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: true,
+                })
+            }
+            _ => {
+                let value = self.expression(base)?;
+                let receiver = self.load_undefined(span)?;
+                Ok(OptionalChainState {
+                    receiver,
+                    value,
+                    has_receiver: false,
+                })
+            }
+        }
+    }
+
+    /// Branches a nullish value to the common chain end before deferred operands are evaluated.
+    fn optional_chain_guard(
+        &mut self,
+        value: RegisterId,
+        end: Label,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let non_nullish = self.builder.new_label().map_err(CompileError::Builder)?;
+        self.builder
+            .emit_jump_if_not_nullish(value, non_nullish, self.bytecode_span(span))
+            .map_err(CompileError::Builder)?;
+        self.emit_jump(end, span)?;
+        self.builder
+            .bind_label(non_nullish)
+            .map_err(CompileError::Builder)
+    }
+
+    /// Advances the state through one static property access.
+    fn optional_static_member(
+        &mut self,
+        mut state: OptionalChainState,
+        property: &Arc<str>,
+        span: SourceSpan,
+    ) -> Result<OptionalChainState, CompileError> {
+        self.emit(
+            Opcode::Move,
+            &[state.receiver.index(), state.value.index()],
+            span,
+        )?;
+        let property = self.scope_name(property)?;
+        self.emit(
+            Opcode::GetById,
+            &[state.value.index(), state.receiver.index(), property],
+            span,
+        )?;
+        state.has_receiver = true;
+        Ok(state)
+    }
+
+    /// Advances the state through a computed property after its optional guard has passed.
+    fn optional_computed_member(
+        &mut self,
+        mut state: OptionalChainState,
+        property: &HirExpression,
+        span: SourceSpan,
+    ) -> Result<OptionalChainState, CompileError> {
+        self.emit(
+            Opcode::Move,
+            &[state.receiver.index(), state.value.index()],
+            span,
+        )?;
+        let property = self.expression(property)?;
+        self.prepare_property_key(property, state.receiver, false, span)?;
+        self.emit(
+            Opcode::GetByValue,
+            &[
+                state.value.index(),
+                state.receiver.index(),
+                property.index(),
+            ],
+            span,
+        )?;
+        state.has_receiver = true;
+        Ok(state)
+    }
+
+    /// Advances the state through one private field lookup.
+    fn optional_private_member(
+        &mut self,
+        mut state: OptionalChainState,
+        name: &crate::HirPrivateName,
+        span: SourceSpan,
+    ) -> Result<OptionalChainState, CompileError> {
+        self.emit(
+            Opcode::Move,
+            &[state.receiver.index(), state.value.index()],
+            span,
+        )?;
+        let key = self.load_private_name(name, span)?;
+        self.emit(
+            Opcode::GetPrivate,
+            &[state.value.index(), state.receiver.index(), key.index()],
+            span,
+        )?;
+        state.has_receiver = true;
+        Ok(state)
+    }
+
+    /// Evaluates guarded arguments and advances the chain through a call operation.
+    fn optional_chain_call(
+        &mut self,
+        state: OptionalChainState,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<OptionalChainState, CompileError> {
+        if arguments
+            .iter()
+            .any(|argument| matches!(argument, HirArrayExpressionPart::Spread(_)))
+        {
+            return self.optional_chain_spread_call(state, arguments, span, tail);
+        }
+        let call_base = self.register()?;
+        if state.has_receiver {
+            self.emit(
+                Opcode::Move,
+                &[call_base.index(), state.receiver.index()],
+                span,
+            )?;
+            let callee = self.register()?;
+            self.emit(Opcode::Move, &[callee.index(), state.value.index()], span)?;
+        } else {
+            self.emit(
+                Opcode::Move,
+                &[call_base.index(), state.value.index()],
+                span,
+            )?;
+        }
+        let mut argument_slots = Vec::with_capacity(arguments.len());
+        for _ in arguments {
+            argument_slots.push(self.register()?);
+        }
+        for (argument, slot) in arguments.iter().zip(argument_slots) {
+            let HirArrayExpressionPart::Element(argument) = argument else {
+                unreachable!("non-spread optional call contains only elements");
+            };
+            let value = self.expression(argument)?;
+            self.emit(Opcode::Move, &[slot.index(), value.index()], argument.span)?;
+        }
+        let argument_count =
+            u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        let opcode = match (state.has_receiver, tail) {
+            (true, true) => Opcode::TailCallWithReceiver,
+            (true, false) => Opcode::CallWithReceiver,
+            (false, true) => Opcode::TailCall,
+            (false, false) => Opcode::Call,
+        };
+        self.emit(
+            opcode,
+            &[state.value.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        self.emit(Opcode::LoadUndefined, &[state.receiver.index()], span)?;
+        Ok(OptionalChainState {
+            has_receiver: false,
+            ..state
+        })
+    }
+
+    /// Uses the existing array-accumulation contract for an optional call containing spread.
+    fn optional_chain_spread_call(
+        &mut self,
+        state: OptionalChainState,
+        arguments: &[HirArrayExpressionPart],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<OptionalChainState, CompileError> {
+        let call_base = self.register()?;
+        if state.has_receiver {
+            self.emit(
+                Opcode::Move,
+                &[call_base.index(), state.receiver.index()],
+                span,
+            )?;
+            let callee = self.register()?;
+            self.emit(Opcode::Move, &[callee.index(), state.value.index()], span)?;
+        } else {
+            self.emit(
+                Opcode::Move,
+                &[call_base.index(), state.value.index()],
+                span,
+            )?;
+        }
+        let arguments = self.array_accumulation(arguments, span)?;
+        let opcode = match (state.has_receiver, tail) {
+            (true, true) => Opcode::TailCallSpreadWithReceiver,
+            (true, false) => Opcode::CallSpreadWithReceiver,
+            (false, true) => Opcode::TailCallSpread,
+            (false, false) => Opcode::CallSpread,
+        };
+        self.emit(
+            opcode,
+            &[state.value.index(), call_base.index(), arguments.index()],
+            span,
+        )?;
+        self.emit(Opcode::LoadUndefined, &[state.receiver.index()], span)?;
+        Ok(OptionalChainState {
+            has_receiver: false,
+            ..state
+        })
+    }
+
+    /// Calls the value/reference produced by a parenthesized optional chain.
+    fn emit_optional_chain_call(
+        &mut self,
+        state: OptionalChainState,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<RegisterId, CompileError> {
+        let arguments = arguments
+            .iter()
+            .cloned()
+            .map(HirArrayExpressionPart::Element)
+            .collect::<Vec<_>>();
+        self.optional_chain_call(state, &arguments, span, tail)
+            .map(|state| state.value)
+    }
+
+    /// Deletes the final chain reference while retaining `true` on every short-circuit path.
+    fn delete_optional_chain(
+        &mut self,
+        base: &HirExpression,
+        links: &[crate::HirOptionalChainLink],
+        span: SourceSpan,
+    ) -> Result<RegisterId, CompileError> {
+        let destination = self.load_boolean(true, span)?;
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let mut state = self.optional_chain_base(base, span)?;
+        let (last, prefix) = links
+            .split_last()
+            .ok_or_else(|| self.unsupported(span, "empty optional chain"))?;
+        for link in prefix {
+            if link.optional {
+                self.optional_chain_guard(state.value, end, link.span)?;
+            }
+            state = match &link.kind {
+                crate::HirOptionalChainLinkKind::StaticMember(property) => {
+                    self.optional_static_member(state, property, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                    self.optional_computed_member(state, property, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::PrivateMember(name) => {
+                    self.optional_private_member(state, name, link.span)?
+                }
+                crate::HirOptionalChainLinkKind::Call(arguments) => {
+                    self.optional_chain_call(state, arguments, link.span, false)?
+                }
+            };
+        }
+        if last.optional {
+            self.optional_chain_guard(state.value, end, last.span)?;
+        }
+        match &last.kind {
+            crate::HirOptionalChainLinkKind::StaticMember(property) => {
+                let property = self.scope_name(property)?;
+                self.emit(
+                    Opcode::DeleteById,
+                    &[destination.index(), state.value.index(), property],
+                    last.span,
+                )?;
+            }
+            crate::HirOptionalChainLinkKind::ComputedMember(property) => {
+                let property = self.expression(property)?;
+                self.prepare_property_key(property, state.value, false, last.span)?;
+                self.emit(
+                    Opcode::DeleteByValue,
+                    &[destination.index(), state.value.index(), property.index()],
+                    last.span,
+                )?;
+            }
+            crate::HirOptionalChainLinkKind::PrivateMember(_) => {
+                return Err(self.unsupported(last.span, "delete private optional member"));
+            }
+            crate::HirOptionalChainLinkKind::Call(arguments) => {
+                self.optional_chain_call(state, arguments, last.span, false)?;
+            }
+        }
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
         Ok(destination)
     }
 
@@ -2602,6 +3046,12 @@ impl Lowerer<'_> {
         span: SourceSpan,
         tail: bool,
     ) -> Result<RegisterId, CompileError> {
+        if let HirExpressionKind::OptionalChain { base, links } = &callee.kind {
+            let state = self.optional_chain(base, links, callee.span, false)?;
+            return self
+                .optional_chain_call(state, arguments, span, tail)
+                .map(|state| state.value);
+        }
         if let HirExpressionKind::StaticMember { object, property } = &callee.kind {
             let receiver_value = self.expression(object)?;
             let receiver = self.register()?;

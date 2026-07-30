@@ -61,6 +61,7 @@ mod grouping;
 mod instance_of;
 mod module;
 mod object_prototype;
+mod optional_chaining;
 mod promise;
 mod properties;
 mod property_keys;
