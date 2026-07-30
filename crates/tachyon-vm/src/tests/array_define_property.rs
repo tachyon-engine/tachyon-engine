@@ -93,38 +93,141 @@ Object.defineProperty(growth, "4", {
 });
 var grew = growth.length === 5 && growth[4] === 4;
 
+var assignmentCalls = 0;
+var assignmentTarget = [0, 1, 2, 3];
+var assignmentValue = {
+  valueOf: function() { assignmentCalls = assignmentCalls + 1; return 2; }
+};
+var assignmentResult = (assignmentTarget.length = assignmentValue);
+var assignmentConversion = assignmentResult === assignmentValue &&
+  assignmentCalls === 2 && assignmentTarget.length === 2 && !(2 in assignmentTarget);
+
+var reflectCalls = 0;
+var reflectTarget = [0, 1, 2];
+var reflectResult = Reflect.set(reflectTarget, "length", {
+  valueOf: function() { reflectCalls = reflectCalls + 1; return 1; }
+});
+var reflectConversion = reflectResult === true && reflectCalls === 2 &&
+  reflectTarget.length === 1 && !(1 in reflectTarget);
+
+var assignCalls = 0;
+var assignTarget = [0, 1, 2];
+var assignResult = Object.assign(assignTarget, {
+  length: { valueOf: function() { assignCalls = assignCalls + 1; return 1; } }
+});
+var objectAssignConversion = assignResult === assignTarget && assignCalls === 2 &&
+  assignTarget.length === 1 && !(1 in assignTarget);
+
+var mutationCalls = 0;
+var mutationTarget = [0, 1, 2];
+var mutationResult = Reflect.set(mutationTarget, "length", {
+  valueOf: function() {
+    mutationCalls = mutationCalls + 1;
+    if (mutationCalls === 1) {
+      Object.defineProperty(mutationTarget, "length", { writable: false });
+    }
+    return 1;
+  }
+});
+var conversionMutation = mutationResult === false && mutationCalls === 2 &&
+  mutationTarget.length === 3 &&
+  Object.getOwnPropertyDescriptor(mutationTarget, "length").writable === false;
+
+var preblockedCalls = 0;
+var preblockedTarget = [0, 1];
+Object.defineProperty(preblockedTarget, "length", { writable: false });
+var preblockedValue = {
+  valueOf: function() { preblockedCalls = preblockedCalls + 1; return 1; }
+};
+preblockedTarget.length = preblockedValue;
+var preblocked = preblockedCalls === 0 &&
+  Reflect.set(preblockedTarget, "length", preblockedValue) === false &&
+  preblockedCalls === 0 && preblockedTarget.length === 2;
+
 primitives && invalid && observableConversion && mismatchCheck &&
   definePropertiesConversion && flagChecks && shrink && rollback &&
-  noPublish && belowLength && grew;
+  noPublish && belowLength && grew && assignmentConversion && reflectConversion &&
+  objectAssignConversion && conversionMutation && preblocked;
+"#;
+
+const ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE: &str = r#"
+var calls = 0;
+var target = [0, 1, 2];
+var proxy = new Proxy(target, {});
+var value = { valueOf: function() { calls = calls + 1; return 1; } };
+var result = (proxy.length = value);
+result === value && calls === 2 && target.length === 1;
+"#;
+
+const ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE: &str = r#"
+var calls = 0;
+var target = [0, 1, 2];
+var proxy = new Proxy(target, {});
+var result = Object.assign(proxy, {
+  length: { valueOf: function() { calls = calls + 1; return 1; } }
+});
+result === proxy && calls === 2 && target.length === 1;
 "#;
 
 #[test]
 fn array_define_property_is_stable_for_every_dispatch_batch() {
-    assert_array_define_property::<1>(2_101, false);
-    assert_array_define_property::<2>(2_102, false);
-    assert_array_define_property::<4>(2_104, false);
-    assert_array_define_property::<8>(2_108, false);
-    assert_array_define_property::<16>(2_116, false);
+    assert_array_define_property::<1>(2_101, false, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<2>(2_102, false, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<4>(2_104, false, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<8>(2_108, false, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<16>(2_116, false, ARRAY_DEFINE_PROPERTY_SOURCE);
 }
 
 #[test]
 fn array_define_property_survives_forced_major_collections() {
-    assert_array_define_property::<1>(2_121, true);
-    assert_array_define_property::<2>(2_122, true);
-    assert_array_define_property::<4>(2_124, true);
-    assert_array_define_property::<8>(2_128, true);
-    assert_array_define_property::<16>(2_136, true);
+    assert_array_define_property::<1>(2_121, true, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<2>(2_122, true, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<4>(2_124, true, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<8>(2_128, true, ARRAY_DEFINE_PROPERTY_SOURCE);
+    assert_array_define_property::<16>(2_136, true, ARRAY_DEFINE_PROPERTY_SOURCE);
+}
+
+#[test]
+fn array_length_proxy_assignment_uses_the_exotic_receiver_define() {
+    assert_array_define_property::<1>(2_141, false, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<2>(2_142, false, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<4>(2_144, false, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<8>(2_148, false, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<16>(2_156, false, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<1>(2_161, true, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<2>(2_162, true, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<4>(2_164, true, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<8>(2_168, true, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+    assert_array_define_property::<16>(2_176, true, ARRAY_LENGTH_PROXY_ASSIGNMENT_SOURCE);
+}
+
+#[test]
+fn array_length_proxy_object_assign_resumes_the_copy_cursor() {
+    assert_array_define_property::<1>(2_181, false, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<2>(2_182, false, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<4>(2_184, false, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<8>(2_188, false, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<16>(2_196, false, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<1>(2_201, true, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<2>(2_202, true, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<4>(2_204, true, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<8>(2_208, true, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
+    assert_array_define_property::<16>(2_216, true, ARRAY_LENGTH_PROXY_OBJECT_ASSIGN_SOURCE);
 }
 
 /// Compiles and executes the Array descriptor fixture under one VM dispatch/GC policy.
-fn assert_array_define_property<const N: usize>(source_id: u32, forced_major: bool) {
+fn assert_array_define_property<const N: usize>(
+    source_id: u32,
+    forced_major: bool,
+    source: &'static str,
+) {
     let module = Compiler
         .compile(
             SourceText::new(
                 SourceId::new(source_id),
                 SourceName::new("array-define-property-fixture"),
                 MediaType::JavaScript,
-                Arc::from(ARRAY_DEFINE_PROPERTY_SOURCE),
+                Arc::from(source),
             ),
             CompileOptions::default(),
         )

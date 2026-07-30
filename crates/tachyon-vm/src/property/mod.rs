@@ -14,8 +14,9 @@ pub(crate) use accessor::{
     PropertyRead, PropertyReadResolution, PropertyWrite, PropertyWriteResolution,
     TypedArrayIndexSetMode,
 };
-pub(crate) use descriptor_parse::PendingDefineProperties;
-pub(crate) use descriptor_parse::PendingPropertyDescriptor;
+pub(crate) use descriptor_parse::{
+    ArrayLengthSetConsumer, PendingDefineProperties, PendingPropertyDescriptor,
+};
 pub(crate) use keys::array_index;
 
 impl Isolate {

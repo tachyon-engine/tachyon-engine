@@ -22,6 +22,16 @@ enum PropertyDescriptorConsumer {
     ReflectDefine,
     ProxyGetOwn(ProxyGetOwnMode),
     DefineProperties(Value),
+    ArraySet(ArrayLengthSetConsumer),
+    ProxyDefineForward(ProxyDefineMode, Value),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ArrayLengthSetConsumer {
+    Assignment,
+    Reflect,
+    ObjectAssign(Value),
+    ProxyObjectAssign,
 }
 
 /// GC-managed Object.defineProperties key scan retained across descriptor getters.
@@ -274,6 +284,15 @@ impl Trace for PendingPropertyDescriptor {
         self.values.trace(tracer);
         if let PropertyDescriptorConsumer::DefineProperties(state) = &mut self.consumer {
             state.trace(tracer);
+        }
+        if let PropertyDescriptorConsumer::ArraySet(ArrayLengthSetConsumer::ObjectAssign(state)) =
+            &mut self.consumer
+        {
+            state.trace(tracer);
+        }
+        if let PropertyDescriptorConsumer::ProxyDefineForward(_, result_object) = &mut self.consumer
+        {
+            result_object.trace(tracer);
         }
     }
 }
@@ -1054,6 +1073,50 @@ impl Isolate {
         )
     }
 
+    /// Starts an assignment-family ArraySetLength transaction with its exact completion contract.
+    pub(crate) fn dispatch_array_length_property_set(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        value: Value,
+        consumer: ArrayLengthSetConsumer,
+    ) -> Result<(), ExecutionError> {
+        let mut pending = PendingPropertyDescriptor::new(
+            target,
+            Value::from_immediate(Immediate::Undefined),
+            PropertyKey::Atom(self.length_atom()?),
+            PropertyDescriptorConsumer::ArraySet(consumer),
+        );
+        pending.record(PropertyDescriptorField::Value, value);
+        self.begin_array_set_length_conversion(site, pending)
+    }
+
+    /// Forwards a Proxy define to ArraySetLength without losing the outer result identity.
+    pub(crate) fn dispatch_array_length_proxy_define(
+        &mut self,
+        site: NativeContinuationSite,
+        target: Value,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+        result_object: Value,
+        mode: ProxyDefineMode,
+    ) -> Result<bool, ExecutionError> {
+        if self
+            .array_length_object_value(target, key, descriptor)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let pending = PendingPropertyDescriptor::from_descriptor(
+            target,
+            key,
+            descriptor,
+            PropertyDescriptorConsumer::ProxyDefineForward(mode, result_object),
+        );
+        self.begin_array_set_length_conversion(site, pending)?;
+        Ok(true)
+    }
+
     /// Resumes the two separately observable conversions required by ArraySetLength.
     pub(crate) fn resume_array_set_length_conversion(
         &mut self,
@@ -1122,13 +1185,19 @@ impl Isolate {
         descriptor: PropertyDescriptor,
         length: u32,
     ) -> Result<(), ExecutionError> {
+        let returns_boolean = matches!(
+            pending.consumer,
+            PropertyDescriptorConsumer::ReflectDefine
+                | PropertyDescriptorConsumer::ArraySet(_)
+                | PropertyDescriptorConsumer::ProxyDefineForward(_, _)
+        );
         let defined =
             match self.array_set_length_descriptor_canonical(pending.target, descriptor, length) {
                 Ok(()) => true,
                 Err(
                     ExecutionError::NonExtensibleObject(_)
                     | ExecutionError::InvalidPropertyRedefinition(_),
-                ) if pending.consumer == PropertyDescriptorConsumer::ReflectDefine => false,
+                ) if returns_boolean => false,
                 Err(error) => return Err(error),
             };
         if let PropertyDescriptorConsumer::DefineProperties(state) = pending.consumer {
@@ -1136,12 +1205,57 @@ impl Isolate {
             self.advance_pending_define_properties_apply(state)?;
             return self.apply_pending_define_properties(site, state);
         }
+        if let PropertyDescriptorConsumer::ArraySet(consumer) = pending.consumer {
+            return self.finish_array_length_property_set(site, pending, consumer, defined);
+        }
+        if let PropertyDescriptorConsumer::ProxyDefineForward(mode, result_object) =
+            pending.consumer
+        {
+            return self
+                .finish_proxy_define_result(site, mode, result_object, defined)
+                .map(|_| ());
+        }
         let result = if pending.consumer == PropertyDescriptorConsumer::ReflectDefine {
             boolean_value(defined)
         } else {
             pending.target
         };
         self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Restores assignment, Reflect.set, Object.assign, or Proxy-forwarding result semantics.
+    fn finish_array_length_property_set(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: PendingPropertyDescriptor,
+        consumer: ArrayLengthSetConsumer,
+        success: bool,
+    ) -> Result<(), ExecutionError> {
+        let assigned = pending
+            .value(PropertyDescriptorField::Value)
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        match consumer {
+            ArrayLengthSetConsumer::Assignment => {
+                self.write(site.caller_base, site.destination, assigned)?;
+                self.finish_property_write(pending.target, success)
+            }
+            ArrayLengthSetConsumer::Reflect => {
+                self.write(site.caller_base, site.destination, boolean_value(success))
+            }
+            ArrayLengthSetConsumer::ObjectAssign(state) => {
+                if !success {
+                    return Err(ExecutionError::ReadOnlyProperty(pending.target));
+                }
+                let state = self.pending_copy_data_properties_reference(state)?;
+                self.resume_object_assign_set(site, state).map(|_| ())
+            }
+            ArrayLengthSetConsumer::ProxyObjectAssign => {
+                if !success {
+                    return Err(ExecutionError::ReadOnlyProperty(pending.target));
+                }
+                self.write(site.caller_base, site.destination, assigned)
+            }
+        }
     }
 
     /// Publishes one returned getter value and its barrier before the next observable Get.

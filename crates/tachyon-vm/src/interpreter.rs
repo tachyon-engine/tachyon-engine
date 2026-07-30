@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::module::ModuleBindingTarget;
-use crate::property::TypedArrayIndexSetMode;
+use crate::property::{ArrayLengthSetConsumer, TypedArrayIndexSetMode};
 
 #[inline(always)]
 pub(crate) fn environment_access_error(
@@ -1394,6 +1394,9 @@ impl Isolate {
                             callee,
                         );
                     }
+                    PropertyWrite::ArrayLength => {
+                        return Err(ExecutionError::MissingNativeContinuation);
+                    }
                 }
             }
             Opcode::CreateAccessorPair => {
@@ -2173,6 +2176,18 @@ impl Isolate {
                     ),
                     callee,
                 ),
+                PropertyWrite::ArrayLength => self
+                    .dispatch_array_length_property_set(
+                        NativeContinuationSite {
+                            caller_base,
+                            destination: value_register,
+                            call_site,
+                        },
+                        receiver,
+                        value,
+                        ArrayLengthSetConsumer::Assignment,
+                    )
+                    .map(|()| None),
             },
         }
     }
@@ -2230,6 +2245,14 @@ impl Isolate {
                     NativeContinuation::reflect_property_set(site, receiver, value),
                     callee,
                 ),
+            PropertyWriteResolution::Write(PropertyWrite::ArrayLength) => self
+                .dispatch_array_length_property_set(
+                    site,
+                    receiver,
+                    value,
+                    ArrayLengthSetConsumer::Reflect,
+                )
+                .map(|()| None),
         }
     }
 

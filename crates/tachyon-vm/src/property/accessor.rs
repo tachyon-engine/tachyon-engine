@@ -28,6 +28,7 @@ pub(crate) enum PropertyReadResolution {
 pub(crate) enum PropertyWrite {
     Complete(bool),
     Setter(Value),
+    ArrayLength,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -914,15 +915,19 @@ impl Isolate {
             Some(PropertyDescriptor::Generic(_)) => {
                 Err(ExecutionError::InvalidPropertyDescriptor(receiver))
             }
-            Some(PropertyDescriptor::Data(_)) | None => match self
-                .set_own_data_property(receiver, key, value)
-            {
-                Ok(()) => Ok(PropertyWrite::Complete(true)),
-                Err(
-                    ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_),
-                ) => Ok(PropertyWrite::Complete(false)),
-                Err(error) => Err(error),
-            },
+            Some(PropertyDescriptor::Data(_)) | None => {
+                if self.is_array_length_object_write(receiver, key, value)? {
+                    return Ok(PropertyWrite::ArrayLength);
+                }
+                match self.set_own_data_property(receiver, key, value) {
+                    Ok(()) => Ok(PropertyWrite::Complete(true)),
+                    Err(
+                        ExecutionError::NonExtensibleObject(_)
+                        | ExecutionError::ReadOnlyProperty(_),
+                    ) => Ok(PropertyWrite::Complete(false)),
+                    Err(error) => Err(error),
+                }
+            }
         }
     }
 
@@ -933,6 +938,9 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<PropertyWrite, ExecutionError> {
+        if self.is_array_length_object_write(receiver, key, value)? {
+            return Ok(PropertyWrite::ArrayLength);
+        }
         match self.set_own_data_property(receiver, key, value) {
             Ok(()) => Ok(PropertyWrite::Complete(true)),
             Err(ExecutionError::NonExtensibleObject(_) | ExecutionError::ReadOnlyProperty(_)) => {
@@ -945,6 +953,19 @@ impl Isolate {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Detects the only ordinary data write whose value conversion can invoke JavaScript.
+    fn is_array_length_object_write(
+        &mut self,
+        receiver: Value,
+        key: PropertyKey,
+        value: Value,
+    ) -> Result<bool, ExecutionError> {
+        if !self.is_object_value(value) || key != PropertyKey::Atom(self.length_atom()?) {
+            return Ok(false);
+        }
+        self.is_array_value(receiver)
     }
 
     /// Recovers a present data value or validates and copies one accessor-pair payload.

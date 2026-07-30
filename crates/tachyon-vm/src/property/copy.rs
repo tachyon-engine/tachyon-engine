@@ -3,6 +3,7 @@
 use core::mem::size_of;
 
 use super::super::*;
+use super::ArrayLengthSetConsumer;
 
 /// Exact-capacity, non-observable PropertyKey storage for object-rest exclusions.
 #[derive(Debug)]
@@ -565,6 +566,14 @@ impl Isolate {
                     )
                 })
                 .map(CopyDataPropertyAction::Dispatched),
+            PropertyWriteResolution::Write(PropertyWrite::ArrayLength) => self
+                .dispatch_array_length_property_set(
+                    site,
+                    pending.target,
+                    value,
+                    ArrayLengthSetConsumer::ObjectAssign(Value::from_heap_ref(state.raw())),
+                )
+                .map(|()| CopyDataPropertyAction::Dispatched(None)),
             PropertyWriteResolution::Proxy(proxy) => self.dispatch_object_assign_proxy_write(
                 site,
                 state,

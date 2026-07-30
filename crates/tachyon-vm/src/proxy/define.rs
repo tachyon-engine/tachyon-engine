@@ -586,6 +586,16 @@ impl Isolate {
         result_object: Value,
         mode: ProxyDefineMode,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if self.dispatch_array_length_proxy_define(
+            site,
+            target,
+            key,
+            descriptor,
+            result_object,
+            mode,
+        )? {
+            return Ok(None);
+        }
         let success = match self.define_property(target, key, descriptor) {
             Ok(()) => true,
             Err(
@@ -638,7 +648,7 @@ impl Isolate {
     }
 
     /// Maps the internal boolean to Object.defineProperty or Reflect.defineProperty.
-    fn finish_proxy_define_result(
+    pub(crate) fn finish_proxy_define_result(
         &mut self,
         site: NativeContinuationSite,
         mode: ProxyDefineMode,

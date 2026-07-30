@@ -1,6 +1,7 @@
 //! Proxy `[[Set]]` dispatch and the four-argument trap continuation.
 
 use super::*;
+use crate::property::ArrayLengthSetConsumer;
 
 const SET_TARGET: usize = 0;
 const SET_KEY: usize = 1;
@@ -466,6 +467,20 @@ impl Isolate {
                 self.finish_property_write(receiver, success)?;
                 Ok(None)
             }
+            PropertyWrite::ArrayLength => self
+                .dispatch_array_length_property_set(
+                    site,
+                    receiver,
+                    value,
+                    if mode == ProxySetMode::ObjectAssign {
+                        ArrayLengthSetConsumer::ProxyObjectAssign
+                    } else if mode == ProxySetMode::Reflect {
+                        ArrayLengthSetConsumer::Reflect
+                    } else {
+                        ArrayLengthSetConsumer::Assignment
+                    },
+                )
+                .map(|()| None),
         }
     }
 
