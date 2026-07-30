@@ -739,6 +739,7 @@ pub(super) fn lower_function_stencil(
         } else {
             super::program::HirFunctionKind::Ordinary
         },
+        role: super::program::HirFunctionRole::Ordinary,
         initialize_instance_elements: false,
     });
     Ok(id)
@@ -838,6 +839,7 @@ pub(super) fn lower_arrow_function_stencil(
         } else {
             super::program::HirFunctionKind::Ordinary
         },
+        role: super::program::HirFunctionRole::Ordinary,
         initialize_instance_elements: false,
     });
     Ok(id)

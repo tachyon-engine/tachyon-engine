@@ -3,24 +3,20 @@
 use crate::hir::{HirArrayExpressionPart, HirForInLeft, HirObjectExpressionPart};
 use crate::{
     BindingId, HirAssignmentTarget, HirClassElement, HirExpression, HirExpressionKind,
-    HirForInitializer, HirFunctionKind, HirObjectPropertyKey, HirObjectPropertyValue, HirPattern,
-    HirPatternKind, HirProgram, HirStatement, HirStatementKind, HirVariableDeclaration,
+    HirForInitializer, HirFunctionKind, HirFunctionRole, HirObjectPropertyKey,
+    HirObjectPropertyValue, HirPattern, HirPatternKind, HirProgram, HirStatement, HirStatementKind,
+    HirVariableDeclaration,
 };
 
 /// Returns bindings crossing synthetic class-initializer boundaries absent from Oxc's function tree.
 pub(super) fn forced_captures(hir: &HirProgram) -> Vec<BindingId> {
     let mut bindings = Vec::new();
     for function in hir.functions() {
-        match function.kind {
-            HirFunctionKind::Generator | HirFunctionKind::AsyncGenerator => {}
-            HirFunctionKind::ClassFieldInitializer => {
-                for statement in function.body.iter() {
-                    if let HirStatementKind::Return(Some(expression)) = &statement.kind {
-                        collect_expression(expression, &mut bindings);
-                    }
-                }
+        match (function.kind, function.role) {
+            (HirFunctionKind::Generator | HirFunctionKind::AsyncGenerator, _) => {}
+            (_, HirFunctionRole::ClassFieldInitializer) => {
+                collect_statements(&function.body, &mut bindings);
             }
-            HirFunctionKind::ClassStaticBlock => collect_statements(&function.body, &mut bindings),
             _ => {}
         }
     }

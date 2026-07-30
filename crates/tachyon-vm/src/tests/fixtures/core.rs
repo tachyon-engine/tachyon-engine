@@ -59,6 +59,7 @@ pub(in crate::tests) fn captured_environment_module() -> CompiledModule {
                 entry_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Script,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: entry_registers,
@@ -81,6 +82,7 @@ pub(in crate::tests) fn captured_environment_module() -> CompiledModule {
                 closure_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Ordinary,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: closure_registers,
@@ -340,6 +342,7 @@ pub(in crate::tests) fn call_module() -> CompiledModule {
                 entry_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Script,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: entry_registers,
@@ -359,6 +362,7 @@ pub(in crate::tests) fn call_module() -> CompiledModule {
                 callee_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Ordinary,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: callee_registers,
@@ -404,6 +408,7 @@ pub(in crate::tests) fn throwing_call_module() -> CompiledModule {
                 entry_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Script,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: entry_registers,
@@ -423,6 +428,7 @@ pub(in crate::tests) fn throwing_call_module() -> CompiledModule {
                 callee_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Ordinary,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: callee_registers,
@@ -472,6 +478,7 @@ pub(in crate::tests) fn cross_code_modules() -> (CompiledModule, CompiledModule)
                 entry_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Script,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: entry_registers,
@@ -491,6 +498,7 @@ pub(in crate::tests) fn cross_code_modules() -> (CompiledModule, CompiledModule)
                 function_bytecode,
                 FunctionMetadata {
                     kind: FunctionKind::Ordinary,
+                    role: FunctionRole::Ordinary,
                     strictness: FunctionStrictness::Sloppy,
                     layout: FunctionLayout {
                         register_count: function_registers,
@@ -524,6 +532,7 @@ pub(in crate::tests) fn cross_code_modules() -> (CompiledModule, CompiledModule)
             caller_bytecode,
             FunctionMetadata {
                 kind: FunctionKind::Script,
+                role: FunctionRole::Ordinary,
                 strictness: FunctionStrictness::Sloppy,
                 layout: FunctionLayout {
                     register_count: caller_registers,

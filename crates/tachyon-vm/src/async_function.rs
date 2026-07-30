@@ -135,6 +135,8 @@ impl Isolate {
                 &mut roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
+        let promise = roots.promise;
+        let activation = roots.activation;
         let state_value = Value::from_heap_ref(state.raw());
         self.write(site.caller_base, site.destination, promise)?;
 

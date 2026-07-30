@@ -2,9 +2,9 @@
 
 use super::{
     BindingLocation, BindingPlanEntry, Bytecode, DecodeError, DecodedInstruction,
-    EnvironmentSlotMetadata, FeedbackSite, FunctionId, FunctionKind, FunctionLayout, HandlerEntry,
-    HandlerKind, ModuleBuildError, Opcode, SourceMapEntry, SuspendPoint, SuspendPointId,
-    VerifiedBytecode, WordOffset, decode_instruction,
+    EnvironmentSlotMetadata, FeedbackSite, FunctionId, FunctionKind, FunctionLayout, FunctionRole,
+    HandlerEntry, HandlerKind, ModuleBuildError, Opcode, SourceMapEntry, SuspendPoint,
+    SuspendPointId, VerifiedBytecode, WordOffset, decode_instruction,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,6 +326,7 @@ pub(super) fn validate_finally_instructions(
 pub(super) fn validate_class_instructions(
     function: FunctionId,
     kind: FunctionKind,
+    role: FunctionRole,
     bytecode: &VerifiedBytecode,
     function_kinds: &[FunctionKind],
 ) -> Result<(), ModuleBuildError> {
@@ -367,13 +368,12 @@ pub(super) fn validate_class_instructions(
         if matches!(
             instruction.opcode,
             Opcode::LoadSuperBase | Opcode::GetSuperById | Opcode::GetSuperByValue
-        ) && !matches!(
-            kind,
-            FunctionKind::ClassMethod
-                | FunctionKind::ClassFieldInitializer
-                | FunctionKind::DerivedClassConstructor
-                | FunctionKind::BaseClassConstructor
-        ) {
+        ) && !(role.has_home_object()
+            || matches!(
+                kind,
+                FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+            ))
+        {
             return Err(ModuleBuildError::InvalidClassInstruction {
                 function,
                 kind,

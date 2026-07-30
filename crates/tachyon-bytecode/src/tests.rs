@@ -763,6 +763,106 @@ fn compiled_module_rejects_sloppy_module_metadata() {
 }
 
 #[test]
+/// Verifies role/kind combinations, strict class bodies, and role-gated super instructions.
+fn compiled_module_verifies_orthogonal_function_roles() {
+    let mut method_words = encode_instruction(Opcode::LoadSuperBase, &[0]).unwrap();
+    method_words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let mut method_metadata = FunctionMetadata::new(
+        FunctionKind::Ordinary,
+        FunctionLayout {
+            register_count: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    method_metadata.role = FunctionRole::Method;
+    method_metadata.strictness = FunctionStrictness::Strict;
+    CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(method_words),
+            method_metadata,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+
+    for (kind, role) in [
+        (FunctionKind::Script, FunctionRole::Method),
+        (FunctionKind::Async, FunctionRole::ClassFieldInitializer),
+    ] {
+        let mut metadata = FunctionMetadata::new(kind, FunctionLayout::default());
+        metadata.role = role;
+        metadata.strictness = FunctionStrictness::Strict;
+        let result = CompiledModule::new(
+            Arc::from(""),
+            Vec::new(),
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+                metadata,
+            )],
+            FunctionId::new(0),
+        );
+        assert!(matches!(
+            result,
+            Err(ModuleBuildError::InvalidFunctionRole {
+                kind: actual_kind,
+                role: actual_role,
+                ..
+            }) if actual_kind == kind && actual_role == role
+        ));
+    }
+
+    let mut sloppy_initializer =
+        FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default());
+    sloppy_initializer.role = FunctionRole::ClassFieldInitializer;
+    let result = CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+            sloppy_initializer,
+        )],
+        FunctionId::new(0),
+    );
+    assert!(matches!(
+        result,
+        Err(ModuleBuildError::InvalidFunctionStrictness {
+            kind: FunctionKind::Ordinary,
+            strictness: FunctionStrictness::Sloppy,
+            ..
+        })
+    ));
+
+    let mut sloppy_method = FunctionMetadata::new(
+        FunctionKind::Ordinary,
+        FunctionLayout {
+            register_count: 1,
+            ..FunctionLayout::default()
+        },
+    );
+    sloppy_method.role = FunctionRole::Method;
+    CompiledModule::new(
+        Arc::from(""),
+        Vec::new(),
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(encode_instruction(Opcode::Return, &[0]).unwrap()),
+            sloppy_method,
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+}
+
+#[test]
 fn compiled_module_enforces_class_kind_and_opcode_contracts() {
     let mut sloppy = FunctionMetadata::new(
         FunctionKind::DerivedClassConstructor,

@@ -342,16 +342,22 @@ impl Isolate {
             return false;
         }
         self.resolve_function_object(receiver)
-            .is_ok_and(|function| match function.executable {
+            .is_ok_and(|object| match object.executable {
                 FunctionExecutable::Bytecode { code, function, .. } => self
                     .loaded_code(code)
                     .ok()
                     .and_then(|code| code.module.function(function))
                     .is_some_and(|metadata| {
-                        !matches!(
+                        matches!(
                             metadata.kind(),
-                            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
-                        )
+                            FunctionKind::DerivedClassConstructor
+                                | FunctionKind::BaseClassConstructor
+                        ) || (matches!(
+                            metadata.kind(),
+                            FunctionKind::Generator | FunctionKind::AsyncGenerator
+                        ) && metadata.role() == FunctionRole::Ordinary)
+                            || (metadata.kind() == FunctionKind::Ordinary
+                                && metadata.role() == FunctionRole::Ordinary)
                     }),
                 FunctionExecutable::Native(native) => native.has_default_prototype(),
                 FunctionExecutable::ClassBytecode(_) => true,
@@ -426,7 +432,7 @@ impl Isolate {
 
     /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
     fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
-        if let Some(kind) = self.generator_function_kind(function)? {
+        if let Some((kind, role)) = self.generator_function_kind(function)? {
             let generator_prototype = if kind == FunctionKind::AsyncGenerator {
                 self.realm
                     .async_generator_prototype
@@ -467,6 +473,19 @@ impl Isolate {
             let prototype = Value::from_heap_ref(prototype.raw());
             let function = roots.function;
             self.set_function_prototype(function, prototype)?;
+            if role == FunctionRole::Method {
+                let prototype_atom = self.prototype_atom()?;
+                self.define_data_property(
+                    function,
+                    prototype_atom,
+                    DataPropertyDescriptor {
+                        value: Some(prototype),
+                        writable: Some(true),
+                        enumerable: Some(false),
+                        configurable: Some(false),
+                    },
+                )?;
+            }
             return Ok(prototype);
         }
         let constructor_atom = self.constructor_atom()?;
@@ -529,18 +548,21 @@ impl Isolate {
     fn generator_function_kind(
         &mut self,
         function: Value,
-    ) -> Result<Option<FunctionKind>, ExecutionError> {
+    ) -> Result<Option<(FunctionKind, FunctionRole)>, ExecutionError> {
         let function = self.resolve_function_object(function)?;
         let FunctionExecutable::Bytecode { code, function, .. } = function.executable else {
             return Ok(None);
         };
-        let kind = self
+        let metadata = self
             .loaded_code(code)?
             .module
             .function(function)
-            .ok_or(ExecutionError::MissingEntryFunction(function))?
-            .kind();
-        Ok(matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator).then_some(kind))
+            .ok_or(ExecutionError::MissingEntryFunction(function))?;
+        Ok(matches!(
+            metadata.kind(),
+            FunctionKind::Generator | FunctionKind::AsyncGenerator
+        )
+        .then_some((metadata.kind(), metadata.role())))
     }
 
     /// Replaces the inline function prototype slot and records its possible young edge.
@@ -587,16 +609,13 @@ impl Isolate {
         else {
             return Err(ExecutionError::NonCallable(function));
         };
-        let kind = self
+        let role = self
             .loaded_code(code)?
             .module
             .function(function_id)
             .ok_or(ExecutionError::MissingEntryFunction(function_id))?
-            .kind();
-        if !matches!(
-            kind,
-            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
-        ) {
+            .role();
+        if !role.has_home_object() {
             return Err(ExecutionError::NonCallable(function));
         }
         self.set_function_prototype(function, home_object)

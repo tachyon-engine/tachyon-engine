@@ -22,8 +22,8 @@ pub(crate) use program::lexical_arguments_binding;
 pub(crate) use program::lower;
 pub use program::{
     BindingId, FunctionStencilId, HirBinding, HirFunction, HirFunctionDeclaration, HirFunctionKind,
-    HirIdentifierReference, HirProgram, HirScope, HirScopeFlags, ReferenceId, ScopeId,
-    StatementCompletion,
+    HirFunctionRole, HirIdentifierReference, HirProgram, HirScope, HirScopeFlags, ReferenceId,
+    ScopeId, StatementCompletion,
 };
 pub use statement::{
     HirCatchClause, HirForInLeft, HirForInitializer, HirStatement, HirStatementKind, HirSwitchCase,

@@ -150,6 +150,7 @@ pub struct HirFunction {
     /// Whether a nested arrow captures this activation's implicit `arguments` binding.
     pub lexical_arguments_owner: bool,
     pub kind: HirFunctionKind,
+    pub role: HirFunctionRole,
     /// Whether this class constructor must run its attached instance-element plan.
     pub initialize_instance_elements: bool,
 }
@@ -164,9 +165,13 @@ pub enum HirFunctionKind {
     DefaultDerivedConstructor,
     BaseClassConstructor,
     DefaultBaseConstructor,
-    ClassMethod,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HirFunctionRole {
+    Ordinary,
+    Method,
     ClassFieldInitializer,
-    ClassStaticBlock,
 }
 
 /// An owned lexical binding declaration, independent from Oxc's arena-backed identifier node.

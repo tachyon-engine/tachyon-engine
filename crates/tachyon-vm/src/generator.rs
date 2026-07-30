@@ -6,7 +6,8 @@ use tachyon_gc::{GcRef, Trace, Tracer};
 use tachyon_value::Value;
 
 use crate::{
-    AllocationSpace, ExecutionError, FunctionKind, Immediate, Isolate, NativeErrorKind, ShapeId,
+    AllocationSpace, BoundFunctionData, ExecutionError, FunctionKind, Immediate, Isolate,
+    NativeErrorKind, ShapeId,
     object::OrdinaryObject,
     runtime::{
         callable::{CallSite, ResolvedCallTarget},
@@ -153,6 +154,25 @@ struct GeneratorHeader {
     is_async: bool,
 }
 
+struct GeneratorInitializationRoots<'a> {
+    vm: VmRoots<'a>,
+    prototype: Value,
+    callee: Value,
+    this_value: Value,
+    argument_prefix: GcRef<BoundFunctionData>,
+}
+
+impl Trace for GeneratorInitializationRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.prototype.trace(tracer);
+        self.callee.trace(tracer);
+        self.this_value.trace(tracer);
+        self.argument_prefix.trace(tracer);
+    }
+}
+
 impl Isolate {
     /// Starts a generator synchronously so parameter initialization precedes object publication.
     pub(crate) fn begin_generator_initialization(
@@ -160,15 +180,6 @@ impl Isolate {
         site: &CallSite,
         target: ResolvedCallTarget,
     ) -> Result<(), ExecutionError> {
-        let prototype = if target.kind == FunctionKind::AsyncGenerator {
-            self.realm
-                .async_generator_prototype
-                .expect("async generator intrinsics initialize before generator calls")
-        } else {
-            self.realm
-                .generator_prototype
-                .expect("generator intrinsics initialize before generator calls")
-        };
         let mut arguments = Vec::new();
         arguments
             .try_reserve_exact(site.argument_count as usize)
@@ -180,20 +191,44 @@ impl Isolate {
             );
         }
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .get_data_property(site.callee, prototype_atom)?
+            .filter(|prototype| self.is_object_value(*prototype))
+            .unwrap_or_else(|| {
+                if target.kind == FunctionKind::AsyncGenerator {
+                    self.realm
+                        .async_generator_prototype
+                        .expect("async generator intrinsics initialize before generator calls")
+                } else {
+                    self.realm
+                        .generator_prototype
+                        .expect("generator intrinsics initialize before generator calls")
+                }
+            });
+        self.write(site.caller_base, site.destination, prototype)?;
         let argument_prefix =
             self.create_apply_argument_prefix(site.callee, this_value, arguments)?;
+        let prototype = self.read(site.caller_base, site.destination)?;
         self.write(
             site.caller_base,
             site.destination,
             Value::from_heap_ref(argument_prefix.raw()),
         )?;
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            promise_jobs: &mut self.promise_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
-            module_graph: &mut self.module_graph,
+        let prefix = self.bound_function_snapshot(argument_prefix)?;
+        let mut roots = GeneratorInitializationRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            prototype,
+            callee: prefix.call_target,
+            this_value: prefix.bound_this,
+            argument_prefix,
         };
         let generator = self
             .heap
@@ -206,14 +241,17 @@ impl Isolate {
                         shape: ShapeId::EMPTY,
                         extensible: true,
                         storage: None,
-                        prototype,
+                        prototype: roots.prototype,
                     },
                     target.kind == FunctionKind::AsyncGenerator,
                 ),
                 AllocationSpace::Young,
-                roots,
+                &mut roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
+        let callee = roots.callee;
+        let this_value = roots.this_value;
+        let argument_prefix = roots.argument_prefix;
         let generator_value = Value::from_heap_ref(generator.raw());
         self.write(site.caller_base, site.destination, generator_value)?;
         let continuation = NativeContinuation::generator_initialize(
@@ -223,7 +261,7 @@ impl Isolate {
                 call_site: site.call_site,
             },
             generator_value,
-            site.callee,
+            callee,
         );
         let caller = core::mem::take(&mut self.fiber);
         if let Err(rollback) = self.set_generator_caller(generator, caller) {
@@ -245,7 +283,7 @@ impl Isolate {
                     CallSite {
                         caller_base: site.caller_base,
                         destination: site.destination,
-                        callee: site.callee,
+                        callee,
                         argument_base: 0,
                         argument_source: None,
                         argument_prefix: Some(argument_prefix),
@@ -301,7 +339,10 @@ impl Isolate {
             })
             .ok_or(ExecutionError::UnsupportedGeneratorYieldResume)?;
         let generator = self.generator_reference(continuation.first())?;
-        let function_prototype = self.ensure_function_prototype(continuation.second())?;
+        let prototype_atom = self.prototype_atom()?;
+        let function_prototype = self
+            .get_data_property(continuation.second(), prototype_atom)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let prototype = if self.is_object_value(function_prototype) {
             function_prototype
         } else if self.generator_header(generator)?.is_async {

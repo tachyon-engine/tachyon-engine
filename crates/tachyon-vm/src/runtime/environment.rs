@@ -23,8 +23,6 @@ impl EnvironmentKind {
             FunctionKind::Ordinary
             | FunctionKind::DerivedClassConstructor
             | FunctionKind::BaseClassConstructor
-            | FunctionKind::ClassMethod
-            | FunctionKind::ClassFieldInitializer
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,

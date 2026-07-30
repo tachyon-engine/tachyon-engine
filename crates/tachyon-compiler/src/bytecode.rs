@@ -312,6 +312,7 @@ fn lower_entry(
     };
     let metadata = FunctionMetadata {
         kind,
+        role: tachyon_bytecode::FunctionRole::Ordinary,
         strictness: scope_strictness(
             source,
             hir,
@@ -1113,10 +1114,8 @@ fn lower_function(
         strict: function.strict,
         initialize_instance_elements: function.initialize_instance_elements,
         proper_tail_calls: function.strict
-            && matches!(
-                function.kind,
-                HirFunctionKind::Ordinary | HirFunctionKind::ClassMethod
-            ),
+            && function.kind == HirFunctionKind::Ordinary
+            && function.role != crate::HirFunctionRole::ClassFieldInitializer,
         needs_argument_source: function.rest_parameter.is_some(),
         active_scope: function.scope,
         environments,
@@ -1318,9 +1317,12 @@ fn lower_function(
                 HirFunctionKind::BaseClassConstructor | HirFunctionKind::DefaultBaseConstructor => {
                     FunctionKind::BaseClassConstructor
                 }
-                HirFunctionKind::ClassMethod => FunctionKind::ClassMethod,
-                HirFunctionKind::ClassFieldInitializer | HirFunctionKind::ClassStaticBlock => {
-                    FunctionKind::ClassFieldInitializer
+            },
+            role: match function.role {
+                crate::HirFunctionRole::Ordinary => tachyon_bytecode::FunctionRole::Ordinary,
+                crate::HirFunctionRole::Method => tachyon_bytecode::FunctionRole::Method,
+                crate::HirFunctionRole::ClassFieldInitializer => {
+                    tachyon_bytecode::FunctionRole::ClassFieldInitializer
                 }
             },
             strictness: if function.strict {

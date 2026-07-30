@@ -791,21 +791,79 @@ fn compiler_freezes_class_method_kind_and_definition_contracts() {
         hir.functions()[0].kind,
         HirFunctionKind::DerivedClassConstructor
     );
-    assert!(
-        hir.functions()[1..]
-            .iter()
-            .all(|function| function.kind == HirFunctionKind::ClassMethod && function.strict)
-    );
+    assert!(hir.functions()[1..].iter().all(|function| {
+        function.kind == HirFunctionKind::Ordinary
+            && function.role == HirFunctionRole::Method
+            && function.strict
+    }));
 
     let module = Compiler.compile(source, CompileOptions::default()).unwrap();
     assert_eq!(module.functions().len(), 4);
-    assert!(
-        module.functions()[2..]
-            .iter()
-            .all(|function| function.kind() == tachyon_bytecode::FunctionKind::ClassMethod)
-    );
+    assert!(module.functions()[2..].iter().all(|function| {
+        function.kind() == tachyon_bytecode::FunctionKind::Ordinary
+            && function.role() == tachyon_bytecode::FunctionRole::Method
+    }));
     let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
     assert_eq!(entry.matches("DefineClassMethodById").count(), 2);
+}
+
+#[test]
+/// Keeps class placement orthogonal to ordinary, generator, async, and async-generator execution.
+fn compiler_preserves_public_and_private_class_method_execution_kinds() {
+    let source = source(
+        MediaType::JavaScript,
+        "class C { ordinary() {} *generator() { yield 1; } async asynchronous() { await 1; } async *asyncGenerator() { yield await 1; } #privateOrdinary() {} *#privateGenerator() { yield 1; } async #privateAsync() { await 1; } async *#privateAsyncGenerator() { yield await 1; } } C;",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let expected = [
+        ("ordinary", HirFunctionKind::Ordinary),
+        ("generator", HirFunctionKind::Generator),
+        ("asynchronous", HirFunctionKind::Async),
+        ("asyncGenerator", HirFunctionKind::AsyncGenerator),
+        ("#privateOrdinary", HirFunctionKind::Ordinary),
+        ("#privateGenerator", HirFunctionKind::Generator),
+        ("#privateAsync", HirFunctionKind::Async),
+        ("#privateAsyncGenerator", HirFunctionKind::AsyncGenerator),
+    ];
+    for (name, kind) in expected {
+        let function = hir
+            .functions()
+            .iter()
+            .find(|function| function.name.as_deref() == Some(name))
+            .unwrap();
+        assert_eq!(function.kind, kind, "HIR execution kind for {name}");
+        assert_eq!(
+            function.role,
+            HirFunctionRole::Method,
+            "HIR role for {name}"
+        );
+        assert!(function.strict, "class method {name} is strict");
+    }
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let methods: Vec<_> = module
+        .functions()
+        .iter()
+        .filter(|function| function.role() == tachyon_bytecode::FunctionRole::Method)
+        .collect();
+    assert_eq!(methods.len(), expected.len());
+    for kind in [
+        tachyon_bytecode::FunctionKind::Ordinary,
+        tachyon_bytecode::FunctionKind::Generator,
+        tachyon_bytecode::FunctionKind::Async,
+        tachyon_bytecode::FunctionKind::AsyncGenerator,
+    ] {
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|function| function.kind() == kind)
+                .count(),
+            2,
+            "public and private methods preserve {kind:?}"
+        );
+    }
 }
 
 #[test]
@@ -856,7 +914,7 @@ fn compiler_handles_named_class_expression_without_leaking_binding() {
     let method = recursive
         .functions()
         .iter()
-        .find(|function| function.kind() == tachyon_bytecode::FunctionKind::ClassMethod)
+        .find(|function| function.role() == tachyon_bytecode::FunctionRole::Method)
         .unwrap();
     assert!(method.binding_plan().iter().any(|binding| {
         matches!(
@@ -971,7 +1029,7 @@ fn compiler_freezes_class_accessor_contracts() {
     let methods: Vec<_> = hir
         .functions()
         .iter()
-        .filter(|function| function.kind == HirFunctionKind::ClassMethod)
+        .filter(|function| function.role == HirFunctionRole::Method)
         .collect();
     assert_eq!(methods.len(), 3);
     assert!(methods.iter().all(|function| function.strict));
@@ -987,6 +1045,16 @@ fn compiler_freezes_class_accessor_contracts() {
     );
 
     let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    let accessors: Vec<_> = module
+        .functions()
+        .iter()
+        .filter(|function| function.role() == tachyon_bytecode::FunctionRole::Method)
+        .collect();
+    assert_eq!(accessors.len(), 3);
+    assert!(accessors.iter().all(|function| {
+        function.kind() == tachyon_bytecode::FunctionKind::Ordinary
+            && function.strictness() == tachyon_bytecode::FunctionStrictness::Strict
+    }));
     let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
     assert_eq!(entry.matches("DefineClassGetterById").count(), 2);
     assert_eq!(entry.matches("DefineClassSetterById").count(), 1);
@@ -1005,7 +1073,7 @@ fn compiler_freezes_computed_class_method_contracts() {
     let methods: Vec<_> = hir
         .functions()
         .iter()
-        .filter(|function| function.kind == HirFunctionKind::ClassMethod)
+        .filter(|function| function.role == HirFunctionRole::Method)
         .collect();
     assert_eq!(methods.len(), 2);
     assert!(methods.iter().all(|function| function.name.is_none()));
@@ -1093,7 +1161,24 @@ fn compiler_freezes_private_accessor_pair() {
         .expect("private getter and setter merge into one HIR element");
     assert!(accessor.getter.is_some());
     assert!(accessor.setter.is_some());
+    for function in hir
+        .functions()
+        .iter()
+        .filter(|function| matches!(function.name.as_deref(), Some("get #value" | "set #value")))
+    {
+        assert_eq!(function.kind, HirFunctionKind::Ordinary);
+        assert_eq!(function.role, HirFunctionRole::Method);
+        assert!(function.strict);
+    }
     let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    assert_eq!(
+        module
+            .functions()
+            .iter()
+            .filter(|function| function.role() == tachyon_bytecode::FunctionRole::Method)
+            .count(),
+        3
+    );
     let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
     assert_eq!(entry.matches("CreateAccessorPair").count(), 1);
     assert_eq!(entry.matches("AttachInstanceFields").count(), 1);

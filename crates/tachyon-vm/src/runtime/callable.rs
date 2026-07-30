@@ -2058,6 +2058,7 @@ pub(crate) struct ResolvedCallTarget {
     pub(crate) function: FunctionId,
     pub(crate) environment: Option<GcRef<Environment>>,
     pub(crate) kind: FunctionKind,
+    pub(crate) role: FunctionRole,
     pub(crate) layout: FunctionLayout,
     pub(crate) strictness: FunctionStrictness,
 }

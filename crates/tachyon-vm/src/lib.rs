@@ -98,8 +98,9 @@ use core::{cell::Cell, num::NonZeroU32, ptr::NonNull};
 
 use tachyon_bytecode::{
     BindingLocation, BytecodeConstant, ClassInstanceElementKind, CompiledModule,
-    DecodedInstruction, FunctionId, FunctionKind, FunctionLayout, FunctionStrictness, HandlerEntry,
-    HandlerKind, Opcode, RegisterId, VerifiedBytecode, VerifiedInstructionDecoder, WordOffset,
+    DecodedInstruction, FunctionId, FunctionKind, FunctionLayout, FunctionRole, FunctionStrictness,
+    HandlerEntry, HandlerKind, Opcode, RegisterId, VerifiedBytecode, VerifiedInstructionDecoder,
+    WordOffset,
 };
 use tachyon_gc::{
     AllocationSpace, FinalizationRegistration, GcExternalMemory, GcRef, GcType, Heap,

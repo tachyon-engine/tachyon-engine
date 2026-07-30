@@ -289,11 +289,42 @@ pub enum FunctionKind {
     Ordinary,
     DerivedClassConstructor,
     BaseClassConstructor,
-    ClassMethod,
-    ClassFieldInitializer,
     Generator,
     Async,
     AsyncGenerator,
+}
+
+/// Source-level role orthogonal to a function's synchronous or suspending execution kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FunctionRole {
+    Ordinary,
+    Method,
+    ClassFieldInitializer,
+}
+
+impl FunctionRole {
+    /// Returns whether calls need the closure's `[[HomeObject]]` in their frame.
+    #[must_use]
+    pub const fn has_home_object(self) -> bool {
+        matches!(self, Self::Method | Self::ClassFieldInitializer)
+    }
+
+    /// Rejects metadata combinations which cannot arise from ECMAScript source lowering.
+    #[must_use]
+    pub const fn is_valid_for(self, kind: FunctionKind) -> bool {
+        match self {
+            Self::Ordinary => true,
+            Self::Method => matches!(
+                kind,
+                FunctionKind::Ordinary
+                    | FunctionKind::Generator
+                    | FunctionKind::Async
+                    | FunctionKind::AsyncGenerator
+            ),
+            Self::ClassFieldInitializer => matches!(kind, FunctionKind::Ordinary),
+        }
+    }
 }
 
 /// The immutable meaning of one constructor-owned instance-element record.
@@ -346,8 +377,6 @@ impl EnvironmentRecordKind {
             FunctionKind::Ordinary
             | FunctionKind::DerivedClassConstructor
             | FunctionKind::BaseClassConstructor
-            | FunctionKind::ClassMethod
-            | FunctionKind::ClassFieldInitializer
             | FunctionKind::Generator
             | FunctionKind::Async
             | FunctionKind::AsyncGenerator => Self::Function,
@@ -469,6 +498,7 @@ pub struct FunctionLayout {
 #[derive(Clone, Debug)]
 pub struct FunctionMetadata {
     pub kind: FunctionKind,
+    pub role: FunctionRole,
     pub strictness: FunctionStrictness,
     pub layout: FunctionLayout,
     pub source_map: Arc<[SourceMapEntry]>,
@@ -488,8 +518,6 @@ impl FunctionMetadata {
             FunctionKind::Module
                 | FunctionKind::DerivedClassConstructor
                 | FunctionKind::BaseClassConstructor
-                | FunctionKind::ClassMethod
-                | FunctionKind::ClassFieldInitializer
         ) {
             FunctionStrictness::Strict
         } else {
@@ -497,6 +525,7 @@ impl FunctionMetadata {
         };
         Self {
             kind,
+            role: FunctionRole::Ordinary,
             strictness,
             layout,
             source_map: Arc::default(),
@@ -557,6 +586,11 @@ impl CompiledFunction {
     #[must_use]
     pub const fn kind(&self) -> FunctionKind {
         self.metadata.kind
+    }
+
+    #[must_use]
+    pub const fn role(&self) -> FunctionRole {
+        self.metadata.role
     }
 
     #[must_use]
@@ -641,6 +675,11 @@ pub enum ModuleBuildError {
         function: FunctionId,
         kind: FunctionKind,
         strictness: FunctionStrictness,
+    },
+    InvalidFunctionRole {
+        function: FunctionId,
+        kind: FunctionKind,
+        role: FunctionRole,
     },
     InvalidClassInstruction {
         function: FunctionId,
@@ -869,14 +908,20 @@ impl CompiledModule {
                     actual: template.id,
                 });
             }
-            if matches!(
+            if !template.metadata.role.is_valid_for(template.metadata.kind) {
+                return Err(ModuleBuildError::InvalidFunctionRole {
+                    function: template.id,
+                    kind: template.metadata.kind,
+                    role: template.metadata.role,
+                });
+            }
+            if (matches!(
                 template.metadata.kind,
                 FunctionKind::Module
                     | FunctionKind::DerivedClassConstructor
                     | FunctionKind::BaseClassConstructor
-                    | FunctionKind::ClassMethod
-                    | FunctionKind::ClassFieldInitializer
-            ) && template.metadata.strictness != FunctionStrictness::Strict
+            ) || template.metadata.role == FunctionRole::ClassFieldInitializer)
+                && template.metadata.strictness != FunctionStrictness::Strict
             {
                 return Err(ModuleBuildError::InvalidFunctionStrictness {
                     function: template.id,
@@ -910,6 +955,7 @@ impl CompiledModule {
             verify::validate_class_instructions(
                 template.id,
                 template.metadata.kind,
+                template.metadata.role,
                 &bytecode,
                 &function_kinds,
             )?;

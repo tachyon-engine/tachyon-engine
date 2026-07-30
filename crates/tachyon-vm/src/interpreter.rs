@@ -38,6 +38,14 @@ fn count_opcode(words: &[u32], target: Opcode) -> Result<usize, ExecutionError> 
     Ok(count)
 }
 
+#[inline(always)]
+const fn bytecode_function_is_constructible(kind: FunctionKind, role: FunctionRole) -> bool {
+    matches!(
+        kind,
+        FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
+    ) || (matches!(kind, FunctionKind::Ordinary) && matches!(role, FunctionRole::Ordinary))
+}
+
 impl Isolate {
     /// Enumerates this isolate's fiber roots for a stop-the-world collection safepoint.
     ///
@@ -4106,12 +4114,14 @@ impl Isolate {
         destination: u32,
         function: FunctionId,
     ) -> Result<(), ExecutionError> {
-        let kind = self
-            .loaded_code(code)?
-            .module
-            .function(function)
-            .ok_or(ExecutionError::MissingEntryFunction(function))?
-            .kind();
+        let (kind, role) = {
+            let metadata = self
+                .loaded_code(code)?
+                .module
+                .function(function)
+                .ok_or(ExecutionError::MissingEntryFunction(function))?;
+            (metadata.kind(), metadata.role())
+        };
         let environment = self.fiber.frames.last().and_then(|frame| frame.environment);
         let internal_prototype = match kind {
             FunctionKind::Async => self
@@ -4163,7 +4173,14 @@ impl Isolate {
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        self.write(base, destination, Value::from_heap_ref(closure.raw()))
+        self.write(base, destination, Value::from_heap_ref(closure.raw()))?;
+        if role == FunctionRole::Method
+            && matches!(kind, FunctionKind::Generator | FunctionKind::AsyncGenerator)
+        {
+            let closure = self.read(base, destination)?;
+            self.ensure_function_prototype(closure)?;
+        }
+        Ok(())
     }
 
     /// Creates a derived class constructor and its prototype pair from one evaluated heritage.
@@ -5167,18 +5184,13 @@ impl Isolate {
                     return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
                 }
                 FunctionExecutable::Bytecode { code, function, .. } => {
-                    let kind = self
+                    let metadata = self
                         .loaded_code(code)?
                         .module
                         .function(function)
-                        .ok_or(ExecutionError::MissingEntryFunction(function))?
-                        .kind();
-                    if matches!(
-                        kind,
-                        FunctionKind::ClassMethod
-                            | FunctionKind::ClassFieldInitializer
-                            | FunctionKind::Generator
-                    ) {
+                        .ok_or(ExecutionError::MissingEntryFunction(function))?;
+                    let kind = metadata.kind();
+                    if !bytecode_function_is_constructible(kind, metadata.role()) {
                         return Err(ExecutionError::NonConstructor(site.callee));
                     }
                     break kind == FunctionKind::DerivedClassConstructor;
@@ -5392,14 +5404,12 @@ impl Isolate {
                             function,
                             environment,
                             kind: template.kind(),
+                            role: template.role(),
                             layout: template.layout(),
                             strictness: template.strictness(),
                         }
                     };
-                    if matches!(
-                        target.kind,
-                        FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
-                    ) || target.layout.needs_argument_source
+                    if target.kind != FunctionKind::Ordinary || target.layout.needs_argument_source
                     {
                         return self.call(site);
                     }
@@ -5478,10 +5488,7 @@ impl Isolate {
         self.fiber.registers[(old.base + copied) as usize..requested as usize]
             .fill(Value::from_immediate(Immediate::Undefined));
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
-        let receiver_or_home_object = if matches!(
-            target.kind,
-            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
-        ) {
+        let receiver_or_home_object = if target.role.has_home_object() {
             Some(self.function_home_object(site.callee)?)
         } else {
             None
@@ -5720,7 +5727,7 @@ impl Isolate {
                     function,
                     environment,
                 } => {
-                    let (kind, layout, strictness) = {
+                    let (kind, role, layout, strictness) = {
                         let function_template =
                             self.loaded_code(code)?
                                 .module
@@ -5728,6 +5735,7 @@ impl Isolate {
                                 .ok_or(ExecutionError::MissingEntryFunction(function))?;
                         (
                             function_template.kind(),
+                            function_template.role(),
                             function_template.layout(),
                             function_template.strictness(),
                         )
@@ -5752,6 +5760,7 @@ impl Isolate {
                                 function,
                                 environment,
                                 kind,
+                                role,
                                 layout,
                                 strictness,
                             },
@@ -5768,6 +5777,7 @@ impl Isolate {
                                 function,
                                 environment,
                                 kind,
+                                role,
                                 layout,
                                 strictness,
                             },
@@ -5779,6 +5789,7 @@ impl Isolate {
                             function,
                             environment,
                             kind,
+                            role,
                             layout,
                             strictness,
                         },
@@ -5787,7 +5798,7 @@ impl Isolate {
                 }
                 FunctionExecutable::ClassBytecode(data) => {
                     let data = self.class_constructor_snapshot(data)?;
-                    let (kind, layout, strictness) = {
+                    let (kind, role, layout, strictness) = {
                         let function_template = self
                             .loaded_code(data.code)?
                             .module
@@ -5795,6 +5806,7 @@ impl Isolate {
                             .ok_or(ExecutionError::MissingEntryFunction(data.function))?;
                         (
                             function_template.kind(),
+                            function_template.role(),
                             function_template.layout(),
                             function_template.strictness(),
                         )
@@ -5810,6 +5822,7 @@ impl Isolate {
                             function: data.function,
                             environment: data.environment,
                             kind,
+                            role,
                             layout,
                             strictness,
                         },
@@ -7536,16 +7549,12 @@ impl Isolate {
             FunctionExecutable::AsyncFromSyncIteratorUnwrap { .. } => false,
             FunctionExecutable::AsyncFromSyncIteratorCloseOnReject { .. } => false,
             FunctionExecutable::Bytecode { code, function, .. } => {
-                let kind = self
+                let metadata = self
                     .loaded_code(code)?
                     .module
                     .function(function)
-                    .ok_or(ExecutionError::MissingEntryFunction(function))?
-                    .kind();
-                !matches!(
-                    kind,
-                    FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
-                )
+                    .ok_or(ExecutionError::MissingEntryFunction(function))?;
+                bytecode_function_is_constructible(metadata.kind(), metadata.role())
             }
             FunctionExecutable::ClassBytecode(_) => true,
         })
@@ -7935,10 +7944,7 @@ impl Isolate {
             self.write(callee_base, index, value)?;
         }
         let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
-        let receiver_or_home_object = if matches!(
-            target.kind,
-            FunctionKind::ClassMethod | FunctionKind::ClassFieldInitializer
-        ) {
+        let receiver_or_home_object = if target.role.has_home_object() {
             Some(self.function_home_object(site.callee)?)
         } else {
             site.construct_receiver

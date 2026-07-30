@@ -41,6 +41,7 @@ mod bigint;
 mod call_spread;
 mod calls;
 mod class;
+mod class_method;
 mod control;
 mod conversion;
 mod data_view;

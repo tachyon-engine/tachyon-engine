@@ -981,6 +981,7 @@ pub(super) fn lower_class(
                 } else {
                     super::program::HirFunctionKind::DefaultBaseConstructor
                 },
+                role: super::program::HirFunctionRole::Ordinary,
                 initialize_instance_elements: false,
             });
             id
@@ -1052,7 +1053,7 @@ pub(super) fn lower_class(
                         .get_mut(function.index() as usize)
                         .expect("new private method stencil remains published");
                     stencil.strict = true;
-                    stencil.kind = super::program::HirFunctionKind::ClassMethod;
+                    stencil.role = super::program::HirFunctionRole::Method;
                     if method.kind == oxc::ast::ast::MethodDefinitionKind::Method {
                         elements.push(HirClassElement::PrivateMethod(HirPrivateMethod {
                             span: source_span(method.span),
@@ -1116,7 +1117,7 @@ pub(super) fn lower_class(
                     .get_mut(function.index() as usize)
                     .expect("new class method stencil is published at its stable index");
                 stencil.strict = true;
-                stencil.kind = super::program::HirFunctionKind::ClassMethod;
+                stencil.role = super::program::HirFunctionRole::Method;
                 elements.push(HirClassElement::Method(HirClassMethod {
                     span: source_span(method.span),
                     key,
@@ -1172,7 +1173,8 @@ pub(super) fn lower_class(
                             strict: true,
                             is_arrow: false,
                             lexical_arguments_owner: false,
-                            kind: super::program::HirFunctionKind::ClassFieldInitializer,
+                            kind: super::program::HirFunctionKind::Ordinary,
+                            role: super::program::HirFunctionRole::ClassFieldInitializer,
                             initialize_instance_elements: false,
                         });
                         Ok(id)
@@ -1234,7 +1236,8 @@ pub(super) fn lower_class(
                     strict: true,
                     is_arrow: false,
                     lexical_arguments_owner: false,
-                    kind: super::program::HirFunctionKind::ClassStaticBlock,
+                    kind: super::program::HirFunctionKind::Ordinary,
+                    role: super::program::HirFunctionRole::ClassFieldInitializer,
                     initialize_instance_elements: false,
                 });
                 elements.push(HirClassElement::StaticBlock(HirClassStaticBlock {
