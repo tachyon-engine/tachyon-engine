@@ -206,6 +206,10 @@ pub enum HirExpressionKind {
         delegate: bool,
     },
     Await(Box<HirExpression>),
+    DynamicImport {
+        source: Box<HirExpression>,
+        options: Option<Box<HirExpression>>,
+    },
     Sequence(Arc<[HirExpression]>),
     Object(Arc<[HirObjectProperty]>),
     ObjectSpread(Arc<[HirObjectExpressionPart]>),
@@ -448,6 +452,22 @@ pub(super) fn lower_expression(
         Expression::AwaitExpression(expression) => HirExpressionKind::Await(Box::new(
             lower_expression(&expression.argument, source, semantic, functions)?,
         )),
+        Expression::ImportExpression(expression) if expression.phase.is_none() => {
+            HirExpressionKind::DynamicImport {
+                source: Box::new(lower_expression(
+                    &expression.source,
+                    source,
+                    semantic,
+                    functions,
+                )?),
+                options: expression
+                    .options
+                    .as_ref()
+                    .map(|options| lower_expression(options, source, semantic, functions))
+                    .transpose()?
+                    .map(Box::new),
+            }
+        }
         Expression::SequenceExpression(sequence) => {
             let mut expressions = Vec::with_capacity(sequence.expressions.len());
             for expression in &sequence.expressions {

@@ -997,6 +997,11 @@ fn verify_instruction(
             check_register(operands[1])?;
             check_register(operands[2])?;
         }
+        Opcode::DynamicImport => {
+            check_register(operands[0])?;
+            check_register(operands[1])?;
+            check_register(operands[2])?;
+        }
         Opcode::SetAccessorFunctionName => {
             check_register(operands[0])?;
             check_register(operands[1])?;

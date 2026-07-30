@@ -136,6 +136,55 @@ fn compiler_emits_verified_bytecode_for_one_plus_two() {
 }
 
 #[test]
+fn compiler_emits_dynamic_import_after_source_then_options() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "import(sourceValue(), optionsValue());",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    let source = disassembly.find("Call r1, callee=r0, argc=0").unwrap();
+    let options = disassembly.find("Call r3, callee=r2, argc=0").unwrap();
+    let dynamic_import = disassembly
+        .find("DynamicImport r4, source=r1, options=r3")
+        .unwrap();
+    assert!(
+        source < options && options < dynamic_import,
+        "{disassembly}"
+    );
+}
+
+#[test]
+fn compiler_materializes_undefined_for_missing_dynamic_import_options() {
+    let module = Compiler
+        .compile(
+            source(MediaType::JavaScript, "import('source.js');"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.contains("LoadUndefined r1"), "{disassembly}");
+    assert!(
+        disassembly.contains("DynamicImport r2, source=r0, options=r1"),
+        "{disassembly}"
+    );
+}
+
+#[test]
 fn compiler_uses_own_definition_for_array_elements_but_not_synthetic_length() {
     let module = Compiler
         .compile(

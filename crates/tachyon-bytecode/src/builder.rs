@@ -336,6 +336,7 @@ impl BytecodeBuilder {
             | Opcode::DefinePrivateMethod
             | Opcode::DefinePrivateAccessor
             | Opcode::HasPrivate => &[0, 1, 2],
+            Opcode::DynamicImport => &[0, 1, 2],
             Opcode::SetAccessorFunctionName => &[0, 1],
             Opcode::SetFunctionName => &[0],
             Opcode::LoadEnvironment | Opcode::StoreEnvironment | Opcode::InitializeEnvironment => {

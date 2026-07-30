@@ -779,6 +779,21 @@ impl Lowerer<'_> {
                 self.emit_suspend(Opcode::Await, source, destination, expression.span)?;
                 Ok(destination)
             }
+            HirExpressionKind::DynamicImport { source, options } => {
+                let source = self.expression(source)?;
+                let options = if let Some(options) = options {
+                    self.expression(options)?
+                } else {
+                    self.load_undefined(expression.span)?
+                };
+                let destination = self.register()?;
+                self.emit(
+                    Opcode::DynamicImport,
+                    &[destination.index(), source.index(), options.index()],
+                    expression.span,
+                )?;
+                Ok(destination)
+            }
             HirExpressionKind::Sequence(expressions) => {
                 let mut result = None;
                 for expression in expressions.iter() {

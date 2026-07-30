@@ -350,6 +350,19 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             1,
             "bytecode instructions",
         ),
+        HirExpressionKind::DynamicImport { source, options } => {
+            let mut count = expression_instruction_count(source)?;
+            count = checked_count_add(
+                count,
+                options
+                    .as_deref()
+                    .map(expression_instruction_count)
+                    .transpose()?
+                    .unwrap_or(1),
+                "bytecode instructions",
+            )?;
+            checked_count_add(count, 1, "bytecode instructions")
+        }
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

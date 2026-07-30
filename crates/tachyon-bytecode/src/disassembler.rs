@@ -294,6 +294,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
             operands[1] + 1,
             operands[2]
         )?,
+        Opcode::DynamicImport => write!(
+            output,
+            " r{}, source=r{}, options=r{}",
+            operands[0], operands[1], operands[2]
+        )?,
     }
     Ok(())
 }

@@ -94,6 +94,37 @@ fn hir_lowering_copies_binary_expression_without_oxc_values() {
 }
 
 #[test]
+fn hir_lowering_owns_dynamic_import_source_and_options() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "import('module.js', { with: { type: 'json' } });",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let [statement] = hir.statements() else {
+        panic!("expected one HIR statement");
+    };
+    let HirStatementKind::Expression(HirExpression {
+        kind: HirExpressionKind::DynamicImport { source, options },
+        ..
+    }) = &statement.kind
+    else {
+        panic!("expected owned dynamic import expression");
+    };
+    assert!(matches!(source.kind, HirExpressionKind::String(_)));
+    assert!(matches!(
+        options.as_deref(),
+        Some(HirExpression {
+            kind: HirExpressionKind::Object(_),
+            ..
+        })
+    ));
+}
+
+#[test]
 /// Confirms logical structure and operator identity survive after the Oxc arena is dropped.
 fn hir_lowering_owns_logical_expression_and_operator() {
     let hir = Compiler

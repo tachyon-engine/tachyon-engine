@@ -278,6 +278,15 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             checked_count_add(argument, if *delegate { 5 } else { 0 }, "scope names")
         }
         HirExpressionKind::Await(argument) => expression_scope_name_count(argument),
+        HirExpressionKind::DynamicImport { source, options } => checked_count_add(
+            expression_scope_name_count(source)?,
+            options
+                .as_deref()
+                .map(expression_scope_name_count)
+                .transpose()?
+                .unwrap_or(0),
+            "scope names",
+        ),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {
@@ -721,6 +730,15 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
             Ok(count)
         }
         HirExpressionKind::SuperComputedMember(property) => expression_literal_count(property),
+        HirExpressionKind::DynamicImport { source, options } => checked_count_add(
+            expression_literal_count(source)?,
+            options
+                .as_deref()
+                .map(expression_literal_count)
+                .transpose()?
+                .unwrap_or(0),
+            "bytecode constants",
+        ),
         HirExpressionKind::Sequence(expressions) => {
             let mut count = 0;
             for expression in expressions.iter() {

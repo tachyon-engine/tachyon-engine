@@ -315,9 +315,11 @@ pub enum Opcode {
     CreateAsyncFromSyncIterator = 134,
     /// Suspends after generator declaration instantiation without producing a resume value.
     InitialYield = 135,
+    /// Requests host-defined dynamic module loading from evaluated source and options values.
+    DynamicImport = 136,
 }
 
-pub(super) const OPCODE_COUNT: usize = 136;
+pub(super) const OPCODE_COUNT: usize = 137;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -455,10 +457,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     1, // LoadAsyncIteratorSymbol
     3, // CreateAsyncFromSyncIterator
     0, // InitialYield
+    3, // DynamicImport
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::InitialYield as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::DynamicImport as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -640,6 +643,7 @@ impl Opcode {
             69 => Some(Self::LoadAsyncIteratorSymbol),
             70 => Some(Self::CreateAsyncFromSyncIterator),
             71 => Some(Self::InitialYield),
+            72 => Some(Self::DynamicImport),
             _ => None,
         }
     }

@@ -193,6 +193,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::TailCallSpreadWithReceiver,
                 Opcode::DirectEvalSpread,
                 Opcode::CreateAsyncFromSyncIterator,
+                Opcode::DynamicImport,
             ],
         ),
         (
@@ -401,6 +402,22 @@ fn verifier_accepts_simple_terminal_program() {
     let mut words = encode_instruction(Opcode::LoadImmediate, &[0, 1]).unwrap();
     words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
     assert!(Bytecode::from_words(words).verify(context()).is_ok());
+}
+
+#[test]
+fn dynamic_import_verifies_all_three_register_operands() {
+    let mut valid = encode_instruction(Opcode::DynamicImport, &[0, 1, 2]).unwrap();
+    valid.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    assert!(Bytecode::from_words(valid).verify(context()).is_ok());
+
+    for operands in [[4, 1, 2], [0, 4, 2], [0, 1, 4]] {
+        let mut words = encode_instruction(Opcode::DynamicImport, &operands).unwrap();
+        words.extend(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap());
+        assert!(matches!(
+            Bytecode::from_words(words).verify(context()),
+            Err(VerifyError::RegisterOutOfRange { register: 4, .. })
+        ));
+    }
 }
 
 #[test]

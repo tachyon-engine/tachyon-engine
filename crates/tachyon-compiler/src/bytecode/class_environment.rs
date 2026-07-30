@@ -278,6 +278,12 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<ClassEnviro
             }
         }
         HirExpressionKind::Await(argument) => collect_expression(argument, bindings),
+        HirExpressionKind::DynamicImport { source, options } => {
+            collect_expression(source, bindings);
+            if let Some(options) = options {
+                collect_expression(options, bindings);
+            }
+        }
         HirExpressionKind::Binary { left, right, .. }
         | HirExpressionKind::Logical { left, right, .. } => {
             collect_expression(left, bindings);
