@@ -769,6 +769,7 @@ pub(crate) enum PromiseResolutionMode {
     ResolverCall,
     Reaction,
     StaticResolve,
+    Internal,
     AsyncAwait,
 }
 

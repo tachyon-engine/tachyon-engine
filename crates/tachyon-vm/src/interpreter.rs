@@ -8904,7 +8904,13 @@ impl Isolate {
                     return Ok(None);
                 }
                 if continuation.kind() == NativeContinuationKind::PromiseFinally {
-                    if let Some(parent) = self.fiber.completions.last_native()
+                    let frame_completion_base = self
+                        .fiber
+                        .frames
+                        .last()
+                        .map_or(0, |frame| frame.completion_base as usize);
+                    if self.fiber.completions.len() > frame_completion_base
+                        && let Some(parent) = self.fiber.completions.last_native()
                         && parent.kind() == NativeContinuationKind::PromiseReaction
                     {
                         let parent = self.pop_native_continuation()?;

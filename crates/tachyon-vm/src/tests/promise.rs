@@ -531,6 +531,26 @@ if (result === returned) score += 32;
 score;
 "#;
 
+const PROMISE_FINALLY_REACTION_BOUNDARY_SOURCE: &str = r#"
+var fulfilledFinallyCalls = 0;
+var fulfilledFinallyValue = 0;
+var rejectedFinallyCalls = 0;
+var rejectedFinallyValue = 0;
+var abruptFinallyIdentity = false;
+var abruptFinallySentinel = {};
+Promise.resolve(1).then(function(value) {
+  return Promise.resolve(value).finally(function() { fulfilledFinallyCalls++; });
+}).then(function(value) { fulfilledFinallyValue = value; });
+Promise.reject(2).then(undefined, function(reason) {
+  return Promise.reject(reason).finally(function() { rejectedFinallyCalls++; });
+}).then(undefined, function(reason) { rejectedFinallyValue = reason; });
+Promise.resolve(3).then(function(value) {
+  return Promise.resolve(value).finally(function() { throw abruptFinallySentinel; });
+}).then(undefined, function(reason) {
+  abruptFinallyIdentity = reason === abruptFinallySentinel;
+});
+"#;
+
 const PROMISE_CONSTRUCTOR_PROTOTYPE_SOURCE: &str = r#"
 var accessorTrace = "";
 var accessorPrototype = {};
@@ -724,6 +744,15 @@ fn promise_catch_invokes_generic_then_with_exact_arguments() {
             _ => None,
         }
     );
+}
+
+#[test]
+fn promise_finally_does_not_consume_the_enclosing_reaction_for_any_dispatch_batch() {
+    assert_promise_finally_reaction_boundary::<1>(5_951);
+    assert_promise_finally_reaction_boundary::<2>(5_953);
+    assert_promise_finally_reaction_boundary::<4>(5_955);
+    assert_promise_finally_reaction_boundary::<8>(5_957);
+    assert_promise_finally_reaction_boundary::<16>(5_959);
 }
 
 #[test]
@@ -1001,6 +1030,22 @@ fn assert_promise_constructor_prototype<const N: usize>(source_id: u32, forced_m
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Keeps inner finally settlement above the active reaction handler's completion checkpoint.
+fn assert_promise_finally_reaction_boundary<const N: usize>(source_id: u32) {
+    let setup = compile_promise_source(source_id, PROMISE_FINALLY_REACTION_BOUNDARY_SOURCE);
+    let probe = compile_promise_source(
+        source_id + 1,
+        "fulfilledFinallyCalls === 1 && fulfilledFinallyValue === 1 && rejectedFinallyCalls === 1 && rejectedFinallyValue === 2 && abruptFinallyIdentity;",
+    );
+    let mut isolate = test_isolate();
+    run_promise_module::<N>(&mut isolate, &setup);
+    let outcome = run_promise_module::<N>(&mut isolate, &probe);
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N} returned {outcome:?}"
     );
 }
 

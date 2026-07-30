@@ -681,6 +681,7 @@ impl Isolate {
             PromiseResolutionMode::StaticResolve => {
                 self.write(site.caller_base, site.destination, promise)
             }
+            PromiseResolutionMode::Internal => Ok(()),
             PromiseResolutionMode::Reaction => {
                 self.promise_jobs.finish_active();
                 if let Some(frame) = self.fiber.frames.last_mut() {
@@ -1063,7 +1064,13 @@ impl Isolate {
         value: Value,
     ) -> Result<(), ExecutionError> {
         self.write(site.caller_base, site.destination, value)?;
-        if let Some(parent) = self.fiber.completions.last_native()
+        let frame_completion_base = self
+            .fiber
+            .frames
+            .last()
+            .map_or(0, |frame| frame.completion_base as usize);
+        if self.fiber.completions.len() > frame_completion_base
+            && let Some(parent) = self.fiber.completions.last_native()
             && parent.kind() == NativeContinuationKind::PromiseReaction
         {
             let parent = self.pop_native_continuation()?;
@@ -1210,19 +1217,11 @@ impl Isolate {
             PromiseState::Pending,
             Value::from_immediate(Immediate::Undefined),
         )?;
-        let resolution_site = NativeContinuationSite {
-            caller_base: site.caller_base,
-            destination: site
-                .destination
-                .checked_add(1)
-                .ok_or(ExecutionError::BoundArgumentCountOverflow)?,
-            call_site: site.call_site,
-        };
         self.begin_promise_resolution(
             callback_promise,
             callback_result,
-            resolution_site,
-            PromiseResolutionMode::StaticResolve,
+            site,
+            PromiseResolutionMode::Internal,
         )?;
         self.begin_promise_finally_mapping(site, callback_promise, original, rejected)?;
         Ok(())
