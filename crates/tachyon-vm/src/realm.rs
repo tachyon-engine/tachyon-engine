@@ -1841,6 +1841,28 @@ impl Isolate {
             },
         )?;
         self.realm.function_prototype = Some(function_prototype);
+        let throw_type_error = self.allocate_native_function(
+            NativeFunction::ThrowTypeError,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: false,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        for name in [b"caller".as_slice(), b"arguments".as_slice()] {
+            let atom = self.intern_intrinsic_name(name)?;
+            self.define_property(
+                function_prototype,
+                PropertyKey::Atom(atom),
+                PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                    getter: Some(throw_type_error),
+                    setter: Some(throw_type_error),
+                    enumerable: Some(false),
+                    configurable: Some(true),
+                }),
+            )?;
+        }
         self.set_function_internal_prototype(call, function_prototype)?;
         let apply = self.allocate_native_function(
             NativeFunction::FunctionPrototypeApply,

@@ -5,7 +5,10 @@ use tachyon_compiler::{
     MediaType, SourceId, SourceName, SourceText,
 };
 
-use super::{fixtures::test_isolate, *};
+use super::{
+    fixtures::{test_isolate, test_isolate_with_heap_spans},
+    *,
+};
 
 /// Compiles and executes a host-provided eval script in the selected Realm.
 fn eval_script_callback(
@@ -95,7 +98,7 @@ fn dynamic_function_callback(
     }
 }
 
-/// Exercises observable argument conversion across every dispatch batch and a moving major GC.
+/// Exercises observable argument conversion across every dispatch batch and an exact major GC.
 fn assert_dynamic_function_batch<const N: usize>(forced_major: bool) {
     let module = compile_source(
         "var trace = ''; var p = { toString() { trace += 'p'; return 'value'; } }; var b = { toString() { trace += 'b'; return 'return value + 1;'; } }; var f = Function(p, b); trace === 'pb' && f.name === 'anonymous' && f.length === 1 && f(2) === 3;",
@@ -143,6 +146,9 @@ fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
     isolate
         .install_realm_hooks(eval_script_callback, dynamic_function_callback)
         .expect("dynamic-function hooks install");
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
     let outcome = isolate
         .execute_with_batch::<8>(
             &module,
@@ -153,6 +159,120 @@ fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
         )
         .expect("cross-Realm dynamic Function executes");
     assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(1)));
+}
+
+/// Proves native and bound callables retain `[[Realm]]` after all prototype clues are removed.
+#[test]
+fn dynamic_function_new_target_uses_explicit_callable_realm() {
+    let module = compile_source(
+        r#"
+var other = $262.createRealm().global;
+var childFunction = other.Function;
+var bound = childFunction.bind(null);
+Object.setPrototypeOf(childFunction, null);
+Object.setPrototypeOf(bound, null);
+var throughBound = Reflect.construct(Function, ["return 2;"], bound);
+Object.getPrototypeOf(throughBound) === other.Function.prototype;
+"#,
+        1_175,
+    );
+    let mut isolate = test_isolate_with_heap_spans(18);
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("dynamic-function hooks install");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("explicit callable Realm fixture executes");
+    if let RunOutcome::Thrown(value) = outcome {
+        panic!("thrown {value:?}: {:?}", isolate.native_error_kind(value));
+    }
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+}
+
+/// Separates newTarget-Realm function inheritance from constructor-Realm generator inheritance.
+fn assert_cross_realm_generator_prototype_graph(source_id: u32, literal: &str) {
+    let source = format!(
+        r#"
+var a = $262.createRealm().global;
+var af = a.eval("({literal})");
+var agf = af.constructor;
+var agp = Object.getPrototypeOf(af.prototype);
+var b = $262.createRealm().global;
+var bf = b.eval("({literal})");
+var bgf = bf.constructor;
+var nt = new b.Function();
+nt.prototype = null;
+Object.setPrototypeOf(agf, null);
+var fn = Reflect.construct(agf, ["yield 1;"], nt);
+(Object.getPrototypeOf(fn) === bgf.prototype ? 1 : 0) +
+    (Object.getPrototypeOf(fn.prototype) === agp ? 2 : 0);
+"#
+    );
+    let module = compile_source(&source, source_id);
+    let mut isolate = test_isolate_with_heap_spans(18);
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("dynamic-function hooks install");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("cross-Realm generator prototype fixture executes");
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(3)));
+}
+
+#[test]
+fn cross_realm_dynamic_generator_prototype_graph_is_split_by_spec_role() {
+    assert_cross_realm_generator_prototype_graph(1_172, "function*(){}");
+}
+
+#[test]
+fn cross_realm_dynamic_async_generator_prototype_graph_is_split_by_spec_role() {
+    assert_cross_realm_generator_prototype_graph(1_174, "async function*(){}");
+}
+
+/// Keeps every freshly installed child-Realm host hook live across exact major safepoints.
+#[test]
+fn cross_realm_eval_generator_literal_survives_forced_major_gc() {
+    let module = compile_source(
+        "var a = $262.createRealm().global; typeof a.eval('(function*(){})') === 'function';",
+        1_173,
+    );
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("eval hooks install");
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 16_384,
+                quantum: 16_384,
+            },
+        )
+        .expect("cross-Realm eval generator literal executes");
+    if let RunOutcome::Thrown(value) = outcome {
+        panic!("thrown {value:?}: {:?}", isolate.native_error_kind(value));
+    }
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "cross-Realm eval returned {outcome:?}"
+    );
 }
 
 /// Runs one direct-eval fixture through a selected dispatch monomorphization.

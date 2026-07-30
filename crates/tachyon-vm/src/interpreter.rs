@@ -4166,6 +4166,7 @@ impl Isolate {
                 .function_prototype
                 .expect("function intrinsics initialize before bytecode execution"),
         };
+        let realm = self.loaded_code(code)?.realm;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             suspended_fibers: &mut self.suspended_fibers,
@@ -4188,7 +4189,8 @@ impl Isolate {
                         function,
                         environment,
                     },
-                    prototype_or_home_object: None,
+                    realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -5963,6 +5965,9 @@ impl Isolate {
                         Value::from_immediate(Immediate::Undefined),
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::ThrowTypeError) => {
+                    return Err(ExecutionError::ReadOnlyProperty(site.this_value));
+                }
                 FunctionExecutable::Native(NativeFunction::HostCreateRealm) => {
                     let (_, global) = self.create_realm()?;
                     let result = self.create_ordinary_object()?;
@@ -7577,42 +7582,14 @@ impl Isolate {
         Ok(self.resolve_function_object(value).is_ok())
     }
 
-    /// Resolves a callable's defining Realm through Proxy and Bound exotic layers.
+    /// Resolves a callable's immutable defining Realm through the Proxy forwarding layer.
     #[cold]
     pub(crate) fn realm_for_callable(&mut self, value: Value) -> Result<RealmId, ExecutionError> {
         if self.is_proxy_value(value) {
             let target = self.proxy_snapshot(value)?.target;
             return self.realm_for_callable(target);
         }
-        let function = self.resolve_function_object(value)?;
-        match function.executable {
-            FunctionExecutable::Bytecode { code, .. } => Ok(self.loaded_code(code)?.realm),
-            FunctionExecutable::ClassBytecode(data) => {
-                let data = self.class_constructor_snapshot(data)?;
-                Ok(self.loaded_code(data.code)?.realm)
-            }
-            FunctionExecutable::Bound(data) => {
-                let target = self.bound_function_snapshot(data)?.call_target;
-                self.realm_for_callable(target)
-            }
-            FunctionExecutable::Native(_) => {
-                let prototype = function.ordinary.prototype;
-                if self.realm.function_prototype == Some(prototype)
-                    || self.realm.typed_array_base_constructor == Some(prototype)
-                {
-                    return Ok(self.active_realm);
-                }
-                for (id, realm) in &self.inactive_realms {
-                    if realm.function_prototype == Some(prototype)
-                        || realm.typed_array_base_constructor == Some(prototype)
-                    {
-                        return Ok(*id);
-                    }
-                }
-                Ok(self.active_realm)
-            }
-            _ => Ok(self.active_realm),
-        }
+        Ok(self.resolve_function_object(value)?.realm)
     }
 
     /// Copies only callable dispatch metadata through a checked no-GC borrow on the hot path.

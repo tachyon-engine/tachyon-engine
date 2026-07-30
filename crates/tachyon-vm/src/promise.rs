@@ -119,6 +119,7 @@ impl Isolate {
         promise: Value,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
         let undefined = Value::from_immediate(Immediate::Undefined);
+        let realm = self.active_realm;
         let mut roots = PromiseCapabilityRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
@@ -160,6 +161,7 @@ impl Isolate {
             self.types.function,
             cell,
             false,
+            realm,
             prototype,
             &mut roots,
         )?;
@@ -168,6 +170,7 @@ impl Isolate {
             self.types.function,
             cell,
             true,
+            realm,
             prototype,
             &mut roots,
         )?;
@@ -1781,6 +1784,7 @@ fn allocate_promise_resolver(
     function_type: GcType<FunctionObject>,
     cell: GcRef<PromiseResolutionCell>,
     reject: bool,
+    realm: RealmId,
     prototype: Value,
     roots: &mut PromiseCapabilityRoots<'_>,
 ) -> Result<Value, ExecutionError> {
@@ -1790,7 +1794,8 @@ fn allocate_promise_resolver(
         0,
         FunctionObject {
             executable: FunctionExecutable::PromiseResolver { cell, reject },
-            prototype_or_home_object: None,
+            realm,
+            prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
             ordinary: OrdinaryObject {
                 shape: ShapeId::EMPTY,
                 extensible: true,

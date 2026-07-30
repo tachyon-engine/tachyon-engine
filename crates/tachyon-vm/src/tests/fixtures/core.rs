@@ -2,9 +2,14 @@ use super::super::*;
 use super::*;
 
 pub(in crate::tests) fn test_isolate() -> Isolate {
+    test_isolate_with_heap_spans(9)
+}
+
+/// Builds a test isolate with an explicit heap span budget for multi-Realm stress fixtures.
+pub(in crate::tests) fn test_isolate_with_heap_spans(heap_spans: usize) -> Isolate {
     Isolate::new(IsolateConfig::new(
         AtomTableConfig::new(1_024, 1024 * 1024, AtomHashSeed::new(1, 2)),
-        HeapLimit::new(9 * SPAN_SIZE_BYTES),
+        HeapLimit::new(heap_spans * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
         RealmLimits::new(64, 1_024),
     ))

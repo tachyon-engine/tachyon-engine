@@ -420,7 +420,7 @@ impl Isolate {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(function, self.types.function)
-                    .map(|function| function.prototype_or_home_object)
+                    .map(|function| function.prototype_or_home_object.get())
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;
@@ -587,7 +587,7 @@ impl Isolate {
                 let object = no_gc
                     .borrow_mut(function, self.types.function)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                object.prototype_or_home_object = Some(prototype);
+                object.prototype_or_home_object.set(prototype);
                 Ok::<(), ExecutionError>(())
             })?;
             scope
@@ -641,7 +641,7 @@ impl Isolate {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow(function, self.types.function)
-                    .map(|function| function.prototype_or_home_object)
+                    .map(|function| function.prototype_or_home_object.get())
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })?;

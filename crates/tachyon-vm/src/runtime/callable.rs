@@ -438,6 +438,7 @@ pub(crate) enum NativeFunction {
     DateUtcGetter(DateUtcField),
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
+    ThrowTypeError,
     AsyncFunctionConstructor,
     GeneratorFunctionConstructor,
     AsyncGeneratorFunctionConstructor,
@@ -1295,6 +1296,7 @@ impl NativeFunction {
             | Self::DateLocalGetter(_)
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
+            | Self::ThrowTypeError
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
@@ -1526,6 +1528,7 @@ impl NativeFunction {
             Self::DateUtcGetter(field) => field.name(),
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
+            Self::ThrowTypeError => "",
             Self::AsyncFunctionConstructor => "AsyncFunction",
             Self::GeneratorFunctionConstructor => "GeneratorFunction",
             Self::AsyncGeneratorFunctionConstructor => "AsyncGeneratorFunction",
@@ -1931,12 +1934,44 @@ pub(crate) enum FunctionExecutable {
     },
 }
 
+/// Compact optional edge for the mutually exclusive `prototype` and `[[HomeObject]]` slot.
+///
+/// `Immediate::Uninitialized` cannot result from a completed ECMAScript property write, so it
+/// distinguishes absence from every observable value without the extra `Option<Value>` tag.
+#[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
+pub(crate) struct FunctionAuxiliaryEdge(Value);
+
+impl FunctionAuxiliaryEdge {
+    pub(crate) const NONE: Self = Self(Value::from_immediate(Immediate::Uninitialized));
+
+    #[inline(always)]
+    pub(crate) fn get(self) -> Option<Value> {
+        (self.0.as_immediate() != Some(Immediate::Uninitialized)).then_some(self.0)
+    }
+
+    #[inline(always)]
+    pub(crate) fn set(&mut self, value: Value) {
+        debug_assert_ne!(value.as_immediate(), Some(Immediate::Uninitialized));
+        self.0 = value;
+    }
+}
+
+impl Trace for FunctionAuxiliaryEdge {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.0.trace(tracer);
+    }
+}
+
 /// Callable payload with one explicit executable kind and shared ordinary-property storage.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FunctionObject {
     pub(crate) executable: FunctionExecutable,
+    /// Immutable ECMAScript `[[Realm]]`; Proxies remain the only forwarding callable wrapper.
+    pub(crate) realm: RealmId,
     /// Public `prototype` for constructors, or `[[HomeObject]]` for class methods.
-    pub(crate) prototype_or_home_object: Option<Value>,
+    pub(crate) prototype_or_home_object: FunctionAuxiliaryEdge,
     pub(crate) ordinary: OrdinaryObject,
 }
 

@@ -256,6 +256,8 @@ impl Isolate {
                 prototype,
             },
         )?;
+        let create_atom = self.intern_intrinsic_name(b"createRealm")?;
+        self.set_own_data_property(hooks, create_atom, create)?;
         let eval = self.allocate_native_function(
             NativeFunction::HostEvalScript,
             OrdinaryObject {
@@ -265,6 +267,11 @@ impl Isolate {
                 prototype,
             },
         )?;
+        let eval_atom = self.intern_intrinsic_name(b"evalScript")?;
+        self.set_own_data_property(hooks, eval_atom, eval)?;
+        let eval_global_atom = self.intern_intrinsic_name(b"eval")?;
+        self.set_own_data_property(global, eval_global_atom, eval)?;
+        self.realm.set(eval_global_atom, eval)?;
         let detach = self.allocate_native_function(
             NativeFunction::HostDetachArrayBuffer,
             OrdinaryObject {
@@ -274,15 +281,8 @@ impl Isolate {
                 prototype,
             },
         )?;
-        let create_atom = self.intern_intrinsic_name(b"createRealm")?;
-        let eval_atom = self.intern_intrinsic_name(b"evalScript")?;
         let detach_atom = self.intern_intrinsic_name(b"detachArrayBuffer")?;
-        self.set_own_data_property(hooks, create_atom, create)?;
-        self.set_own_data_property(hooks, eval_atom, eval)?;
-        self.set_own_data_property(hooks, detach_atom, detach)?;
-        let eval_global_atom = self.intern_intrinsic_name(b"eval")?;
-        self.set_own_data_property(global, eval_global_atom, eval)?;
-        self.realm.set(eval_global_atom, eval)
+        self.set_own_data_property(hooks, detach_atom, detach)
     }
 
     /// Executes one compiled module with a selected Realm as the active execution context.
@@ -810,6 +810,7 @@ impl Isolate {
         native: NativeFunction,
         ordinary: OrdinaryObject,
     ) -> Result<Value, ExecutionError> {
+        let realm = self.active_realm;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
             suspended_fibers: &mut self.suspended_fibers,
@@ -828,7 +829,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::Native(native),
-                    prototype_or_home_object: None,
+                    realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary,
                 },
                 AllocationSpace::Old,
@@ -846,6 +848,7 @@ impl Isolate {
         constructor: Value,
         rejected: bool,
     ) -> Result<Value, ExecutionError> {
+        let realm = self.active_realm;
         let function_prototype = self
             .realm
             .function_prototype
@@ -877,7 +880,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::PromiseFinallyHandler { state, rejected },
-                    prototype_or_home_object: None,
+                    realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -899,6 +903,7 @@ impl Isolate {
         rejected: bool,
         retained: Value,
     ) -> Result<(Value, Value), ExecutionError> {
+        let realm = self.active_realm;
         let function_prototype = self
             .realm
             .function_prototype
@@ -944,7 +949,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::PromiseFinallyResultHandler { state, rejected },
-                    prototype_or_home_object: None,
+                    realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -975,6 +981,7 @@ impl Isolate {
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let target_object = self.resolve_function_object(bound_target)?;
+        let function_realm = target_object.realm;
         let (call_target, bound_this, existing_arguments) = match target_object.executable {
             FunctionExecutable::Bound(data) => {
                 let snapshot = self.bound_function_snapshot(data)?;
@@ -1056,7 +1063,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::Bound(data),
-                    prototype_or_home_object: None,
+                    realm: function_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

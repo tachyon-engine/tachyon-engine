@@ -830,7 +830,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::AsyncFromSyncIteratorUnwrap { done },
-                    prototype_or_home_object: None,
+                    realm: self.active_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -878,7 +879,8 @@ impl Isolate {
                     executable: FunctionExecutable::AsyncFromSyncIteratorCloseOnReject {
                         iterator: roots.iterator,
                     },
-                    prototype_or_home_object: None,
+                    realm: self.active_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

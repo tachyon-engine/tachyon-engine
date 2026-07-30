@@ -247,7 +247,8 @@ impl Isolate {
                         element,
                         rejected: false,
                     },
-                    prototype_or_home_object: None,
+                    realm: self.active_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -272,7 +273,8 @@ impl Isolate {
                         element,
                         rejected: true,
                     },
-                    prototype_or_home_object: None,
+                    realm: self.active_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,

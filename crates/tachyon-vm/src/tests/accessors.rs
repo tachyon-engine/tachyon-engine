@@ -738,7 +738,8 @@ fn allocate_bytecode_test_function(
                     function,
                     environment: None,
                 },
-                prototype_or_home_object: None,
+                realm: RealmId::MAIN,
+                prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                 ordinary: OrdinaryObject {
                     shape: ShapeId::EMPTY,
                     extensible: true,

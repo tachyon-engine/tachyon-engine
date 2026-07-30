@@ -218,7 +218,8 @@ impl Isolate {
                 0,
                 FunctionObject {
                     executable: FunctionExecutable::ProxyRevoker(roots.proxy),
-                    prototype_or_home_object: None,
+                    realm: self.active_realm,
+                    prototype_or_home_object: FunctionAuxiliaryEdge::NONE,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
