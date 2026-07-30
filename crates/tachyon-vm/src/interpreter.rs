@@ -2059,7 +2059,7 @@ impl Isolate {
             }
             Opcode::InitialYield => {
                 self.suspend_generator_initialization()?;
-                return Ok(None);
+                return self.resume_restored_generator_native_caller();
             }
             Opcode::EnterFinally => {
                 let (index, handler) = self
@@ -7604,6 +7604,9 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::IteratorDrop) => {
                     return self.begin_iterator_drop(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorFlatMap) => {
+                    return self.begin_iterator_flat_map(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::IteratorHelperNext) => {
                     return self.begin_iterator_helper_next(&site);

@@ -567,6 +567,7 @@ pub(crate) enum NativeFunction {
     IteratorFilter,
     IteratorTake,
     IteratorDrop,
+    IteratorFlatMap,
     IteratorHelperNext,
     IteratorHelperReturn,
     WrapForValidIteratorNext,
@@ -1357,7 +1358,8 @@ impl NativeFunction {
             | Self::IteratorMap
             | Self::IteratorFilter
             | Self::IteratorTake
-            | Self::IteratorDrop => 1,
+            | Self::IteratorDrop
+            | Self::IteratorFlatMap => 1,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
             | Self::SymbolValueOf
@@ -1702,6 +1704,7 @@ impl NativeFunction {
             Self::IteratorFilter => "filter",
             Self::IteratorTake => "take",
             Self::IteratorDrop => "drop",
+            Self::IteratorFlatMap => "flatMap",
             Self::IteratorHelperNext => "next",
             Self::IteratorHelperReturn => "return",
             Self::WrapForValidIteratorNext => "next",
@@ -2397,6 +2400,7 @@ pub(crate) struct IntrinsicPropertyAtoms {
     pub(crate) length: Option<AtomId>,
     pub(crate) done: Option<AtomId>,
     pub(crate) value: Option<AtomId>,
+    pub(crate) next: Option<AtomId>,
 }
 
 #[derive(Clone, Copy, Debug)]

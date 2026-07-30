@@ -238,4 +238,13 @@ impl Isolate {
         self.intrinsic_property_atoms.value = Some(atom);
         Ok(atom)
     }
+
+    pub(crate) fn next_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.next {
+            return Ok(atom);
+        }
+        let atom = self.intern_intrinsic_name(b"next")?;
+        self.intrinsic_property_atoms.next = Some(atom);
+        Ok(atom)
+    }
 }

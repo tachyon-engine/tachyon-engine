@@ -151,6 +151,33 @@ impl Isolate {
         })
     }
 
+    /// Publishes or clears flatMap's cached inner iterator record with both barriers.
+    pub(super) fn set_iterator_helper_inner(
+        &mut self,
+        helper: GcRef<IteratorHelperObject>,
+        iterator: Value,
+        next_method: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let helper = scope.root(helper).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let object = no_gc
+                    .borrow_mut(helper, self.types.iterator_helper)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                object.inner_iterator = iterator;
+                object.inner_next = next_method;
+                Ok(())
+            })?;
+            scope
+                .write_value_barrier(helper, iterator)
+                .map_err(ExecutionError::HeapReference)?;
+            scope
+                .write_value_barrier(helper, next_method)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
     pub(super) fn complete_iterator_helper(&mut self, helper: Value) -> Result<(), ExecutionError> {
         let reference = self.iterator_helper_reference(helper)?;
         self.set_iterator_helper_state(reference, IteratorHelperState::Completed)

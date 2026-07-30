@@ -2,9 +2,11 @@
 
 mod drop;
 mod filter;
+mod flat_map;
 mod lazy;
 mod map;
 mod object;
+mod protocol;
 mod state;
 mod take;
 

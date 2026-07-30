@@ -86,6 +86,20 @@ var result = Array.from(values());
 result.length === 3 && result[0] === 1 && result[1] === 2 && result[2] === 3;
 "#;
 
+const ARRAY_FROM_PRIMITIVE_GENERATOR_SOURCE: &str = r#"
+Number.prototype[Symbol.iterator] = function* () {
+  var index = 0;
+  var target = this >>> 0;
+  while (index < target) {
+    yield index;
+    index++;
+  }
+};
+var result = Array.from(5);
+result.length === 5 && result[0] === 0 && result[1] === 1 && result[2] === 2 &&
+  result[3] === 3 && result[4] === 4;
+"#;
+
 #[test]
 fn array_of_is_stable_for_every_dispatch_batch() {
     assert_array_of_source::<1>(ARRAY_OF_SOURCE, 1_871, false);
@@ -124,6 +138,11 @@ fn array_from_observes_array_mutation_and_number_boundaries() {
 #[test]
 fn array_from_consumes_generator_fibers() {
     assert_array_of_source::<8>(ARRAY_FROM_GENERATOR_SOURCE, 1_911, false);
+}
+
+#[test]
+fn array_from_preserves_a_primitive_iterator_receiver_across_generator_fibers() {
+    assert_array_of_source::<8>(ARRAY_FROM_PRIMITIVE_GENERATOR_SOURCE, 1_912, false);
 }
 
 /// Compiles and executes one Array.of fixture under a selected dispatch and GC policy.

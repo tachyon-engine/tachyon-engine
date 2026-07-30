@@ -2573,6 +2573,11 @@ impl Isolate {
         self.realm.iterator_drop = Some(drop);
         let drop_atom = self.intern_intrinsic_name(b"drop")?;
         self.set_intrinsic_data_property(iterator_prototype, drop_atom, drop, true)?;
+        let flat_map =
+            self.allocate_native_function(NativeFunction::IteratorFlatMap, function_object())?;
+        self.realm.iterator_flat_map = Some(flat_map);
+        let flat_map_atom = self.intern_intrinsic_name(b"flatMap")?;
+        self.set_intrinsic_data_property(iterator_prototype, flat_map_atom, flat_map, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,
