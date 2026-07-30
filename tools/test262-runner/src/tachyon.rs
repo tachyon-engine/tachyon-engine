@@ -1,4 +1,11 @@
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    future::Future,
+    num::NonZeroU32,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Waker},
+};
 
 use tachyon_compiler::{
     CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
@@ -7,8 +14,8 @@ use tachyon_gc::HeapLimit;
 use tachyon_vm::{
     AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, HostProviderError,
     HostProviders, Isolate, IsolateConfig, LoadedModule, ModuleError, ModuleIdentity,
-    ModuleLoadError, ModuleLoader, RealmId, RealmLimits, ResolvedModuleRequest, RunOutcome,
-    StackLimits, TimeZoneProvider, Value, WallClockProvider,
+    ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId, RealmLimits, ResolvedModuleRequest,
+    RunOutcome, StackLimits, TimeZoneProvider, Value, WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -241,6 +248,15 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         }
     } else if let Some(outcome) = execute_module(&mut isolate, &module) {
         return outcome;
+    } else {
+        let root = match ModuleIdentity::try_new(&request.test.body.name) {
+            Ok(identity) => identity,
+            Err(error) => return unsupported(format!("invalid script identity: {error:?}")),
+        };
+        let mut loader = Test262ModuleLoader::for_script(root, &request.test.modules);
+        if let Some(outcome) = drive_test262_work(&mut isolate, &mut loader, None) {
+            return outcome;
+        }
     }
     if request.is_async {
         return execute_async_probe(&mut isolate);
@@ -355,11 +371,98 @@ fn execute_source_module(
         Ok(root_id) => root_id,
         Err(error) => return Some(classify_module_load_error(error)),
     };
-    match isolate.evaluate_module(root_id) {
-        Ok(RunOutcome::Completed(_)) => None,
-        Ok(outcome) => classify_run_outcome(isolate, outcome),
-        Err(error) => Some(unsupported(format!("module evaluation failed: {error:?}"))),
+    let evaluation = match isolate.evaluate_module_promise(root_id) {
+        Ok(promise) => promise,
+        Err(error) => {
+            return Some(unsupported(format!(
+                "module evaluation startup failed: {error:?}"
+            )));
+        }
+    };
+    drive_test262_work(isolate, &mut loader, Some(evaluation))
+}
+
+/// Pumps the unified VM driver and services owned dynamic-import requests between polls.
+fn drive_test262_work(
+    isolate: &mut Isolate,
+    loader: &mut Test262ModuleLoader,
+    root_evaluation: Option<Value>,
+) -> Option<EngineOutcome> {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut targets = root_evaluation.into_iter().collect::<VecDeque<_>>();
+    let quantum = NonZeroU32::new(u32::MAX).expect("driver quantum is non-zero");
+    for _ in 0..EXECUTION_FUEL_LIMIT {
+        while let Some(request) = isolate.take_pending_dynamic_import() {
+            let import_promise = match isolate.load_dynamic_import_graph(loader, &request) {
+                Ok(module) => match isolate.complete_dynamic_import_success(request.id(), module) {
+                    Ok(promise) => promise,
+                    Err(error) => {
+                        return Some(unsupported(format!(
+                            "dynamic import completion failed: {error:?}"
+                        )));
+                    }
+                },
+                Err(_) => {
+                    let reason = match isolate
+                        .create_native_error(tachyon_vm::NativeErrorKind::Type, None)
+                    {
+                        Ok(reason) => reason,
+                        Err(error) => {
+                            return Some(unsupported(format!(
+                                "dynamic import error allocation failed: {error:?}"
+                            )));
+                        }
+                    };
+                    match isolate.complete_dynamic_import_failure(request.id(), reason) {
+                        Ok(promise) => promise,
+                        Err(error) => {
+                            return Some(unsupported(format!(
+                                "dynamic import rejection failed: {error:?}"
+                            )));
+                        }
+                    }
+                }
+            };
+            targets.push_back(import_promise);
+        }
+        let Some(&target) = targets.front() else {
+            match isolate.drive_jobs_once(quantum) {
+                Ok(true) => continue,
+                Ok(false) => return None,
+                Err(error) => {
+                    return Some(unsupported(format!("module job drain failed: {error:?}")));
+                }
+            }
+        };
+        let poll = {
+            let mut driver = match isolate.drive_promise(target, quantum) {
+                Ok(driver) => driver,
+                Err(error) => {
+                    return Some(unsupported(format!("module driver failed: {error:?}")));
+                }
+            };
+            Pin::new(&mut driver).poll(&mut context)
+        };
+        match poll {
+            core::task::Poll::Ready(Ok(PromiseOutcome::Fulfilled(_))) => {
+                targets.pop_front();
+            }
+            core::task::Poll::Ready(Ok(PromiseOutcome::Rejected(reason))) => {
+                if root_evaluation == Some(target) {
+                    return classify_run_outcome(isolate, RunOutcome::Thrown(reason));
+                }
+                targets.pop_front();
+            }
+            core::task::Poll::Ready(Err(error)) => {
+                return Some(unsupported(format!("module driver failed: {error:?}")));
+            }
+            core::task::Poll::Pending => {}
+        }
     }
+    Some(EngineOutcome::Timeout {
+        message: "Tachyon module driver exhausted its transition budget".into(),
+    })
 }
 
 /// Deterministic source-module loader with no filesystem or ambient host capabilities.
@@ -387,6 +490,14 @@ impl Test262ModuleLoader {
             sources: fixtures.to_vec(),
         }
     }
+
+    fn for_script(root: ModuleIdentity, fixtures: &[SourceUnit]) -> Self {
+        Self {
+            root,
+            root_module: None,
+            sources: fixtures.to_vec(),
+        }
+    }
 }
 
 impl ModuleLoader for Test262ModuleLoader {
@@ -403,9 +514,7 @@ impl ModuleLoader for Test262ModuleLoader {
             )
         })?;
         let identity = if specifier.starts_with("./") || specifier.starts_with("../") {
-            let referrer = referrer.ok_or_else(|| {
-                Test262ModuleLoaderError::Invalid("relative module request has no referrer".into())
-            })?;
+            let referrer = referrer.unwrap_or(&self.root);
             let referrer = String::from_utf8(referrer.as_bytes().to_vec()).map_err(|_| {
                 Test262ModuleLoaderError::Invalid("module referrer is not UTF-8".into())
             })?;

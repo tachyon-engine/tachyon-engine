@@ -686,7 +686,7 @@ impl Isolate {
     }
 
     /// Allocates a branded Error and installs the optional non-enumerable message property.
-    pub(crate) fn create_native_error(
+    pub fn create_native_error(
         &mut self,
         kind: NativeErrorKind,
         message: Option<Value>,

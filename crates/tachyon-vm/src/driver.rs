@@ -79,6 +79,14 @@ impl Future for VmDriver<'_> {
 }
 
 impl Isolate {
+    /// Advances at most one isolate-owned scheduler transition for embedding job pumps.
+    pub fn drive_jobs_once(&mut self, quantum: NonZeroU32) -> Result<bool, ExecutionError> {
+        Ok(!matches!(
+            self.advance_driver(quantum.get())?,
+            DriverProgress::Pending
+        ))
+    }
+
     /// Creates a temporary Future over isolate-owned scheduler state.
     pub fn drive_promise(
         &mut self,
@@ -148,6 +156,9 @@ impl Isolate {
                 | PromiseCheckpointProgress::Completed(_)
                 | PromiseCheckpointProgress::Suspended => {}
             }
+            return Ok(DriverProgress::Progressed);
+        }
+        if self.advance_dynamic_import()? {
             return Ok(DriverProgress::Progressed);
         }
         Ok(DriverProgress::Pending)

@@ -457,11 +457,9 @@ impl Isolate {
         return_site: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         let state = self.async_function_state_reference(state_value)?;
-        self.fiber
-            .frames
-            .last_mut()
-            .ok_or(ExecutionError::MissingEnvironment)?
-            .pc = return_site;
+        if let Some(frame) = self.fiber.frames.last_mut() {
+            frame.pc = return_site;
+        }
         let caller = core::mem::take(&mut self.fiber);
         let (paused, destination, instruction) = self.take_async_function_pause(state, caller)?;
         self.fiber = paused;

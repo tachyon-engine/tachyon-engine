@@ -1500,6 +1500,9 @@ impl Isolate {
                         rejected,
                         return_site,
                     )?
+                } else if self.is_dynamic_import_promise(capability) {
+                    self.resume_dynamic_import_job(capability, argument, rejected)?;
+                    None
                 } else if self.resolve_function_object(handler).is_err() {
                     let site = self.promise_job_site(return_site)?;
                     let suspended = self

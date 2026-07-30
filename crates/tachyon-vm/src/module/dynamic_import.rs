@@ -4,7 +4,7 @@ use core::num::NonZeroU32;
 
 use tachyon_gc::{Trace, Tracer};
 
-use super::{ModuleError, ModuleEvaluationState, ModuleGraph, ModuleId};
+use super::{ModuleError, ModuleId};
 use crate::{ExecutionError, Isolate, PromiseState, Value, tuning::modules::*};
 
 /// Stable identity for one dynamic import handoff.
@@ -78,7 +78,6 @@ pub enum DynamicImportError {
     RequestLimit { limit: u32 },
     RequestIdExhausted,
     UnknownRequest(DynamicImportRequestId),
-    ModuleNotEvaluated(ModuleId),
 }
 
 #[derive(Debug)]
@@ -86,12 +85,15 @@ struct ActiveDynamicImport {
     id: DynamicImportRequestId,
     request: Option<DynamicImportRequest>,
     promise: Value,
+    module: Option<ModuleId>,
+    evaluation_promise: Option<Value>,
 }
 
 impl Trace for ActiveDynamicImport {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.promise.trace(tracer);
+        self.evaluation_promise.trace(tracer);
     }
 }
 
@@ -151,6 +153,8 @@ impl DynamicImportState {
             id,
             request: Some(request),
             promise,
+            module: None,
+            evaluation_promise: None,
         });
         self.next_id = next_id;
         Ok(id)
@@ -181,33 +185,71 @@ impl DynamicImportState {
             .map(|entry| entry.promise)
             .ok_or(DynamicImportError::UnknownRequest(id))
     }
+
+    fn attach_module(
+        &mut self,
+        id: DynamicImportRequestId,
+        module: ModuleId,
+    ) -> Result<(), DynamicImportError> {
+        let entry = self
+            .active
+            .iter_mut()
+            .find(|entry| entry.id == id && entry.request.is_none() && entry.module.is_none())
+            .ok_or(DynamicImportError::UnknownRequest(id))?;
+        entry.module = Some(module);
+        Ok(())
+    }
+
+    fn next_unstarted(&self) -> Option<(DynamicImportRequestId, ModuleId, Value)> {
+        self.active.iter().find_map(|entry| {
+            (entry.evaluation_promise.is_none())
+                .then(|| entry.module.map(|module| (entry.id, module, entry.promise)))
+                .flatten()
+        })
+    }
+
+    #[inline]
+    fn started_at(&self, index: usize) -> Option<(ModuleId, Value)> {
+        let entry = self.active.get(index)?;
+        entry.module.zip(entry.evaluation_promise)
+    }
+
+    #[inline]
+    fn active_len(&self) -> usize {
+        self.active.len()
+    }
+
+    fn set_evaluation_promise(
+        &mut self,
+        id: DynamicImportRequestId,
+        promise: Value,
+    ) -> Result<(), DynamicImportError> {
+        let entry = self
+            .active
+            .iter_mut()
+            .find(|entry| entry.id == id && entry.module.is_some())
+            .ok_or(DynamicImportError::UnknownRequest(id))?;
+        entry.evaluation_promise = Some(promise);
+        Ok(())
+    }
+
+    #[inline]
+    fn contains_promise(&self, promise: Value) -> bool {
+        self.active.iter().any(|entry| entry.promise == promise)
+    }
+
+    fn completion_for_promise(&self, promise: Value) -> Option<(DynamicImportRequestId, ModuleId)> {
+        self.active
+            .iter()
+            .find(|entry| entry.promise == promise && entry.evaluation_promise.is_some())
+            .and_then(|entry| entry.module.map(|module| (entry.id, module)))
+    }
 }
 
 impl Trace for DynamicImportState {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         for entry in &mut self.active {
             entry.trace(tracer);
-        }
-    }
-}
-
-impl ModuleGraph {
-    fn dynamic_import_outcome(
-        &self,
-        module: ModuleId,
-    ) -> Result<Result<(), Value>, DynamicImportError> {
-        let record = self
-            .record(module)
-            .map_err(|_| DynamicImportError::ModuleNotEvaluated(module))?;
-        match record.evaluation {
-            ModuleEvaluationState::Evaluated(_) => Ok(Ok(())),
-            ModuleEvaluationState::Errored(reason) => Ok(Err(reason)),
-            ModuleEvaluationState::Unevaluated
-            | ModuleEvaluationState::Waiting
-            | ModuleEvaluationState::Evaluating
-            | ModuleEvaluationState::AsyncEvaluating(_) => {
-                Err(DynamicImportError::ModuleNotEvaluated(module))
-            }
         }
     }
 }
@@ -242,7 +284,7 @@ impl Isolate {
         &mut self,
         id: DynamicImportRequestId,
         reason: Value,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Value, ExecutionError> {
         let promise = self
             .module_graph
             .dynamic_imports
@@ -253,31 +295,94 @@ impl Isolate {
             .dynamic_imports
             .remove(id)
             .map_err(dynamic_import_execution_error)?;
-        Ok(())
+        Ok(promise)
     }
 
-    /// Fulfills with an evaluated module namespace, or preserves module evaluation rejection.
+    /// Attaches the loaded module; the isolate-wide driver owns evaluation and settlement.
     pub fn complete_dynamic_import_success(
         &mut self,
         id: DynamicImportRequestId,
         module: ModuleId,
-    ) -> Result<(), ExecutionError> {
-        let outcome = self
-            .module_graph
-            .dynamic_import_outcome(module)
-            .map_err(dynamic_import_execution_error)?;
+    ) -> Result<Value, ExecutionError> {
         let promise = self
             .module_graph
             .dynamic_imports
             .dispatched_promise(id)
             .map_err(dynamic_import_execution_error)?;
-        match outcome {
-            Ok(()) => {
-                let namespace = self.get_module_namespace(module)?;
-                self.settle_promise(promise, PromiseState::Fulfilled, namespace)?;
-            }
-            Err(reason) => self.settle_promise(promise, PromiseState::Rejected, reason)?,
+        self.module_graph
+            .dynamic_imports
+            .attach_module(id, module)
+            .map_err(dynamic_import_execution_error)?;
+        Ok(promise)
+    }
+
+    /// Attaches one import to its cycle-root evaluation Promise through the FIFO reaction queue.
+    pub(crate) fn advance_dynamic_import(&mut self) -> Result<bool, ExecutionError> {
+        if let Some((id, module, promise)) = self.module_graph.dynamic_imports.next_unstarted() {
+            let evaluation = self
+                .evaluate_module_promise(module)
+                .map_err(|error| match error {
+                    super::ModuleEvaluationError::Graph(error) => ExecutionError::Module(error),
+                    super::ModuleEvaluationError::Execution(error) => error,
+                    super::ModuleEvaluationError::AsyncEvaluationPending(module) => {
+                        ExecutionError::Module(ModuleError::DynamicImportModuleNotEvaluated(module))
+                    }
+                })?;
+            self.perform_promise_then_with_capability(evaluation, None, None, promise)?;
+            self.module_graph
+                .dynamic_imports
+                .set_evaluation_promise(id, evaluation)
+                .map_err(dynamic_import_execution_error)?;
+            return Ok(true);
         }
+        let mut completable = None;
+        for index in 0..self.module_graph.dynamic_imports.active_len() {
+            let Some((module, evaluation)) = self.module_graph.dynamic_imports.started_at(index)
+            else {
+                continue;
+            };
+            if self
+                .module_graph
+                .evaluation_outcome(module)
+                .map_err(ExecutionError::Module)?
+                .is_some()
+            {
+                completable = Some((module, evaluation));
+                break;
+            }
+        }
+        let Some((_, evaluation)) = completable else {
+            return Ok(false);
+        };
+        let before = self.promise_snapshot(evaluation)?.state;
+        let root = self.module_graph.evaluation_root_for_promise(evaluation);
+        self.settle_completed_module_promise(root, evaluation)?;
+        Ok(before != self.promise_snapshot(evaluation)?.state)
+    }
+
+    #[inline]
+    pub(crate) fn is_dynamic_import_promise(&self, promise: Value) -> bool {
+        self.module_graph.dynamic_imports.contains_promise(promise)
+    }
+
+    /// Runs the internal ContinueDynamicImport reaction after module evaluation settles.
+    pub(crate) fn resume_dynamic_import_job(
+        &mut self,
+        promise: Value,
+        reason: Value,
+        rejected: bool,
+    ) -> Result<(), ExecutionError> {
+        let (id, module) = self
+            .module_graph
+            .dynamic_imports
+            .completion_for_promise(promise)
+            .ok_or(ExecutionError::Module(ModuleError::InvalidLinkState))?;
+        let (state, result) = if rejected {
+            (PromiseState::Rejected, reason)
+        } else {
+            (PromiseState::Fulfilled, self.get_module_namespace(module)?)
+        };
+        self.settle_promise(promise, state, result)?;
         self.module_graph
             .dynamic_imports
             .remove(id)
@@ -330,9 +435,6 @@ fn dynamic_import_execution_error(error: DynamicImportError) -> ExecutionError {
         }
         DynamicImportError::RequestIdExhausted => ModuleError::DynamicImportRequestIdExhausted,
         DynamicImportError::UnknownRequest(id) => ModuleError::UnknownDynamicImportRequest(id),
-        DynamicImportError::ModuleNotEvaluated(module) => {
-            ModuleError::DynamicImportModuleNotEvaluated(module)
-        }
     };
     ExecutionError::Module(error)
 }

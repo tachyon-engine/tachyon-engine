@@ -256,6 +256,78 @@ fn async_function_state_survives_forced_major_collection() {
     assert_async_function_source::<16>(true);
 }
 
+/// Resumes an awaited async activation when an embedding job pump has no caller frame.
+#[test]
+fn async_await_resumes_from_an_idle_embedding_checkpoint() {
+    let setup = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_050),
+                SourceName::new("idle-async-resume"),
+                MediaType::JavaScript,
+                Arc::from(
+                    "var result = 0; var gate = new Promise(function(resolve) {}); async function run() { result = await gate; } run(); gate;",
+                ),
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let assertion = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_051),
+                SourceName::new("idle-async-result"),
+                MediaType::JavaScript,
+                Arc::from("result;"),
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let gate_reader = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(3_052),
+                SourceName::new("idle-async-gate"),
+                MediaType::JavaScript,
+                Arc::from("gate;"),
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let mut isolate = Isolate::new(IsolateConfig::new(
+        AtomTableConfig::new(2_048, 2 * 1024 * 1024, AtomHashSeed::new(39, 40)),
+        HeapLimit::new(128 * SPAN_SIZE_BYTES),
+        StackLimits::new(96, 8_192),
+        RealmLimits::new(96, 2_048),
+    ))
+    .unwrap();
+    let budget = ExecutionBudget {
+        fuel: 65_536,
+        quantum: 65_536,
+    };
+    let RunOutcome::Completed(_) = isolate.execute(&setup, budget).unwrap() else {
+        panic!("async setup did not complete");
+    };
+    let RunOutcome::Completed(gate) = isolate.execute(&gate_reader, budget).unwrap() else {
+        panic!("gate reader did not complete");
+    };
+    assert_eq!(
+        isolate.promise_snapshot(gate).unwrap().state,
+        PromiseState::Pending
+    );
+    isolate
+        .settle_promise(gate, PromiseState::Fulfilled, Value::from_i32(7))
+        .unwrap();
+    while isolate
+        .drive_jobs_once(core::num::NonZeroU32::new(4).unwrap())
+        .unwrap()
+    {}
+    let RunOutcome::Completed(result) = isolate.execute(&assertion, budget).unwrap() else {
+        panic!("async assertion did not complete");
+    };
+    assert_eq!(result.as_i32(), Some(7));
+}
+
 #[test]
 fn async_completion_precedence_runs_for_every_dispatch_batch() {
     assert_async_completion_matrix::<1>(false);

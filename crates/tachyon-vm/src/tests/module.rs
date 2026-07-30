@@ -27,6 +27,20 @@ fn public_name(value: &str) -> ModuleExportName {
     ModuleExportName::try_new(value).expect("test module export name allocates")
 }
 
+/// Polls the executor-neutral driver until the selected Promise reaches a terminal state.
+fn drive_to_outcome(isolate: &mut Isolate, promise: Value) -> PromiseOutcome {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    loop {
+        let mut driver = isolate
+            .drive_promise(promise, NonZeroU32::new(4).unwrap())
+            .unwrap();
+        if let core::task::Poll::Ready(Ok(outcome)) = Pin::new(&mut driver).poll(&mut context) {
+            return outcome;
+        }
+    }
+}
+
 fn request_list(values: &[&str]) -> Box<[ModuleIdentity]> {
     values
         .iter()
@@ -2417,6 +2431,10 @@ fn dynamic_import_success_retains_promise_through_forced_major_collection() {
         isolate.create_ordinary_object().unwrap();
     }
     isolate.complete_dynamic_import_success(id, module).unwrap();
+    assert!(matches!(
+        drive_to_outcome(&mut isolate, promise),
+        PromiseOutcome::Fulfilled(_)
+    ));
     let snapshot = isolate.promise_snapshot(promise).unwrap();
     assert_eq!(snapshot.state, PromiseState::Fulfilled);
     assert!(isolate.is_module_namespace_value(snapshot.result));
@@ -2492,7 +2510,7 @@ fn dynamic_import_failure_settles_only_the_selected_request() {
 }
 
 #[test]
-fn dynamic_import_pending_module_completion_is_retriable() {
+fn dynamic_import_success_evaluates_an_unevaluated_module() {
     let mut isolate = fixtures::test_isolate();
     let module = isolate
         .module_graph
@@ -2502,21 +2520,66 @@ fn dynamic_import_pending_module_completion_is_retriable() {
     let (id, promise) = isolate.enqueue_dynamic_import(&[0x61], None, &[]).unwrap();
     let _ = isolate.take_pending_dynamic_import().unwrap();
 
-    assert_eq!(
-        isolate.complete_dynamic_import_success(id, module),
-        Err(ExecutionError::Module(
-            ModuleError::DynamicImportModuleNotEvaluated(module)
-        ))
-    );
+    isolate.complete_dynamic_import_success(id, module).unwrap();
     assert_eq!(
         isolate.promise_snapshot(promise).unwrap().state,
         PromiseState::Pending
     );
-    isolate
-        .complete_dynamic_import_failure(id, Value::from_i32(9))
+    assert!(matches!(
+        drive_to_outcome(&mut isolate, promise),
+        PromiseOutcome::Fulfilled(_)
+    ));
+    let snapshot = isolate.promise_snapshot(promise).unwrap();
+    assert!(isolate.is_module_namespace_value(snapshot.result));
+}
+
+#[test]
+fn dynamic_imports_do_not_block_behind_the_first_evaluation() {
+    let mut isolate = fixtures::test_isolate();
+    let gate = isolate
+        .create_promise(
+            PromiseState::Pending,
+            Value::from_immediate(Immediate::Undefined),
+        )
         .unwrap();
+    let first_source = LoadedModule::precompiled(compile_source_module(
+        2_930,
+        "memory:first",
+        "export let gate; await gate;",
+    ));
+    let second_source = LoadedModule::precompiled(compile_source_module(
+        2_931,
+        "memory:second",
+        "export const value = 2;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (specifier("memory:first"), first_source),
+        (specifier("memory:second"), second_source),
+    ]);
+    let first = isolate
+        .load_module_graph(&mut loader, &specifier("memory:first"))
+        .unwrap();
+    let second = isolate
+        .load_module_graph(&mut loader, &specifier("memory:second"))
+        .unwrap();
+    isolate.write_module_binding(first, "gate", gate).unwrap();
+    let (first_id, first_promise) = isolate.enqueue_dynamic_import(&[0x61], None, &[]).unwrap();
+    let (second_id, second_promise) = isolate.enqueue_dynamic_import(&[0x62], None, &[]).unwrap();
+    let _ = isolate.take_pending_dynamic_import().unwrap();
+    let _ = isolate.take_pending_dynamic_import().unwrap();
+    isolate
+        .complete_dynamic_import_success(first_id, first)
+        .unwrap();
+    isolate
+        .complete_dynamic_import_success(second_id, second)
+        .unwrap();
+
+    assert!(matches!(
+        drive_to_outcome(&mut isolate, second_promise),
+        PromiseOutcome::Fulfilled(_)
+    ));
     assert_eq!(
-        isolate.promise_snapshot(promise).unwrap().result.as_i32(),
-        Some(9)
+        isolate.promise_snapshot(first_promise).unwrap().state,
+        PromiseState::Pending
     );
 }
