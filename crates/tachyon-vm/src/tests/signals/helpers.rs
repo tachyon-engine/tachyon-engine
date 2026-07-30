@@ -289,7 +289,9 @@ pub(super) fn assert_signal_cross_realm<const N: usize>(forced_major: bool) {
         8_500 + N as u32,
         "signals-cross-realm",
     );
-    let mut isolate = test_isolate();
+    // Two fully initialized Realms plus descriptor-heavy Signals need ten logical spans now that
+    // String concat owns an independently registered continuation payload.
+    let mut isolate = test_isolate_with_heap_spans(10);
     let (_, child_global) = isolate.create_realm().expect("child Realm initializes");
     if forced_major {
         isolate

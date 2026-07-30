@@ -941,6 +941,22 @@ impl Isolate {
                     self.write(base, operands[0], value)?;
                 }
             }
+            Opcode::ToString => {
+                let input = self.read(base, operands[1])?;
+                if self.is_object_value(input) {
+                    self.dispatch_object_primitive_conversion(
+                        ConversionConsumer::ToString,
+                        base,
+                        operands[0],
+                        Value::from_immediate(Immediate::Undefined),
+                        input,
+                        instruction_offset,
+                    )?;
+                } else {
+                    let value = self.primitive_to_string_value(input)?;
+                    self.write(base, operands[0], value)?;
+                }
+            }
             Opcode::BitwiseNot => {
                 let input = self.read(base, operands[1])?;
                 if self.is_object_value(input) {
@@ -5192,6 +5208,9 @@ impl Isolate {
                         true,
                     );
                 }
+                FunctionExecutable::Native(NativeFunction::SymbolConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::RegExpConstructor) => {
                     let regexp = self.create_regexp_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, regexp);
@@ -6177,8 +6196,7 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::StringConcat) => {
-                    let value = self.string_concat(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_concat(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringRepeat) => {
                     let value = self.string_repeat(&site)?;
@@ -6227,6 +6245,8 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::StringConstructor
+                    | NativeFunction::SymbolConstructor
+                    | NativeFunction::SymbolFor
                     | NativeFunction::NumberToExponential
                     | NativeFunction::NumberToFixed
                     | NativeFunction::NumberToPrecision
@@ -6389,15 +6409,9 @@ impl Isolate {
                     let object = self.create_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
-                FunctionExecutable::Native(
-                    native @ (NativeFunction::SymbolConstructor
-                    | NativeFunction::BooleanConstructor),
-                ) => {
+                FunctionExecutable::Native(NativeFunction::BooleanConstructor) => {
+                    let native = NativeFunction::BooleanConstructor;
                     let value = self.primitive_constructor_value(native, &site)?;
-                    return self.write(site.caller_base, site.destination, value);
-                }
-                FunctionExecutable::Native(NativeFunction::SymbolFor) => {
-                    let value = self.symbol_for(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::SymbolKeyFor) => {
@@ -9635,6 +9649,7 @@ pub(crate) unsafe fn execute_verified_hot_instruction(
                 registers.write(operands[0], value);
                 HotControl::Continue
             }
+            Opcode::ToString => HotControl::Slow,
             Opcode::ToPropertyKey => {
                 let key = registers.read(operands[1]);
                 let guard = registers.read(operands[2]);

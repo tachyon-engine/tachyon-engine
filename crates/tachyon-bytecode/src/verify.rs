@@ -941,6 +941,7 @@ fn verify_instruction(
         | Opcode::Negate
         | Opcode::Typeof
         | Opcode::ToNumber
+        | Opcode::ToString
         | Opcode::BitwiseNot
         | Opcode::TypeofScope
         | Opcode::CreateForInIterator

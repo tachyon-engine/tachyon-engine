@@ -79,6 +79,7 @@ mod signals;
 mod string_case;
 mod string_replace_all;
 mod string_split;
+mod symbol;
 mod tagged_template;
 mod typed_array;
 mod typed_array_at;

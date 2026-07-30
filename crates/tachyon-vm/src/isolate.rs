@@ -630,6 +630,9 @@ impl Isolate {
             pending_array_join: registry
                 .try_register("PendingArrayJoin")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_string_concat: registry
+                .try_register("PendingStringConcat")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_array_flat: registry
                 .try_register("PendingArrayFlat")
                 .map_err(IsolateCreationError::TypeRegistration)?,

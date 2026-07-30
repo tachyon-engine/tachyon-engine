@@ -130,12 +130,9 @@ impl Isolate {
         })
     }
 
-    /// Implements Symbol.for against the global registry shared by every Realm in this Agent.
-    pub(crate) fn symbol_for(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let argument = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let key = self.primitive_string_value(Some(argument))?;
+    /// Resolves an already converted String key in the registry shared by every Realm in this Agent.
+    pub(crate) fn symbol_for_string(&mut self, key: Value) -> Result<Value, ExecutionError> {
+        debug_assert!(self.is_string_value(key));
         let atom = self.property_key_atom(key)?;
         if let Some(root) = self
             .agent

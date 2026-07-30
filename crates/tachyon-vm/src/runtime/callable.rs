@@ -953,6 +953,7 @@ impl NativeFunction {
                 | Self::SignalWatcherConstructor
                 | Self::ObjectConstructor
                 | Self::StringConstructor
+                | Self::SymbolConstructor
                 | Self::RegExpConstructor
                 | Self::NumberConstructor
                 | Self::BigIntConstructor
@@ -983,7 +984,8 @@ impl NativeFunction {
     #[inline(always)]
     pub(crate) const fn has_default_prototype(self) -> bool {
         matches!(self, Self::TypedArrayBaseConstructor)
-            || (self.is_constructor() && !matches!(self, Self::ProxyConstructor))
+            || (self.is_constructor()
+                && !matches!(self, Self::ProxyConstructor | Self::SymbolConstructor))
     }
 
     #[inline(always)]
@@ -2387,6 +2389,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_copy_within: GcType<PendingArrayCopyWithin>,
     pub(crate) pending_array_fill: GcType<PendingArrayFill>,
     pub(crate) pending_array_join: GcType<PendingArrayJoin>,
+    pub(crate) pending_string_concat: GcType<PendingStringConcat>,
     pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,

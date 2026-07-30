@@ -319,6 +319,7 @@ pub enum HirExpressionKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirUnaryOperator {
     Plus,
+    ToString,
     Negate,
     Not,
     BitwiseNot,
@@ -403,6 +404,13 @@ pub(super) fn lower_expression(
                 .zip(template.quasis.iter().skip(1))
             {
                 let expression = lower_expression(expression, source, semantic, functions)?;
+                let expression = HirExpression {
+                    span: expression.span,
+                    kind: HirExpressionKind::Unary {
+                        operator: HirUnaryOperator::ToString,
+                        argument: Box::new(expression),
+                    },
+                };
                 accumulated = HirExpression {
                     span,
                     kind: HirExpressionKind::Binary {

@@ -321,9 +321,11 @@ pub enum Opcode {
     LoadTemplateObject = 137,
     /// Applies the non-observable object-literal `__proto__` prototype initialization rule.
     SetObjectLiteralPrototype = 138,
+    /// Applies ECMAScript ToString with the string preferred type.
+    ToString = 139,
 }
 
-pub(super) const OPCODE_COUNT: usize = 139;
+pub(super) const OPCODE_COUNT: usize = 140;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -464,10 +466,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // DynamicImport
     2, // LoadTemplateObject
     2, // SetObjectLiteralPrototype
+    2, // ToString
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::SetObjectLiteralPrototype as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::ToString as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -652,6 +655,7 @@ impl Opcode {
             72 => Some(Self::DynamicImport),
             73 => Some(Self::LoadTemplateObject),
             74 => Some(Self::SetObjectLiteralPrototype),
+            75 => Some(Self::ToString),
             _ => None,
         }
     }

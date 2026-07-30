@@ -72,6 +72,7 @@ mod regexp_replace;
 mod regexp_search;
 mod runtime;
 mod string;
+mod string_concat;
 mod string_replace_all;
 mod string_split;
 mod tagged_template;
@@ -318,6 +319,7 @@ use runtime::{
         TypeofStrings,
     },
 };
+use string_concat::PendingStringConcat;
 use weak_collection::{WeakCollection, WeakMapObject, WeakRefObject, WeakSetObject};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.

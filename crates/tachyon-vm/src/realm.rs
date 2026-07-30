@@ -1205,6 +1205,12 @@ impl Isolate {
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
         self.initialize_remaining_well_known_symbols(symbol_constructor)?;
+        self.define_intrinsic_to_string_tag(
+            self.realm
+                .symbol_prototype
+                .expect("Symbol prototype initializes before its toStringTag"),
+            b"Symbol",
+        )?;
         self.install_species_accessor(regexp_constructor, function_prototype)?;
         let regexp_split = allocate(self, NativeFunction::RegExpSplit)?;
         let split_symbol = self
@@ -3289,6 +3295,7 @@ impl Isolate {
         )?;
         self.realm.map_constructor = Some(map);
         self.set_function_prototype(map, map_prototype)?;
+        self.install_species_accessor(map, function_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(map_prototype, constructor_atom, map, true)?;
         for (name, native) in [
@@ -3349,6 +3356,7 @@ impl Isolate {
         )?;
         self.realm.set_constructor = Some(set);
         self.set_function_prototype(set, set_prototype)?;
+        self.install_species_accessor(set, function_prototype)?;
         self.set_intrinsic_data_property(set_prototype, constructor_atom, set, true)?;
         for (name, native) in [
             (b"add".as_slice(), NativeFunction::SetAdd),

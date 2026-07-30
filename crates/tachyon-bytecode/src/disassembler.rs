@@ -110,6 +110,7 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         | Opcode::Negate
         | Opcode::Typeof
         | Opcode::ToNumber
+        | Opcode::ToString
         | Opcode::BitwiseNot
         | Opcode::CreateForInIterator
         | Opcode::ForInNext

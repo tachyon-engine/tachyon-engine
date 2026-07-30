@@ -167,6 +167,8 @@ const _: [(); 1] = [(); core::mem::size_of::<BuiltinPropertyKeyConsumer>()];
 #[repr(u8)]
 pub(crate) enum ConversionNativeFunction {
     StringConstructor,
+    SymbolConstructor,
+    SymbolFor,
     NumberConstructor,
     BigIntConstructor,
     BigIntAsIntN,
@@ -199,6 +201,8 @@ impl ConversionNativeFunction {
     pub(crate) const fn from_native(native: NativeFunction) -> Option<Self> {
         match native {
             NativeFunction::StringConstructor => Some(Self::StringConstructor),
+            NativeFunction::SymbolConstructor => Some(Self::SymbolConstructor),
+            NativeFunction::SymbolFor => Some(Self::SymbolFor),
             NativeFunction::NumberConstructor => Some(Self::NumberConstructor),
             NativeFunction::BigIntConstructor => Some(Self::BigIntConstructor),
             NativeFunction::BigIntAsIntN => Some(Self::BigIntAsIntN),
@@ -232,6 +236,8 @@ impl ConversionNativeFunction {
     pub(crate) const fn native(self) -> NativeFunction {
         match self {
             Self::StringConstructor => NativeFunction::StringConstructor,
+            Self::SymbolConstructor => NativeFunction::SymbolConstructor,
+            Self::SymbolFor => NativeFunction::SymbolFor,
             Self::NumberConstructor => NativeFunction::NumberConstructor,
             Self::BigIntConstructor => NativeFunction::BigIntConstructor,
             Self::BigIntAsIntN => NativeFunction::BigIntAsIntN,
@@ -267,6 +273,8 @@ pub(crate) enum ConversionConsumer {
     NativeCall(ConversionNativeFunction),
     NativeConstruct(ConversionNativeFunction),
     ToNumber,
+    ToString,
+    StringConcatElement,
     Negate,
     BitwiseNot,
     BinaryLeft(Opcode),
@@ -384,6 +392,8 @@ impl ConversionConsumer {
         match self {
             Self::NativeCall(native) | Self::NativeConstruct(native) => Some(native.native()),
             Self::ToNumber
+            | Self::ToString
+            | Self::StringConcatElement
             | Self::Negate
             | Self::BitwiseNot
             | Self::BinaryLeft(_)
@@ -501,6 +511,8 @@ impl ConversionConsumer {
         matches!(
             self,
             Self::NativeCall(ConversionNativeFunction::StringConstructor)
+                | Self::NativeCall(ConversionNativeFunction::SymbolConstructor)
+                | Self::NativeCall(ConversionNativeFunction::SymbolFor)
                 | Self::NativeCall(ConversionNativeFunction::StringToLowerCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToUpperCase)
                 | Self::NativeCall(ConversionNativeFunction::StringToLocaleLowerCase)
@@ -516,6 +528,8 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUri)
                 | Self::NativeCall(ConversionNativeFunction::GlobalEncodeUriComponent)
                 | Self::NativeCall(ConversionNativeFunction::DateParse)
+                | Self::ToString
+                | Self::StringConcatElement
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
                 | Self::ErrorConstructorMessage
@@ -568,6 +582,8 @@ impl ConversionConsumer {
         matches!(
             self,
             Self::ToNumber
+                | Self::ToString
+                | Self::StringConcatElement
                 | Self::Negate
                 | Self::BitwiseNot
                 | Self::BinaryLeft(_)

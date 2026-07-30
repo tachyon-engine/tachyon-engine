@@ -1605,10 +1605,23 @@ impl Isolate {
                 .object_snapshot(value)
                 .map(|(_, object)| object.prototype);
         }
-        Ok(self
-            .realm
-            .object_prototype
-            .expect("Object prototype initializes before primitive boxing"))
+        let prototype = if self.is_string_value(value) {
+            self.realm.string_prototype
+        } else if numeric_value(value).is_some() {
+            self.realm.number_prototype
+        } else if self.is_bigint_value(value) {
+            self.realm.bigint_prototype
+        } else if matches!(
+            value.as_immediate(),
+            Some(Immediate::True | Immediate::False)
+        ) {
+            self.realm.boolean_prototype
+        } else if self.is_symbol_value(value) {
+            self.realm.symbol_prototype
+        } else {
+            self.realm.object_prototype
+        };
+        Ok(prototype.expect("primitive prototype initializes before Object.getPrototypeOf"))
     }
 
     /// Creates the object, then delegates its optional descriptor map to the shared state machine.

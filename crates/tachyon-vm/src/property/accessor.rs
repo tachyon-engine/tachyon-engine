@@ -947,7 +947,13 @@ impl Isolate {
                 Ok(PropertyWrite::Complete(false))
             }
             Err(ExecutionError::NotObject(_))
-                if numeric_value(receiver).is_some() || self.is_bigint_value(receiver) =>
+                if numeric_value(receiver).is_some()
+                    || self.is_bigint_value(receiver)
+                    || self.is_symbol_value(receiver)
+                    || matches!(
+                        receiver.as_immediate(),
+                        Some(Immediate::True | Immediate::False)
+                    ) =>
             {
                 Ok(PropertyWrite::Complete(false))
             }

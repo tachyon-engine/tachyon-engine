@@ -110,6 +110,21 @@ impl Isolate {
         )
     }
 
+    /// Applies ordinary ToString to a primitive, rejecting Symbol unlike the explicit String call.
+    pub(crate) fn primitive_to_string_value(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        if self.is_string_value(value) {
+            return Ok(value);
+        }
+        let mut units = Vec::new();
+        self.append_primitive_string_units(value, &mut units)?;
+        self.allocate_runtime_string(
+            JsString::try_from_utf16(&units).map_err(ExecutionError::PropertyKeyString)?,
+        )
+    }
+
     /// Converts one primitive String argument while retaining an earlier managed edge.
     pub(crate) fn primitive_string_value_retaining(
         &mut self,
@@ -219,6 +234,9 @@ impl Isolate {
                 } else {
                     Value::from_immediate(Immediate::Undefined)
                 }
+            }
+            NativeFunction::SymbolConstructor | NativeFunction::SymbolFor => {
+                Value::from_immediate(Immediate::Undefined)
             }
             NativeFunction::StringIterator => Value::from_immediate(Immediate::Undefined),
             NativeFunction::NumberToExponential
@@ -483,6 +501,13 @@ impl Isolate {
                         return self.resume_dynamic_function_conversion(
                             continuation.site,
                             state,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::StringConcatElement {
+                        return self.resume_string_concat_conversion(
+                            continuation.site,
+                            continuation.receiver,
                             value,
                         );
                     }
@@ -1372,6 +1397,10 @@ impl Isolate {
             };
             return Ok(match consumer {
                 ConversionConsumer::ToNumber => self.convert_to_number(argument)?,
+                ConversionConsumer::ToString => self.primitive_to_string_value(argument)?,
+                ConversionConsumer::StringConcatElement => {
+                    unreachable!("String concat conversion resumes inside its state machine")
+                }
                 ConversionConsumer::Negate => self.numeric_primitive_negate(argument)?,
                 ConversionConsumer::BitwiseNot => self.numeric_primitive_bitwise_not(argument)?,
                 ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
@@ -1596,6 +1625,20 @@ impl Isolate {
                 } else {
                     Ok(string)
                 }
+            }
+            NativeFunction::SymbolConstructor => {
+                let Some(argument) =
+                    argument.filter(|value| value.as_immediate() != Some(Immediate::Undefined))
+                else {
+                    return self.allocate_symbol(None);
+                };
+                let description = self.primitive_to_string_value(argument)?;
+                self.allocate_symbol(Some(description))
+            }
+            NativeFunction::SymbolFor => {
+                let argument = argument.unwrap_or(Value::from_immediate(Immediate::Undefined));
+                let key = self.primitive_to_string_value(argument)?;
+                self.symbol_for_string(key)
             }
             NativeFunction::StringIterator => {
                 let string = self.primitive_string_value(argument)?;

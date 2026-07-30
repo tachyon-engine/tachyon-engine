@@ -101,6 +101,7 @@ fn operand_count_table_covers_every_opcode_once() {
                 Opcode::InitializeGlobalLexical,
                 Opcode::Typeof,
                 Opcode::ToNumber,
+                Opcode::ToString,
                 Opcode::BitwiseNot,
                 Opcode::CreateForInIterator,
                 Opcode::ForInNext,

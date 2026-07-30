@@ -439,36 +439,6 @@ impl Isolate {
         ))
     }
 
-    /// Concatenates every primitive argument after calculating one exact output capacity.
-    pub(crate) fn string_concat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
-        let mut capacity = self.string_value_length(site.this_value)?;
-        for index in 0..site.argument_count {
-            let argument = self
-                .call_argument(site, index)?
-                .expect("argument count is bounded");
-            capacity = capacity
-                .checked_add(self.primitive_string_unit_length(argument)?)
-                .filter(|length| *length <= u32::MAX as usize)
-                .ok_or(ExecutionError::InvalidStringLength)?;
-        }
-        let mut units = Vec::new();
-        units
-            .try_reserve_exact(capacity)
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        self.append_primitive_string_units(site.this_value, &mut units)?;
-        for index in 0..site.argument_count {
-            let argument = self
-                .call_argument(site, index)?
-                .expect("argument count is bounded");
-            self.append_primitive_string_units(argument, &mut units)?;
-        }
-        debug_assert_eq!(units.len(), capacity);
-        self.allocate_runtime_string(
-            JsString::try_from_owned_code_units(units)
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )
-    }
-
     /// Repeats the receiver after rejecting negative, infinite, and overlong results.
     pub(crate) fn string_repeat(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let units = self.string_receiver_units(site.this_value)?;
