@@ -596,10 +596,11 @@ pub(super) fn lower_expression(
                     };
                     let function =
                         lower_function_stencil(function, None, None, source, semantic, functions)?;
-                    functions
+                    let stencil = functions
                         .get_mut(function.index() as usize)
-                        .expect("new object accessor stencil remains published")
-                        .role = super::program::HirFunctionRole::Method;
+                        .expect("new object accessor stencil remains published");
+                    stencil.role = super::program::HirFunctionRole::Method;
+                    stencil.source_span = Some(source_span(property.span));
                     if property.kind == PropertyKind::Get {
                         HirObjectPropertyValue::Getter(function)
                     } else {
@@ -622,10 +623,11 @@ pub(super) fn lower_expression(
                     }
                     let function =
                         lower_function_stencil(function, None, None, source, semantic, functions)?;
-                    functions
+                    let stencil = functions
                         .get_mut(function.index() as usize)
-                        .expect("new object method stencil remains published")
-                        .role = super::program::HirFunctionRole::Method;
+                        .expect("new object method stencil remains published");
+                    stencil.role = super::program::HirFunctionRole::Method;
+                    stencil.source_span = Some(source_span(property.span));
                     HirObjectPropertyValue::Method(function)
                 } else {
                     HirObjectPropertyValue::Data(lower_expression(
@@ -969,6 +971,7 @@ pub(super) fn lower_class(
             functions.push(HirFunction {
                 id,
                 span: source_span(class.span),
+                source_span: Some(source_span(class.span)),
                 name: class_name.clone(),
                 self_binding: None,
                 parameters: Arc::from([]),
@@ -993,6 +996,7 @@ pub(super) fn lower_class(
     let stencil = functions
         .get_mut(constructor.index() as usize)
         .expect("new class constructor stencil is published at its stable index");
+    stencil.source_span = Some(source_span(class.span));
     if stencil.kind == super::program::HirFunctionKind::Ordinary {
         stencil.kind = if class.super_class.is_some() {
             super::program::HirFunctionKind::DerivedClassConstructor
@@ -1057,6 +1061,7 @@ pub(super) fn lower_class(
                         .expect("new private method stencil remains published");
                     stencil.strict = true;
                     stencil.role = super::program::HirFunctionRole::Method;
+                    stencil.source_span = Some(class_method_source_span(method, source));
                     if method.kind == oxc::ast::ast::MethodDefinitionKind::Method {
                         elements.push(HirClassElement::PrivateMethod(HirPrivateMethod {
                             span: source_span(method.span),
@@ -1121,6 +1126,7 @@ pub(super) fn lower_class(
                     .expect("new class method stencil is published at its stable index");
                 stencil.strict = true;
                 stencil.role = super::program::HirFunctionRole::Method;
+                stencil.source_span = Some(class_method_source_span(method, source));
                 elements.push(HirClassElement::Method(HirClassMethod {
                     span: source_span(method.span),
                     key,
@@ -1162,6 +1168,7 @@ pub(super) fn lower_class(
                         functions.push(HirFunction {
                             id,
                             span: source_span(field.span),
+                            source_span: None,
                             name: None,
                             self_binding: None,
                             parameters: Arc::from([]),
@@ -1229,6 +1236,7 @@ pub(super) fn lower_class(
                 functions.push(HirFunction {
                     id: function,
                     span: source_span(block.span),
+                    source_span: None,
                     name: None,
                     self_binding: None,
                     parameters: Arc::from([]),
@@ -1283,6 +1291,46 @@ pub(super) fn lower_class(
         private_names: private_names.into(),
         elements: elements.into(),
     })
+}
+
+/// Removes the class-only `static` modifier and its following trivia from method source text.
+fn class_method_source_span(
+    method: &oxc::ast::ast::MethodDefinition<'_>,
+    source: &SourceText,
+) -> SourceSpan {
+    let span = source_span(method.span);
+    if !method.r#static {
+        return span;
+    }
+    let start = span.start as usize;
+    let after_static = start.saturating_add("static".len());
+    let text = source.text();
+    if text.get(start..after_static) != Some("static") {
+        return span;
+    }
+    SourceSpan {
+        start: skip_source_trivia(text, after_static, span.end as usize) as u32,
+        end: span.end,
+    }
+}
+
+/// Advances over whitespace and comments without normalizing the retained source backing.
+fn skip_source_trivia(source: &str, mut offset: usize, end: usize) -> usize {
+    while offset < end {
+        let tail = &source[offset..end];
+        if tail.starts_with("//") {
+            offset += tail.find(['\n', '\r']).unwrap_or(tail.len());
+        } else if tail.starts_with("/*") {
+            offset += tail.find("*/").map_or(tail.len(), |length| length + 2);
+        } else if let Some(character) = tail.chars().next()
+            && character.is_whitespace()
+        {
+            offset += character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    offset
 }
 
 /// Resolves one private declaration to a stable module-local class/element identity.

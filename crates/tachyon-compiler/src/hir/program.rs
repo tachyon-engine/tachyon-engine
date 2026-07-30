@@ -136,6 +136,8 @@ pub struct HirFunctionDeclaration {
 pub struct HirFunction {
     pub id: FunctionStencilId,
     pub span: SourceSpan,
+    /// Exact grammar-production range exposed by `Function.prototype.toString`.
+    pub source_span: Option<SourceSpan>,
     pub name: Option<Arc<str>>,
     /// The immutable lexical name visible only inside a named function expression.
     pub self_binding: Option<HirBinding>,

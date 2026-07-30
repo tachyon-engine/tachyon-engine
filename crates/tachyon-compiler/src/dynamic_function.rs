@@ -41,7 +41,7 @@ pub(super) fn compile(
     let prefix = kind.prefix();
     let parameter_check = format!("({prefix} __tachyon_validate({parameters}\n){{}})");
     let body_check = format!("({prefix} __tachyon_validate(){{\n{body}\n}})");
-    let combined = format!("({prefix} anonymous({parameters}\n){{\n{body}\n}})");
+    let combined = format!("({prefix} anonymous({parameters}\n) {{\n{body}\n}})");
     let options = CompileOptions {
         source_mode: SourceMode::Script,
         direct_eval: false,

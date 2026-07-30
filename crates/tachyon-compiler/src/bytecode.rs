@@ -1301,66 +1301,68 @@ fn lower_function(
         .checked_add(1)
         .map(FunctionId::new)
         .ok_or(CompileError::RegisterOverflow)?;
-    Ok(CompiledFunctionTemplate::new(
-        function_id,
-        bytecode,
-        FunctionMetadata {
-            kind: match function.kind {
-                HirFunctionKind::Ordinary => FunctionKind::Ordinary,
-                HirFunctionKind::Async => FunctionKind::Async,
-                HirFunctionKind::Generator => FunctionKind::Generator,
-                HirFunctionKind::AsyncGenerator => FunctionKind::AsyncGenerator,
-                HirFunctionKind::DerivedClassConstructor
-                | HirFunctionKind::DefaultDerivedConstructor => {
-                    FunctionKind::DerivedClassConstructor
-                }
-                HirFunctionKind::BaseClassConstructor | HirFunctionKind::DefaultBaseConstructor => {
-                    FunctionKind::BaseClassConstructor
-                }
-            },
-            role: match function.role {
-                crate::HirFunctionRole::Ordinary => tachyon_bytecode::FunctionRole::Ordinary,
-                crate::HirFunctionRole::Method => tachyon_bytecode::FunctionRole::Method,
-                crate::HirFunctionRole::ClassFieldInitializer => {
-                    tachyon_bytecode::FunctionRole::ClassFieldInitializer
-                }
-            },
-            strictness: if function.strict {
-                FunctionStrictness::Strict
-            } else {
-                FunctionStrictness::Sloppy
-            },
-            layout: FunctionLayout {
-                register_count,
-                argument_count: u32::try_from(function.parameters.len())
-                    .map_err(|_| CompileError::RegisterOverflow)?,
-                function_length: u32::try_from(function_length)
-                    .map_err(|_| CompileError::RegisterOverflow)?,
-                name_scope,
-                max_handler_depth: function_capacity.max_handler_depth,
-                max_completion_depth: function_capacity.max_completion_depth,
-                environment_slot_count: u32::try_from(
-                    environments.functions[function_index].slots.len(),
-                )
-                .map_err(|_| CompileError::BindingOverflow)?,
-                self_binding_slot,
-                needs_argument_source: lowerer.needs_argument_source,
-                has_rest_parameter: function.rest_parameter.is_some(),
-                simple_parameter_list: function
-                    .parameters
-                    .iter()
-                    .all(|parameter| matches!(parameter.kind, crate::HirPatternKind::Binding(_))),
-                ..FunctionLayout::default()
-            },
-            source_map,
-            handlers,
-            suspend_points,
-            feedback_sites: Default::default(),
-            binding_plan,
-            environment_record_kind: EnvironmentRecordKind::Function,
-            environment_slots,
+    let metadata = FunctionMetadata {
+        kind: match function.kind {
+            HirFunctionKind::Ordinary => FunctionKind::Ordinary,
+            HirFunctionKind::Async => FunctionKind::Async,
+            HirFunctionKind::Generator => FunctionKind::Generator,
+            HirFunctionKind::AsyncGenerator => FunctionKind::AsyncGenerator,
+            HirFunctionKind::DerivedClassConstructor
+            | HirFunctionKind::DefaultDerivedConstructor => FunctionKind::DerivedClassConstructor,
+            HirFunctionKind::BaseClassConstructor | HirFunctionKind::DefaultBaseConstructor => {
+                FunctionKind::BaseClassConstructor
+            }
         },
-    ))
+        role: match function.role {
+            crate::HirFunctionRole::Ordinary => tachyon_bytecode::FunctionRole::Ordinary,
+            crate::HirFunctionRole::Method => tachyon_bytecode::FunctionRole::Method,
+            crate::HirFunctionRole::ClassFieldInitializer => {
+                tachyon_bytecode::FunctionRole::ClassFieldInitializer
+            }
+        },
+        strictness: if function.strict {
+            FunctionStrictness::Strict
+        } else {
+            FunctionStrictness::Sloppy
+        },
+        layout: FunctionLayout {
+            register_count,
+            argument_count: u32::try_from(function.parameters.len())
+                .map_err(|_| CompileError::RegisterOverflow)?,
+            function_length: u32::try_from(function_length)
+                .map_err(|_| CompileError::RegisterOverflow)?,
+            name_scope,
+            max_handler_depth: function_capacity.max_handler_depth,
+            max_completion_depth: function_capacity.max_completion_depth,
+            environment_slot_count: u32::try_from(
+                environments.functions[function_index].slots.len(),
+            )
+            .map_err(|_| CompileError::BindingOverflow)?,
+            self_binding_slot,
+            needs_argument_source: lowerer.needs_argument_source,
+            has_rest_parameter: function.rest_parameter.is_some(),
+            simple_parameter_list: function
+                .parameters
+                .iter()
+                .all(|parameter| matches!(parameter.kind, crate::HirPatternKind::Binding(_))),
+            ..FunctionLayout::default()
+        },
+        source_map,
+        handlers,
+        suspend_points,
+        feedback_sites: Default::default(),
+        binding_plan,
+        environment_record_kind: EnvironmentRecordKind::Function,
+        environment_slots,
+    };
+    let template = CompiledFunctionTemplate::new(function_id, bytecode, metadata);
+    Ok(match function.source_span {
+        Some(span) => template.with_source_span(tachyon_bytecode::SourceSpan {
+            start: span.start,
+            end: span.end,
+        }),
+        None => template,
+    })
 }
 
 /// Freezes one exact-capacity owner metadata slice without changing bytecode or binding references.

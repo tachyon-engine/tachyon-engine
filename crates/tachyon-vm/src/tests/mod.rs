@@ -54,6 +54,7 @@ mod eval;
 mod finalization_registry;
 mod finally;
 mod fixtures;
+mod function_to_string;
 mod generator;
 mod grouping;
 mod module;

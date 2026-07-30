@@ -1163,7 +1163,8 @@ impl Isolate {
                     ToPrimitiveStage::ToString => self.intern_intrinsic_name(b"toString")?.into(),
                 };
                 self.push_native_conversion(continuation)?;
-                let property = match self.resolve_property_read(continuation.object, key) {
+                let property = match self.resolve_conversion_property_read(continuation.object, key)
+                {
                     Ok(property) => property,
                     Err(error) => {
                         self.pop_native_conversion()?;
@@ -1227,6 +1228,38 @@ impl Isolate {
             match self.call_conversion_callback(continuation, method, argument)? {
                 ConversionCallbackResult::Suspended => return Ok(()),
                 ConversionCallbackResult::Returned(value) => returned = Some(value),
+            }
+        }
+    }
+
+    /// Follows Proxy targets only when their `get` trap is observably absent.
+    fn resolve_conversion_property_read(
+        &mut self,
+        mut target: Value,
+        key: PropertyKey,
+    ) -> Result<PropertyRead, ExecutionError> {
+        loop {
+            match self.resolve_property_read_until_proxy(target, key)? {
+                PropertyReadResolution::Read(read) => return Ok(read),
+                PropertyReadResolution::Proxy(proxy) => {
+                    let snapshot = self.proxy_snapshot(proxy)?;
+                    if snapshot.handler.as_immediate() == Some(Immediate::Null) {
+                        return Err(ExecutionError::ProxyRevoked);
+                    }
+                    let get = self.intern_intrinsic_name(b"get")?;
+                    let trap = self.resolve_property_read(snapshot.handler, get.into())?;
+                    let absent = match trap {
+                        PropertyRead::Missing => true,
+                        PropertyRead::Data(value) => is_nullish(value),
+                        PropertyRead::Accessor(getter) => {
+                            getter.as_immediate() == Some(Immediate::Undefined)
+                        }
+                    };
+                    if !absent {
+                        return Err(ExecutionError::NotObject(proxy));
+                    }
+                    target = snapshot.target;
+                }
             }
         }
     }

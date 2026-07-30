@@ -161,6 +161,32 @@ fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
     assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(1)));
 }
 
+#[test]
+fn dynamic_function_to_string_returns_the_canonical_generated_source() {
+    let module = compile_source(
+        r#"var f = Function("a", " /* a */ b, c /* b */ //", "/* c */ ; /* d */ //");
+Function.prototype.toString.call(f) === "function anonymous(a, /* a */ b, c /* b */ //\n) {\n/* c */ ; /* d */ //\n}";"#,
+        1_173,
+    );
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("dynamic-function hooks install");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("dynamic Function source executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dynamic Function source returned {outcome:?}"
+    );
+}
+
 /// Proves native and bound callables retain `[[Realm]]` after all prototype clues are removed.
 #[test]
 fn dynamic_function_new_target_uses_explicit_callable_realm() {

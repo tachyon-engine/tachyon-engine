@@ -8,6 +8,7 @@ mod collections;
 mod data_view;
 mod date;
 mod finalization_registry;
+mod function;
 mod global;
 mod json;
 mod map_upsert;

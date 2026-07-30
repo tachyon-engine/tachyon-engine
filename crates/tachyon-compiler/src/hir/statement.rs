@@ -712,6 +712,7 @@ pub(super) fn lower_function_stencil(
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
+        source_span: Some(source_span(function.span)),
         name,
         self_binding,
         parameters: parameters.into(),
@@ -816,6 +817,7 @@ pub(super) fn lower_arrow_function_stencil(
     functions.push(HirFunction {
         id,
         span: source_span(function.span),
+        source_span: Some(source_span(function.span)),
         name: None,
         self_binding: None,
         parameters: parameters.into(),

@@ -545,6 +545,7 @@ pub struct CompiledFunctionTemplate {
     id: FunctionId,
     bytecode: Bytecode,
     metadata: FunctionMetadata,
+    source_range: FunctionSourceRange,
 }
 
 impl CompiledFunctionTemplate {
@@ -555,9 +556,54 @@ impl CompiledFunctionTemplate {
             id,
             bytecode,
             metadata,
+            source_range: FunctionSourceRange::UNAVAILABLE,
+        }
+    }
+
+    /// Attaches the exact ECMAScript grammar production used by `Function.prototype.toString`.
+    #[must_use]
+    pub const fn with_source_span(mut self, span: SourceSpan) -> Self {
+        self.source_range = FunctionSourceRange::new(span);
+        self
+    }
+}
+
+/// Compact source slice owned by immutable code rather than by each closure instance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+struct FunctionSourceRange {
+    start: u32,
+    end: u32,
+}
+
+impl FunctionSourceRange {
+    const UNAVAILABLE: Self = Self {
+        start: u32::MAX,
+        end: 0,
+    };
+
+    #[inline(always)]
+    const fn new(span: SourceSpan) -> Self {
+        Self {
+            start: span.start,
+            end: span.end,
+        }
+    }
+
+    #[inline(always)]
+    const fn span(self) -> Option<SourceSpan> {
+        if self.start == Self::UNAVAILABLE.start && self.end == Self::UNAVAILABLE.end {
+            None
+        } else {
+            Some(SourceSpan {
+                start: self.start,
+                end: self.end,
+            })
         }
     }
 }
+
+const _: [(); 8] = [(); std::mem::size_of::<FunctionSourceRange>()];
 
 /// A verified function whose code and metadata can be shared across isolates.
 #[derive(Clone, Debug)]
@@ -565,6 +611,7 @@ pub struct CompiledFunction {
     id: FunctionId,
     bytecode: VerifiedBytecode,
     metadata: FunctionMetadata,
+    source_range: FunctionSourceRange,
 }
 
 impl CompiledFunction {
@@ -631,6 +678,12 @@ impl CompiledFunction {
     #[must_use]
     pub fn environment_slots(&self) -> &[EnvironmentSlotMetadata] {
         &self.metadata.environment_slots
+    }
+
+    /// Returns the exact UTF-8 source range for this ECMAScript-defined function.
+    #[must_use]
+    pub const fn source_span(&self) -> Option<SourceSpan> {
+        self.source_range.span()
     }
 }
 
@@ -714,6 +767,11 @@ pub enum ModuleBuildError {
         offset: WordOffset,
     },
     SourceMapOutOfBounds {
+        function: FunctionId,
+        span: SourceSpan,
+        source_len: u32,
+    },
+    InvalidFunctionSourceRange {
         function: FunctionId,
         span: SourceSpan,
         source_len: u32,
@@ -915,6 +973,18 @@ impl CompiledModule {
                     role: template.metadata.role,
                 });
             }
+            if let Some(span) = template.source_range.span()
+                && (span.start > span.end
+                    || span.end > source_len
+                    || !source.is_char_boundary(span.start as usize)
+                    || !source.is_char_boundary(span.end as usize))
+            {
+                return Err(ModuleBuildError::InvalidFunctionSourceRange {
+                    function: template.id,
+                    span,
+                    source_len,
+                });
+            }
             if (matches!(
                 template.metadata.kind,
                 FunctionKind::Module
@@ -1000,6 +1070,7 @@ impl CompiledModule {
                 id: template.id,
                 bytecode,
                 metadata: template.metadata,
+                source_range: template.source_range,
             });
         }
         Ok(Self {

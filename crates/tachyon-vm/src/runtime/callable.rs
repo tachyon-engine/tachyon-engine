@@ -448,6 +448,7 @@ pub(crate) enum NativeFunction {
     FunctionPrototypeCall,
     FunctionPrototypeApply,
     FunctionPrototypeBind,
+    FunctionPrototypeToString,
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
     ErrorIsError,
@@ -1297,6 +1298,7 @@ impl NativeFunction {
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
             | Self::ThrowTypeError
+            | Self::FunctionPrototypeToString
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
@@ -1538,6 +1540,7 @@ impl NativeFunction {
             Self::FunctionPrototypeCall => "call",
             Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
+            Self::FunctionPrototypeToString => "toString",
             Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
             Self::ErrorConstructor(NativeErrorKind::Eval) => "EvalError",

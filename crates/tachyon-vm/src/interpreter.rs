@@ -6741,6 +6741,10 @@ impl Isolate {
                     let bound = self.create_bound_function(&site)?;
                     return self.write(site.caller_base, site.destination, bound);
                 }
+                FunctionExecutable::Native(NativeFunction::FunctionPrototypeToString) => {
+                    let result = self.function_prototype_to_string(site.this_value)?;
+                    return self.write(site.caller_base, site.destination, result);
+                }
                 FunctionExecutable::Native(native @ NativeFunction::FunctionConstructor)
                 | FunctionExecutable::Native(native @ NativeFunction::AsyncFunctionConstructor)
                 | FunctionExecutable::Native(

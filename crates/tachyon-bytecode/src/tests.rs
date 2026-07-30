@@ -763,6 +763,36 @@ fn compiled_module_rejects_sloppy_module_metadata() {
 }
 
 #[test]
+fn compiled_module_verifies_exact_function_source_ranges() {
+    for span in [
+        SourceSpan { start: 2, end: 1 },
+        SourceSpan { start: 0, end: 4 },
+        SourceSpan { start: 1, end: 2 },
+    ] {
+        let template = CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(encode_instruction(Opcode::ReturnUndefined, &[]).unwrap()),
+            FunctionMetadata::new(FunctionKind::Ordinary, FunctionLayout::default()),
+        )
+        .with_source_span(span);
+        assert!(matches!(
+            CompiledModule::new(
+                Arc::from("éx"),
+                Vec::new(),
+                Vec::new(),
+                vec![template],
+                FunctionId::new(0),
+            ),
+            Err(ModuleBuildError::InvalidFunctionSourceRange {
+                function,
+                span: actual,
+                source_len: 3,
+            }) if function == FunctionId::new(0) && actual == span
+        ));
+    }
+}
+
+#[test]
 /// Verifies role/kind combinations, strict class bodies, and role-gated super instructions.
 fn compiled_module_verifies_orthogonal_function_roles() {
     let mut method_words = encode_instruction(Opcode::LoadSuperBase, &[0]).unwrap();

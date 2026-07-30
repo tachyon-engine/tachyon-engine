@@ -1205,6 +1205,7 @@ impl Isolate {
         self.initialize_to_primitive_symbol(symbol_constructor)?;
         self.initialize_iterator_symbol(symbol_constructor)?;
         self.initialize_remaining_well_known_symbols(symbol_constructor)?;
+        self.install_species_accessor(regexp_constructor, function_prototype)?;
         let regexp_split = allocate(self, NativeFunction::RegExpSplit)?;
         let split_symbol = self
             .realm
@@ -1886,6 +1887,17 @@ impl Isolate {
         self.realm.function_prototype_bind = Some(bind);
         let bind_atom = self.intern_intrinsic_name(b"bind")?;
         self.set_intrinsic_data_property(function_prototype, bind_atom, bind, true)?;
+        let to_string = self.allocate_native_function(
+            NativeFunction::FunctionPrototypeToString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let to_string_atom = self.intern_intrinsic_name(b"toString")?;
+        self.set_intrinsic_data_property(function_prototype, to_string_atom, to_string, true)?;
         let constructor = self.allocate_native_function(
             NativeFunction::FunctionConstructor,
             OrdinaryObject {
