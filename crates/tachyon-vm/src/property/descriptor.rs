@@ -275,15 +275,13 @@ impl Isolate {
                 return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
             }
         }
-        if self.is_array_value(receiver)?
-            && key == PropertyKey::Atom(self.length_atom()?)
-            && let PropertyDescriptor::Data(data) = descriptor
-            && let Some(value) = data.value
-            && data.writable.is_none()
-            && data.enumerable.is_none()
-            && data.configurable.is_none()
-        {
-            return self.set_array_length_value(receiver, value);
+        if self.is_array_value(receiver)? {
+            if key == PropertyKey::Atom(self.length_atom()?) {
+                return self.array_set_length_descriptor(receiver, descriptor);
+            }
+            if let Some(index) = self.array_property_index(key) {
+                self.guard_array_index_growth(receiver, index)?;
+            }
         }
         if self.is_function_prototype_property(receiver, key) {
             if let PropertyDescriptor::Data(data) = descriptor
@@ -331,9 +329,10 @@ impl Isolate {
         if let Some(property) = property
             && let Some(current) = self.stored_property_from_snapshot(snapshot, property)?
         {
-            return self.redefine_present_property(
+            self.redefine_present_property(
                 receiver, object, snapshot, key, property, current, descriptor,
-            );
+            )?;
+            return self.grow_array_length_for_index_property(receiver, key);
         }
         if property.is_none()
             && let Some(current_value) = self.function_metadata_property(receiver, key)?
@@ -351,6 +350,190 @@ impl Isolate {
             return Err(ExecutionError::NonExtensibleObject(receiver));
         }
         self.define_missing_property(receiver, key, descriptor)
+    }
+
+    /// Implements Array exotic `[[DefineOwnProperty]]` for the non-configurable length slot.
+    ///
+    /// Shrinking is transactional in the ECMAScript sense: length is published first, indexed
+    /// properties are deleted in descending order, and a failed delete restores length to the
+    /// blocking index plus one. A requested `writable: false` is delayed until that transaction
+    /// either succeeds or has restored its observable failure state.
+    fn array_set_length_descriptor(
+        &mut self,
+        receiver: Value,
+        descriptor: PropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        let Some(value) = (match descriptor {
+            PropertyDescriptor::Data(data) => data.value,
+            PropertyDescriptor::Generic(_) | PropertyDescriptor::Accessor(_) => None,
+        }) else {
+            return self.redefine_array_length(receiver, descriptor);
+        };
+        let new_length = self.primitive_array_length(value)?;
+        self.array_set_length_descriptor_canonical(receiver, descriptor, new_length)
+    }
+
+    /// Applies ArraySetLength after the caller has completed both observable conversions.
+    pub(crate) fn array_set_length_descriptor_canonical(
+        &mut self,
+        receiver: Value,
+        descriptor: PropertyDescriptor,
+        new_length: u32,
+    ) -> Result<(), ExecutionError> {
+        let canonical_value = safe_integer_value(u64::from(new_length));
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let old_descriptor = self
+            .complete_own_property_descriptor(receiver, length_key)?
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let PropertyDescriptor::Data(old_data) = old_descriptor else {
+            return Err(ExecutionError::InvalidArrayLength);
+        };
+        let old_length = old_data
+            .value
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::InvalidArrayLength)? as u32;
+        let PropertyDescriptor::Data(mut new_data) = descriptor else {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        };
+        new_data.value = Some(canonical_value);
+        if new_length >= old_length {
+            return self.redefine_array_length(receiver, PropertyDescriptor::Data(new_data));
+        }
+        if old_data.writable != Some(true) {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+
+        let delay_read_only = new_data.writable == Some(false);
+        if delay_read_only {
+            new_data.writable = Some(true);
+        }
+        self.redefine_array_length(receiver, PropertyDescriptor::Data(new_data))?;
+        let indexed_keys = self.array_shrink_keys(receiver, new_length)?;
+        for (index, key) in indexed_keys {
+            if !self.delete_own_data_property(receiver, key)? {
+                new_data.value = Some(safe_integer_value(u64::from(index) + 1));
+                if delay_read_only {
+                    new_data.writable = Some(false);
+                }
+                self.truncate_dense_array(receiver, index + 1)?;
+                self.redefine_array_length(receiver, PropertyDescriptor::Data(new_data))?;
+                return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+            }
+        }
+        self.truncate_dense_array(receiver, new_length)?;
+        if delay_read_only {
+            self.redefine_array_length(
+                receiver,
+                PropertyDescriptor::Data(DataPropertyDescriptor {
+                    value: None,
+                    writable: Some(false),
+                    enumerable: None,
+                    configurable: None,
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Keeps the synchronous exotic boundary honest until observable object ToNumber can suspend.
+    fn primitive_array_length(&mut self, value: Value) -> Result<u32, ExecutionError> {
+        if self.is_object_value(value) {
+            return Err(ExecutionError::UnsupportedNumberConversion(value));
+        }
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        if !number.is_finite()
+            || number < 0.0
+            || number.fract() != 0.0
+            || number > f64::from(u32::MAX)
+        {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        Ok(number as u32)
+    }
+
+    /// Applies ordinary descriptor validation to the intrinsic Array length property.
+    fn redefine_array_length(
+        &mut self,
+        receiver: Value,
+        descriptor: PropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        let key = PropertyKey::Atom(self.length_atom()?);
+        let (object, snapshot) = self.object_snapshot(receiver)?;
+        let property = self
+            .shapes
+            .lookup(snapshot.shape, key)
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let current = self
+            .stored_property_from_snapshot(snapshot, property)?
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        self.redefine_present_property(
+            receiver, object, snapshot, key, property, current, descriptor,
+        )
+    }
+
+    /// Snapshots every index removed by ArraySetLength in strict descending numeric order.
+    fn array_shrink_keys(
+        &mut self,
+        receiver: Value,
+        new_length: u32,
+    ) -> Result<Vec<(u32, PropertyKey)>, ExecutionError> {
+        let (_, snapshot) = self.object_snapshot(receiver)?;
+        let keys = self.ordinary_own_property_keys(receiver, snapshot)?;
+        let mut indexed = Vec::new();
+        indexed
+            .try_reserve_exact(keys.len())
+            .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
+        for key in keys {
+            let Some(index) = self.array_property_index(key) else {
+                continue;
+            };
+            if index >= new_length {
+                indexed.push((index, key));
+            }
+        }
+        indexed.sort_unstable_by_key(|entry| core::cmp::Reverse(entry.0));
+        Ok(indexed)
+    }
+
+    /// Rejects an Array index definition before publishing a property past read-only length.
+    fn guard_array_index_growth(
+        &mut self,
+        receiver: Value,
+        index: u32,
+    ) -> Result<(), ExecutionError> {
+        let length_key = PropertyKey::Atom(self.length_atom()?);
+        let descriptor = self
+            .complete_own_property_descriptor(receiver, length_key)?
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let PropertyDescriptor::Data(data) = descriptor else {
+            return Err(ExecutionError::InvalidArrayLength);
+        };
+        let length = data
+            .value
+            .and_then(numeric_value)
+            .ok_or(ExecutionError::InvalidArrayLength)? as u32;
+        if index >= length && data.writable != Some(true) {
+            return Err(ExecutionError::InvalidPropertyRedefinition(receiver));
+        }
+        Ok(())
+    }
+
+    /// Internal Array algorithms use the same exotic path as Object.defineProperty.
+    pub(crate) fn set_array_length_value(
+        &mut self,
+        receiver: Value,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.array_set_length_descriptor(
+            receiver,
+            PropertyDescriptor::Data(DataPropertyDescriptor {
+                value: Some(value),
+                writable: None,
+                enumerable: None,
+                configurable: None,
+            }),
+        )
     }
 
     /// Creates a normalized payload, reusing a retained tombstone slot when one exists.

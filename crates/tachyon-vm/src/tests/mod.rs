@@ -16,6 +16,7 @@ mod array_buffer;
 mod array_concat;
 mod array_copy;
 mod array_copy_within;
+mod array_define_property;
 mod array_fill;
 mod array_filter;
 mod array_find;

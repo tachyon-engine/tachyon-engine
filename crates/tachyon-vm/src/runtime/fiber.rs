@@ -279,6 +279,8 @@ pub(crate) enum ConversionConsumer {
     BigIntAsNValue(bool),
     ToPropertyKey,
     BuiltinPropertyKey(BuiltinPropertyKeyConsumer),
+    ArraySetLengthUint32,
+    ArraySetLengthNumber,
     ErrorConstructorMessage,
     ErrorToStringName,
     ErrorToStringMessage,
@@ -394,6 +396,8 @@ impl ConversionConsumer {
             | Self::BigIntAsNValue(_)
             | Self::ToPropertyKey
             | Self::BuiltinPropertyKey(_)
+            | Self::ArraySetLengthUint32
+            | Self::ArraySetLengthNumber
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
             | Self::ErrorToStringMessage

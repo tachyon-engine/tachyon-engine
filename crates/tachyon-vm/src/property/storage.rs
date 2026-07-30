@@ -328,7 +328,11 @@ impl Isolate {
     }
 
     /// Clears default dense properties after ordinary non-configurable length checks succeed.
-    fn truncate_dense_array(&mut self, receiver: Value, length: u32) -> Result<(), ExecutionError> {
+    pub(super) fn truncate_dense_array(
+        &mut self,
+        receiver: Value,
+        length: u32,
+    ) -> Result<(), ExecutionError> {
         let Some(raw) = receiver.as_heap_ref() else {
             return Ok(());
         };
@@ -606,61 +610,6 @@ impl Isolate {
             )?;
         }
         Ok(())
-    }
-
-    /// Applies the shrinking portion of ArraySetLength before publishing the new length slot.
-    pub(crate) fn set_array_length_value(
-        &mut self,
-        receiver: Value,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        let length_key = PropertyKey::Atom(self.length_atom()?);
-        let old_length = self
-            .complete_own_property_descriptor(receiver, length_key)?
-            .and_then(|descriptor| match descriptor {
-                PropertyDescriptor::Data(data) => data.value.and_then(numeric_value),
-                _ => None,
-            })
-            .ok_or(ExecutionError::InvalidArrayLength)?;
-        let new_length = numeric_value(value).ok_or(ExecutionError::InvalidArrayLength)?;
-        if !new_length.is_finite()
-            || new_length < 0.0
-            || new_length.fract() != 0.0
-            || new_length > f64::from(u32::MAX)
-        {
-            return Err(ExecutionError::InvalidArrayLength);
-        }
-        if new_length < old_length {
-            let (_, snapshot) = self.object_snapshot(receiver)?;
-            let entries = self.ordinary_own_property_keys(receiver, snapshot)?;
-            let mut indices = Vec::with_capacity(entries.len());
-            for key in entries {
-                let Some(atom) = key.atom() else {
-                    continue;
-                };
-                let Some(name) = self.atoms.get(atom) else {
-                    continue;
-                };
-                let Some(index) = crate::property::keys::array_index(name.as_view()) else {
-                    continue;
-                };
-                if f64::from(index) >= new_length {
-                    indices.push(key);
-                }
-            }
-            for index in indices {
-                if !self.delete_own_data_property(receiver, index)? {
-                    return Err(ExecutionError::ReadOnlyProperty(receiver));
-                }
-            }
-            self.truncate_dense_array(receiver, new_length as u32)?;
-        }
-        let (_, snapshot) = self.object_snapshot(receiver)?;
-        let property = self
-            .shapes
-            .lookup(snapshot.shape, length_key)
-            .ok_or(ExecutionError::ArrayLengthOverflow)?;
-        self.update_property_slot(snapshot, length_key, property.slot, value)
     }
 
     /// Defines a fresh ordinary data slot with the intrinsic attributes required by an exotic.

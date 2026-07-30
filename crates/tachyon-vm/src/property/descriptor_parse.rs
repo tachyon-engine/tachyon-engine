@@ -31,6 +31,7 @@ pub(crate) struct PendingDefineProperties {
     source: Value,
     keys: Box<[PropertyKey]>,
     index: usize,
+    apply_index: usize,
     descriptors: Vec<PendingDefinedProperty>,
 }
 
@@ -107,6 +108,7 @@ pub(crate) struct PendingPropertyDescriptor {
     present: u8,
     field: PropertyDescriptorField,
     consumer: PropertyDescriptorConsumer,
+    array_length_uint32: u32,
 }
 
 impl PendingPropertyDescriptor {
@@ -125,6 +127,75 @@ impl PendingPropertyDescriptor {
             present: 0,
             field: PropertyDescriptorField::FIRST,
             consumer,
+            array_length_uint32: 0,
+        }
+    }
+
+    /// Rebuilds managed conversion state from a descriptor already closed by defineProperties.
+    fn from_descriptor(
+        target: Value,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+        consumer: PropertyDescriptorConsumer,
+    ) -> Self {
+        let mut pending = Self::new(
+            target,
+            Value::from_immediate(Immediate::Undefined),
+            key,
+            consumer,
+        );
+        match descriptor {
+            PropertyDescriptor::Generic(descriptor) => {
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Enumerable,
+                    descriptor.enumerable,
+                );
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Configurable,
+                    descriptor.configurable,
+                );
+            }
+            PropertyDescriptor::Data(descriptor) => {
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Enumerable,
+                    descriptor.enumerable,
+                );
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Configurable,
+                    descriptor.configurable,
+                );
+                if let Some(value) = descriptor.value {
+                    pending.record(PropertyDescriptorField::Value, value);
+                }
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Writable,
+                    descriptor.writable,
+                );
+            }
+            PropertyDescriptor::Accessor(descriptor) => {
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Enumerable,
+                    descriptor.enumerable,
+                );
+                pending.record_optional_boolean(
+                    PropertyDescriptorField::Configurable,
+                    descriptor.configurable,
+                );
+                if let Some(getter) = descriptor.getter {
+                    pending.record(PropertyDescriptorField::Get, getter);
+                }
+                if let Some(setter) = descriptor.setter {
+                    pending.record(PropertyDescriptorField::Set, setter);
+                }
+            }
+        }
+        pending
+    }
+
+    #[inline]
+    fn record_optional_boolean(&mut self, field: PropertyDescriptorField, value: Option<bool>) {
+        if let Some(value) = value {
+            self.record(field, boolean_value(value));
         }
     }
 
@@ -775,6 +846,7 @@ impl Isolate {
             source,
             keys: keys.into_boxed_slice(),
             index: 0,
+            apply_index: 0,
             descriptors,
         })
     }
@@ -861,30 +933,70 @@ impl Isolate {
         })
     }
 
-    /// Applies the fully validated descriptor list only after every getter has succeeded.
+    /// Applies the fully validated descriptor list in order, suspending on Array length coercion.
     fn apply_pending_define_properties(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<PendingDefineProperties>,
     ) -> Result<(), ExecutionError> {
-        let (target, descriptors) = self.heap.with_running_scope(|scope| {
+        loop {
+            let next = self.pending_define_property_to_apply(state)?;
+            let Some((target, property)) = next else {
+                let target = self.pending_define_properties(state)?.target;
+                return self.write(site.caller_base, site.destination, target);
+            };
+            if self
+                .array_length_object_value(target, property.key, property.descriptor)?
+                .is_some()
+            {
+                let pending = PendingPropertyDescriptor::from_descriptor(
+                    target,
+                    property.key,
+                    property.descriptor,
+                    PropertyDescriptorConsumer::DefineProperties(Value::from_heap_ref(state.raw())),
+                );
+                return self.begin_array_set_length_conversion(site, pending);
+            }
+            self.define_property(target, property.key, property.descriptor)?;
+            self.advance_pending_define_properties_apply(state)?;
+        }
+    }
+
+    /// Copies the next closed descriptor without retaining the external Vec borrow.
+    fn pending_define_property_to_apply(
+        &mut self,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<Option<(Value, PendingDefinedProperty)>, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
             let state = scope.root(state).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 let pending = no_gc
                     .borrow(state, self.types.pending_define_properties)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                let mut descriptors = Vec::new();
-                descriptors
-                    .try_reserve_exact(pending.descriptors.len())
-                    .map_err(|_| ExecutionError::OwnPropertyKeyAllocationFailed)?;
-                descriptors.extend_from_slice(&pending.descriptors);
-                Ok((pending.target, descriptors))
+                Ok(pending
+                    .descriptors
+                    .get(pending.apply_index)
+                    .copied()
+                    .map(|property| (pending.target, property)))
             })
-        })?;
-        for property in descriptors {
-            self.define_property(target, property.key, property.descriptor)?;
-        }
-        self.write(site.caller_base, site.destination, target)
+        })
+    }
+
+    /// Commits one defineProperties mutation only after its complete exotic transaction succeeds.
+    fn advance_pending_define_properties_apply(
+        &mut self,
+        state: GcRef<PendingDefineProperties>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_define_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                pending.apply_index = pending.apply_index.saturating_add(1);
+                Ok(())
+            })
+        })
     }
 
     /// Copies managed state without retaining a heap borrow across lookup or allocation.
@@ -901,6 +1013,135 @@ impl Isolate {
                     .map_err(ExecutionError::NoGcBorrow)
             })
         })
+    }
+
+    /// Returns the object-valued Array length operand that requires observable coercion.
+    fn array_length_object_value(
+        &mut self,
+        target: Value,
+        key: PropertyKey,
+        descriptor: PropertyDescriptor,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if !self.is_array_value(target)? || key != PropertyKey::Atom(self.length_atom()?) {
+            return Ok(None);
+        }
+        let PropertyDescriptor::Data(data) = descriptor else {
+            return Ok(None);
+        };
+        Ok(data.value.filter(|value| self.is_object_value(*value)))
+    }
+
+    /// Publishes descriptor state, then begins the first observable ToUint32 conversion.
+    fn begin_array_set_length_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: PendingPropertyDescriptor,
+    ) -> Result<(), ExecutionError> {
+        let descriptor = pending.finish(self)?;
+        let object = self
+            .array_length_object_value(pending.target, pending.key, descriptor)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        let state = self.allocate_pending_property_descriptor(pending)?;
+        let state_value = Value::from_heap_ref(state.raw());
+        self.write(site.caller_base, site.destination, state_value)?;
+        self.dispatch_object_primitive_conversion(
+            ConversionConsumer::ArraySetLengthUint32,
+            site.caller_base,
+            site.destination,
+            state_value,
+            object,
+            site.call_site,
+        )
+    }
+
+    /// Resumes the two separately observable conversions required by ArraySetLength.
+    pub(crate) fn resume_array_set_length_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingPropertyDescriptor>,
+        consumer: ConversionConsumer,
+        primitive: Value,
+    ) -> Result<(), ExecutionError> {
+        let number = numeric_value(self.convert_to_number(primitive)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(primitive))?;
+        if consumer == ConversionConsumer::ArraySetLengthUint32 {
+            let uint32 = to_array_length_uint32(number);
+            self.set_pending_array_length_uint32(state, uint32)?;
+            let pending = self.pending_property_descriptor(state)?;
+            let original = pending
+                .value(PropertyDescriptorField::Value)
+                .ok_or(ExecutionError::MissingNativeContinuation)?;
+            return self.dispatch_object_primitive_conversion(
+                ConversionConsumer::ArraySetLengthNumber,
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+                original,
+                site.call_site,
+            );
+        }
+        if consumer != ConversionConsumer::ArraySetLengthNumber {
+            return Err(ExecutionError::MissingNativeContinuation);
+        }
+        let pending = self.pending_property_descriptor(state)?;
+        if f64::from(pending.array_length_uint32) != number {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        let descriptor = pending.finish(self)?;
+        self.finish_array_set_length_descriptor(
+            site,
+            pending,
+            descriptor,
+            pending.array_length_uint32,
+        )
+    }
+
+    /// Stores the first conversion result before the second callback can trigger collection.
+    fn set_pending_array_length_uint32(
+        &mut self,
+        state: GcRef<PendingPropertyDescriptor>,
+        length: u32,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.pending_property_descriptor)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .array_length_uint32 = length;
+                Ok(())
+            })
+        })
+    }
+
+    /// Applies the canonical length and resumes the original descriptor consumer.
+    fn finish_array_set_length_descriptor(
+        &mut self,
+        site: NativeContinuationSite,
+        pending: PendingPropertyDescriptor,
+        descriptor: PropertyDescriptor,
+        length: u32,
+    ) -> Result<(), ExecutionError> {
+        let defined =
+            match self.array_set_length_descriptor_canonical(pending.target, descriptor, length) {
+                Ok(()) => true,
+                Err(
+                    ExecutionError::NonExtensibleObject(_)
+                    | ExecutionError::InvalidPropertyRedefinition(_),
+                ) if pending.consumer == PropertyDescriptorConsumer::ReflectDefine => false,
+                Err(error) => return Err(error),
+            };
+        if let PropertyDescriptorConsumer::DefineProperties(state) = pending.consumer {
+            let state = self.pending_define_properties_reference(state)?;
+            self.advance_pending_define_properties_apply(state)?;
+            return self.apply_pending_define_properties(site, state);
+        }
+        let result = if pending.consumer == PropertyDescriptorConsumer::ReflectDefine {
+            boolean_value(defined)
+        } else {
+            pending.target
+        };
+        self.write(site.caller_base, site.destination, result)
     }
 
     /// Publishes one returned getter value and its barrier before the next observable Get.
@@ -973,6 +1214,12 @@ impl Isolate {
                 .dispatch_proxy_define(site, pending.target, pending.key, descriptor, mode)
                 .map(|_| ());
         }
+        if self
+            .array_length_object_value(pending.target, pending.key, descriptor)?
+            .is_some()
+        {
+            return self.begin_array_set_length_conversion(site, pending);
+        }
         let defined = match self.define_property(pending.target, pending.key, descriptor) {
             Ok(()) => true,
             Err(
@@ -1015,4 +1262,13 @@ fn property_descriptor_edges(descriptor: PropertyDescriptor) -> impl Iterator<It
         PropertyDescriptor::Generic(_) => [None, None],
     };
     values.into_iter().flatten()
+}
+
+/// Applies the ECMAScript ToUint32 modulo rule to an already converted Number.
+#[inline(always)]
+fn to_array_length_uint32(number: f64) -> u32 {
+    if !number.is_finite() || number == 0.0 {
+        return 0;
+    }
+    number.trunc().rem_euclid(4_294_967_296.0) as u32
 }

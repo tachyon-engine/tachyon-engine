@@ -398,6 +398,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::ArraySetLengthUint32
+                            | ConversionConsumer::ArraySetLengthNumber
+                    ) {
+                        let state =
+                            self.pending_property_descriptor_reference(continuation.receiver)?;
+                        return self.resume_array_set_length_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::JsonStringifyNumberSpace
                             | ConversionConsumer::JsonStringifyStringSpace
                             | ConversionConsumer::JsonStringifyNumberValue
@@ -1383,6 +1397,10 @@ impl Isolate {
                 ConversionConsumer::ToPropertyKey => argument,
                 ConversionConsumer::BuiltinPropertyKey(_) => {
                     unreachable!("builtin property-key consumers finish inside the state machine")
+                }
+                ConversionConsumer::ArraySetLengthUint32
+                | ConversionConsumer::ArraySetLengthNumber => {
+                    unreachable!("ArraySetLength conversions finish inside the state machine")
                 }
                 ConversionConsumer::ErrorConstructorMessage
                 | ConversionConsumer::ErrorToStringName
