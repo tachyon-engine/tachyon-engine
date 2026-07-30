@@ -2423,6 +2423,43 @@ fn dynamic_import_success_retains_promise_through_forced_major_collection() {
 }
 
 #[test]
+fn dynamic_import_graph_reuses_loader_resolution_and_linking() {
+    let mut isolate = fixtures::test_isolate();
+    let root_identity = specifier("memory:root/main.js");
+    let root_module = LoadedModule::precompiled(compile_source_module(
+        2_900,
+        "memory:root/main.js",
+        "import(\"./dep.js\")",
+    ));
+    let dependency_identity = specifier("./dep.js");
+    let dependency = LoadedModule::precompiled(compile_source_module(
+        2_901,
+        "./dep.js",
+        "export const value = 42;",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![
+        (root_identity.clone(), root_module),
+        (dependency_identity, dependency),
+    ]);
+    let root = isolate
+        .load_module_graph(&mut loader, &root_identity)
+        .unwrap();
+    let _ = isolate.evaluate_module(root).unwrap();
+    let request = isolate.take_pending_dynamic_import().unwrap();
+    let imported = isolate
+        .load_dynamic_import_graph(&mut loader, &request)
+        .unwrap();
+    assert_ne!(imported, root);
+    assert!(matches!(
+        isolate.evaluate_module(imported).unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    isolate
+        .complete_dynamic_import_success(request.id(), imported)
+        .unwrap();
+}
+
+#[test]
 fn dynamic_import_failure_settles_only_the_selected_request() {
     let mut isolate = fixtures::test_isolate();
     let (first_id, first_promise) = isolate.enqueue_dynamic_import(&[0x61], None, &[]).unwrap();

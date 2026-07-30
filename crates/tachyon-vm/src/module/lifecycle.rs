@@ -221,6 +221,39 @@ impl ModuleGraph {
 }
 
 impl Isolate {
+    /// Resolves one host-dispatched dynamic request and loads its graph through the shared loader path.
+    pub fn load_dynamic_import_graph<L: ModuleLoader>(
+        &mut self,
+        loader: &mut L,
+        request: &DynamicImportRequest,
+    ) -> Result<ModuleId, ModuleLoadError<L::Error>> {
+        let attributes = request
+            .attributes()
+            .iter()
+            .map(|attribute| tachyon_bytecode::ModuleAttribute {
+                key: Arc::from(attribute.key()),
+                value: Arc::from(attribute.value()),
+            })
+            .collect::<Vec<_>>();
+        let module_request = tachyon_bytecode::ModuleRequest {
+            specifier: Arc::from(request.specifier()),
+            attributes: attributes.into(),
+        };
+        let referrer = request
+            .referrer()
+            .map(|module| {
+                self.module_graph
+                    .record(module)
+                    .map(|record| &record.specifier)
+            })
+            .transpose()
+            .map_err(ModuleLoadError::Graph)?;
+        let identity = loader
+            .resolve(&module_request, referrer)
+            .map_err(ModuleLoadError::Loader)?;
+        self.load_module_graph(loader, &identity)
+    }
+
     /// Initializes or updates one local module binding; imported aliases remain read-only.
     pub fn write_module_binding(
         &mut self,
