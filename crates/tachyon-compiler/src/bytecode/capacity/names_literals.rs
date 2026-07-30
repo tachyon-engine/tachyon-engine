@@ -311,7 +311,8 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                 }
                 if matches!(
                     property.value,
-                    crate::HirObjectPropertyValue::Getter(_)
+                    crate::HirObjectPropertyValue::Method(_)
+                        | crate::HirObjectPropertyValue::Getter(_)
                         | crate::HirObjectPropertyValue::Setter(_)
                 ) {
                     count = checked_count_add(count, 1, "scope names")?;
@@ -329,6 +330,17 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
                 let nested = match part {
                     crate::hir::HirObjectExpressionPart::Property(property) => {
                         let mut count = object_property_scope_name_count(&property.value)?;
+                        if matches!(property.key, HirObjectPropertyKey::Static(_)) {
+                            count = checked_count_add(count, 1, "scope names")?;
+                        }
+                        if matches!(
+                            property.value,
+                            crate::HirObjectPropertyValue::Method(_)
+                                | crate::HirObjectPropertyValue::Getter(_)
+                                | crate::HirObjectPropertyValue::Setter(_)
+                        ) {
+                            count = checked_count_add(count, 1, "scope names")?;
+                        }
                         if let HirObjectPropertyKey::Computed(key) = &property.key {
                             count = checked_count_add(
                                 count,
@@ -895,9 +907,9 @@ fn object_property_scope_name_count(
 ) -> Result<usize, CompileError> {
     match value {
         crate::HirObjectPropertyValue::Data(expression) => expression_scope_name_count(expression),
-        crate::HirObjectPropertyValue::Getter(_) | crate::HirObjectPropertyValue::Setter(_) => {
-            Ok(0)
-        }
+        crate::HirObjectPropertyValue::Method(_)
+        | crate::HirObjectPropertyValue::Getter(_)
+        | crate::HirObjectPropertyValue::Setter(_) => Ok(0),
     }
 }
 
@@ -906,8 +918,8 @@ fn object_property_literal_count(
 ) -> Result<usize, CompileError> {
     match value {
         crate::HirObjectPropertyValue::Data(expression) => expression_literal_count(expression),
-        crate::HirObjectPropertyValue::Getter(_) | crate::HirObjectPropertyValue::Setter(_) => {
-            Ok(0)
-        }
+        crate::HirObjectPropertyValue::Method(_)
+        | crate::HirObjectPropertyValue::Getter(_)
+        | crate::HirObjectPropertyValue::Setter(_) => Ok(0),
     }
 }

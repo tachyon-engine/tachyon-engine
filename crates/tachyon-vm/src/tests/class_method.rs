@@ -179,6 +179,16 @@ fn class_async_method_minimal_probes() {
             "probe === 2;",
             8_830,
         ),
+        (
+            "class B { *value() { yield 40; } } class C extends B { *value() { yield super.value().next().value + 2; } } var method = C.prototype.value; var replacement = Object.create(Object.getPrototypeOf(method.prototype)); method.prototype = replacement; var generator = new C().value(); Object.getPrototypeOf(generator) === replacement && generator.next().value === 42;",
+            "true;",
+            8_835,
+        ),
+        (
+            "var probe = 0; class B { *value() { yield 40; } } class C extends B { async *value() { yield super.value().next().value + 2; } } var method = C.prototype.value; var replacement = Object.create(Object.getPrototypeOf(method.prototype)); method.prototype = replacement; var generator = new C().value(); var shapeOk = Object.getPrototypeOf(generator) === replacement; generator.next().then(function(step) { probe = step.value; }); shapeOk;",
+            "probe === 42;",
+            8_837,
+        ),
     ] {
         assert_class_method_probe(source, expected, source_id, false);
         assert_class_method_probe(source, expected, source_id + 100, true);

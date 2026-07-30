@@ -56,16 +56,15 @@ impl Isolate {
             ),
             PropertyKey::Symbol(symbol) => {
                 let description = self.symbol_description(symbol)?;
-                let description_length = description
-                    .map(|value| self.string_value_length(value))
+                let key_length = description
+                    .map(|value| {
+                        self.string_value_length(value)?
+                            .checked_add(2)
+                            .ok_or(ExecutionError::StringBufferAllocationFailed)
+                    })
                     .transpose()?
                     .unwrap_or(0);
-                (
-                    description_length
-                        .checked_add(2)
-                        .ok_or(ExecutionError::StringBufferAllocationFailed)?,
-                    description,
-                )
+                (key_length, description)
             }
             PropertyKey::Private(_) => {
                 return Err(ExecutionError::PrivatePropertyKeyEscaped);
@@ -95,11 +94,11 @@ impl Isolate {
                 }
             }
             PropertyKey::Symbol(_) => {
-                units.push(u16::from(b'['));
                 if let Some(description) = symbol_description {
+                    units.push(u16::from(b'['));
                     self.append_primitive_string_units(description, &mut units)?;
+                    units.push(u16::from(b']'));
                 }
-                units.push(u16::from(b']'));
             }
             PropertyKey::Private(_) => {
                 return Err(ExecutionError::PrivatePropertyKeyEscaped);

@@ -867,6 +867,33 @@ fn compiler_preserves_public_and_private_class_method_execution_kinds() {
 }
 
 #[test]
+/// Keeps object-method execution kind orthogonal to its independently published home object.
+fn compiler_preserves_object_method_roles_and_home_objects() {
+    let source = source(
+        MediaType::JavaScript,
+        "({ ordinary() { return super.value; }, *generator() { yield super.value; }, async asynchronous() { return super.value; }, async *asyncGenerator() { yield super.value; }, get value() { return super.value; }, set value(next) {} });",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    assert_eq!(hir.functions().len(), 6);
+    assert!(
+        hir.functions()
+            .iter()
+            .all(|function| function.role == HirFunctionRole::Method)
+    );
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    assert!(
+        module.functions()[1..]
+            .iter()
+            .all(|function| function.role() == tachyon_bytecode::FunctionRole::Method)
+    );
+    let entry = tachyon_bytecode::disassemble(&module.functions()[0]).unwrap();
+    assert_eq!(entry.matches("SetFunctionHomeObject").count(), 6);
+}
+
+#[test]
 /// Freezes the enter/initialize/leave protocol and method capture for named class expressions.
 fn compiler_handles_named_class_expression_without_leaking_binding() {
     let class_source = source(

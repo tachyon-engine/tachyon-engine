@@ -845,66 +845,31 @@ impl Lowerer<'_> {
                                 property.span,
                             )?;
                         }
-                        HirObjectPropertyValue::Getter(function)
-                        | HirObjectPropertyValue::Setter(function) => {
-                            let value = self.register()?;
-                            let function = function
-                                .index()
-                                .checked_add(1)
-                                .ok_or(CompileError::RegisterOverflow)?;
-                            self.emit(
-                                Opcode::CreateClosure,
-                                &[value.index(), function],
+                        HirObjectPropertyValue::Method(function) => {
+                            self.define_object_method(
+                                *function,
+                                object,
+                                &property.key,
+                                key,
                                 property.span,
                             )?;
-                            let (static_opcode, value_opcode, is_getter, prefix) =
-                                match &property.value {
-                                    HirObjectPropertyValue::Getter(_) => (
-                                        Opcode::DefineGetterById,
-                                        Opcode::DefineGetterByValue,
-                                        true,
-                                        "get ",
-                                    ),
-                                    HirObjectPropertyValue::Setter(_) => (
-                                        Opcode::DefineSetterById,
-                                        Opcode::DefineSetterByValue,
-                                        false,
-                                        "set ",
-                                    ),
-                                    HirObjectPropertyValue::Data(_) => {
-                                        unreachable!("accessor arm selected")
-                                    }
-                                };
-                            match &property.key {
-                                HirObjectPropertyKey::Static(key_name) => {
-                                    let function_name =
-                                        std::sync::Arc::from(format!("{prefix}{key_name}"));
-                                    let function_name = self.scope_name(&function_name)?;
-                                    self.emit(
-                                        Opcode::SetFunctionName,
-                                        &[value.index(), function_name],
-                                        property.span,
-                                    )?;
-                                    self.emit(
-                                        static_opcode,
-                                        &[object.index(), value.index(), key],
-                                        property.span,
-                                    )?;
-                                }
-                                HirObjectPropertyKey::Computed(_) => {
-                                    self.emit(
-                                        Opcode::SetAccessorFunctionName,
-                                        &[value.index(), key, u32::from(is_getter)],
-                                        property.span,
-                                    )?;
-                                    self.emit(
-                                        value_opcode,
-                                        &[object.index(), value.index(), key],
-                                        property.span,
-                                    )?;
-                                }
-                            }
                         }
+                        HirObjectPropertyValue::Getter(function) => self.define_object_accessor(
+                            *function,
+                            true,
+                            object,
+                            &property.key,
+                            key,
+                            property.span,
+                        )?,
+                        HirObjectPropertyValue::Setter(function) => self.define_object_accessor(
+                            *function,
+                            false,
+                            object,
+                            &property.key,
+                            key,
+                            property.span,
+                        )?,
                     }
                 }
                 Ok(object)
@@ -930,12 +895,12 @@ impl Lowerer<'_> {
                         HirObjectExpressionPart::Property(property) => {
                             let (opcode, key) = match &property.key {
                                 HirObjectPropertyKey::Static(key) => {
-                                    (Opcode::SetById, self.scope_name(key)?)
+                                    (Opcode::CreateDataPropertyById, self.scope_name(key)?)
                                 }
                                 HirObjectPropertyKey::Computed(key) => {
                                     let key = self.expression(key)?;
                                     self.prepare_property_key(key, object, false, property.span)?;
-                                    (Opcode::SetByValue, key.index())
+                                    (Opcode::CreateDataPropertyByValue, key.index())
                                 }
                             };
                             match &property.value {
@@ -947,13 +912,33 @@ impl Lowerer<'_> {
                                         property.span,
                                     )?;
                                 }
-                                HirObjectPropertyValue::Getter(_)
-                                | HirObjectPropertyValue::Setter(_) => {
-                                    return Err(self.unsupported(
+                                HirObjectPropertyValue::Method(function) => {
+                                    self.define_object_method(
+                                        *function,
+                                        object,
+                                        &property.key,
+                                        key,
                                         property.span,
-                                        "object spread with accessor property",
-                                    ));
+                                    )?;
                                 }
+                                HirObjectPropertyValue::Getter(function) => self
+                                    .define_object_accessor(
+                                        *function,
+                                        true,
+                                        object,
+                                        &property.key,
+                                        key,
+                                        property.span,
+                                    )?,
+                                HirObjectPropertyValue::Setter(function) => self
+                                    .define_object_accessor(
+                                        *function,
+                                        false,
+                                        object,
+                                        &property.key,
+                                        key,
+                                        property.span,
+                                    )?,
                             }
                         }
                     }
@@ -1426,6 +1411,114 @@ impl Lowerer<'_> {
         let value = self.register()?;
         self.emit(Opcode::LoadEnvironment, &[value.index(), depth, slot], span)?;
         Ok(value)
+    }
+
+    /// Creates, names, and installs one object method after publishing its `[[HomeObject]]`.
+    fn define_object_method(
+        &mut self,
+        method: FunctionStencilId,
+        home_object: RegisterId,
+        key: &HirObjectPropertyKey,
+        key_operand: u32,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let closure = self.register()?;
+        let function = method
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+        self.emit(
+            Opcode::SetFunctionHomeObject,
+            &[closure.index(), home_object.index()],
+            span,
+        )?;
+        match key {
+            HirObjectPropertyKey::Static(name) => {
+                let name = self.scope_name(name)?;
+                self.emit(Opcode::SetFunctionName, &[closure.index(), name], span)?;
+            }
+            HirObjectPropertyKey::Computed(_) => {
+                self.emit(
+                    Opcode::SetFunctionNameByValue,
+                    &[closure.index(), key_operand],
+                    span,
+                )?;
+            }
+        }
+        let opcode = match key {
+            HirObjectPropertyKey::Static(_) => Opcode::CreateDataPropertyById,
+            HirObjectPropertyKey::Computed(_) => Opcode::CreateDataPropertyByValue,
+        };
+        self.emit(
+            opcode,
+            &[home_object.index(), closure.index(), key_operand],
+            span,
+        )
+    }
+
+    /// Creates, names, and installs one object accessor with its shared home-object contract.
+    fn define_object_accessor(
+        &mut self,
+        accessor: FunctionStencilId,
+        is_getter: bool,
+        home_object: RegisterId,
+        key: &HirObjectPropertyKey,
+        key_operand: u32,
+        span: SourceSpan,
+    ) -> Result<(), CompileError> {
+        let closure = self.register()?;
+        let function = accessor
+            .index()
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        self.emit(Opcode::CreateClosure, &[closure.index(), function], span)?;
+        self.emit(
+            Opcode::SetFunctionHomeObject,
+            &[closure.index(), home_object.index()],
+            span,
+        )?;
+        let (static_opcode, value_opcode, prefix) = if is_getter {
+            (
+                Opcode::DefineGetterById,
+                Opcode::DefineGetterByValue,
+                "get ",
+            )
+        } else {
+            (
+                Opcode::DefineSetterById,
+                Opcode::DefineSetterByValue,
+                "set ",
+            )
+        };
+        match key {
+            HirObjectPropertyKey::Static(name) => {
+                let function_name = std::sync::Arc::from(format!("{prefix}{name}"));
+                let function_name = self.scope_name(&function_name)?;
+                self.emit(
+                    Opcode::SetFunctionName,
+                    &[closure.index(), function_name],
+                    span,
+                )?;
+                self.emit(
+                    static_opcode,
+                    &[home_object.index(), closure.index(), key_operand],
+                    span,
+                )
+            }
+            HirObjectPropertyKey::Computed(_) => {
+                self.emit(
+                    Opcode::SetAccessorFunctionName,
+                    &[closure.index(), key_operand, u32::from(is_getter)],
+                    span,
+                )?;
+                self.emit(
+                    value_opcode,
+                    &[home_object.index(), closure.index(), key_operand],
+                    span,
+                )
+            }
+        }
     }
 
     /// Creates one shared private method closure with the class prototype as its home object.

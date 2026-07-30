@@ -49,6 +49,7 @@ pub enum HirArrayExpressionPart {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirObjectPropertyValue {
     Data(HirExpression),
+    Method(FunctionStencilId),
     Getter(FunctionStencilId),
     Setter(FunctionStencilId),
 }
@@ -595,6 +596,10 @@ pub(super) fn lower_expression(
                     };
                     let function =
                         lower_function_stencil(function, None, None, source, semantic, functions)?;
+                    functions
+                        .get_mut(function.index() as usize)
+                        .expect("new object accessor stencil remains published")
+                        .role = super::program::HirFunctionRole::Method;
                     if property.kind == PropertyKind::Get {
                         HirObjectPropertyValue::Getter(function)
                     } else {
@@ -615,15 +620,13 @@ pub(super) fn lower_expression(
                             "named object method",
                         ));
                     }
-                    HirObjectPropertyValue::Data(HirExpression {
-                        span: source_span(function.span),
-                        kind: HirExpressionKind::Function(HirFunctionExpression {
-                            stencil: lower_function_stencil(
-                                function, None, None, source, semantic, functions,
-                            )?,
-                            anonymous: false,
-                        }),
-                    })
+                    let function =
+                        lower_function_stencil(function, None, None, source, semantic, functions)?;
+                    functions
+                        .get_mut(function.index() as usize)
+                        .expect("new object method stencil remains published")
+                        .role = super::program::HirFunctionRole::Method;
+                    HirObjectPropertyValue::Method(function)
                 } else {
                     HirObjectPropertyValue::Data(lower_expression(
                         &property.value,
