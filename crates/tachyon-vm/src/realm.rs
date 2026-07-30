@@ -11,6 +11,14 @@ use crate::runtime::callable::{
 impl Isolate {
     /// Builds the object/function prototype graph and intrinsic constructors before publication.
     pub(super) fn initialize_realm_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        self.realm.begin_construction()?;
+        let result = self.initialize_realm_intrinsics_inner();
+        self.realm.finish_construction();
+        result
+    }
+
+    /// Builds one complete graph while the active Realm owns every construction-local handle.
+    fn initialize_realm_intrinsics_inner(&mut self) -> Result<(), ExecutionError> {
         let object_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,
@@ -1809,6 +1817,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };

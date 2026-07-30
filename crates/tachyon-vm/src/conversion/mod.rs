@@ -171,6 +171,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -192,7 +193,8 @@ impl Isolate {
             )
             .map_err(ExecutionError::HeapAllocation)?;
         self.next_symbol_serial = next_serial;
-        Ok(Value::from_heap_ref(symbol.raw()))
+        self.realm
+            .retain_construction_value(Value::from_heap_ref(symbol.raw()))
     }
 
     /// Starts one conversion consumer, suspending only when its argument requires a JS callback.
@@ -1876,6 +1878,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -1889,7 +1892,8 @@ impl Isolate {
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        Ok(Value::from_heap_ref(value.raw()))
+        self.realm
+            .retain_construction_value(Value::from_heap_ref(value.raw()))
     }
 
     /// Allocates a String while updating one caller-owned edge across a moving collection.
@@ -1905,6 +1909,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },

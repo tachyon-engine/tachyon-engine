@@ -10,6 +10,7 @@ pub(crate) struct VmRoots<'a> {
     pub(crate) finalization_jobs: &'a mut finalization::FinalizationJobs,
     pub(crate) promise_jobs: &'a mut PromiseJobQueue,
     pub(crate) realm: &'a mut Realm,
+    pub(crate) inactive_realms: &'a mut Vec<(RealmId, Realm)>,
     pub(crate) loaded_code: &'a mut Vec<LoadedCode>,
     pub(crate) module_graph: &'a mut ModuleGraph,
 }
@@ -95,6 +96,9 @@ impl Trace for VmRoots<'_> {
         self.finalization_jobs.trace(tracer);
         self.promise_jobs.trace(tracer);
         self.realm.trace(tracer);
+        for (_, realm) in self.inactive_realms.iter_mut() {
+            realm.trace(tracer);
+        }
         for code in self.loaded_code.iter_mut() {
             code.trace(tracer);
         }

@@ -784,6 +784,7 @@ fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
+        inactive_realms: &mut isolate.inactive_realms,
         loaded_code: &mut isolate.loaded_code,
         module_graph: &mut isolate.module_graph,
     };
@@ -836,6 +837,7 @@ fn collect_major(isolate: &mut Isolate) {
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
+        inactive_realms: &mut isolate.inactive_realms,
         loaded_code: &mut isolate.loaded_code,
         module_graph: &mut isolate.module_graph,
     };
@@ -849,6 +851,7 @@ fn collect_minor(isolate: &mut Isolate) {
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
+        inactive_realms: &mut isolate.inactive_realms,
         loaded_code: &mut isolate.loaded_code,
         module_graph: &mut isolate.module_graph,
     };

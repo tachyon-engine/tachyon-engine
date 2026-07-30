@@ -569,6 +569,7 @@ pub enum ExecutionError {
     RegExpMatchAllRequiresGlobal,
     InvalidJsonCircularStructure,
     UnsupportedDynamicFunctionConstructor,
+    RealmConstructionRootAllocationFailed,
     ProxyConstructorRequiresNew,
     ProxyRevoked,
     ProxyInvariantViolation,

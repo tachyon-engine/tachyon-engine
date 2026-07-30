@@ -150,6 +150,7 @@ impl Isolate {
                             finalization_jobs: &mut self.finalization_jobs,
                             promise_jobs: &mut self.promise_jobs,
                             realm: &mut self.realm,
+                            inactive_realms: &mut self.inactive_realms,
                             loaded_code: &mut self.loaded_code,
                             module_graph: &mut self.module_graph,
                         },
@@ -3684,6 +3685,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -3962,6 +3964,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -3990,6 +3993,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -4168,6 +4172,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -4395,6 +4400,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -4417,6 +4423,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -4491,6 +4498,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -5303,6 +5311,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },

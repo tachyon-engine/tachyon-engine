@@ -2,17 +2,40 @@ use super::{fixtures::*, *};
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
 #[test]
+/// Forces collection at every child-intrinsic allocation and then executes each published graph.
 fn child_realms_have_distinct_globals_and_remain_gc_roots() {
     let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
     let (first_id, first_global) = isolate.create_realm().unwrap();
     let (second_id, second_global) = isolate.create_realm().unwrap();
+    let (third_id, third_global) = isolate.create_realm().unwrap();
     assert_ne!(first_id, second_id);
+    assert_ne!(second_id, third_id);
     assert_ne!(first_global, second_global);
-    assert_eq!(isolate.inactive_realms.len(), 2);
+    assert_ne!(second_global, third_global);
+    assert_eq!(isolate.inactive_realms.len(), 3);
     isolate
         .allocate_runtime_string(JsString::try_from_latin1(b"realm-root").unwrap())
         .unwrap();
     assert!(isolate.native_error_kind(first_global).unwrap().is_none());
+    assert!(isolate.native_error_kind(second_global).unwrap().is_none());
+    assert!(isolate.native_error_kind(third_global).unwrap().is_none());
+    let module = arithmetic_module();
+    for realm in [first_id, second_id, third_id] {
+        let outcome = isolate
+            .execute_in_realm(
+                realm,
+                &module,
+                ExecutionBudget {
+                    fuel: 64,
+                    quantum: 64,
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(3)));
+    }
 }
 
 #[test]

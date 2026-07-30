@@ -187,18 +187,15 @@ impl Isolate {
         );
         self.inactive_realms.push((current_id, current));
         self.active_realm = id;
-        let initialized = self.initialize_realm_intrinsics();
-        if let Err(error) = initialized {
-            let (_, current) = self
-                .inactive_realms
-                .pop()
-                .expect("realm swap retains the previous active realm");
-            self.realm = current;
-            self.active_realm = current_id;
+        if let Err(error) = self.initialize_realm_intrinsics() {
+            self.restore_realm_after_failed_creation(current_id);
             return Err(error);
         }
-        if self.eval_script_callback.is_some() {
-            self.install_realm_hooks_current()?;
+        if self.eval_script_callback.is_some()
+            && let Err(error) = self.install_realm_hooks_current()
+        {
+            self.restore_realm_after_failed_creation(current_id);
+            return Err(error);
         }
         let child = mem::replace(
             &mut self.realm,
@@ -213,6 +210,16 @@ impl Isolate {
         self.inactive_realms.push((id, child));
         self.active_realm = current_id;
         Ok((id, global))
+    }
+
+    /// Restores the prior active Realm after any fallible child-construction phase.
+    fn restore_realm_after_failed_creation(&mut self, previous_id: RealmId) {
+        let (_, previous) = self
+            .inactive_realms
+            .pop()
+            .expect("realm construction retains the previous active realm last");
+        self.realm = previous;
+        self.active_realm = previous_id;
     }
 
     /// Installs the host-only `$262` realm hooks on the currently active global object.
@@ -771,10 +778,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.ordinary_object,
                 0,
@@ -784,7 +793,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     pub(crate) fn intern_intrinsic_name(&mut self, name: &[u8]) -> Result<AtomId, ExecutionError> {
@@ -806,10 +816,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.function,
                 0,
@@ -823,7 +835,8 @@ impl Isolate {
                 roots,
             )
             .map(|function| Value::from_heap_ref(function.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates a traced reaction wrapper that preserves a finally argument across callback calls.
@@ -853,6 +866,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -896,6 +910,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -998,6 +1013,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             };
@@ -1028,6 +1044,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -1067,6 +1084,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -1311,6 +1329,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
@@ -1330,7 +1349,8 @@ impl Isolate {
                 roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        Ok(Value::from_heap_ref(object.raw()))
+        self.realm
+            .retain_construction_value(Value::from_heap_ref(object.raw()))
     }
 
     /// Allocates one arguments exotic object and records a lazy simple-parameter alias when valid.
@@ -1349,10 +1369,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.arguments_object,
                 0,
@@ -1375,7 +1397,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates one boxed Number while keeping its data and prototype live across collection.
@@ -1392,10 +1415,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.number_object,
                 0,
@@ -1413,7 +1438,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates one boxed BigInt while keeping its primitive data and prototype live.
@@ -1430,10 +1456,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.bigint_object,
                 0,
@@ -1451,7 +1479,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates one branded Date object while retaining its Realm-local prototype.
@@ -1467,10 +1496,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.date_object,
                 0,
@@ -1488,7 +1519,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates one boxed Boolean while keeping its ordinary prototype rooted.
@@ -1508,10 +1540,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.boolean_object,
                 0,
@@ -1529,7 +1563,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates one boxed String and roots its primitive data and ordinary prototype together.
@@ -1546,10 +1581,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.string_object,
                 0,
@@ -1567,7 +1604,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates a boxed Symbol while tracing its optional primitive data and object prototype.
@@ -1584,10 +1622,12 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };
-        self.heap
+        let value = self
+            .heap
             .try_allocate_with_gc(
                 self.types.symbol_object,
                 0,
@@ -1605,7 +1645,8 @@ impl Isolate {
                 roots,
             )
             .map(|object| Value::from_heap_ref(object.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        self.realm.retain_construction_value(value)
     }
 
     /// Allocates a RegExp object after pattern validation has produced source and flag strings.
@@ -1622,6 +1663,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1663,6 +1705,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1714,6 +1757,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1765,6 +1809,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1816,6 +1861,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1885,6 +1931,7 @@ impl Isolate {
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
+                inactive_realms: &mut self.inactive_realms,
                 loaded_code: &mut self.loaded_code,
                 module_graph: &mut self.module_graph,
             },
@@ -1919,7 +1966,8 @@ impl Isolate {
                 &mut roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
-        Ok(Value::from_heap_ref(array.raw()))
+        self.realm
+            .retain_construction_value(Value::from_heap_ref(array.raw()))
     }
 
     /// Snapshots the currently visible enumerable string keys into one managed iterator payload.
@@ -1934,6 +1982,7 @@ impl Isolate {
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
+            inactive_realms: &mut self.inactive_realms,
             loaded_code: &mut self.loaded_code,
             module_graph: &mut self.module_graph,
         };

@@ -278,6 +278,7 @@ pub(crate) struct Realm {
     pub(crate) primitive_hint_strings: PrimitiveHintStrings,
     pub(crate) typeof_strings: TypeofStrings,
     pub(crate) limits: RealmLimits,
+    construction_roots: Option<Vec<Value>>,
 }
 
 impl Realm {
@@ -459,7 +460,39 @@ impl Realm {
             primitive_hint_strings,
             typeof_strings,
             limits,
+            construction_roots: None,
         }
+    }
+
+    /// Opens the precise handle set used while the intrinsic graph is not yet fully published.
+    pub(crate) fn begin_construction(&mut self) -> Result<(), ExecutionError> {
+        debug_assert!(self.construction_roots.is_none());
+        let mut roots = Vec::new();
+        roots
+            .try_reserve_exact(tuning::realms::INITIAL_CONSTRUCTION_ROOT_CAPACITY)
+            .map_err(|_| ExecutionError::RealmConstructionRootAllocationFailed)?;
+        self.construction_roots = Some(roots);
+        Ok(())
+    }
+
+    /// Retains one initializer-local managed value until the complete graph is published.
+    pub(crate) fn retain_construction_value(
+        &mut self,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        let Some(roots) = &mut self.construction_roots else {
+            return Ok(value);
+        };
+        roots
+            .try_reserve(1)
+            .map_err(|_| ExecutionError::RealmConstructionRootAllocationFailed)?;
+        roots.push(value);
+        Ok(value)
+    }
+
+    /// Closes construction on both success and failure without retaining duplicate roots.
+    pub(crate) fn finish_construction(&mut self) {
+        self.construction_roots = None;
     }
 
     /// Reserves the complete mandatory binding set before any intrinsic becomes observable.
@@ -700,6 +733,7 @@ impl Realm {
 
 impl Trace for Realm {
     fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.construction_roots.trace(tracer);
         for binding in &mut self.intrinsic_bindings {
             binding.value.trace(tracer);
         }

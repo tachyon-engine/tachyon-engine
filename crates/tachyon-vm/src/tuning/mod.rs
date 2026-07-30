@@ -17,5 +17,6 @@ pub(crate) mod modules;
 pub(crate) mod numbers;
 pub(crate) mod objects;
 pub(crate) mod promises;
+pub(crate) mod realms;
 pub(crate) mod signals;
 pub(crate) mod strings;

@@ -59,6 +59,7 @@ fn weak_ref_target_clears_after_job_boundary_and_major_collection() {
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
+        inactive_realms: &mut isolate.inactive_realms,
         loaded_code: &mut isolate.loaded_code,
         module_graph: &mut isolate.module_graph,
     };
