@@ -141,7 +141,7 @@ fn resolving_functions_share_the_first_call_guard_across_forced_major() {
 fn promise_species_accessor_descriptor_round_trips() {
     let mut isolate = test_isolate();
     let constructor = isolate.realm.promise_constructor.unwrap();
-    let species = isolate.realm.well_known_symbols.species.unwrap();
+    let species = isolate.agent.well_known_symbols.species.unwrap();
     let key = isolate.property_key(species).unwrap();
     let descriptor = isolate
         .complete_own_property_descriptor(constructor, key)
@@ -173,7 +173,7 @@ fn promise_species_accessor_descriptor_round_trips() {
 fn promise_to_string_tag_descriptor_is_standard() {
     let mut isolate = test_isolate();
     let prototype = isolate.realm.promise_prototype.unwrap();
-    let symbol = isolate.realm.well_known_symbols.to_string_tag.unwrap();
+    let symbol = isolate.agent.well_known_symbols.to_string_tag.unwrap();
     let key = isolate.property_key(symbol).unwrap();
     let descriptor = isolate
         .complete_own_property_descriptor(prototype, key)

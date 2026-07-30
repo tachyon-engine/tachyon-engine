@@ -293,7 +293,7 @@ impl Isolate {
         }
         self.set_array_flat_value(state, |pending| &mut pending.constructor, value)?;
         let species = self
-            .realm
+            .agent
             .well_known_symbols
             .species
             .expect("Symbol.species initializes before Array");

@@ -559,25 +559,11 @@ impl Isolate {
         if !self.is_object_value(constructor) {
             return Err(ExecutionError::NotObject(constructor));
         }
-        let constructor_realm = if self.is_constructor_value(constructor)? {
-            let constructor_realm = self.realm_for_callable(constructor)?;
-            Some(constructor_realm)
-        } else {
-            None
-        };
         self.update_array_buffer_slice_value(state, 3, constructor)?;
-        let species = constructor_realm
-            .and_then(|realm| {
-                if realm == self.active_realm {
-                    self.realm.well_known_symbols.species
-                } else {
-                    self.inactive_realms
-                        .iter()
-                        .find(|(id, _)| *id == realm)
-                        .and_then(|(_, realm)| realm.well_known_symbols.species)
-                }
-            })
-            .or(self.realm.well_known_symbols.species)
+        let species = self
+            .agent
+            .well_known_symbols
+            .species
             .expect("Symbol.species initializes before ArrayBuffer");
         let species_key = self.property_key(species)?;
         if let Some(value) = self.dispatch_array_buffer_slice_get(

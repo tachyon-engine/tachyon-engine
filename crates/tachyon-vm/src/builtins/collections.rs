@@ -263,7 +263,7 @@ impl Isolate {
                 }
                 let iterable = self.pending_collection_initializer(state)?.iterable;
                 let iterator_symbol = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .iterator
                     .expect("Symbol.iterator initializes before collection construction");

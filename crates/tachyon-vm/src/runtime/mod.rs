@@ -1,5 +1,6 @@
 //! Internal runtime state grouped by lifecycle owner.
 
+pub(crate) mod agent;
 pub(crate) mod callable;
 pub(crate) mod class;
 pub(crate) mod code;

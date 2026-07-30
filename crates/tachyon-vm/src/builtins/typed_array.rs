@@ -370,7 +370,7 @@ impl Isolate {
             }
             TypedArrayConstructionMode::ArrayLike | TypedArrayConstructionMode::IterableList => {
                 let iterator = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .iterator
                     .expect("Symbol.iterator initializes before TypedArray");

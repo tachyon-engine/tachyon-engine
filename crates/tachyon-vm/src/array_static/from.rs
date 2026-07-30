@@ -68,7 +68,7 @@ impl Isolate {
             return Err(ExecutionError::NotObject(source));
         }
         let iterator = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .expect("Symbol.iterator initializes before Array.from");
@@ -152,7 +152,7 @@ impl Isolate {
             return Err(ExecutionError::NotObject(source));
         }
         let iterator = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .expect("Symbol.iterator initializes before IterableToList");

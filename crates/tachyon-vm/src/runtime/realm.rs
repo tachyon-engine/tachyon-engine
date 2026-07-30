@@ -16,20 +16,6 @@ pub(crate) struct IntrinsicBinding {
     pub(crate) writable: bool,
 }
 
-/// One realm-local entry in the ECMAScript global Symbol registry.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RegisteredSymbol {
-    pub(crate) key: AtomId,
-    pub(crate) symbol: Value,
-}
-
-impl Trace for RegisteredSymbol {
-    #[inline(always)]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.symbol.trace(tracer);
-    }
-}
-
 /// Stable isolate-local index into mandatory bindings excluded from the host user-binding quota.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
@@ -107,7 +93,6 @@ const _: [(); 4] = [(); core::mem::size_of::<Option<GlobalLexicalSlotId>>()];
 #[derive(Debug)]
 pub(crate) struct Realm {
     pub(crate) intrinsic_bindings: Vec<IntrinsicBinding>,
-    pub(crate) registered_symbols: Vec<RegisteredSymbol>,
     pub(crate) intrinsic_slots_by_atom: Vec<Option<IntrinsicSlotId>>,
     pub(crate) global_lexicals: Vec<GlobalLexicalBinding>,
     pub(crate) global_lexical_slots_by_atom: Vec<Option<GlobalLexicalSlotId>>,
@@ -275,7 +260,6 @@ pub(crate) struct Realm {
     pub(crate) global_number_functions: [Option<Value>; GlobalNumberFunction::ALL.len()],
     pub(crate) global_uri_functions: [Option<Value>; GlobalUriFunction::ALL.len()],
     pub(crate) error_intrinsics: ErrorIntrinsics,
-    pub(crate) well_known_symbols: WellKnownSymbols,
     pub(crate) primitive_hint_strings: PrimitiveHintStrings,
     pub(crate) typeof_strings: TypeofStrings,
     pub(crate) limits: RealmLimits,
@@ -290,7 +274,6 @@ impl Realm {
     ) -> Self {
         Self {
             intrinsic_bindings: Vec::new(),
-            registered_symbols: Vec::new(),
             intrinsic_slots_by_atom: Vec::new(),
             global_lexicals: Vec::new(),
             global_lexical_slots_by_atom: Vec::new(),
@@ -458,7 +441,6 @@ impl Realm {
             global_number_functions: [None; GlobalNumberFunction::ALL.len()],
             global_uri_functions: [None; GlobalUriFunction::ALL.len()],
             error_intrinsics: ErrorIntrinsics::default(),
-            well_known_symbols: WellKnownSymbols::default(),
             primitive_hint_strings,
             typeof_strings,
             limits,
@@ -739,7 +721,6 @@ impl Trace for Realm {
         for binding in &mut self.intrinsic_bindings {
             binding.value.trace(tracer);
         }
-        self.registered_symbols.trace(tracer);
         for binding in &mut self.global_lexicals {
             binding.value.trace(tracer);
         }
@@ -905,43 +886,8 @@ impl Trace for Realm {
         self.global_number_functions.trace(tracer);
         self.global_uri_functions.trace(tracer);
         self.error_intrinsics.trace(tracer);
-        self.well_known_symbols.trace(tracer);
         self.primitive_hint_strings.trace(tracer);
         self.typeof_strings.trace(tracer);
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct WellKnownSymbols {
-    pub(crate) to_primitive: Option<Value>,
-    pub(crate) iterator: Option<Value>,
-    pub(crate) async_iterator: Option<Value>,
-    pub(crate) has_instance: Option<Value>,
-    pub(crate) is_concat_spreadable: Option<Value>,
-    pub(crate) replace: Option<Value>,
-    pub(crate) search: Option<Value>,
-    pub(crate) r#match: Option<Value>,
-    pub(crate) match_all: Option<Value>,
-    pub(crate) species: Option<Value>,
-    pub(crate) split: Option<Value>,
-    pub(crate) to_string_tag: Option<Value>,
-}
-
-impl Trace for WellKnownSymbols {
-    #[inline]
-    fn trace(&mut self, tracer: &mut dyn Tracer) {
-        self.to_primitive.trace(tracer);
-        self.iterator.trace(tracer);
-        self.async_iterator.trace(tracer);
-        self.has_instance.trace(tracer);
-        self.is_concat_spreadable.trace(tracer);
-        self.replace.trace(tracer);
-        self.search.trace(tracer);
-        self.r#match.trace(tracer);
-        self.match_all.trace(tracer);
-        self.species.trace(tracer);
-        self.split.trace(tracer);
-        self.to_string_tag.trace(tracer);
     }
 }
 

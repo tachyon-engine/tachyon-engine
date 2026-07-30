@@ -106,7 +106,8 @@ use tachyon_bytecode::{
 use tachyon_gc::{
     AllocationSpace, FinalizationRegistration, GcExternalMemory, GcRef, GcType, Heap,
     HeapAllocationError, HeapLimit, HeapReferenceError, KeptObjectError, ManagedAllocationError,
-    NoGcBorrowError, RootError, Trace, Tracer, TypeRegistrationError, TypeRegistry,
+    NoGcBorrowError, PersistentResolveError, PersistentRootError, PersistentRootId, RootError,
+    Trace, Tracer, TypeRegistrationError, TypeRegistry,
 };
 use tachyon_value::Immediate;
 pub use tachyon_value::Value;
@@ -262,6 +263,7 @@ use regexp_replace::PendingRegExpReplace;
 #[cfg(feature = "opcode-profile")]
 use runtime::code::is_conditional_branch;
 use runtime::{
+    agent::{AgentState, RegisteredSymbol, WellKnownSymbolId},
     callable::{
         AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics,
@@ -464,6 +466,8 @@ pub enum ExecutionError {
     HeapReference(HeapReferenceError),
     KeptObject(KeptObjectError),
     Root(RootError),
+    PersistentRoot(PersistentRootError),
+    PersistentResolve(PersistentResolveError),
     NoGcBorrow(NoGcBorrowError),
     MissingPendingException,
     MissingNativeContinuation,

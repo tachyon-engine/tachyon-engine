@@ -187,7 +187,7 @@ impl Isolate {
         }
         self.set_array_concat_value(state, |pending| &mut pending.constructor, value)?;
         let species = self
-            .realm
+            .agent
             .well_known_symbols
             .species
             .expect("Symbol.species initializes before Array");
@@ -342,7 +342,7 @@ impl Isolate {
             return self.begin_array_concat_value_define(site, state);
         }
         let spreadable = self
-            .realm
+            .agent
             .well_known_symbols
             .is_concat_spreadable
             .expect("Symbol.isConcatSpreadable initializes before Array");

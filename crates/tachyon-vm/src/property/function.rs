@@ -687,7 +687,7 @@ impl Isolate {
             return Err(ExecutionError::NonCallable(target));
         }
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .has_instance
             .expect("Symbol.hasInstance initializes before script execution");

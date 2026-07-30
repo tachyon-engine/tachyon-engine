@@ -193,24 +193,11 @@ impl Isolate {
         if !self.is_object_value(constructor) {
             return Err(ExecutionError::NotObject(constructor));
         }
-        let constructor_realm = if self.is_constructor_value(constructor)? {
-            Some(self.realm_for_callable(constructor)?)
-        } else {
-            None
-        };
         self.set_typed_array_subarray_value(state, SUBARRAY_AUXILIARY, constructor)?;
-        let species = constructor_realm
-            .and_then(|realm| {
-                if realm == self.active_realm {
-                    self.realm.well_known_symbols.species
-                } else {
-                    self.inactive_realms
-                        .iter()
-                        .find(|(id, _)| *id == realm)
-                        .and_then(|(_, realm)| realm.well_known_symbols.species)
-                }
-            })
-            .or(self.realm.well_known_symbols.species)
+        let species = self
+            .agent
+            .well_known_symbols
+            .species
             .expect("Symbol.species initializes before TypedArray subarray");
         let species = self.property_key(species)?;
         if let Some(value) = self.dispatch_typed_array_subarray_get(

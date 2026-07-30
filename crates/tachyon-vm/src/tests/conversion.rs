@@ -284,7 +284,7 @@ fn install_exotic_getter(
     let target_name = isolate.intern_intrinsic_name(b"target").unwrap();
     isolate.realm.set(target_name, target).unwrap();
     let symbol = isolate
-        .realm
+        .agent
         .well_known_symbols
         .to_primitive
         .expect("realm initialization publishes Symbol.toPrimitive");

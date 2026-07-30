@@ -1153,7 +1153,7 @@ impl Isolate {
                 let key = match continuation.stage {
                     ToPrimitiveStage::Exotic => {
                         let symbol = self
-                            .realm
+                            .agent
                             .well_known_symbols
                             .to_primitive
                             .expect("well-known symbols initialize before execution");

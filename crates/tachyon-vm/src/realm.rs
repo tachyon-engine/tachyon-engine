@@ -148,7 +148,7 @@ impl Isolate {
             self.install_collection_accessor(prototype, function_prototype, name, native)?;
         }
         let tag = self.property_key(
-            self.realm
+            self.agent
                 .well_known_symbols
                 .to_string_tag
                 .expect("well-known symbols initialize before ArrayBuffer"),
@@ -235,7 +235,7 @@ impl Isolate {
             }
         }
         let tag = self.property_key(
-            self.realm
+            self.agent
                 .well_known_symbols
                 .to_string_tag
                 .expect("well-known symbols initialize before DataView"),
@@ -308,7 +308,7 @@ impl Isolate {
             },
         )?;
         let tag = self.property_key(
-            self.realm
+            self.agent
                 .well_known_symbols
                 .to_string_tag
                 .expect("Symbol.toStringTag initializes before TypedArray"),
@@ -530,7 +530,7 @@ impl Isolate {
             }
         }
         let iterator_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .expect("Symbol.iterator initializes before TypedArray");
@@ -1208,7 +1208,7 @@ impl Isolate {
         self.install_species_accessor(regexp_constructor, function_prototype)?;
         let regexp_split = allocate(self, NativeFunction::RegExpSplit)?;
         let split_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .split
             .expect("Symbol.split remains rooted during RegExp initialization");
@@ -1225,7 +1225,7 @@ impl Isolate {
         )?;
         let regexp_search = allocate(self, NativeFunction::RegExpSearch)?;
         let search_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .search
             .expect("Symbol.search remains rooted during RegExp initialization");
@@ -1242,7 +1242,7 @@ impl Isolate {
         )?;
         let regexp_match = allocate(self, NativeFunction::RegExpMatch)?;
         let match_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .r#match
             .expect("Symbol.match remains rooted during RegExp initialization");
@@ -1259,7 +1259,7 @@ impl Isolate {
         )?;
         let regexp_match_all = allocate(self, NativeFunction::RegExpMatchAll)?;
         let match_all_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .match_all
             .expect("Symbol.matchAll remains rooted during RegExp initialization");
@@ -1276,7 +1276,7 @@ impl Isolate {
         )?;
         let regexp_replace = allocate(self, NativeFunction::RegExpReplace)?;
         let replace_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .replace
             .expect("Symbol.replace remains rooted during RegExp initialization");
@@ -1404,7 +1404,7 @@ impl Isolate {
             self.install_collection_method(bigint_prototype, function_prototype, name, native)?;
         }
         let to_string_tag = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before BigInt");
@@ -1540,7 +1540,7 @@ impl Isolate {
             self.set_intrinsic_data_property(prototype, atom, function, true)?;
         }
         let to_primitive_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_primitive
             .expect("Symbol.toPrimitive initializes before Date");
@@ -1581,33 +1581,46 @@ impl Isolate {
         Ok(())
     }
 
-    /// Allocates and publishes the realm-local well-known `Symbol.toPrimitive` identity.
+    /// Reuses the Agent identity or allocates it once, then publishes the Realm property.
+    fn initialize_well_known_symbol(
+        &mut self,
+        symbol_constructor: Value,
+        id: WellKnownSymbolId,
+        property_name: &[u8],
+        description: &[u8],
+    ) -> Result<Value, ExecutionError> {
+        let symbol = if let Some(root) = self.agent.well_known(id) {
+            self.resolve_persistent_symbol(root)?
+        } else {
+            let description = self.allocate_runtime_string(
+                JsString::try_from_latin1(description)
+                    .map_err(ExecutionError::PropertyKeyString)?,
+            )?;
+            let symbol = self.allocate_symbol(Some(description))?;
+            let root = self.persist_symbol_value(symbol)?;
+            self.agent.set_well_known(id, symbol, root);
+            symbol
+        };
+        let property = self.intern_intrinsic_name(property_name)?;
+        self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
+        Ok(symbol)
+    }
+
+    /// Publishes shared `Symbol.toPrimitive` and installs this Realm's prototype method.
     fn initialize_to_primitive_symbol(
         &mut self,
         symbol_constructor: Value,
     ) -> Result<(), ExecutionError> {
-        let description = self.allocate_runtime_string(
-            JsString::try_from_latin1(b"Symbol.toPrimitive")
-                .map_err(ExecutionError::PropertyKeyString)?,
+        let symbol = self.initialize_well_known_symbol(
+            symbol_constructor,
+            WellKnownSymbolId::ToPrimitive,
+            b"toPrimitive",
+            b"Symbol.toPrimitive",
         )?;
-        let symbol = self.allocate_symbol(Some(description))?;
-        self.realm.well_known_symbols.to_primitive = Some(symbol);
-        let to_primitive = self.intern_intrinsic_name(b"toPrimitive")?;
-        let symbol = self
-            .realm
-            .well_known_symbols
-            .to_primitive
-            .expect("Symbol.toPrimitive remains rooted during initialization");
-        self.set_intrinsic_constant_property(symbol_constructor, to_primitive, symbol)?;
         let function_prototype = self
             .realm
             .function_prototype
             .expect("Function initializes before Symbol methods");
-        let symbol = self
-            .realm
-            .well_known_symbols
-            .to_primitive
-            .expect("Symbol.toPrimitive remains rooted after property publication");
         let key = self.property_key(symbol)?;
         let method = self.allocate_native_function(
             NativeFunction::SymbolToPrimitive,
@@ -1661,24 +1674,18 @@ impl Isolate {
         Ok(())
     }
 
-    /// Allocates and publishes the realm-local well-known `Symbol.iterator` identity.
+    /// Publishes the Agent-shared `Symbol.iterator` identity on this Realm's constructor.
     fn initialize_iterator_symbol(
         &mut self,
         symbol_constructor: Value,
     ) -> Result<(), ExecutionError> {
-        let description = self.allocate_runtime_string(
-            JsString::try_from_latin1(b"Symbol.iterator")
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )?;
-        let symbol = self.allocate_symbol(Some(description))?;
-        self.realm.well_known_symbols.iterator = Some(symbol);
-        let iterator = self.intern_intrinsic_name(b"iterator")?;
-        let symbol = self
-            .realm
-            .well_known_symbols
-            .iterator
-            .expect("Symbol.iterator remains rooted during initialization");
-        self.set_intrinsic_constant_property(symbol_constructor, iterator, symbol)
+        self.initialize_well_known_symbol(
+            symbol_constructor,
+            WellKnownSymbolId::Iterator,
+            b"iterator",
+            b"Symbol.iterator",
+        )
+        .map(|_| ())
     }
 
     /// Publishes the remaining standard well-known Symbols as immutable constructor properties.
@@ -1686,81 +1693,74 @@ impl Isolate {
         &mut self,
         symbol_constructor: Value,
     ) -> Result<(), ExecutionError> {
-        for (name, description) in [
+        for (id, name, description) in [
             (
+                WellKnownSymbolId::AsyncDispose,
                 b"asyncDispose".as_slice(),
                 b"Symbol.asyncDispose".as_slice(),
             ),
             (
+                WellKnownSymbolId::AsyncIterator,
                 b"asyncIterator".as_slice(),
                 b"Symbol.asyncIterator".as_slice(),
             ),
-            (b"dispose".as_slice(), b"Symbol.dispose".as_slice()),
-            (b"hasInstance".as_slice(), b"Symbol.hasInstance".as_slice()),
             (
+                WellKnownSymbolId::Dispose,
+                b"dispose".as_slice(),
+                b"Symbol.dispose".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::HasInstance,
+                b"hasInstance".as_slice(),
+                b"Symbol.hasInstance".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::IsConcatSpreadable,
                 b"isConcatSpreadable".as_slice(),
                 b"Symbol.isConcatSpreadable".as_slice(),
             ),
-            (b"match".as_slice(), b"Symbol.match".as_slice()),
-            (b"matchAll".as_slice(), b"Symbol.matchAll".as_slice()),
-            (b"replace".as_slice(), b"Symbol.replace".as_slice()),
-            (b"search".as_slice(), b"Symbol.search".as_slice()),
-            (b"species".as_slice(), b"Symbol.species".as_slice()),
-            (b"split".as_slice(), b"Symbol.split".as_slice()),
-            (b"toStringTag".as_slice(), b"Symbol.toStringTag".as_slice()),
-            (b"unscopables".as_slice(), b"Symbol.unscopables".as_slice()),
+            (
+                WellKnownSymbolId::Match,
+                b"match".as_slice(),
+                b"Symbol.match".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::MatchAll,
+                b"matchAll".as_slice(),
+                b"Symbol.matchAll".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::Replace,
+                b"replace".as_slice(),
+                b"Symbol.replace".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::Search,
+                b"search".as_slice(),
+                b"Symbol.search".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::Species,
+                b"species".as_slice(),
+                b"Symbol.species".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::Split,
+                b"split".as_slice(),
+                b"Symbol.split".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::ToStringTag,
+                b"toStringTag".as_slice(),
+                b"Symbol.toStringTag".as_slice(),
+            ),
+            (
+                WellKnownSymbolId::Unscopables,
+                b"unscopables".as_slice(),
+                b"Symbol.unscopables".as_slice(),
+            ),
         ] {
-            let property = self.intern_intrinsic_name(name)?;
-            let description = self.allocate_runtime_string(
-                JsString::try_from_latin1(description)
-                    .map_err(ExecutionError::PropertyKeyString)?,
-            )?;
-            let symbol = self.allocate_symbol(Some(description))?;
-            if name == b"toStringTag" {
-                self.realm.well_known_symbols.to_string_tag = Some(symbol);
-            } else if name == b"hasInstance" {
-                self.realm.well_known_symbols.has_instance = Some(symbol);
-            } else if name == b"isConcatSpreadable" {
-                self.realm.well_known_symbols.is_concat_spreadable = Some(symbol);
-            } else if name == b"replace" {
-                self.realm.well_known_symbols.replace = Some(symbol);
-            } else if name == b"search" {
-                self.realm.well_known_symbols.search = Some(symbol);
-            } else if name == b"match" {
-                self.realm.well_known_symbols.r#match = Some(symbol);
-            } else if name == b"matchAll" {
-                self.realm.well_known_symbols.match_all = Some(symbol);
-            } else if name == b"species" {
-                self.realm.well_known_symbols.species = Some(symbol);
-            } else if name == b"split" {
-                self.realm.well_known_symbols.split = Some(symbol);
-            } else if name == b"asyncIterator" {
-                self.realm.well_known_symbols.async_iterator = Some(symbol);
-            }
-            let symbol = if name == b"toStringTag" {
-                self.realm.well_known_symbols.to_string_tag.unwrap()
-            } else if name == b"hasInstance" {
-                self.realm.well_known_symbols.has_instance.unwrap()
-            } else if name == b"isConcatSpreadable" {
-                self.realm.well_known_symbols.is_concat_spreadable.unwrap()
-            } else if name == b"replace" {
-                self.realm.well_known_symbols.replace.unwrap()
-            } else if name == b"search" {
-                self.realm.well_known_symbols.search.unwrap()
-            } else if name == b"match" {
-                self.realm.well_known_symbols.r#match.unwrap()
-            } else if name == b"matchAll" {
-                self.realm.well_known_symbols.match_all.unwrap()
-            } else if name == b"species" {
-                self.realm.well_known_symbols.species.unwrap()
-            } else if name == b"split" {
-                self.realm.well_known_symbols.split.unwrap()
-            } else if name == b"asyncIterator" {
-                self.realm.well_known_symbols.async_iterator.unwrap()
-            } else {
-                symbol
-            };
-            self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
+            self.initialize_well_known_symbol(symbol_constructor, id, name, description)?;
         }
         self.install_function_has_instance()?;
         Ok(())
@@ -1773,7 +1773,7 @@ impl Isolate {
             .function_prototype
             .expect("Function prototype initializes before well-known Symbols");
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .has_instance
             .expect("Symbol.hasInstance is published before its default method");
@@ -2559,7 +2559,7 @@ impl Isolate {
         )?;
         self.realm.iterator_identity = Some(identity);
         let iterator_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .expect("Symbol.iterator initializes before Array");
@@ -2681,7 +2681,7 @@ impl Isolate {
                 .map_err(ExecutionError::PropertyKeyString)?,
         )?;
         let tag_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before RegExp String Iterator");
@@ -2827,7 +2827,7 @@ impl Isolate {
         })?;
         self.realm.async_iterator_prototype = Some(async_iterator_prototype);
         let async_iterator_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .async_iterator
             .expect("Symbol.asyncIterator initializes before generator intrinsics");
@@ -3074,7 +3074,7 @@ impl Isolate {
             self.set_intrinsic_data_property(number, atom, method, true)?;
         }
         let tag_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before Math");
@@ -3220,7 +3220,7 @@ impl Isolate {
         )?;
         self.install_collection_to_string_tags(map_prototype, set_prototype)?;
         let iterator_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .expect("Symbol.iterator initializes before collections");
@@ -3343,7 +3343,7 @@ impl Isolate {
         tag: &[u8],
     ) -> Result<(), ExecutionError> {
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before intrinsic tag publication");
@@ -3468,7 +3468,7 @@ impl Isolate {
             NativeFunction::WeakRefDeref,
         )?;
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol before WeakRef");
@@ -3531,7 +3531,7 @@ impl Isolate {
             self.install_collection_method(prototype, function_prototype, name, native)?;
         }
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol before FinalizationRegistry");
@@ -3645,7 +3645,7 @@ impl Isolate {
         let stringify_atom = self.intern_intrinsic_name(b"stringify")?;
         self.set_intrinsic_data_property(object, stringify_atom, stringify, true)?;
         let tag_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before JSON");
@@ -3728,7 +3728,7 @@ impl Isolate {
             self.set_intrinsic_data_property(object, key, method, true)?;
         }
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before Reflect");
@@ -3813,7 +3813,7 @@ impl Isolate {
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
         let to_string_tag_symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before Promise");
@@ -3904,7 +3904,7 @@ impl Isolate {
             },
         )?;
         let species = self
-            .realm
+            .agent
             .well_known_symbols
             .species
             .expect("Symbol.species initializes before intrinsic constructors");

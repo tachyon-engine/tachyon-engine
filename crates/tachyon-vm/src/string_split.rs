@@ -131,7 +131,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let separator = self.native_call_state_snapshot(state)?.values[SPLIT_SEPARATOR];
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .split
             .expect("Symbol.split initializes before String.prototype.split");

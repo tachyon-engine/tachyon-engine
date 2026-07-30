@@ -1,9 +1,61 @@
-//! Realm-local ECMAScript global Symbol registry operations.
+//! Agent-wide ECMAScript Symbol registry operations and Symbol prototype methods.
 
 use super::super::*;
-use crate::runtime::realm::RegisteredSymbol;
 
 impl Isolate {
+    /// Moves one managed Symbol identity into the isolate-owned persistent root table.
+    pub(crate) fn persist_symbol_value(
+        &mut self,
+        symbol: Value,
+    ) -> Result<PersistentRootId<SymbolValue>, ExecutionError> {
+        let raw = symbol
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedPropertyKey(symbol))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.symbol)
+            .map_err(ExecutionError::HeapReference)?;
+        self.heap.with_running_scope(|scope| {
+            let local = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope
+                .persist(local, self.types.symbol)
+                .map_err(ExecutionError::PersistentRoot)
+        })
+    }
+
+    /// Resolves one Agent-owned Symbol root into a Value for the current operation.
+    pub(crate) fn resolve_persistent_symbol(
+        &mut self,
+        root: PersistentRootId<SymbolValue>,
+    ) -> Result<Value, ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            scope
+                .local_from_persistent(root, self.types.symbol)
+                .map(|symbol| Value::from_heap_ref(symbol.as_gc_ref().raw()))
+                .map_err(ExecutionError::PersistentResolve)
+        })
+    }
+
+    /// Reads a Symbol's immutable isolate-local serial without retaining a payload borrow.
+    fn symbol_serial(&mut self, symbol: Value) -> Result<NonZeroU32, ExecutionError> {
+        let raw = symbol
+            .as_heap_ref()
+            .ok_or(ExecutionError::UnsupportedPropertyKey(symbol))?;
+        let reference = self
+            .heap
+            .checked_reference(raw, self.types.symbol)
+            .map_err(ExecutionError::HeapReference)?;
+        self.heap.with_running_scope(|scope| {
+            let symbol = scope.root(reference).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(symbol, self.types.symbol)
+                    .map(|symbol| symbol.serial)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })
+    }
+
     /// Returns the primitive Symbol receiver or rejects incompatible receivers before observable work.
     fn this_symbol_value(&mut self, value: Value) -> Result<Value, ExecutionError> {
         if self.is_symbol_value(value) {
@@ -78,36 +130,41 @@ impl Isolate {
         })
     }
 
-    /// Implements Symbol.for for primitive keys and retains the returned registry symbol in Realm.
+    /// Implements Symbol.for against the global registry shared by every Realm in this Agent.
     pub(crate) fn symbol_for(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let argument = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let key = self.primitive_string_value(Some(argument))?;
         let atom = self.property_key_atom(key)?;
-        if let Some(entry) = self
-            .realm
+        if let Some(root) = self
+            .agent
             .registered_symbols
             .iter()
             .find(|entry| entry.key == atom)
+            .map(|entry| entry.root)
         {
-            return Ok(entry.symbol);
+            return self.resolve_persistent_symbol(root);
+        }
+        if self.agent.registered_symbols.len() == self.agent.registered_symbols.capacity() {
+            self.agent
+                .registered_symbols
+                .try_reserve_exact(tuning::symbols::REGISTRY_CAPACITY_GROWTH)
+                .map_err(|_| ExecutionError::SymbolRegistryAllocationFailed)?;
         }
         let description = self.atom_string_value(atom)?;
         let symbol = self.allocate_registered_symbol(description)?;
-        if self.realm.registered_symbols.len() == self.realm.registered_symbols.capacity() {
-            self.realm
-                .registered_symbols
-                .try_reserve_exact(8)
-                .map_err(|_| ExecutionError::SymbolRegistryAllocationFailed)?;
-        }
-        self.realm
-            .registered_symbols
-            .push(RegisteredSymbol { key: atom, symbol });
+        let serial = self.symbol_serial(symbol)?;
+        let root = self.persist_symbol_value(symbol)?;
+        self.agent.registered_symbols.push(RegisteredSymbol {
+            key: atom,
+            serial,
+            root,
+        });
         Ok(symbol)
     }
 
-    /// Implements Symbol.keyFor by resolving only symbols owned by this Realm's registry.
+    /// Implements Symbol.keyFor by consulting the Agent-wide global registry.
     pub(crate) fn symbol_key_for(&mut self, site: &CallSite) -> Result<Value, ExecutionError> {
         let symbol = self
             .call_argument(site, 0)?
@@ -115,11 +172,12 @@ impl Isolate {
         if !self.is_symbol_value(symbol) {
             return Err(ExecutionError::NotObject(symbol));
         }
+        let serial = self.symbol_serial(symbol)?;
         let Some(entry) = self
-            .realm
+            .agent
             .registered_symbols
             .iter()
-            .find(|entry| entry.symbol == symbol)
+            .find(|entry| entry.serial == serial)
         else {
             return Ok(Value::from_immediate(Immediate::Undefined));
         };

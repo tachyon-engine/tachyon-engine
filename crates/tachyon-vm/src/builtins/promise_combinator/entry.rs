@@ -295,7 +295,7 @@ impl Isolate {
             return Ok(false);
         }
         let iterator = self
-            .realm
+            .agent
             .well_known_symbols
             .iterator
             .ok_or(ExecutionError::MissingNativeContinuation)?;

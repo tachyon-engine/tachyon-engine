@@ -103,7 +103,7 @@ impl Isolate {
                 }
                 self.set_promise_then_constructor(state, value)?;
                 let species = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .species
                     .expect("Symbol.species initializes before Promise");

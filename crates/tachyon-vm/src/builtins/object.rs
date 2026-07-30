@@ -1292,7 +1292,7 @@ impl Isolate {
             .map_err(Self::completion_stack_error)?;
         let frame_depth = self.fiber.frames.len();
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .to_string_tag
             .expect("Symbol.toStringTag initializes before Object.prototype.toString");

@@ -52,7 +52,7 @@ impl Isolate {
                 })?;
                 let pending = self.promise_combinator_snapshot(state)?;
                 let iterator = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .iterator
                     .ok_or(ExecutionError::MissingNativeContinuation)?;

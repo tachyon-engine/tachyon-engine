@@ -20,3 +20,4 @@ pub(crate) mod promises;
 pub(crate) mod realms;
 pub(crate) mod signals;
 pub(crate) mod strings;
+pub(crate) mod symbols;

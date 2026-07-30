@@ -39,6 +39,81 @@ fn child_realms_have_distinct_globals_and_remain_gc_roots() {
 }
 
 #[test]
+/// Proves every child publishes the Agent's complete well-known Symbol identity set.
+fn well_known_symbols_are_shared_across_realms_under_forced_major() {
+    let mut isolate = test_isolate();
+    let expected = isolate.agent.well_known_symbols;
+    assert!(
+        WellKnownSymbolId::ALL
+            .into_iter()
+            .all(|id| isolate.agent.well_known(id).is_some())
+    );
+    assert_eq!(
+        isolate.heap.persistent_root_stats().live_roots,
+        WellKnownSymbolId::COUNT
+    );
+    assert!(expected.async_dispose.is_some());
+    assert!(expected.dispose.is_some());
+    assert!(expected.unscopables.is_some());
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    for _ in 0..3 {
+        isolate.create_realm().expect("child Realm initializes");
+    }
+    assert_eq!(isolate.agent.well_known_symbols, expected);
+    assert_eq!(
+        isolate.heap.persistent_root_stats().live_roots,
+        WellKnownSymbolId::COUNT
+    );
+}
+
+#[test]
+/// Proves separate Realm executions reuse one Agent registry entry and persistent root.
+fn global_symbol_registry_is_agent_shared_under_forced_major() {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(7_490),
+                SourceName::new("agent-symbol-registry"),
+                MediaType::JavaScript,
+                Arc::from(
+                    "Symbol.for('agent-key') === Symbol.for('agent-key') && \
+                     Symbol.keyFor(Symbol.for('agent-key')) === 'agent-key';",
+                ),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("Agent Symbol registry fixture compiles");
+    let mut isolate = test_isolate();
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    let budget = ExecutionBudget {
+        fuel: 1_024,
+        quantum: 1_024,
+    };
+    let main = isolate
+        .execute(&module, budget)
+        .expect("main Realm registry fixture executes");
+    let (child, _) = isolate.create_realm().expect("child Realm initializes");
+    let child = isolate
+        .execute_in_realm(child, &module, budget)
+        .expect("child Realm registry fixture executes");
+    assert!(
+        matches!(main, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+    assert!(
+        matches!(child, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+    assert_eq!(isolate.agent.registered_symbols.len(), 1);
+    assert_eq!(
+        isolate.heap.persistent_root_stats().live_roots,
+        WellKnownSymbolId::COUNT + 1
+    );
+}
+
+#[test]
 fn compiled_code_can_be_loaded_once_per_realm() {
     let mut isolate = test_isolate();
     let (realm, _) = isolate.create_realm().unwrap();

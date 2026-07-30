@@ -273,7 +273,7 @@ impl Isolate {
                         .ok_or(ExecutionError::MissingNativeContinuation)?;
                     self.set_array_for_each_value(output, OUTPUT_CONSTRUCTOR, value)?;
                     let species = self
-                        .realm
+                        .agent
                         .well_known_symbols
                         .species
                         .expect("Symbol.species initializes before Array");

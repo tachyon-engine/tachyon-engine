@@ -1218,7 +1218,7 @@ impl Isolate {
             }
             Opcode::LoadIteratorSymbol => {
                 let symbol = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .iterator
                     .expect("Symbol.iterator initializes before bytecode execution");
@@ -1226,7 +1226,7 @@ impl Isolate {
             }
             Opcode::LoadAsyncIteratorSymbol => {
                 let symbol = self
-                    .realm
+                    .agent
                     .well_known_symbols
                     .async_iterator
                     .expect("Symbol.asyncIterator initializes before bytecode execution");
@@ -7838,7 +7838,7 @@ impl Isolate {
             )?;
         }
         if let (Some(iterator), Some(values)) = (
-            self.realm.well_known_symbols.iterator,
+            self.agent.well_known_symbols.iterator,
             self.realm.array_values,
         ) {
             let key = self.property_key(iterator)?;

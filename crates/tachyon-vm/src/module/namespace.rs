@@ -401,7 +401,7 @@ impl Isolate {
         &mut self,
     ) -> Result<PropertyKey, ExecutionError> {
         self.property_key(
-            self.realm
+            self.agent
                 .well_known_symbols
                 .to_string_tag
                 .expect("Symbol.toStringTag initializes before module evaluation"),

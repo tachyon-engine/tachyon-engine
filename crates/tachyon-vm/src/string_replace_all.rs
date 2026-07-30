@@ -131,7 +131,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let search = self.native_call_state_snapshot(state)?.values[REPLACE_ALL_SEARCH];
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .r#match
             .expect("Symbol.match initializes before replaceAll");
@@ -245,7 +245,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let search = self.native_call_state_snapshot(state)?.values[REPLACE_ALL_SEARCH];
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .replace
             .expect("Symbol.replace initializes before replaceAll");

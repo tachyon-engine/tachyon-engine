@@ -256,7 +256,7 @@ impl Isolate {
         stage: RegExpSearchStage,
     ) -> Result<(), ExecutionError> {
         let symbol = self
-            .realm
+            .agent
             .well_known_symbols
             .search
             .expect("Symbol.search initializes before String.prototype.search");

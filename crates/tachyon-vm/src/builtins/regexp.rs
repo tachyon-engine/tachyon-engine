@@ -309,7 +309,7 @@ impl Isolate {
         key: PropertyKey,
     ) -> Result<bool, ExecutionError> {
         if let PropertyKey::Symbol(symbol) = key
-            && self.realm.well_known_symbols.replace == Some(symbol.value())
+            && self.agent.well_known_symbols.replace == Some(symbol.value())
         {
             return Ok(true);
         }
