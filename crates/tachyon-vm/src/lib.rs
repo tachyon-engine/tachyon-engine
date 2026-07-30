@@ -49,6 +49,7 @@ mod host;
 mod interpreter;
 mod isolate;
 mod iterator;
+mod iterator_eager;
 mod iterator_helper;
 mod iterator_intrinsics;
 mod module;
@@ -237,6 +238,7 @@ use iterator::{
     ArrayIterationKind, ArrayIteratorNextAction, ArrayIteratorObject, CollectionIterationKind,
     CollectionIteratorObject,
 };
+use iterator_eager::{IteratorEagerKind, IteratorEagerOperation};
 use iterator_helper::{IteratorHelperObject, WrapForValidIteratorObject};
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
@@ -295,20 +297,21 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IteratorFromStage,
-        IteratorHelperStage, IteratorPrototypeSetterKey, IteratorPrototypeSetterStage,
-        JsonStringifyStage, NativeContinuation, NativeContinuationKind, NativeContinuationSite,
-        ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
-        PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,
-        PromiseThenStage, PropertyCallbackMode, PropertyMutationRoots, PropertyWriteMode,
-        PrototypeInitializationRoots, ProxyCallStage, ProxyContinuationStage, ProxyDefineMode,
-        ProxyDefineStage, ProxyDeleteMode, ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage,
-        ProxyGetStage, ProxyHasStage, ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage,
-        ProxySetMode, ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage,
-        RegExpSearchStage, RegExpStringIteratorStage, RegExpTestStage, SignalStateStage,
-        StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
-        TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
-        TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage, next_to_primitive_stage,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IteratorEagerStage,
+        IteratorFromStage, IteratorHelperStage, IteratorPrototypeSetterKey,
+        IteratorPrototypeSetterStage, JsonStringifyStage, NativeContinuation,
+        NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
+        ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
+        PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,
+        PropertyMutationRoots, PropertyWriteMode, PrototypeInitializationRoots, ProxyCallStage,
+        ProxyContinuationStage, ProxyDefineMode, ProxyDefineStage, ProxyDeleteMode,
+        ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
+        ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
+        ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
+        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringReplaceAllStage,
+        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
+        TypedArraySetStage, TypedArraySliceStage, TypedArraySubarrayStage, VmRoots,
+        WrapForValidIteratorStage, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

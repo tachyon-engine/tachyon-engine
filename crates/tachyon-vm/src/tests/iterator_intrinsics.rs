@@ -488,6 +488,78 @@ shapeOk && takeOk && zeroOk && invalidRange && invalidCloseCalls === 1 && dropOk
   infinityOk && reentryOk;
 "#;
 
+const ITERATOR_EAGER_SOURCE: &str = r#"
+var descriptorNames = ["reduce", "toArray", "forEach", "some", "every", "find"];
+var descriptorsOk = descriptorNames.every(function(name) {
+  var descriptor = Object.getOwnPropertyDescriptor(Iterator.prototype, name);
+  var expectedLength = name === "toArray" ? 0 : 1;
+  return typeof descriptor.value === "function" && descriptor.value.name === name &&
+    descriptor.value.length === expectedLength && descriptor.writable === true &&
+    descriptor.enumerable === false && descriptor.configurable === true;
+});
+
+var array = "abcd"[Symbol.iterator]().toArray();
+var arrayOk = array.length === 4 && array.join("") === "abcd" &&
+  Object.getPrototypeOf(array) === Array.prototype;
+var explicitUndefinedCalls = 0;
+var reduced = [3, 5][Symbol.iterator]().reduce(function(acc, value, index) {
+  explicitUndefinedCalls++;
+  return (acc === undefined ? 0 : acc) + value + index;
+}, undefined);
+var reduceOk = reduced === 9 && explicitUndefinedCalls === 2;
+
+var seen = "";
+[1, 2, 3][Symbol.iterator]().forEach(function(value, index) {
+  seen += value + ":" + index + ";";
+});
+var callbackOk = seen === "1:0;2:1;3:2;";
+
+function closingIterator() {
+  var index = 0;
+  var iterator = {
+    closes: 0,
+    next: function() {
+      index++;
+      return index <= 4 ? { value: index, done: false } : { done: true };
+    },
+    return: function() { this.closes++; return {}; }
+  };
+  Object.setPrototypeOf(iterator, Iterator.prototype);
+  return iterator;
+}
+var someIterator = closingIterator();
+var someOk = someIterator.some(function(value) { return value === 2; }) === true &&
+  someIterator.closes === 1;
+var everyIterator = closingIterator();
+var everyOk = everyIterator.every(function(value) { return value < 3; }) === false &&
+  everyIterator.closes === 1;
+var findIterator = closingIterator();
+var found = findIterator.find(function(value) { return value === 3; });
+var findOk = found === 3 && findIterator.closes === 1;
+
+var nextGets = 0;
+var invalidCloses = 0;
+var invalid = {
+  get next() { nextGets++; return function() { return { done: true }; }; },
+  return: function() { invalidCloses++; return {}; }
+};
+Object.setPrototypeOf(invalid, Iterator.prototype);
+try { invalid.some(null); } catch (error) {}
+var validationOk = nextGets === 0 && invalidCloses === 1;
+
+var protocolCloses = 0;
+var protocol = {
+  next: function() { throw new Error("next"); },
+  return: function() { protocolCloses++; return {}; }
+};
+Object.setPrototypeOf(protocol, Iterator.prototype);
+try { protocol.forEach(function() {}); } catch (error) {}
+var protocolOk = protocolCloses === 0;
+
+descriptorsOk && arrayOk && reduceOk && callbackOk && someOk && everyOk && findOk &&
+  validationOk && protocolOk;
+"#;
+
 #[test]
 fn iterator_intrinsics_are_stable_for_every_dispatch_batch() {
     assert_iterator_intrinsics::<1>(8_901, false);
@@ -619,6 +691,45 @@ fn iterator_take_and_drop_are_stable_for_every_dispatch_batch() {
 #[test]
 fn iterator_take_and_drop_roots_survive_forced_major_collection() {
     assert_iterator_take_drop::<8>(9_050, true);
+}
+
+#[test]
+fn iterator_eager_helpers_are_stable_for_every_dispatch_batch() {
+    assert_iterator_eager::<1>(9_061, false);
+    assert_iterator_eager::<2>(9_062, false);
+    assert_iterator_eager::<4>(9_064, false);
+    assert_iterator_eager::<8>(9_068, false);
+    assert_iterator_eager::<16>(9_076, false);
+}
+
+#[test]
+fn iterator_eager_roots_survive_forced_major_collection() {
+    assert_iterator_eager::<8>(9_080, true);
+}
+
+#[test]
+fn eager_helpers_do_not_grow_the_rust_stack_for_large_native_loops() {
+    let source = r#"
+var values = "7".repeat(2000);
+var array = values[Symbol.iterator]().toArray();
+var reduced = values[Symbol.iterator]().reduce(Number, 7);
+array.length === 2000 && array[0] === "7" && array[1999] === "7" && reduced === 7;
+"#;
+    let module = compile_iterator_source(source, 9_081);
+    let mut isolate = test_isolate_with_heap_spans(128);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_194_304,
+                quantum: 4_194_304,
+            },
+        )
+        .expect("large native eager-helper fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "large native eager helper returned {outcome:?}"
+    );
 }
 
 #[test]
@@ -782,6 +893,34 @@ fn assert_iterator_take_drop<const N: usize>(source_id: u32, forced_major: bool)
             },
         )
         .expect("Iterator.take/drop fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Executes every eager helper, including both close policies, under one VM policy.
+fn assert_iterator_eager<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_iterator_source(ITERATOR_EAGER_SOURCE, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 524_288,
+                quantum: 524_288,
+            },
+        )
+        .expect("Iterator eager fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
         RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,

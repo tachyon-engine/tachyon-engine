@@ -167,6 +167,12 @@ pub(crate) struct Realm {
     pub(crate) iterator_take: Option<Value>,
     pub(crate) iterator_drop: Option<Value>,
     pub(crate) iterator_flat_map: Option<Value>,
+    pub(crate) iterator_reduce: Option<Value>,
+    pub(crate) iterator_to_array: Option<Value>,
+    pub(crate) iterator_for_each: Option<Value>,
+    pub(crate) iterator_some: Option<Value>,
+    pub(crate) iterator_every: Option<Value>,
+    pub(crate) iterator_find: Option<Value>,
     pub(crate) iterator_helper_prototype: Option<Value>,
     pub(crate) iterator_helper_next: Option<Value>,
     pub(crate) iterator_helper_return: Option<Value>,
@@ -365,6 +371,12 @@ impl Realm {
             iterator_take: None,
             iterator_drop: None,
             iterator_flat_map: None,
+            iterator_reduce: None,
+            iterator_to_array: None,
+            iterator_for_each: None,
+            iterator_some: None,
+            iterator_every: None,
+            iterator_find: None,
             iterator_helper_prototype: None,
             iterator_helper_next: None,
             iterator_helper_return: None,
@@ -830,6 +842,12 @@ impl Trace for Realm {
         self.iterator_take.trace(tracer);
         self.iterator_drop.trace(tracer);
         self.iterator_flat_map.trace(tracer);
+        self.iterator_reduce.trace(tracer);
+        self.iterator_to_array.trace(tracer);
+        self.iterator_for_each.trace(tracer);
+        self.iterator_some.trace(tracer);
+        self.iterator_every.trace(tracer);
+        self.iterator_find.trace(tracer);
         self.iterator_helper_prototype.trace(tracer);
         self.iterator_helper_next.trace(tracer);
         self.iterator_helper_return.trace(tracer);

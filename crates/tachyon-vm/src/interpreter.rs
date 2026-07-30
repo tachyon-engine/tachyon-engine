@@ -2584,6 +2584,7 @@ impl Isolate {
             ) => (continuation.first(), 0, None, 0),
             NativeContinuationKind::IteratorFrom(_)
             | NativeContinuationKind::IteratorHelper(_)
+            | NativeContinuationKind::IteratorEager(_)
             | NativeContinuationKind::WrapForValidIterator(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -7608,6 +7609,24 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorFlatMap) => {
                     return self.begin_iterator_flat_map(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorReduce) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::Reduce);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorToArray) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::ToArray);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorForEach) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::ForEach);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorSome) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::Some);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorEvery) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::Every);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorFind) => {
+                    return self.begin_iterator_eager(&site, IteratorEagerKind::Find);
+                }
                 FunctionExecutable::Native(NativeFunction::IteratorHelperNext) => {
                     return self.begin_iterator_helper_next(&site);
                 }
@@ -8532,6 +8551,9 @@ impl Isolate {
                 NativeContinuationKind::IteratorHelper(stage) => {
                     self.resume_iterator_helper(continuation, stage, value)
                 }
+                NativeContinuationKind::IteratorEager(stage) => {
+                    self.resume_iterator_eager(continuation, stage, value)
+                }
                 NativeContinuationKind::WrapForValidIterator(stage) => {
                     self.resume_wrap_for_valid_iterator(continuation, stage, value)
                 }
@@ -8694,6 +8716,12 @@ impl Isolate {
                 if let ExecutionError::HostThrown(thrown) = &error
                     && let Some(outcome) =
                         self.handle_iterator_helper_thrown(continuation, *thrown)?
+                {
+                    return Ok(outcome);
+                }
+                if let ExecutionError::HostThrown(thrown) = &error
+                    && let Some(outcome) =
+                        self.handle_iterator_eager_thrown(continuation, *thrown)?
                 {
                     return Ok(outcome);
                 }
@@ -8948,6 +8976,9 @@ impl Isolate {
             if frame.return_continuation {
                 let continuation = self.pop_native_continuation()?;
                 if let Some(outcome) = self.handle_iterator_helper_thrown(continuation, value)? {
+                    return Ok(outcome);
+                }
+                if let Some(outcome) = self.handle_iterator_eager_thrown(continuation, value)? {
                     return Ok(outcome);
                 }
                 if continuation.kind()

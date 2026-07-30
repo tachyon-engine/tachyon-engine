@@ -1311,6 +1311,21 @@ pub(crate) enum IteratorHelperStage {
     NormalCloseReturnCall,
 }
 
+/// Observable boundaries shared by the eager Iterator Helper terminal operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IteratorEagerStage {
+    NextGet,
+    NextCall,
+    DoneGet,
+    ValueGet,
+    CallbackCall,
+    ThrowCloseReturnGet,
+    ThrowCloseReturnCall,
+    NormalCloseReturnGet,
+    NormalCloseReturnCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ObjectToLocaleStringStage {
@@ -1540,6 +1555,7 @@ pub(crate) enum NativeContinuationKind {
     },
     IteratorFrom(IteratorFromStage),
     IteratorHelper(IteratorHelperStage),
+    IteratorEager(IteratorEagerStage),
     WrapForValidIterator(WrapForValidIteratorStage),
     DynamicFunctionPrototype,
     ObjectToString,
@@ -2146,6 +2162,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::IteratorHelper(stage),
+            first,
+            second,
+        }
+    }
+
+    /// Retains the eager operation state and one stage-specific rooted operand.
+    #[inline]
+    pub(crate) const fn iterator_eager(
+        site: NativeContinuationSite,
+        stage: IteratorEagerStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IteratorEager(stage),
             first,
             second,
         }

@@ -568,6 +568,12 @@ pub(crate) enum NativeFunction {
     IteratorTake,
     IteratorDrop,
     IteratorFlatMap,
+    IteratorReduce,
+    IteratorToArray,
+    IteratorForEach,
+    IteratorSome,
+    IteratorEvery,
+    IteratorFind,
     IteratorHelperNext,
     IteratorHelperReturn,
     WrapForValidIteratorNext,
@@ -1347,6 +1353,7 @@ impl NativeFunction {
             | Self::IteratorConstructor
             | Self::IteratorConstructorGetter
             | Self::IteratorToStringTagGetter
+            | Self::IteratorToArray
             | Self::IteratorHelperNext
             | Self::IteratorHelperReturn
             | Self::WrapForValidIteratorNext
@@ -1359,7 +1366,12 @@ impl NativeFunction {
             | Self::IteratorFilter
             | Self::IteratorTake
             | Self::IteratorDrop
-            | Self::IteratorFlatMap => 1,
+            | Self::IteratorFlatMap
+            | Self::IteratorReduce
+            | Self::IteratorForEach
+            | Self::IteratorSome
+            | Self::IteratorEvery
+            | Self::IteratorFind => 1,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
             | Self::SymbolValueOf
@@ -1705,6 +1717,12 @@ impl NativeFunction {
             Self::IteratorTake => "take",
             Self::IteratorDrop => "drop",
             Self::IteratorFlatMap => "flatMap",
+            Self::IteratorReduce => "reduce",
+            Self::IteratorToArray => "toArray",
+            Self::IteratorForEach => "forEach",
+            Self::IteratorSome => "some",
+            Self::IteratorEvery => "every",
+            Self::IteratorFind => "find",
             Self::IteratorHelperNext => "next",
             Self::IteratorHelperReturn => "return",
             Self::WrapForValidIteratorNext => "next",
@@ -2308,6 +2326,7 @@ pub(crate) struct VmTypes {
     pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) generator_object: GcType<GeneratorObject>,
     pub(crate) async_from_sync_iterator: GcType<AsyncFromSyncIteratorObject>,
+    pub(crate) iterator_eager_operation: GcType<IteratorEagerOperation>,
     pub(crate) iterator_helper: GcType<IteratorHelperObject>,
     pub(crate) wrap_for_valid_iterator: GcType<WrapForValidIteratorObject>,
     pub(crate) async_function_state: GcType<AsyncFunctionState>,

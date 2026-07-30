@@ -65,7 +65,7 @@ impl Isolate {
     }
 
     /// Writes a default dense Array property, geometrically replacing fixed backing when needed.
-    pub(super) fn set_dense_array_value(
+    pub(crate) fn set_dense_array_value(
         &mut self,
         receiver: Value,
         index: u32,

@@ -2578,6 +2578,36 @@ impl Isolate {
         self.realm.iterator_flat_map = Some(flat_map);
         let flat_map_atom = self.intern_intrinsic_name(b"flatMap")?;
         self.set_intrinsic_data_property(iterator_prototype, flat_map_atom, flat_map, true)?;
+        let reduce =
+            self.allocate_native_function(NativeFunction::IteratorReduce, function_object())?;
+        self.realm.iterator_reduce = Some(reduce);
+        let reduce_atom = self.intern_intrinsic_name(b"reduce")?;
+        self.set_intrinsic_data_property(iterator_prototype, reduce_atom, reduce, true)?;
+        let to_array =
+            self.allocate_native_function(NativeFunction::IteratorToArray, function_object())?;
+        self.realm.iterator_to_array = Some(to_array);
+        let to_array_atom = self.intern_intrinsic_name(b"toArray")?;
+        self.set_intrinsic_data_property(iterator_prototype, to_array_atom, to_array, true)?;
+        let for_each =
+            self.allocate_native_function(NativeFunction::IteratorForEach, function_object())?;
+        self.realm.iterator_for_each = Some(for_each);
+        let for_each_atom = self.intern_intrinsic_name(b"forEach")?;
+        self.set_intrinsic_data_property(iterator_prototype, for_each_atom, for_each, true)?;
+        let some =
+            self.allocate_native_function(NativeFunction::IteratorSome, function_object())?;
+        self.realm.iterator_some = Some(some);
+        let some_atom = self.intern_intrinsic_name(b"some")?;
+        self.set_intrinsic_data_property(iterator_prototype, some_atom, some, true)?;
+        let every =
+            self.allocate_native_function(NativeFunction::IteratorEvery, function_object())?;
+        self.realm.iterator_every = Some(every);
+        let every_atom = self.intern_intrinsic_name(b"every")?;
+        self.set_intrinsic_data_property(iterator_prototype, every_atom, every, true)?;
+        let find =
+            self.allocate_native_function(NativeFunction::IteratorFind, function_object())?;
+        self.realm.iterator_find = Some(find);
+        let find_atom = self.intern_intrinsic_name(b"find")?;
+        self.set_intrinsic_data_property(iterator_prototype, find_atom, find, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,
