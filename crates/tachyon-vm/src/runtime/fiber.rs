@@ -3059,6 +3059,8 @@ impl Trace for EvalVarEnvironment {
 #[derive(Debug, Default)]
 pub(crate) struct Fiber {
     pub(crate) frames: Vec<Frame>,
+    /// Stable referrer for module entry work without enlarging every hot activation frame.
+    pub(crate) entry_module: Option<ModuleId>,
     /// Only direct-eval/debugger fibers enable runtime name lookup before global resolution.
     pub(crate) dynamic_scope: bool,
     /// Distinguishes an eval child from an ordinary fiber that only retains var overlays.

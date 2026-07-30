@@ -86,6 +86,7 @@ pub use finalization::{
 pub use host::{HostProviderError, HostProviders, TimeZoneProvider, WallClockProvider};
 pub use isolate::Isolate;
 pub use module::{
+    DynamicImportAttribute, DynamicImportError, DynamicImportRequest, DynamicImportRequestId,
     LoadedModule, ModuleError, ModuleEvaluationError, ModuleExportName, ModuleId, ModuleIdentity,
     ModuleLimits, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
 };

@@ -2320,3 +2320,166 @@ fn module_live_cells_are_roots_at_allocation_triggered_major_collections() {
             .is_ok()
     );
 }
+
+#[test]
+fn dynamic_import_handoff_owns_utf16_data_and_preserves_fifo_order() {
+    let mut isolate = fixtures::test_isolate();
+    let attribute = DynamicImportAttribute::try_from_utf16(
+        &"type".encode_utf16().collect::<Vec<_>>(),
+        &"json".encode_utf16().collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let first_specifier = [0x61, 0xd800, 0x62];
+    let (first_id, _) = isolate
+        .enqueue_dynamic_import(&first_specifier, None, core::slice::from_ref(&attribute))
+        .unwrap();
+    let second_specifier = "memory:second".encode_utf16().collect::<Vec<_>>();
+    let (second_id, _) = isolate
+        .enqueue_dynamic_import(&second_specifier, None, &[])
+        .unwrap();
+
+    let first = isolate.take_pending_dynamic_import().unwrap();
+    assert_eq!(first.id(), first_id);
+    assert_eq!(first.specifier(), first_specifier);
+    assert_eq!(first.attributes(), core::slice::from_ref(&attribute));
+    let second = isolate.take_pending_dynamic_import().unwrap();
+    assert_eq!(second.id(), second_id);
+    assert_eq!(second.specifier(), second_specifier);
+    assert!(isolate.take_pending_dynamic_import().is_none());
+}
+
+/// Executes the verified DynamicImport opcode and checks its module-owned host handoff.
+fn assert_dynamic_import_opcode_batch<const N: usize>(forced_major: bool) {
+    let mut isolate = fixtures::test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let identity = specifier("memory:dynamic-import-root");
+    let module = LoadedModule::precompiled(compile_source_module(
+        2_800 + N as u32,
+        "memory:dynamic-import-root",
+        "import(\"./dep.js\")",
+    ));
+    let mut loader = PrecompiledGraphLoader::new(vec![(identity.clone(), module)]);
+    let root = isolate.load_module_graph(&mut loader, &identity).unwrap();
+    let RunOutcome::Completed(promise) =
+        isolate.evaluate_module_with_test_batch::<N>(root).unwrap()
+    else {
+        panic!("dynamic import module should return its Promise");
+    };
+    assert_eq!(
+        isolate.promise_snapshot(promise).unwrap().state,
+        PromiseState::Pending
+    );
+    let request = isolate.take_pending_dynamic_import().unwrap();
+    assert_eq!(
+        request.specifier(),
+        "./dep.js".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(request.referrer(), Some(root));
+    assert!(request.attributes().is_empty());
+}
+
+#[test]
+fn dynamic_import_opcode_runs_for_every_dispatch_batch() {
+    assert_dynamic_import_opcode_batch::<1>(false);
+    assert_dynamic_import_opcode_batch::<2>(false);
+    assert_dynamic_import_opcode_batch::<4>(false);
+    assert_dynamic_import_opcode_batch::<8>(true);
+    assert_dynamic_import_opcode_batch::<16>(true);
+}
+
+#[test]
+fn dynamic_import_success_retains_promise_through_forced_major_collection() {
+    let mut isolate = fixtures::test_isolate();
+    let module = isolate
+        .module_graph
+        .insert(record("memory:dynamic", &[], vec![], vec![], &[]))
+        .unwrap();
+    isolate.module_graph.link(module).unwrap();
+    assert!(matches!(
+        isolate.evaluate_module(module).unwrap(),
+        RunOutcome::Completed(_)
+    ));
+    let (id, promise) = isolate
+        .enqueue_dynamic_import(&[0x2e, 0x2f, 0x6d], Some(module), &[])
+        .unwrap();
+    let request = isolate.take_pending_dynamic_import().unwrap();
+    assert_eq!(request.id(), id);
+    assert_eq!(request.referrer(), Some(module));
+
+    isolate
+        .heap
+        .set_forced_collection_mode(ForcedCollectionMode::Major);
+    for _ in 0..32 {
+        isolate.create_ordinary_object().unwrap();
+    }
+    isolate.complete_dynamic_import_success(id, module).unwrap();
+    let snapshot = isolate.promise_snapshot(promise).unwrap();
+    assert_eq!(snapshot.state, PromiseState::Fulfilled);
+    assert!(isolate.is_module_namespace_value(snapshot.result));
+}
+
+#[test]
+fn dynamic_import_failure_settles_only_the_selected_request() {
+    let mut isolate = fixtures::test_isolate();
+    let (first_id, first_promise) = isolate.enqueue_dynamic_import(&[0x61], None, &[]).unwrap();
+    let (second_id, second_promise) = isolate.enqueue_dynamic_import(&[0x62], None, &[]).unwrap();
+    let _ = isolate.take_pending_dynamic_import().unwrap();
+    let _ = isolate.take_pending_dynamic_import().unwrap();
+
+    isolate
+        .complete_dynamic_import_failure(second_id, Value::from_i32(42))
+        .unwrap();
+    assert_eq!(
+        isolate.promise_snapshot(second_promise).unwrap().state,
+        PromiseState::Rejected
+    );
+    assert_eq!(
+        isolate.promise_snapshot(first_promise).unwrap().state,
+        PromiseState::Pending
+    );
+    isolate
+        .complete_dynamic_import_failure(first_id, Value::from_i32(7))
+        .unwrap();
+    assert_eq!(
+        isolate
+            .promise_snapshot(first_promise)
+            .unwrap()
+            .result
+            .as_i32(),
+        Some(7)
+    );
+}
+
+#[test]
+fn dynamic_import_pending_module_completion_is_retriable() {
+    let mut isolate = fixtures::test_isolate();
+    let module = isolate
+        .module_graph
+        .insert(record("memory:pending", &[], vec![], vec![], &[]))
+        .unwrap();
+    isolate.module_graph.link(module).unwrap();
+    let (id, promise) = isolate.enqueue_dynamic_import(&[0x61], None, &[]).unwrap();
+    let _ = isolate.take_pending_dynamic_import().unwrap();
+
+    assert_eq!(
+        isolate.complete_dynamic_import_success(id, module),
+        Err(ExecutionError::Module(
+            ModuleError::DynamicImportModuleNotEvaluated(module)
+        ))
+    );
+    assert_eq!(
+        isolate.promise_snapshot(promise).unwrap().state,
+        PromiseState::Pending
+    );
+    isolate
+        .complete_dynamic_import_failure(id, Value::from_i32(9))
+        .unwrap();
+    assert_eq!(
+        isolate.promise_snapshot(promise).unwrap().result.as_i32(),
+        Some(9)
+    );
+}

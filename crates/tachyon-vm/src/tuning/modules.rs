@@ -10,6 +10,12 @@ pub(crate) const INITIAL_LINK_WORK_CAPACITY: usize = 32;
 pub(crate) const INITIAL_ASYNC_PARENT_CAPACITY: usize = 2;
 /// Completion normally releases a short chain before the next Promise turn.
 pub(crate) const INITIAL_ASYNC_READY_CAPACITY: usize = 8;
+/// Embedded hosts normally have only a few dynamic module fetches in flight at once.
+pub(crate) const INITIAL_DYNAMIC_IMPORT_CAPACITY: usize = 4;
+/// Bounds outstanding host handoffs independently from the number of loaded module records.
+pub(crate) const MAX_PENDING_DYNAMIC_IMPORTS: u32 = 1_024;
+/// Import attributes are usually absent or contain only a `type` entry.
+pub(crate) const INITIAL_DYNAMIC_IMPORT_ATTRIBUTE_CAPACITY: usize = 1;
 /// Linear atom comparison wins for the small namespace surface common in embedded modules.
 pub(crate) const NAMESPACE_LINEAR_LOOKUP_LIMIT: usize = 8;
 /// Default graph edges per configured module when the host does not override module limits.

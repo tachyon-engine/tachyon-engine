@@ -1,5 +1,6 @@
 //! Owned ECMAScript module records and isolate-local live binding storage.
 
+mod dynamic_import;
 mod evaluation;
 mod lifecycle;
 mod link;
@@ -9,6 +10,9 @@ mod start;
 pub(crate) use namespace::ModuleNamespaceObject;
 pub(crate) use start::{ModuleStartPhase, ModuleStartState};
 
+pub use dynamic_import::{
+    DynamicImportAttribute, DynamicImportError, DynamicImportRequest, DynamicImportRequestId,
+};
 pub use lifecycle::{
     LoadedModule, ModuleEvaluationError, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
 };
@@ -396,6 +400,10 @@ pub enum ModuleError {
     AlreadyInitializedBinding,
     InvalidLinkState,
     EvaluationOrderLimit { limit: u32 },
+    DynamicImportRequestLimit { limit: u32 },
+    DynamicImportRequestIdExhausted,
+    UnknownDynamicImportRequest(DynamicImportRequestId),
+    DynamicImportModuleNotEvaluated(ModuleId),
 }
 
 /// Append-only module records and binding cells with deterministic iteration order.
@@ -408,6 +416,7 @@ pub(crate) struct ModuleGraph {
     next_async_evaluation_order: u64,
     ready_async_modules: Vec<ModuleId>,
     rejection_worklist: Vec<ModuleId>,
+    dynamic_imports: dynamic_import::DynamicImportState,
     pub(crate) start_state: Option<ModuleStartState>,
     next_start_epoch: u32,
 }
@@ -471,6 +480,7 @@ impl ModuleGraph {
             next_async_evaluation_order: 0,
             ready_async_modules: Vec::with_capacity(INITIAL_ASYNC_READY_CAPACITY),
             rejection_worklist: Vec::with_capacity(INITIAL_ASYNC_READY_CAPACITY),
+            dynamic_imports: dynamic_import::DynamicImportState::try_new()?,
             start_state: None,
             next_start_epoch: 4,
         })
@@ -789,6 +799,7 @@ impl Trace for ModuleGraph {
                 | ModuleEvaluationState::Evaluating => {}
             }
         }
+        self.dynamic_imports.trace(tracer);
     }
 }
 

@@ -424,6 +424,7 @@ impl Isolate {
                 .map_err(ExecutionError::Module)
         })();
         self.fiber.frames.clear();
+        self.fiber.entry_module = None;
         if result.is_ok() {
             self.module_graph
                 .set_function_instantiation_cursor(module, next)
@@ -1984,6 +1985,20 @@ impl Isolate {
                     self.suspend_async_function_await(site)?;
                 }
                 return Ok(None);
+            }
+            Opcode::DynamicImport => {
+                let source = self.read(base, operands[1])?;
+                let options = self.read(base, operands[2])?;
+                if !self.is_string_value(source) {
+                    return Err(ExecutionError::UnsupportedPrimitiveStringConversion(source));
+                }
+                if options.as_immediate() != Some(Immediate::Undefined) {
+                    return Err(ExecutionError::NotObject(options));
+                }
+                let specifier = self.string_value_to_utf16(source)?;
+                let (_, promise) =
+                    self.enqueue_dynamic_import(&specifier, self.fiber.entry_module, &[])?;
+                self.write(base, operands[0], promise)?;
             }
             Opcode::Yield => {
                 self.suspend_generator_yield(crate::generator::GeneratorSuspendSite {
@@ -4026,6 +4041,7 @@ impl Isolate {
         }
         self.cancel_signal_execution()?;
         self.fiber.frames.clear();
+        self.fiber.entry_module = module;
         self.fiber.argument_objects.clear();
         self.fiber.argument_sources.clear();
         self.fiber.argument_callees.clear();
