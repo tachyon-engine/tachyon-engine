@@ -1043,7 +1043,10 @@ fn object_property_label_count(
     value: &crate::HirObjectPropertyValue,
 ) -> Result<usize, CompileError> {
     match value {
-        crate::HirObjectPropertyValue::Data(expression) => expression_label_count(expression),
+        crate::HirObjectPropertyValue::Data(expression)
+        | crate::HirObjectPropertyValue::Prototype(expression) => {
+            expression_label_count(expression)
+        }
         crate::HirObjectPropertyValue::Method(_)
         | crate::HirObjectPropertyValue::Getter(_)
         | crate::HirObjectPropertyValue::Setter(_) => Ok(0),

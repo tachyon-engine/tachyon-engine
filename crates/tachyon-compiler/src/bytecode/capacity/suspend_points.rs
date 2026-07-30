@@ -243,7 +243,9 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
                 if let HirObjectPropertyKey::Computed(key) = &property.key {
                     count = add(count, expression_suspend_point_count(key)?)?;
                 }
-                if let HirObjectPropertyValue::Data(value) = &property.value {
+                if let HirObjectPropertyValue::Data(value)
+                | HirObjectPropertyValue::Prototype(value) = &property.value
+                {
                     count = add(count, expression_suspend_point_count(value)?)?;
                 }
             }
@@ -257,7 +259,9 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
                         if let HirObjectPropertyKey::Computed(key) = &property.key {
                             count = add(count, expression_suspend_point_count(key)?)?;
                         }
-                        if let HirObjectPropertyValue::Data(value) = &property.value {
+                        if let HirObjectPropertyValue::Data(value)
+                        | HirObjectPropertyValue::Prototype(value) = &property.value
+                        {
                             count = add(count, expression_suspend_point_count(value)?)?;
                         }
                     }

@@ -874,6 +874,14 @@ impl Lowerer<'_> {
                                 property.span,
                             )?;
                         }
+                        HirObjectPropertyValue::Prototype(value) => {
+                            let value = self.expression(value)?;
+                            self.emit(
+                                Opcode::SetObjectLiteralPrototype,
+                                &[object.index(), value.index()],
+                                property.span,
+                            )?;
+                        }
                         HirObjectPropertyValue::Method(function) => {
                             self.define_object_method(
                                 *function,
@@ -938,6 +946,14 @@ impl Lowerer<'_> {
                                     self.emit(
                                         opcode,
                                         &[object.index(), value.index(), key],
+                                        property.span,
+                                    )?;
+                                }
+                                HirObjectPropertyValue::Prototype(value) => {
+                                    let value = self.expression(value)?;
+                                    self.emit(
+                                        Opcode::SetObjectLiteralPrototype,
+                                        &[object.index(), value.index()],
                                         property.span,
                                     )?;
                                 }

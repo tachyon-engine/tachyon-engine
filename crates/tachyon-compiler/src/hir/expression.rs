@@ -49,6 +49,8 @@ pub enum HirArrayExpressionPart {
 #[derive(Clone, Debug, PartialEq)]
 pub enum HirObjectPropertyValue {
     Data(HirExpression),
+    /// Annex B's non-computed `__proto__: value` prototype initializer.
+    Prototype(HirExpression),
     Method(FunctionStencilId),
     Getter(FunctionStencilId),
     Setter(FunctionStencilId),
@@ -717,6 +719,16 @@ pub(super) fn lower_expression(
                     stencil.role = super::program::HirFunctionRole::Method;
                     stencil.source_span = Some(source_span(property.span));
                     HirObjectPropertyValue::Method(function)
+                } else if !property.computed
+                    && !property.shorthand
+                    && matches!(&key, HirObjectPropertyKey::Static(name) if name.as_ref() == "__proto__")
+                {
+                    HirObjectPropertyValue::Prototype(lower_expression(
+                        &property.value,
+                        source,
+                        semantic,
+                        functions,
+                    )?)
                 } else {
                     HirObjectPropertyValue::Data(lower_expression(
                         &property.value,

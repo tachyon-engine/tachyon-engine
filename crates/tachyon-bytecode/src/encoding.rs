@@ -319,9 +319,11 @@ pub enum Opcode {
     DynamicImport = 136,
     /// Loads or creates the active Realm's frozen template object for one syntax site.
     LoadTemplateObject = 137,
+    /// Applies the non-observable object-literal `__proto__` prototype initialization rule.
+    SetObjectLiteralPrototype = 138,
 }
 
-pub(super) const OPCODE_COUNT: usize = 138;
+pub(super) const OPCODE_COUNT: usize = 139;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -461,10 +463,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // InitialYield
     3, // DynamicImport
     2, // LoadTemplateObject
+    2, // SetObjectLiteralPrototype
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::LoadTemplateObject as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::SetObjectLiteralPrototype as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -648,6 +651,7 @@ impl Opcode {
             71 => Some(Self::InitialYield),
             72 => Some(Self::DynamicImport),
             73 => Some(Self::LoadTemplateObject),
+            74 => Some(Self::SetObjectLiteralPrototype),
             _ => None,
         }
     }

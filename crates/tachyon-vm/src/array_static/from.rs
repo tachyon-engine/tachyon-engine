@@ -678,6 +678,13 @@ impl Isolate {
             self.pop_native_continuation()?;
             return Err(error);
         }
+        let parent_is_active = self.fiber.completions.last_native().is_some_and(|parent| {
+            matches!(parent.kind(), NativeContinuationKind::ArrayStatic(parent_stage) if parent_stage == stage)
+                && parent.first() == Value::from_heap_ref(state.raw())
+        });
+        if !parent_is_active {
+            return Ok(());
+        }
         if self.fiber.frames.len() != frame_depth {
             let frame = self
                 .fiber

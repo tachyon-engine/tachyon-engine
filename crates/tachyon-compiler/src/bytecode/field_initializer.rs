@@ -160,7 +160,9 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 if let HirObjectPropertyKey::Computed(key) = &property.key {
                     collect_expression(key, bindings);
                 }
-                if let HirObjectPropertyValue::Data(value) = &property.value {
+                if let HirObjectPropertyValue::Data(value)
+                | HirObjectPropertyValue::Prototype(value) = &property.value
+                {
                     collect_expression(value, bindings);
                 }
             }
@@ -172,7 +174,9 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                         if let HirObjectPropertyKey::Computed(key) = &property.key {
                             collect_expression(key, bindings);
                         }
-                        if let HirObjectPropertyValue::Data(value) = &property.value {
+                        if let HirObjectPropertyValue::Data(value)
+                        | HirObjectPropertyValue::Prototype(value) = &property.value
+                        {
                             collect_expression(value, bindings);
                         }
                     }

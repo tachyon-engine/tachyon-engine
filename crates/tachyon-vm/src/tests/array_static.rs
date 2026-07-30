@@ -80,6 +80,12 @@ result.length === 5 && result[0] === Number.MAX_VALUE && result[1] === Number.MI
   result[4] === Number.POSITIVE_INFINITY;
 "#;
 
+const ARRAY_FROM_GENERATOR_SOURCE: &str = r#"
+function* values() { yield 1; yield 2; yield 3; }
+var result = Array.from(values());
+result.length === 3 && result[0] === 1 && result[1] === 2 && result[2] === 3;
+"#;
+
 #[test]
 fn array_of_is_stable_for_every_dispatch_batch() {
     assert_array_of_source::<1>(ARRAY_OF_SOURCE, 1_871, false);
@@ -113,6 +119,11 @@ fn array_from_state_survives_forced_major_collections() {
 fn array_from_observes_array_mutation_and_number_boundaries() {
     assert_array_of_source::<8>(ARRAY_FROM_MUTATION_SOURCE, 1_909, false);
     assert_array_of_source::<8>(ARRAY_FROM_NUMBER_SOURCE, 1_910, false);
+}
+
+#[test]
+fn array_from_consumes_generator_fibers() {
+    assert_array_of_source::<8>(ARRAY_FROM_GENERATOR_SOURCE, 1_911, false);
 }
 
 /// Compiles and executes one Array.of fixture under a selected dispatch and GC policy.

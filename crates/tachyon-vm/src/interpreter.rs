@@ -1441,6 +1441,16 @@ impl Isolate {
                 let object = self.create_ordinary_object()?;
                 self.write(base, operands[0], object)?;
             }
+            Opcode::SetObjectLiteralPrototype => {
+                let object = self.read(base, operands[0])?;
+                let prototype = self.read(base, operands[1])?;
+                if prototype.as_immediate() == Some(Immediate::Null)
+                    || self.is_object_value(prototype)
+                {
+                    let changed = self.ordinary_set_prototype_of(object, prototype)?;
+                    debug_assert!(changed, "fresh object literal accepts its prototype");
+                }
+            }
             Opcode::CreateArray => {
                 let prototype = self
                     .realm
@@ -2573,6 +2583,7 @@ impl Isolate {
                 WrapForValidIteratorStage::NextCall | WrapForValidIteratorStage::ReturnCall,
             ) => (continuation.first(), 0, None, 0),
             NativeContinuationKind::IteratorFrom(_)
+            | NativeContinuationKind::IteratorHelper(_)
             | NativeContinuationKind::WrapForValidIterator(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -7582,6 +7593,15 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorFrom) => {
                     return self.begin_iterator_from(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorMap) => {
+                    return self.begin_iterator_map(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorHelperNext) => {
+                    return self.begin_iterator_helper_next(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorHelperReturn) => {
+                    return self.begin_iterator_helper_return(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::WrapForValidIteratorNext) => {
                     return self.begin_wrap_for_valid_iterator_next(&site);
                 }
@@ -8497,6 +8517,9 @@ impl Isolate {
                 NativeContinuationKind::IteratorFrom(stage) => {
                     self.resume_iterator_from(continuation, stage, value)
                 }
+                NativeContinuationKind::IteratorHelper(stage) => {
+                    self.resume_iterator_helper(continuation, stage, value)
+                }
                 NativeContinuationKind::WrapForValidIterator(stage) => {
                     self.resume_wrap_for_valid_iterator(continuation, stage, value)
                 }
@@ -8650,6 +8673,12 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if let ExecutionError::HostThrown(thrown) = &error
+                    && let Some(outcome) =
+                        self.handle_iterator_helper_thrown(continuation, *thrown)?
+                {
+                    return Ok(outcome);
+                }
                 if matches!(
                     continuation.kind(),
                     NativeContinuationKind::AsyncFromSyncIterator(_)
@@ -8900,6 +8929,9 @@ impl Isolate {
                 .truncate(frame.completion_base as usize);
             if frame.return_continuation {
                 let continuation = self.pop_native_continuation()?;
+                if let Some(outcome) = self.handle_iterator_helper_thrown(continuation, value)? {
+                    return Ok(outcome);
+                }
                 if continuation.kind()
                     == NativeContinuationKind::CollectionIteratorClose(
                         CollectionIteratorCloseStage::ReturnCall,

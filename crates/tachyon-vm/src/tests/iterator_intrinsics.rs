@@ -217,6 +217,85 @@ shapeOk && wrapperOk && missingReturnOk && iterableOk && identityOk && invalidTh
   primitiveThrows === 3 && stringOk && primitiveReceiverOk;
 "#;
 
+const ITERATOR_MAP_SOURCE: &str = r#"
+var invalidClosed = 0;
+var invalidTypeError = false;
+var invalid = {
+  __proto__: Iterator.prototype,
+  get next() { throw new Error("next must not be read"); },
+  return() { invalidClosed++; return {}; }
+};
+try { invalid.map(); } catch (error) { invalidTypeError = error instanceof TypeError; }
+var invalidObjectTypeError = false;
+function invokeInvalidMap() { invalid.map({}); }
+try { invokeInvalidMap(); } catch (error) { invalidObjectTypeError = error instanceof TypeError; }
+
+var nextGets = 0;
+var nextCalls = 0;
+var returnCalls = 0;
+var cursor = 0;
+var source = Object.create(Iterator.prototype);
+Object.defineProperty(source, "next", {
+  get: function() {
+    nextGets++;
+    return function() {
+      nextCalls++;
+      return cursor < 3 ? { value: ++cursor, done: false } : { done: true };
+    };
+  }
+});
+source.return = function() { returnCalls++; return {}; };
+var mapperCalls = 0;
+var mapped = source.map(function(value, index) {
+  mapperCalls++;
+  return value * 10 + index;
+});
+var first = mapped.next();
+var second = mapped.next();
+var third = mapped.next();
+var exhausted = mapped.next();
+var after = mapped.next();
+mapped.return();
+var iterationOk = nextGets === 1 && nextCalls === 4 && mapperCalls === 3 &&
+  first.value === 10 && first.done === false && second.value === 21 &&
+  third.value === 32 && exhausted.done === true && after.done === true && returnCalls === 0;
+
+var explicitReturnCalls = 0;
+var closeSource = Object.create(Iterator.prototype);
+closeSource.next = function() { return { value: 1, done: false }; };
+closeSource.return = function() { explicitReturnCalls++; return {}; };
+var closeHelper = closeSource.map(function(value) { return value; });
+closeHelper.next();
+var closeResult = closeHelper.return();
+closeHelper.return();
+var returnOk = explicitReturnCalls === 1 && closeResult.done === true;
+
+var chainSource = Object.create(Iterator.prototype);
+var chainCursor = 0;
+chainSource.next = function() {
+  return chainCursor++ === 0 ? { value: 5, done: false } : { done: true };
+};
+var chained = chainSource.map(function(value) { return value + 1; })
+  .map(function(value, index) { return value + index + 1; });
+var chainFirst = chained.next();
+var chainDone = chained.next();
+var chainOk = chainFirst.value === 7 && chainFirst.done === false && chainDone.done === true;
+
+var reentryClosed = 0;
+var reentrySource = Object.create(Iterator.prototype);
+reentrySource.next = function() { return { value: 1, done: false }; };
+reentrySource.return = function() { reentryClosed++; return {}; };
+var reentryHelper;
+reentryHelper = reentrySource.map(function(value) { reentryHelper.next(); return value; });
+var reentryTypeError = false;
+try { reentryHelper.next(); } catch (error) { reentryTypeError = error instanceof TypeError; }
+var reentryDone = reentryHelper.next();
+var reentryOk = reentryTypeError && reentryClosed === 1 && reentryDone.done === true;
+
+invalidClosed === 2 && invalidTypeError && invalidObjectTypeError && iterationOk && returnOk &&
+  chainOk && reentryOk;
+"#;
+
 #[test]
 fn iterator_intrinsics_are_stable_for_every_dispatch_batch() {
     assert_iterator_intrinsics::<1>(8_901, false);
@@ -308,6 +387,20 @@ fn iterator_from_roots_survive_forced_major_collection() {
     assert_iterator_from::<8>(8_960, true);
 }
 
+#[test]
+fn iterator_map_is_stable_for_every_dispatch_batch() {
+    assert_iterator_map::<1>(8_971, false);
+    assert_iterator_map::<2>(8_972, false);
+    assert_iterator_map::<4>(8_974, false);
+    assert_iterator_map::<8>(8_978, false);
+    assert_iterator_map::<16>(8_986, false);
+}
+
+#[test]
+fn iterator_map_roots_survive_forced_major_collection() {
+    assert_iterator_map::<8>(8_990, true);
+}
+
 /// Compiles and executes the Iterator intrinsic graph under one dispatch and GC policy.
 fn assert_iterator_intrinsics<const N: usize>(source_id: u32, forced_major: bool) {
     let module = compile_iterator_intrinsics(source_id);
@@ -359,6 +452,34 @@ fn assert_iterator_from<const N: usize>(source_id: u32, forced_major: bool) {
             },
         )
         .expect("Iterator.from fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Executes map creation, stepping, exhaustion, and explicit close under one VM policy.
+fn assert_iterator_map<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_iterator_source(ITERATOR_MAP_SOURCE, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Iterator.map fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
         RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,

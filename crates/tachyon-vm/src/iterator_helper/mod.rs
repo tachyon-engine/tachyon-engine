@@ -1,5 +1,6 @@
 //! GC-owned substrate for synchronous Iterator Helpers.
 
+mod map;
 mod object;
 
 #[allow(

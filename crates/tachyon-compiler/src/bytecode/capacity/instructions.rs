@@ -723,7 +723,10 @@ fn object_property_instruction_count(
     value: &crate::HirObjectPropertyValue,
 ) -> Result<usize, CompileError> {
     match value {
-        crate::HirObjectPropertyValue::Data(expression) => expression_instruction_count(expression),
+        crate::HirObjectPropertyValue::Data(expression)
+        | crate::HirObjectPropertyValue::Prototype(expression) => {
+            expression_instruction_count(expression)
+        }
         crate::HirObjectPropertyValue::Method(_)
         | crate::HirObjectPropertyValue::Getter(_)
         | crate::HirObjectPropertyValue::Setter(_) => Ok(3),

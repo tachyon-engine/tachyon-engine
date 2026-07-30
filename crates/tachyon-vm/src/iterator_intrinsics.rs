@@ -489,7 +489,7 @@ impl Isolate {
     }
 
     #[inline(always)]
-    const fn native_site(site: &CallSite) -> NativeContinuationSite {
+    pub(crate) const fn native_site(site: &CallSite) -> NativeContinuationSite {
         NativeContinuationSite {
             caller_base: site.caller_base,
             destination: site.destination,

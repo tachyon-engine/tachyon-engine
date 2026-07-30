@@ -1001,7 +1001,10 @@ fn object_property_scope_name_count(
     value: &crate::HirObjectPropertyValue,
 ) -> Result<usize, CompileError> {
     match value {
-        crate::HirObjectPropertyValue::Data(expression) => expression_scope_name_count(expression),
+        crate::HirObjectPropertyValue::Data(expression)
+        | crate::HirObjectPropertyValue::Prototype(expression) => {
+            expression_scope_name_count(expression)
+        }
         crate::HirObjectPropertyValue::Method(_)
         | crate::HirObjectPropertyValue::Getter(_)
         | crate::HirObjectPropertyValue::Setter(_) => Ok(0),
@@ -1012,7 +1015,10 @@ fn object_property_literal_count(
     value: &crate::HirObjectPropertyValue,
 ) -> Result<usize, CompileError> {
     match value {
-        crate::HirObjectPropertyValue::Data(expression) => expression_literal_count(expression),
+        crate::HirObjectPropertyValue::Data(expression)
+        | crate::HirObjectPropertyValue::Prototype(expression) => {
+            expression_literal_count(expression)
+        }
         crate::HirObjectPropertyValue::Method(_)
         | crate::HirObjectPropertyValue::Getter(_)
         | crate::HirObjectPropertyValue::Setter(_) => Ok(0),

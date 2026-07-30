@@ -197,6 +197,11 @@ fn write_instruction(output: &mut String, opcode: Opcode, operands: &[u32; 3]) -
         Opcode::SetFunctionHomeObject => {
             write!(output, " function=r{}, home=r{}", operands[0], operands[1])?
         }
+        Opcode::SetObjectLiteralPrototype => write!(
+            output,
+            " target=r{}, prototype=r{}",
+            operands[0], operands[1]
+        )?,
         Opcode::AttachInstanceFields => write!(
             output,
             " constructor=r{}, records=r{}, count={}",

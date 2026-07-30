@@ -1280,6 +1280,23 @@ pub(crate) enum WrapForValidIteratorStage {
     ReturnCall,
 }
 
+/// Observable boundaries in lazy Iterator Helper creation, stepping, and closing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IteratorHelperStage {
+    CreateNextGet,
+    CreateCloseReturnGet,
+    CreateCloseReturnCall,
+    NextCall,
+    DoneGet,
+    ValueGet,
+    MapCallbackCall,
+    AbruptCloseReturnGet,
+    AbruptCloseReturnCall,
+    NormalCloseReturnGet,
+    NormalCloseReturnCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ObjectToLocaleStringStage {
@@ -1508,6 +1525,7 @@ pub(crate) enum NativeContinuationKind {
         stage: IteratorPrototypeSetterStage,
     },
     IteratorFrom(IteratorFromStage),
+    IteratorHelper(IteratorHelperStage),
     WrapForValidIterator(WrapForValidIteratorStage),
     DynamicFunctionPrototype,
     ObjectToString,
@@ -2098,6 +2116,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::IteratorFrom(stage),
+            first,
+            second,
+        }
+    }
+
+    /// Retains the helper or direct iterator plus one stage-specific rooted operand.
+    #[inline]
+    pub(crate) const fn iterator_helper(
+        site: NativeContinuationSite,
+        stage: IteratorHelperStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IteratorHelper(stage),
             first,
             second,
         }

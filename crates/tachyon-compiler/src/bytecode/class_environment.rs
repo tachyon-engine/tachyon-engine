@@ -380,7 +380,7 @@ fn collect_property(
     if let HirObjectPropertyKey::Computed(key) = key {
         collect_expression(key, bindings);
     }
-    if let HirObjectPropertyValue::Data(value) = value {
+    if let HirObjectPropertyValue::Data(value) | HirObjectPropertyValue::Prototype(value) = value {
         collect_expression(value, bindings);
     }
 }

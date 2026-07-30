@@ -202,6 +202,7 @@ fn operand_count_table_covers_every_opcode_once() {
             &[
                 Opcode::SetFunctionNameByValue,
                 Opcode::SetFunctionHomeObject,
+                Opcode::SetObjectLiteralPrototype,
             ],
         ),
         (2, &[Opcode::GetSuperById]),

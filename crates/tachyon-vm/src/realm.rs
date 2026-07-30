@@ -2188,6 +2188,7 @@ impl Isolate {
         )?;
         let from_atom = self.intern_intrinsic_name(b"from")?;
         self.set_intrinsic_data_property(constructor, from_atom, from, true)?;
+
         let of = self.allocate_native_function(
             NativeFunction::ArrayOf,
             OrdinaryObject {
@@ -2553,6 +2554,10 @@ impl Isolate {
         self.realm.iterator_from = Some(from);
         let from_atom = self.intern_intrinsic_name(b"from")?;
         self.set_intrinsic_data_property(constructor, from_atom, from, true)?;
+        let map = self.allocate_native_function(NativeFunction::IteratorMap, function_object())?;
+        self.realm.iterator_map = Some(map);
+        let map_atom = self.intern_intrinsic_name(b"map")?;
+        self.set_intrinsic_data_property(iterator_prototype, map_atom, map, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,
@@ -2623,7 +2628,24 @@ impl Isolate {
         )?;
         self.realm.wrap_for_valid_iterator_return = Some(return_method);
         let return_atom = self.intern_intrinsic_name(b"return")?;
-        self.set_intrinsic_data_property(wrapper_prototype, return_atom, return_method, true)
+        self.set_intrinsic_data_property(wrapper_prototype, return_atom, return_method, true)?;
+
+        let helper_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: iterator_prototype,
+        })?;
+        self.realm.iterator_helper_prototype = Some(helper_prototype);
+        let helper_next =
+            self.allocate_native_function(NativeFunction::IteratorHelperNext, function_object())?;
+        self.realm.iterator_helper_next = Some(helper_next);
+        self.set_intrinsic_data_property(helper_prototype, next_atom, helper_next, true)?;
+        let helper_return =
+            self.allocate_native_function(NativeFunction::IteratorHelperReturn, function_object())?;
+        self.realm.iterator_helper_return = Some(helper_return);
+        self.set_intrinsic_data_property(helper_prototype, return_atom, helper_return, true)?;
+        self.define_intrinsic_to_string_tag(helper_prototype, b"Iterator Helper")
     }
 
     /// Builds `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and Array `values`/`@@iterator`.
