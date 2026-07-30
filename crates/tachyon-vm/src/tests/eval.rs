@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use tachyon_compiler::{
-    CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText,
+    CompileError, CompileOptions, Compiler, DynamicFunctionKind as CompilerDynamicFunctionKind,
+    MediaType, SourceId, SourceName, SourceText,
 };
 
 use super::{fixtures::test_isolate, *};
@@ -57,10 +58,101 @@ fn eval_script_callback(
 }
 
 fn dynamic_function_callback(
-    _isolate: &mut Isolate,
-    _realm: RealmId,
+    isolate: &mut Isolate,
+    realm: RealmId,
+    kind: crate::DynamicFunctionKind,
+    source: crate::DynamicFunctionSource,
 ) -> Result<Value, ExecutionError> {
-    Err(ExecutionError::UnsupportedDynamicFunctionConstructor)
+    let kind = match kind {
+        crate::DynamicFunctionKind::Ordinary => CompilerDynamicFunctionKind::Ordinary,
+        crate::DynamicFunctionKind::Generator => CompilerDynamicFunctionKind::Generator,
+        crate::DynamicFunctionKind::Async => CompilerDynamicFunctionKind::Async,
+        crate::DynamicFunctionKind::AsyncGenerator => CompilerDynamicFunctionKind::AsyncGenerator,
+    };
+    let module = Compiler
+        .compile_dynamic_function(
+            SourceId::new(u32::MAX - 11),
+            SourceName::new("dynamic-function"),
+            kind,
+            &source.parameters,
+            &source.body,
+        )
+        .map_err(|error| match error {
+            CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
+            _ => ExecutionError::UnsupportedDynamicFunctionConstructor,
+        })?;
+    match isolate.execute_in_realm(
+        realm,
+        &module,
+        ExecutionBudget {
+            fuel: 8_192,
+            quantum: 8_192,
+        },
+    )? {
+        RunOutcome::Completed(value) => Ok(value),
+        RunOutcome::Thrown(value) => Err(ExecutionError::HostThrown(value)),
+        RunOutcome::BudgetExhausted => Err(ExecutionError::UnsupportedDynamicFunctionConstructor),
+    }
+}
+
+/// Exercises observable argument conversion across every dispatch batch and a moving major GC.
+fn assert_dynamic_function_batch<const N: usize>(forced_major: bool) {
+    let module = compile_source(
+        "var trace = ''; var p = { toString() { trace += 'p'; return 'value'; } }; var b = { toString() { trace += 'b'; return 'return value + 1;'; } }; var f = Function(p, b); trace === 'pb' && f.name === 'anonymous' && f.length === 1 && f(2) === 3;",
+        1_169,
+    );
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("dynamic-function hooks install");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("dynamic Function executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True))
+    );
+}
+
+#[test]
+fn dynamic_function_argument_conversion_is_resumable_for_every_batch() {
+    assert_dynamic_function_batch::<1>(false);
+    assert_dynamic_function_batch::<2>(false);
+    assert_dynamic_function_batch::<4>(false);
+    assert_dynamic_function_batch::<8>(true);
+    assert_dynamic_function_batch::<16>(true);
+}
+
+#[test]
+fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
+    let module = compile_source(
+        "var other = $262.createRealm().global; other.calls = 0; var fn = other.Function('calls += 1;'); fn(); other.calls;",
+        1_171,
+    );
+    let mut isolate = test_isolate();
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("dynamic-function hooks install");
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 32_768,
+                quantum: 32_768,
+            },
+        )
+        .expect("cross-Realm dynamic Function executes");
+    assert_eq!(outcome, RunOutcome::Completed(Value::from_i32(1)));
 }
 
 /// Runs one direct-eval fixture through a selected dispatch monomorphization.

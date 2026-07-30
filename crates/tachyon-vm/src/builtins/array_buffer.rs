@@ -171,6 +171,7 @@ impl Isolate {
         let mut roots = ArrayBufferAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -845,6 +846,7 @@ impl Isolate {
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,

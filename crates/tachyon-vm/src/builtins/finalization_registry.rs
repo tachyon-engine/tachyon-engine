@@ -26,6 +26,7 @@ impl Isolate {
             .unwrap_or(fallback);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -85,6 +86,7 @@ impl Isolate {
         let target = GcRef::from_erased_raw(target.as_heap_ref().expect("target was validated"));
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,

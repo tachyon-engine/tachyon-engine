@@ -61,6 +61,7 @@ fn allocate_managed_environment(
 ) -> GcRef<Environment> {
     let roots = &mut VmRoots {
         fiber: &mut isolate.fiber,
+        suspended_fibers: &mut isolate.suspended_fibers,
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,

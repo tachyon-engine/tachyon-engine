@@ -21,6 +21,7 @@ impl Isolate {
         )?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -252,6 +253,7 @@ impl Isolate {
         let mut roots = SignalStateRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -361,6 +363,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -486,6 +489,7 @@ impl Isolate {
         )?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,

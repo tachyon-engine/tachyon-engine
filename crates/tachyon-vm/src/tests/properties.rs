@@ -780,6 +780,7 @@ fn allocate_young_test_function(isolate: &mut Isolate) -> Value {
     let prototype = isolate.realm.function_prototype.unwrap();
     let roots = &mut VmRoots {
         fiber: &mut isolate.fiber,
+        suspended_fibers: &mut isolate.suspended_fibers,
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
@@ -831,6 +832,7 @@ fn accessor_pair_raw(isolate: &mut Isolate, object: Value, key: AtomId) -> RawHe
 fn collect_major(isolate: &mut Isolate) {
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
+        suspended_fibers: &mut isolate.suspended_fibers,
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,
@@ -843,6 +845,7 @@ fn collect_major(isolate: &mut Isolate) {
 fn collect_minor(isolate: &mut Isolate) {
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
+        suspended_fibers: &mut isolate.suspended_fibers,
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,

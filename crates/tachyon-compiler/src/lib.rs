@@ -11,6 +11,7 @@
 
 mod bytecode;
 mod diagnostic;
+mod dynamic_function;
 mod hir;
 mod parser;
 mod source;
@@ -18,6 +19,7 @@ mod source;
 use std::sync::Arc;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity, RelatedDiagnosticSpan, SourceSpan};
+pub use dynamic_function::DynamicFunctionKind;
 pub use hir::{
     BindingId, FunctionStencilId, HirAssignmentOperator, HirAssignmentTarget, HirBinaryOperator,
     HirBinding, HirCatchClause, HirClass, HirClassElement, HirClassField, HirClassMethod,
@@ -65,6 +67,7 @@ pub enum CompileError {
         source_name: SourceName,
         span: SourceSpan,
     },
+    MalformedDynamicFunctionUtf16,
     UnboundExceptionHandler,
 }
 
@@ -100,6 +103,18 @@ impl Compiler {
     ) -> Result<tachyon_bytecode::CompiledModule, CompileError> {
         let (parsed, hir) = parser::parse_with(source, options, hir::lower)?;
         bytecode::lower(parsed.source(), &hir, options)
+    }
+
+    /// Validates dynamic parameters/body independently, then compiles their combined expression.
+    pub fn compile_dynamic_function(
+        &self,
+        source_id: SourceId,
+        source_name: SourceName,
+        kind: DynamicFunctionKind,
+        parameters: &[Box<[u16]>],
+        body: &[u16],
+    ) -> Result<tachyon_bytecode::CompiledModule, CompileError> {
+        dynamic_function::compile(self, source_id, source_name, kind, parameters, body)
     }
 }
 

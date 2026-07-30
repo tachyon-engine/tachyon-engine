@@ -63,6 +63,7 @@ impl Isolate {
         let mut roots = AsyncFromSyncAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -813,6 +814,7 @@ impl Isolate {
             .expect("Function prototype initializes before iterator unwrap callbacks");
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -853,6 +855,7 @@ impl Isolate {
         let mut roots = AsyncFromSyncAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,

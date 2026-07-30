@@ -146,6 +146,7 @@ impl Isolate {
                     let mut roots = CodeLoadRoots {
                         vm: VmRoots {
                             fiber: &mut self.fiber,
+                            suspended_fibers: &mut self.suspended_fibers,
                             finalization_jobs: &mut self.finalization_jobs,
                             promise_jobs: &mut self.promise_jobs,
                             realm: &mut self.realm,
@@ -668,6 +669,8 @@ impl Isolate {
                 .expect("entry frame exists while executing");
             (frame.code, frame.function, frame.pc, frame.base)
         };
+        let frame_realm = self.loaded_code(code)?.realm;
+        self.activate_realm_for_frame(frame_realm)?;
         let (mut cursor, mut registers) = self.execution_cursor(code, function, base)?;
         #[cfg(feature = "opcode-profile")]
         self.execution_profile.record_batch_cursor_bind();
@@ -766,6 +769,8 @@ impl Isolate {
                     .expect("continued execution retains an active frame");
                 (frame.code, frame.function, frame.pc, frame.base)
             };
+            let frame_realm = self.loaded_code(code)?.realm;
+            self.activate_realm_for_frame(frame_realm)?;
             #[cfg(feature = "opcode-profile")]
             if is_conditional_branch(instruction.opcode) {
                 self.execution_profile
@@ -2276,6 +2281,7 @@ impl Isolate {
                     1,
                 )
             }
+            NativeContinuationKind::DynamicFunctionPrototype => (continuation.second(), 0, None, 0),
             NativeContinuationKind::Proxy { stage, .. } => match stage {
                 ProxyContinuationStage::TrapGetter => (continuation.second(), 0, None, 0),
                 ProxyContinuationStage::TrapCall => {
@@ -3067,16 +3073,19 @@ impl Isolate {
         if let Some(slot) = resolution.lexical_slot {
             return self.realm.lexical_value(slot).map(Some);
         }
-        if resolution.intrinsic_slot.is_some() {
-            let global = self
-                .realm
-                .global_object
-                .expect("initialized realm publishes a global object");
-            return self.get_data_property(global, resolution.atom);
+        // The object half of a Global Environment Record is authoritative. A realm slot is
+        // only a stable name-resolution cache: property writes through `globalThis` must be
+        // immediately visible to identifier references, including in dynamic functions.
+        let global = self
+            .realm
+            .global_object
+            .expect("initialized realm publishes a global object");
+        match self.get_data_property(global, resolution.atom)? {
+            Some(value) => Ok(Some(value)),
+            None => Ok(resolution
+                .global_slot
+                .and_then(|slot| self.realm.get_slot(slot))),
         }
-        Ok(resolution
-            .global_slot
-            .and_then(|slot| self.realm.get_slot(slot)))
     }
 
     /// Resolves a name through cold runtime environments used by direct eval and debugger code.
@@ -3335,17 +3344,11 @@ impl Isolate {
         if self.store_dynamic_environment(resolution.atom, value)? {
             return Ok(());
         }
-        if resolution.intrinsic_slot.is_some() {
-            let global = self
-                .realm
-                .global_object
-                .expect("initialized realm publishes a global object");
-            return self.set_own_data_property(global, resolution.atom, value);
-        }
-        if let Some(slot) = resolution.global_slot {
-            self.realm.set_slot(slot, value);
-            return Ok(());
-        }
+        let global = self
+            .realm
+            .global_object
+            .expect("initialized realm publishes a global object");
+        self.set_own_data_property(global, resolution.atom, value)?;
         self.realm.set(resolution.atom, value)
     }
 
@@ -3369,8 +3372,13 @@ impl Isolate {
         if self.scope_value(resolution)?.is_some() {
             return Ok(());
         }
-        self.realm
-            .set(resolution.atom, Value::from_immediate(Immediate::Undefined))
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let global = self
+            .realm
+            .global_object
+            .expect("initialized realm publishes a global object");
+        self.set_own_data_property(global, resolution.atom, undefined)?;
+        self.realm.set(resolution.atom, undefined)
     }
 
     /// Updates a mutable global or applies the strict/sloppy primitive-intrinsic write contract.
@@ -3402,18 +3410,28 @@ impl Isolate {
                 result => result,
             };
         }
-        if let Some(slot) = resolution.global_slot {
-            self.realm.set_slot(slot, value);
-            return Ok(());
-        }
         let strict = self
             .fiber
             .frames
             .last()
             .is_some_and(|frame| frame.strictness == FunctionStrictness::Strict);
-        if strict {
+        if strict
+            && self
+                .get_data_property(
+                    self.realm
+                        .global_object
+                        .expect("initialized realm publishes a global object"),
+                    resolution.atom,
+                )?
+                .is_none()
+        {
             Err(ExecutionError::UnresolvedBinding(resolution.atom))
         } else {
+            let global = self
+                .realm
+                .global_object
+                .expect("initialized realm publishes a global object");
+            self.set_own_data_property(global, resolution.atom, value)?;
             self.realm.set(resolution.atom, value)
         }
     }
@@ -3662,6 +3680,7 @@ impl Isolate {
         .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -3939,6 +3958,7 @@ impl Isolate {
         debug_assert_eq!(environment.kind(), environment_kind);
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -3966,6 +3986,7 @@ impl Isolate {
             .map_err(|_| ExecutionError::EnvironmentStorageAllocationFailed)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -4143,6 +4164,7 @@ impl Isolate {
         };
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -4369,6 +4391,7 @@ impl Isolate {
         }
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -4390,6 +4413,7 @@ impl Isolate {
         self.write(base, record_base, Value::from_heap_ref(plan.raw()))?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -4463,6 +4487,7 @@ impl Isolate {
         let plan = self.class_constructor_snapshot(data)?.plan;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -5172,17 +5197,14 @@ impl Isolate {
                     let registry = self.create_finalization_registry_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, registry);
                 }
-                FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
-                    let function = self.create_dynamic_function_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, function);
-                }
-                FunctionExecutable::Native(
-                    NativeFunction::AsyncFunctionConstructor
-                    | NativeFunction::GeneratorFunctionConstructor
-                    | NativeFunction::AsyncGeneratorFunctionConstructor,
-                ) => {
-                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
-                }
+                FunctionExecutable::Native(native @ NativeFunction::FunctionConstructor)
+                | FunctionExecutable::Native(native @ NativeFunction::AsyncFunctionConstructor)
+                | FunctionExecutable::Native(
+                    native @ NativeFunction::GeneratorFunctionConstructor,
+                )
+                | FunctionExecutable::Native(
+                    native @ NativeFunction::AsyncGeneratorFunctionConstructor,
+                ) => return self.begin_dynamic_function(&site, dynamic_function_kind(native)),
                 FunctionExecutable::Bytecode { code, function, .. } => {
                     let metadata = self
                         .loaded_code(code)?
@@ -5277,6 +5299,7 @@ impl Isolate {
         let mut roots = ConstructReceiverRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -6704,17 +6727,14 @@ impl Isolate {
                     let bound = self.create_bound_function(&site)?;
                     return self.write(site.caller_base, site.destination, bound);
                 }
-                FunctionExecutable::Native(NativeFunction::FunctionConstructor) => {
-                    let function = self.create_dynamic_function_from_site(&site)?;
-                    return self.write(site.caller_base, site.destination, function);
-                }
-                FunctionExecutable::Native(
-                    NativeFunction::AsyncFunctionConstructor
-                    | NativeFunction::GeneratorFunctionConstructor
-                    | NativeFunction::AsyncGeneratorFunctionConstructor,
-                ) => {
-                    return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
-                }
+                FunctionExecutable::Native(native @ NativeFunction::FunctionConstructor)
+                | FunctionExecutable::Native(native @ NativeFunction::AsyncFunctionConstructor)
+                | FunctionExecutable::Native(
+                    native @ NativeFunction::GeneratorFunctionConstructor,
+                )
+                | FunctionExecutable::Native(
+                    native @ NativeFunction::AsyncGeneratorFunctionConstructor,
+                ) => return self.begin_dynamic_function(&site, dynamic_function_kind(native)),
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
                     return self.begin_error_constructor(&site, kind);
                 }
@@ -6892,27 +6912,6 @@ impl Isolate {
                 }
                 FunctionExecutable::Native(NativeFunction::AsyncFromSyncIteratorThrow) => {
                     return self.begin_async_from_sync_iterator_throw(&site);
-                }
-                FunctionExecutable::Native(NativeFunction::GeneratorFunctionPrototype) => {
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(Immediate::Undefined),
-                    );
-                }
-                FunctionExecutable::Native(NativeFunction::AsyncFunctionPrototype) => {
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(Immediate::Undefined),
-                    );
-                }
-                FunctionExecutable::Native(NativeFunction::AsyncGeneratorFunctionPrototype) => {
-                    return self.write(
-                        site.caller_base,
-                        site.destination,
-                        Value::from_immediate(Immediate::Undefined),
-                    );
                 }
                 FunctionExecutable::Native(NativeFunction::SignalCurrentComputed) => {
                     let result = self.signal_current_computed();
@@ -7567,21 +7566,6 @@ impl Isolate {
             return self.is_callable_value(target);
         }
         Ok(self.resolve_function_object(value).is_ok())
-    }
-
-    /// Creates the zero-argument dynamic Function through the embedding compiler callback.
-    fn create_dynamic_function_from_site(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        if site.argument_count != 0 {
-            return Err(ExecutionError::UnsupportedDynamicFunctionConstructor);
-        }
-        let callback = self
-            .dynamic_function_callback
-            .ok_or(ExecutionError::UnsupportedDynamicFunctionConstructor)?;
-        let realm = self.realm_for_callable(site.callee)?;
-        callback(self, realm)
     }
 
     /// Resolves a callable's defining Realm through Proxy and Bound exotic layers.
@@ -8411,6 +8395,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::ErrorStackSetter(stage) => {
                     self.resume_error_stack_setter(continuation, stage, value)
+                }
+                NativeContinuationKind::DynamicFunctionPrototype => {
+                    self.resume_dynamic_function_prototype(continuation, value)
                 }
                 NativeContinuationKind::ObjectToString => {
                     self.resume_object_to_string(continuation, value)
@@ -9362,6 +9349,17 @@ impl Isolate {
             .last_mut()
             .expect("frame remains active while jumping")
             .pc = pc;
+    }
+}
+
+#[inline(always)]
+fn dynamic_function_kind(native: NativeFunction) -> DynamicFunctionKind {
+    match native {
+        NativeFunction::FunctionConstructor => DynamicFunctionKind::Ordinary,
+        NativeFunction::GeneratorFunctionConstructor => DynamicFunctionKind::Generator,
+        NativeFunction::AsyncFunctionConstructor => DynamicFunctionKind::Async,
+        NativeFunction::AsyncGeneratorFunctionConstructor => DynamicFunctionKind::AsyncGenerator,
+        _ => unreachable!("dynamic-function dispatch filters constructor identity"),
     }
 }
 

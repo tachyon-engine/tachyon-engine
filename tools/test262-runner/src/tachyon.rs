@@ -8,14 +8,16 @@ use std::{
 };
 
 use tachyon_compiler::{
-    CompileError, CompileOptions, Compiler, MediaType, SourceId, SourceMode, SourceName, SourceText,
+    CompileError, CompileOptions, Compiler, DynamicFunctionKind as CompilerDynamicFunctionKind,
+    MediaType, SourceId, SourceMode, SourceName, SourceText,
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, ExecutionBudget, ExecutionError, HostProviderError,
-    HostProviders, Isolate, IsolateConfig, LoadedModule, ModuleError, ModuleIdentity,
-    ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId, RealmLimits, ResolvedModuleRequest,
-    RunOutcome, StackLimits, TimeZoneProvider, Value, WallClockProvider,
+    AtomHashSeed, AtomTableConfig, DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget,
+    ExecutionError, HostProviderError, HostProviders, Isolate, IsolateConfig, LoadedModule,
+    ModuleError, ModuleIdentity, ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId,
+    RealmLimits, ResolvedModuleRequest, RunOutcome, StackLimits, TimeZoneProvider, Value,
+    WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -29,7 +31,8 @@ const EXECUTION_FUEL_LIMIT: u64 = 20_000_000;
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
-const MAX_LOADED_MODULES: u32 = 64;
+// Dynamic Function/eval tests legitimately compile many short scripts in one isolate.
+const MAX_LOADED_MODULES: u32 = 4_096;
 const MAX_GLOBAL_BINDINGS: u32 = 1 << 18;
 const ASYNC_HARNESS_NAME: &str = "doneprintHandle.js";
 const GLOBAL_OBJECT_HARNESS_NAME: &str = "fnGlobalObject.js";
@@ -131,18 +134,27 @@ fn eval_script_callback(
 fn dynamic_function_callback(
     isolate: &mut Isolate,
     realm: RealmId,
+    kind: DynamicFunctionKind,
+    source: DynamicFunctionSource,
 ) -> Result<Value, ExecutionError> {
+    let kind = match kind {
+        DynamicFunctionKind::Ordinary => CompilerDynamicFunctionKind::Ordinary,
+        DynamicFunctionKind::Generator => CompilerDynamicFunctionKind::Generator,
+        DynamicFunctionKind::Async => CompilerDynamicFunctionKind::Async,
+        DynamicFunctionKind::AsyncGenerator => CompilerDynamicFunctionKind::AsyncGenerator,
+    };
     let module = Compiler
-        .compile(
-            SourceText::new(
-                SourceId::new(u32::MAX - 2),
-                SourceName::new("Function"),
-                MediaType::JavaScript,
-                Arc::from("(function(){})"),
-            ),
-            options(SourceMode::Script),
+        .compile_dynamic_function(
+            SourceId::new(u32::MAX - 2),
+            SourceName::new("Function"),
+            kind,
+            &source.parameters,
+            &source.body,
         )
-        .map_err(|_| ExecutionError::UnsupportedDynamicFunctionConstructor)?;
+        .map_err(|error| match error {
+            CompileError::Diagnostics(_) => ExecutionError::InvalidEvalSource,
+            _ => ExecutionError::UnsupportedDynamicFunctionConstructor,
+        })?;
     match isolate.execute_in_realm(
         realm,
         &module,

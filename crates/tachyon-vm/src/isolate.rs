@@ -96,6 +96,27 @@ pub struct Isolate {
 }
 
 impl Isolate {
+    /// Switches Realm records while retaining the current Fiber for a cross-Realm bytecode call.
+    pub(crate) fn activate_realm_for_frame(
+        &mut self,
+        realm: RealmId,
+    ) -> Result<(), ExecutionError> {
+        if realm == self.active_realm {
+            return Ok(());
+        }
+        let position = self
+            .inactive_realms
+            .iter()
+            .position(|(id, _)| *id == realm)
+            .ok_or(ExecutionError::RealmLimit { limit: u32::MAX })?;
+        let (_, selected) = self.inactive_realms.swap_remove(position);
+        let current_id = self.active_realm;
+        let current = mem::replace(&mut self.realm, selected);
+        self.inactive_realms.push((current_id, current));
+        self.active_realm = realm;
+        Ok(())
+    }
+
     #[inline(always)]
     pub(crate) const fn driver_is_busy(&self) -> bool {
         self.driver_active_work.is_some() || self.module_graph.evaluation_start_pending()
@@ -117,6 +138,14 @@ impl Isolate {
             IntrinsicPrototypeKind::SignalWatcher => realm.signal_watcher_prototype,
             IntrinsicPrototypeKind::String => realm.string_prototype,
             IntrinsicPrototypeKind::Promise => realm.promise_prototype,
+            IntrinsicPrototypeKind::Function => realm.function_prototype,
+            IntrinsicPrototypeKind::GeneratorFunction => realm.generator_function_prototype,
+            IntrinsicPrototypeKind::AsyncFunction => realm.async_function_prototype,
+            IntrinsicPrototypeKind::AsyncGeneratorFunction => {
+                realm.async_generator_function_prototype
+            }
+            IntrinsicPrototypeKind::Generator => realm.generator_prototype,
+            IntrinsicPrototypeKind::AsyncGenerator => realm.async_generator_prototype,
         };
         if realm == self.active_realm {
             return lookup(&self.realm);
@@ -563,6 +592,9 @@ impl Isolate {
             pending_date_numeric_arguments: registry
                 .try_register("PendingDateNumericArguments")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_dynamic_function: registry
+                .try_register("PendingDynamicFunction")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             native_call_state: registry
                 .try_register("NativeCallState")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -735,6 +767,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -769,6 +802,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -815,6 +849,7 @@ impl Isolate {
         })?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -857,6 +892,7 @@ impl Isolate {
         let mut roots = PromiseFinallyResultRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -958,6 +994,7 @@ impl Isolate {
         let data = {
             let roots = &mut VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -987,6 +1024,7 @@ impl Isolate {
             .prototype;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1025,6 +1063,7 @@ impl Isolate {
     ) -> Result<GcRef<BoundFunctionData>, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1268,6 +1307,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1305,6 +1345,7 @@ impl Isolate {
             .expect("Object prototype initializes before arguments objects");
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1347,6 +1388,7 @@ impl Isolate {
         debug_assert!(numeric_value(number_data).is_some());
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1384,6 +1426,7 @@ impl Isolate {
         debug_assert!(self.is_bigint_value(bigint_data));
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1420,6 +1463,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1460,6 +1504,7 @@ impl Isolate {
         ));
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1497,6 +1542,7 @@ impl Isolate {
         debug_assert!(self.is_string_value(string_data));
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1534,6 +1580,7 @@ impl Isolate {
         debug_assert!(symbol_data.is_none_or(|value| self.is_symbol_value(value)));
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1571,6 +1618,7 @@ impl Isolate {
         let mut roots = RegExpAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1611,6 +1659,7 @@ impl Isolate {
         let mut roots = CollectionAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1661,6 +1710,7 @@ impl Isolate {
         let mut roots = CollectionAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1711,6 +1761,7 @@ impl Isolate {
         let mut roots = WeakCollectionAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1761,6 +1812,7 @@ impl Isolate {
         let mut roots = WeakCollectionAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1829,6 +1881,7 @@ impl Isolate {
         let mut roots = ArrayAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -1877,6 +1930,7 @@ impl Isolate {
         let keys = self.for_in_keys(source)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,

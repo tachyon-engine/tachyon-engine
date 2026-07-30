@@ -6,6 +6,7 @@ use crate::module::ModuleGraph;
 
 pub(crate) struct VmRoots<'a> {
     pub(crate) fiber: &'a mut Fiber,
+    pub(crate) suspended_fibers: &'a mut Vec<Fiber>,
     pub(crate) finalization_jobs: &'a mut finalization::FinalizationJobs,
     pub(crate) promise_jobs: &'a mut PromiseJobQueue,
     pub(crate) realm: &'a mut Realm,
@@ -88,6 +89,9 @@ impl Trace for VmRoots<'_> {
     #[inline]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.fiber.trace_roots(tracer);
+        for fiber in self.suspended_fibers.iter_mut() {
+            fiber.trace_roots(tracer);
+        }
         self.finalization_jobs.trace(tracer);
         self.promise_jobs.trace(tracer);
         self.realm.trace(tracer);
@@ -274,6 +278,7 @@ pub(crate) enum ConversionConsumer {
     ErrorConstructorMessage,
     ErrorToStringName,
     ErrorToStringMessage,
+    DynamicFunctionArgument,
     DateConstructSingle,
     DateNumericArgument,
     DateToPrimitiveString,
@@ -388,6 +393,7 @@ impl ConversionConsumer {
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
             | Self::ErrorToStringMessage
+            | Self::DynamicFunctionArgument
             | Self::DateConstructSingle
             | Self::DateNumericArgument
             | Self::DateToPrimitiveString
@@ -507,6 +513,7 @@ impl ConversionConsumer {
                 | Self::ErrorConstructorMessage
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
+                | Self::DynamicFunctionArgument
                 | Self::DateToPrimitiveString
                 | Self::JsonParseText
                 | Self::JsonStringifyStringSpace
@@ -568,6 +575,7 @@ impl ConversionConsumer {
                 | Self::ErrorConstructorMessage
                 | Self::ErrorToStringName
                 | Self::ErrorToStringMessage
+                | Self::DynamicFunctionArgument
                 | Self::DateConstructSingle
                 | Self::DateNumericArgument
                 | Self::DateToPrimitiveString
@@ -1441,6 +1449,7 @@ pub(crate) enum NativeContinuationKind {
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ErrorStackSetter(ErrorStackSetterStage),
+    DynamicFunctionPrototype,
     ObjectToString,
     ObjectIsPrototypeOf,
     ObjectLookupAccessor {
@@ -1967,6 +1976,21 @@ impl NativeContinuation {
             kind: NativeContinuationKind::ErrorToString(stage),
             first: state,
             second: Value::from_immediate(Immediate::Undefined),
+        }
+    }
+
+    /// Roots dynamic-function state and its effective newTarget across prototype Get.
+    #[inline]
+    pub(crate) const fn dynamic_function_prototype(
+        site: NativeContinuationSite,
+        state: Value,
+        new_target: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::DynamicFunctionPrototype,
+            first: state,
+            second: new_target,
         }
     }
 

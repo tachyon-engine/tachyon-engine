@@ -432,19 +432,20 @@ impl Isolate {
 
     /// Allocates a one-slot constructor object, then publishes the lazy function edge with a barrier.
     fn materialize_function_prototype(&mut self, function: Value) -> Result<Value, ExecutionError> {
+        let function_realm = self.realm_for_callable(function)?;
         if let Some((kind, role)) = self.generator_function_kind(function)? {
-            let generator_prototype = if kind == FunctionKind::AsyncGenerator {
-                self.realm
-                    .async_generator_prototype
-                    .expect("async generator intrinsics initialize before closures")
+            let intrinsic = if kind == FunctionKind::AsyncGenerator {
+                IntrinsicPrototypeKind::AsyncGenerator
             } else {
-                self.realm
-                    .generator_prototype
-                    .expect("generator intrinsics initialize before generator closures")
+                IntrinsicPrototypeKind::Generator
             };
+            let generator_prototype = self
+                .realm_intrinsic_prototype(function_realm, intrinsic)
+                .expect("generator intrinsics initialize before generator closures");
             let mut roots = PrototypeInitializationRoots {
                 vm: VmRoots {
                     fiber: &mut self.fiber,
+                    suspended_fibers: &mut self.suspended_fibers,
                     finalization_jobs: &mut self.finalization_jobs,
                     promise_jobs: &mut self.promise_jobs,
                     realm: &mut self.realm,
@@ -490,8 +491,7 @@ impl Isolate {
         }
         let constructor_atom = self.constructor_atom()?;
         let object_prototype = self
-            .realm
-            .object_prototype
+            .realm_intrinsic_prototype(function_realm, IntrinsicPrototypeKind::Object)
             .expect("Object prototype initializes before function prototype");
         let shape = self
             .shapes
@@ -504,6 +504,7 @@ impl Isolate {
         let mut roots = PrototypeInitializationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,

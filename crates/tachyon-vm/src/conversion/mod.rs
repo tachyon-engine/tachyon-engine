@@ -167,6 +167,7 @@ impl Isolate {
         let roots = &mut SymbolAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,
@@ -459,6 +460,15 @@ impl Isolate {
                             }
                             _ => unreachable!("matched JSON conversion consumer"),
                         };
+                    }
+                    if continuation.consumer == ConversionConsumer::DynamicFunctionArgument {
+                        let state =
+                            self.pending_dynamic_function_reference(continuation.receiver)?;
+                        return self.resume_dynamic_function_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
                     }
                     if continuation.consumer == ConversionConsumer::JsonParseText {
                         let text = self.primitive_string_value(Some(value))?;
@@ -1344,6 +1354,9 @@ impl Isolate {
                 | ConversionConsumer::ErrorToStringMessage => {
                     unreachable!("Error messages finish inside the conversion state machine")
                 }
+                ConversionConsumer::DynamicFunctionArgument => {
+                    unreachable!("dynamic Function conversion resumes inside its state machine")
+                }
                 ConversionConsumer::DateConstructSingle
                 | ConversionConsumer::DateNumericArgument => {
                     unreachable!("Date construction finishes inside the conversion state machine")
@@ -1859,6 +1872,7 @@ impl Isolate {
     ) -> Result<Value, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -1887,6 +1901,7 @@ impl Isolate {
         let mut roots = RuntimeStringAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
+                suspended_fibers: &mut self.suspended_fibers,
                 finalization_jobs: &mut self.finalization_jobs,
                 promise_jobs: &mut self.promise_jobs,
                 realm: &mut self.realm,

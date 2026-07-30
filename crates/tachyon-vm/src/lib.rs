@@ -37,6 +37,7 @@ mod collection;
 mod collection_for_each;
 mod conversion;
 mod driver;
+mod dynamic_function;
 mod error;
 #[cfg(feature = "opcode-profile")]
 mod execution_profile;
@@ -147,8 +148,29 @@ impl EvalKind {
 pub type EvalScriptCallback =
     fn(&mut Isolate, RealmId, EvalKind, Value) -> Result<Value, ExecutionError>;
 
+/// Grammar family selected by CreateDynamicFunction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DynamicFunctionKind {
+    Ordinary,
+    Generator,
+    Async,
+    AsyncGenerator,
+}
+
+/// Frozen UTF-16 inputs for an embedding's dynamic-function compiler.
+#[derive(Debug)]
+pub struct DynamicFunctionSource {
+    pub parameters: Box<[Box<[u16]>]>,
+    pub body: Box<[u16]>,
+}
+
 /// Host callback used to compile dynamic `Function` constructor source in one Realm.
-pub type DynamicFunctionCallback = fn(&mut Isolate, RealmId) -> Result<Value, ExecutionError>;
+pub type DynamicFunctionCallback = fn(
+    &mut Isolate,
+    RealmId,
+    DynamicFunctionKind,
+    DynamicFunctionSource,
+) -> Result<Value, ExecutionError>;
 
 #[derive(Clone, Copy)]
 pub(crate) enum IntrinsicPrototypeKind {
@@ -161,6 +183,12 @@ pub(crate) enum IntrinsicPrototypeKind {
     SignalWatcher,
     String,
     Promise,
+    Function,
+    GeneratorFunction,
+    AsyncFunction,
+    AsyncGeneratorFunction,
+    Generator,
+    AsyncGenerator,
 }
 
 use argument_list::{ArgumentListOperation, PendingArgumentList};
@@ -195,6 +223,7 @@ use conversion::{
     numeric_relational, numeric_relational_hot, numeric_value, safe_integer_value,
     strict_equal_hot,
 };
+use dynamic_function::PendingDynamicFunction;
 use error::ErrorObject;
 use finalization_registry::{FinalizationCell, FinalizationRegistryObject};
 use for_in::{ForInAllocationError, ForInIterator, ForInKeySet};

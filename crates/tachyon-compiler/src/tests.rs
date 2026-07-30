@@ -13,6 +13,7 @@ fn source(media_type: MediaType, text: &str) -> SourceText {
     )
 }
 
+mod dynamic_function;
 mod emission;
 mod frontend;
 mod module;

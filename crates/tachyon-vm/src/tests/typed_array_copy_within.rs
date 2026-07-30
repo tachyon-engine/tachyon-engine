@@ -177,6 +177,8 @@ fn unused_eval_callback(
 fn unused_dynamic_function_callback(
     _isolate: &mut Isolate,
     _realm: RealmId,
+    _kind: crate::DynamicFunctionKind,
+    _source: crate::DynamicFunctionSource,
 ) -> Result<Value, ExecutionError> {
     Err(ExecutionError::UnsupportedDynamicFunctionConstructor)
 }

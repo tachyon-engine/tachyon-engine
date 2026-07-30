@@ -131,6 +131,7 @@ fn collect_signal_major_at_job_boundary(isolate: &mut Isolate) {
     isolate.heap.clear_kept_objects_at_job_boundary();
     let mut roots = VmRoots {
         fiber: &mut isolate.fiber,
+        suspended_fibers: &mut isolate.suspended_fibers,
         finalization_jobs: &mut isolate.finalization_jobs,
         promise_jobs: &mut isolate.promise_jobs,
         realm: &mut isolate.realm,

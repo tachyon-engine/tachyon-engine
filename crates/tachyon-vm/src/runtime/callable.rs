@@ -439,11 +439,8 @@ pub(crate) enum NativeFunction {
     DateUtcSetter(DateUtcSetter),
     FunctionPrototype,
     AsyncFunctionConstructor,
-    AsyncFunctionPrototype,
     GeneratorFunctionConstructor,
-    GeneratorFunctionPrototype,
     AsyncGeneratorFunctionConstructor,
-    AsyncGeneratorFunctionPrototype,
     AsyncFromSyncIteratorNext,
     AsyncFromSyncIteratorReturn,
     AsyncFromSyncIteratorThrow,
@@ -1298,9 +1295,6 @@ impl NativeFunction {
             | Self::DateLocalGetter(_)
             | Self::DateUtcGetter(_)
             | Self::FunctionPrototype
-            | Self::AsyncFunctionPrototype
-            | Self::GeneratorFunctionPrototype
-            | Self::AsyncGeneratorFunctionPrototype
             | Self::SpeciesGetter
             | Self::ArrayToString
             | Self::ArrayToLocaleString
@@ -1533,11 +1527,8 @@ impl NativeFunction {
             Self::DateUtcSetter(setter) => setter.name(),
             Self::FunctionPrototype => "",
             Self::AsyncFunctionConstructor => "AsyncFunction",
-            Self::AsyncFunctionPrototype => "",
             Self::GeneratorFunctionConstructor => "GeneratorFunction",
-            Self::GeneratorFunctionPrototype => "",
             Self::AsyncGeneratorFunctionConstructor => "AsyncGeneratorFunction",
-            Self::AsyncGeneratorFunctionPrototype => "",
             Self::AsyncFromSyncIteratorNext => "next",
             Self::AsyncFromSyncIteratorReturn => "return",
             Self::AsyncFromSyncIteratorThrow => "throw",
@@ -2277,6 +2268,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_argument_list: GcType<PendingArgumentList>,
     pub(crate) pending_native_property_key: GcType<PendingNativePropertyKey>,
     pub(crate) pending_date_numeric_arguments: GcType<PendingDateNumericArguments>,
+    pub(crate) pending_dynamic_function: GcType<PendingDynamicFunction>,
     pub(crate) native_call_state: GcType<NativeCallState>,
     pub(crate) pending_array_concat: GcType<PendingArrayConcat>,
     pub(crate) pending_array_copy: GcType<PendingArrayCopy>,

@@ -157,6 +157,7 @@ impl Isolate {
         let list = ExclusionList::with_capacity(capacity)?;
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -754,6 +755,7 @@ impl Isolate {
     ) -> Result<GcRef<PendingCopyDataProperties>, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
@@ -778,6 +780,7 @@ impl Isolate {
     ) -> Result<GcRef<PendingObjectAssign>, ExecutionError> {
         let roots = &mut VmRoots {
             fiber: &mut self.fiber,
+            suspended_fibers: &mut self.suspended_fibers,
             finalization_jobs: &mut self.finalization_jobs,
             promise_jobs: &mut self.promise_jobs,
             realm: &mut self.realm,
