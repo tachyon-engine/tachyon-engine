@@ -1718,6 +1718,8 @@ impl Isolate {
             let symbol = self.allocate_symbol(Some(description))?;
             if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag = Some(symbol);
+            } else if name == b"hasInstance" {
+                self.realm.well_known_symbols.has_instance = Some(symbol);
             } else if name == b"isConcatSpreadable" {
                 self.realm.well_known_symbols.is_concat_spreadable = Some(symbol);
             } else if name == b"replace" {
@@ -1737,6 +1739,8 @@ impl Isolate {
             }
             let symbol = if name == b"toStringTag" {
                 self.realm.well_known_symbols.to_string_tag.unwrap()
+            } else if name == b"hasInstance" {
+                self.realm.well_known_symbols.has_instance.unwrap()
             } else if name == b"isConcatSpreadable" {
                 self.realm.well_known_symbols.is_concat_spreadable.unwrap()
             } else if name == b"replace" {
@@ -1758,7 +1762,46 @@ impl Isolate {
             };
             self.set_intrinsic_constant_property(symbol_constructor, property, symbol)?;
         }
+        self.install_function_has_instance()?;
         Ok(())
+    }
+
+    /// Installs the immutable default `@@hasInstance` method after its Symbol identity exists.
+    fn install_function_has_instance(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before well-known Symbols");
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .has_instance
+            .expect("Symbol.hasInstance is published before its default method");
+        let method = self.allocate_native_function(
+            NativeFunction::FunctionPrototypeHasInstance,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.function_has_instance = Some(method);
+        let key = self.property_key(symbol)?;
+        let method = self
+            .realm
+            .function_has_instance
+            .expect("default @@hasInstance remains rooted before publication");
+        self.define_data_property(
+            function_prototype,
+            key,
+            DataPropertyDescriptor {
+                value: Some(method),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(false),
+            },
+        )
     }
 
     /// Installs the non-constructor Symbol registry functions on the intrinsic Symbol function.

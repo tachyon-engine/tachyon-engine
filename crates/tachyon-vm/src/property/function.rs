@@ -676,32 +676,173 @@ impl Isolate {
         })
     }
 
-    /// Starts ordinary HasInstance and suspends only when the value chain reaches a Proxy.
+    /// Starts `InstanceofOperator`, including observable `@@hasInstance` lookup and invocation.
     pub(crate) fn begin_instance_of(
         &mut self,
         site: NativeContinuationSite,
         value: Value,
-        mut constructor: Value,
+        target: Value,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        loop {
-            let function = self.resolve_function_object(constructor)?;
-            let FunctionExecutable::Bound(data) = function.executable else {
-                break;
-            };
-            constructor = self.bound_function_snapshot(data)?.call_target;
+        if !self.is_object_value(target) {
+            return Err(ExecutionError::NonCallable(target));
         }
-        let prototype_atom = self.prototype_atom()?;
-        let prototype = self.get_data_property(constructor, prototype_atom)?.ok_or(
-            ExecutionError::InvalidInstanceofPrototype(Value::from_immediate(Immediate::Undefined)),
-        )?;
-        if !self.is_object_value(prototype) {
-            return Err(ExecutionError::InvalidInstanceofPrototype(prototype));
+        let symbol = self
+            .realm
+            .well_known_symbols
+            .has_instance
+            .expect("Symbol.hasInstance initializes before script execution");
+        let key = self.property_key(symbol)?;
+        if matches!(
+            self.resolve_property_read_until_proxy(target, key)?,
+            PropertyReadResolution::Read(PropertyRead::Data(method))
+                if Some(method) == self.realm.function_has_instance
+        ) {
+            return self.begin_ordinary_has_instance(site, target, value);
+        }
+        self.dispatch_instance_of_property_get(
+            NativeContinuation::instance_of(site, InstanceOfStage::MethodGet, target, value),
+            target,
+            key,
+        )
+    }
+
+    /// Implements `OrdinaryHasInstance` for both the builtin and operator fallback.
+    pub(crate) fn begin_ordinary_has_instance(
+        &mut self,
+        site: NativeContinuationSite,
+        constructor: Value,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        if !self.is_callable_value(constructor)? {
+            self.write(site.caller_base, site.destination, boolean_value(false))?;
+            return Ok(None);
+        }
+        if !self.is_proxy_value(constructor)
+            && let FunctionExecutable::Bound(data) =
+                self.resolve_function_object(constructor)?.executable
+        {
+            let target = self.bound_function_snapshot(data)?.bound_target;
+            return self.begin_instance_of(site, value, target);
         }
         if !self.is_object_value(value) {
             self.write(site.caller_base, site.destination, boolean_value(false))?;
             return Ok(None);
         }
-        self.continue_instance_of(site, prototype, value)
+        let prototype_atom = self.prototype_atom()?;
+        match self.resolve_property_read_until_proxy(constructor, prototype_atom.into())? {
+            PropertyReadResolution::Read(PropertyRead::Data(prototype)) => {
+                if !self.is_object_value(prototype) {
+                    return Err(ExecutionError::InvalidInstanceofPrototype(prototype));
+                }
+                return self.continue_instance_of(site, prototype, value);
+            }
+            PropertyReadResolution::Read(PropertyRead::Missing) => {
+                return Err(ExecutionError::InvalidInstanceofPrototype(
+                    Value::from_immediate(Immediate::Undefined),
+                ));
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(getter))
+                if getter.as_immediate() == Some(Immediate::Undefined) =>
+            {
+                return Err(ExecutionError::InvalidInstanceofPrototype(
+                    Value::from_immediate(Immediate::Undefined),
+                ));
+            }
+            PropertyReadResolution::Read(PropertyRead::Accessor(_))
+            | PropertyReadResolution::Proxy(_) => {}
+        }
+        self.dispatch_instance_of_property_get(
+            NativeContinuation::instance_of(
+                site,
+                InstanceOfStage::PrototypeGet,
+                constructor,
+                value,
+            ),
+            constructor,
+            prototype_atom.into(),
+        )
+    }
+
+    /// Runs one Proxy/accessor-aware property lookup under a typed instanceof parent.
+    fn dispatch_instance_of_property_get(
+        &mut self,
+        continuation: NativeContinuation,
+        target: Value,
+        key: PropertyKey,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        let completion_depth = self.fiber.completions.len();
+        self.fiber
+            .completions
+            .push_native(continuation)
+            .map_err(Self::completion_stack_error)?;
+        let frame_depth = self.fiber.frames.len();
+        let outcome = match self.dispatch_proxy_aware_property_read(site, target, target, key) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if self.fiber.completions.len() > completion_depth {
+                    self.pop_native_continuation()?;
+                }
+                return Err(error);
+            }
+        };
+        if self.fiber.completions.len() == completion_depth
+            || self.fiber.frames.len() != frame_depth
+        {
+            return Ok(outcome);
+        }
+        let continuation = self.pop_native_continuation()?;
+        let value = self.read(site.caller_base, site.destination)?;
+        self.resume_instance_of(continuation, value)
+    }
+
+    /// Continues after an observable method/prototype lookup or Proxy prototype step.
+    pub(crate) fn resume_instance_of(
+        &mut self,
+        continuation: NativeContinuation,
+        value: Value,
+    ) -> Result<Option<RunOutcome>, ExecutionError> {
+        let site = continuation.site();
+        match continuation.kind() {
+            NativeContinuationKind::InstanceOf(InstanceOfStage::MethodGet) => {
+                let target = continuation.first();
+                let tested = continuation.second();
+                if is_nullish(value) {
+                    if !self.is_callable_value(target)? {
+                        return Err(ExecutionError::NonCallable(target));
+                    }
+                    return self.begin_ordinary_has_instance(site, target, tested);
+                }
+                if !self.is_callable_value(value)? {
+                    return Err(ExecutionError::NonCallable(value));
+                }
+                self.write(site.caller_base, site.destination, tested)?;
+                self.dispatch_property_callback(
+                    NativeContinuation::instance_of(
+                        site,
+                        InstanceOfStage::MethodCall,
+                        target,
+                        tested,
+                    ),
+                    value,
+                )
+            }
+            NativeContinuationKind::InstanceOf(InstanceOfStage::MethodCall) => {
+                let result = boolean_value(self.is_truthy_value(value)?);
+                self.write(site.caller_base, site.destination, result)?;
+                Ok(None)
+            }
+            NativeContinuationKind::InstanceOf(InstanceOfStage::PrototypeGet) => {
+                if !self.is_object_value(value) {
+                    return Err(ExecutionError::InvalidInstanceofPrototype(value));
+                }
+                self.continue_instance_of(site, value, continuation.second())
+            }
+            NativeContinuationKind::InstanceOf(InstanceOfStage::PrototypeChain) => {
+                self.resume_instance_of_chain(continuation, value)
+            }
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
     }
 
     /// Walks ordinary prototypes iteratively and delegates exotic steps to Proxy dispatch.
@@ -717,7 +858,12 @@ impl Isolate {
                 let frames = self.fiber.frames.len();
                 self.fiber
                     .completions
-                    .push_native(NativeContinuation::instance_of(site, prototype))
+                    .push_native(NativeContinuation::instance_of(
+                        site,
+                        InstanceOfStage::PrototypeChain,
+                        prototype,
+                        Value::from_immediate(Immediate::Undefined),
+                    ))
                     .map_err(|error| match error {
                         CompletionStackError::Limit { limit, requested } => {
                             ExecutionError::CompletionStackLimit { limit, requested }
@@ -744,7 +890,7 @@ impl Isolate {
                 }
                 let continuation = self.pop_native_continuation()?;
                 let candidate = self.read(site.caller_base, site.destination)?;
-                return self.resume_instance_of(continuation, candidate);
+                return self.resume_instance_of_chain(continuation, candidate);
             } else {
                 self.object_snapshot(current)?.1.prototype
             };
@@ -760,8 +906,8 @@ impl Isolate {
         }
     }
 
-    /// Resumes HasInstance after one Proxy `[[GetPrototypeOf]]` result.
-    pub(crate) fn resume_instance_of(
+    /// Resumes the prototype-chain portion after one Proxy `[[GetPrototypeOf]]` result.
+    fn resume_instance_of_chain(
         &mut self,
         continuation: NativeContinuation,
         candidate: Value,

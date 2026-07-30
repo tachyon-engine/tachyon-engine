@@ -117,6 +117,7 @@ pub(crate) struct Realm {
     pub(crate) function_prototype: Option<Value>,
     pub(crate) function_prototype_call: Option<Value>,
     pub(crate) function_prototype_bind: Option<Value>,
+    pub(crate) function_has_instance: Option<Value>,
     pub(crate) async_function_constructor: Option<Value>,
     pub(crate) async_function_prototype: Option<Value>,
     pub(crate) generator_function_constructor: Option<Value>,
@@ -299,6 +300,7 @@ impl Realm {
             function_prototype: None,
             function_prototype_call: None,
             function_prototype_bind: None,
+            function_has_instance: None,
             async_function_constructor: None,
             async_function_prototype: None,
             generator_function_constructor: None,
@@ -748,6 +750,7 @@ impl Trace for Realm {
         self.function_prototype.trace(tracer);
         self.function_prototype_call.trace(tracer);
         self.function_prototype_bind.trace(tracer);
+        self.function_has_instance.trace(tracer);
         self.async_function_constructor.trace(tracer);
         self.async_function_prototype.trace(tracer);
         self.generator_function_constructor.trace(tracer);
@@ -913,6 +916,7 @@ pub(crate) struct WellKnownSymbols {
     pub(crate) to_primitive: Option<Value>,
     pub(crate) iterator: Option<Value>,
     pub(crate) async_iterator: Option<Value>,
+    pub(crate) has_instance: Option<Value>,
     pub(crate) is_concat_spreadable: Option<Value>,
     pub(crate) replace: Option<Value>,
     pub(crate) search: Option<Value>,
@@ -929,6 +933,7 @@ impl Trace for WellKnownSymbols {
         self.to_primitive.trace(tracer);
         self.iterator.trace(tracer);
         self.async_iterator.trace(tracer);
+        self.has_instance.trace(tracer);
         self.is_concat_spreadable.trace(tracer);
         self.replace.trace(tracer);
         self.search.trace(tracer);

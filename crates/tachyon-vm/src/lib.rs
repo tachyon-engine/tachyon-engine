@@ -289,7 +289,7 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, JsonStringifyStage,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, JsonStringifyStage,
         NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
         PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,

@@ -449,6 +449,7 @@ pub(crate) enum NativeFunction {
     FunctionPrototypeApply,
     FunctionPrototypeBind,
     FunctionPrototypeToString,
+    FunctionPrototypeHasInstance,
     FunctionConstructor,
     ErrorConstructor(NativeErrorKind),
     ErrorIsError,
@@ -1076,6 +1077,7 @@ impl NativeFunction {
             | Self::ObjectEntries
             | Self::ObjectGetPrototypeOf
             | Self::ObjectIsPrototypeOf
+            | Self::FunctionPrototypeHasInstance
             | Self::ObjectIsExtensible
             | Self::ObjectPreventExtensions
             | Self::ObjectSeal
@@ -1541,6 +1543,7 @@ impl NativeFunction {
             Self::FunctionPrototypeApply => "apply",
             Self::FunctionPrototypeBind => "bind",
             Self::FunctionPrototypeToString => "toString",
+            Self::FunctionPrototypeHasInstance => "[Symbol.hasInstance]",
             Self::FunctionConstructor => "Function",
             Self::ErrorConstructor(NativeErrorKind::Error) => "Error",
             Self::ErrorConstructor(NativeErrorKind::Eval) => "EvalError",

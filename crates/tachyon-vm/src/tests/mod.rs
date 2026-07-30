@@ -57,6 +57,7 @@ mod fixtures;
 mod function_to_string;
 mod generator;
 mod grouping;
+mod instance_of;
 mod module;
 mod object_prototype;
 mod promise;

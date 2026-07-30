@@ -703,6 +703,16 @@ pub(crate) enum PropertyCallbackMode {
     DefineProperties,
 }
 
+/// Resumable stages shared by `instanceof` and the default `@@hasInstance` builtin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum InstanceOfStage {
+    MethodGet,
+    MethodCall,
+    PrototypeGet,
+    PrototypeChain,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ProxyOwnKeysMode {
@@ -1449,7 +1459,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayStatic(ArrayStaticStage),
     MapGetOrInsertComputed,
     InstanceElements(InstanceElementStage),
-    InstanceOf,
+    InstanceOf(InstanceOfStage),
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ErrorStackSetter(ErrorStackSetterStage),
@@ -2029,12 +2039,17 @@ impl NativeContinuation {
     }
 
     #[inline]
-    pub(crate) const fn instance_of(site: NativeContinuationSite, prototype: Value) -> Self {
+    pub(crate) const fn instance_of(
+        site: NativeContinuationSite,
+        stage: InstanceOfStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
         Self {
             site,
-            kind: NativeContinuationKind::InstanceOf,
-            first: prototype,
-            second: Value::from_immediate(Immediate::Undefined),
+            kind: NativeContinuationKind::InstanceOf(stage),
+            first,
+            second,
         }
     }
 

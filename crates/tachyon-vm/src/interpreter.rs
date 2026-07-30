@@ -2516,7 +2516,15 @@ impl Isolate {
             NativeContinuationKind::InstanceElements(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
-            NativeContinuationKind::InstanceOf => {
+            NativeContinuationKind::InstanceOf(InstanceOfStage::MethodCall) => {
+                let argument_base = site
+                    .caller_base
+                    .checked_add(site.destination)
+                    .ok_or(ExecutionError::RegisterWindowTooLarge(1))?;
+                self.write(site.caller_base, site.destination, continuation.second())?;
+                (continuation.first(), argument_base, None, 1)
+            }
+            NativeContinuationKind::InstanceOf(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::ErrorConstructor(_) => {
@@ -6745,6 +6753,22 @@ impl Isolate {
                     let result = self.function_prototype_to_string(site.this_value)?;
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::FunctionPrototypeHasInstance) => {
+                    let value = self
+                        .call_argument(&site, 0)?
+                        .unwrap_or(Value::from_immediate(Immediate::Undefined));
+                    return self
+                        .begin_ordinary_has_instance(
+                            NativeContinuationSite {
+                                caller_base: site.caller_base,
+                                destination: site.destination,
+                                call_site: site.call_site,
+                            },
+                            site.this_value,
+                            value,
+                        )
+                        .map(|_| ());
+                }
                 FunctionExecutable::Native(native @ NativeFunction::FunctionConstructor)
                 | FunctionExecutable::Native(native @ NativeFunction::AsyncFunctionConstructor)
                 | FunctionExecutable::Native(
@@ -8374,7 +8398,7 @@ impl Isolate {
                 NativeContinuationKind::InstanceElements(stage) => {
                     self.resume_instance_elements(continuation, stage, value)
                 }
-                NativeContinuationKind::InstanceOf => {
+                NativeContinuationKind::InstanceOf(_) => {
                     self.resume_instance_of(continuation, value).map(|_| ())
                 }
                 NativeContinuationKind::ErrorConstructor(stage) => {
