@@ -1,5 +1,7 @@
 //! GC-owned substrate for synchronous Iterator Helpers.
 
+mod filter;
+mod lazy;
 mod map;
 mod object;
 

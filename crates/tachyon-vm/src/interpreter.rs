@@ -7596,6 +7596,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorMap) => {
                     return self.begin_iterator_map(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorFilter) => {
+                    return self.begin_iterator_filter(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IteratorHelperNext) => {
                     return self.begin_iterator_helper_next(&site);
                 }

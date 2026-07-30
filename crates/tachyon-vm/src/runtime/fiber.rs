@@ -1284,13 +1284,14 @@ pub(crate) enum WrapForValidIteratorStage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum IteratorHelperStage {
-    CreateNextGet,
+    CreateMapNextGet,
+    CreateFilterNextGet,
     CreateCloseReturnGet,
     CreateCloseReturnCall,
     NextCall,
     DoneGet,
     ValueGet,
-    MapCallbackCall,
+    CallbackCall,
     AbruptCloseReturnGet,
     AbruptCloseReturnCall,
     NormalCloseReturnGet,

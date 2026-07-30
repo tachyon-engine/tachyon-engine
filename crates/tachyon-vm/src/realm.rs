@@ -2558,6 +2558,11 @@ impl Isolate {
         self.realm.iterator_map = Some(map);
         let map_atom = self.intern_intrinsic_name(b"map")?;
         self.set_intrinsic_data_property(iterator_prototype, map_atom, map, true)?;
+        let filter =
+            self.allocate_native_function(NativeFunction::IteratorFilter, function_object())?;
+        self.realm.iterator_filter = Some(filter);
+        let filter_atom = self.intern_intrinsic_name(b"filter")?;
+        self.set_intrinsic_data_property(iterator_prototype, filter_atom, filter, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,

@@ -564,6 +564,7 @@ pub(crate) enum NativeFunction {
     IteratorToStringTagSetter,
     IteratorFrom,
     IteratorMap,
+    IteratorFilter,
     IteratorHelperNext,
     IteratorHelperReturn,
     WrapForValidIteratorNext,
@@ -1351,7 +1352,8 @@ impl NativeFunction {
             Self::IteratorConstructorSetter
             | Self::IteratorToStringTagSetter
             | Self::IteratorFrom
-            | Self::IteratorMap => 1,
+            | Self::IteratorMap
+            | Self::IteratorFilter => 1,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
             | Self::SymbolValueOf
@@ -1693,6 +1695,7 @@ impl NativeFunction {
             Self::IteratorToStringTagSetter => "set [Symbol.toStringTag]",
             Self::IteratorFrom => "from",
             Self::IteratorMap => "map",
+            Self::IteratorFilter => "filter",
             Self::IteratorHelperNext => "next",
             Self::IteratorHelperReturn => "return",
             Self::WrapForValidIteratorNext => "next",

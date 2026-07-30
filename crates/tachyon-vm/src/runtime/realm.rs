@@ -163,6 +163,7 @@ pub(crate) struct Realm {
     pub(crate) iterator_to_string_tag_setter: Option<Value>,
     pub(crate) iterator_from: Option<Value>,
     pub(crate) iterator_map: Option<Value>,
+    pub(crate) iterator_filter: Option<Value>,
     pub(crate) iterator_helper_prototype: Option<Value>,
     pub(crate) iterator_helper_next: Option<Value>,
     pub(crate) iterator_helper_return: Option<Value>,
@@ -357,6 +358,7 @@ impl Realm {
             iterator_to_string_tag_setter: None,
             iterator_from: None,
             iterator_map: None,
+            iterator_filter: None,
             iterator_helper_prototype: None,
             iterator_helper_next: None,
             iterator_helper_return: None,
@@ -818,6 +820,7 @@ impl Trace for Realm {
         self.iterator_to_string_tag_setter.trace(tracer);
         self.iterator_from.trace(tracer);
         self.iterator_map.trace(tracer);
+        self.iterator_filter.trace(tracer);
         self.iterator_helper_prototype.trace(tracer);
         self.iterator_helper_next.trace(tracer);
         self.iterator_helper_return.trace(tracer);

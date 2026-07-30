@@ -296,6 +296,104 @@ invalidClosed === 2 && invalidTypeError && invalidObjectTypeError && iterationOk
   chainOk && reentryOk;
 "#;
 
+const ITERATOR_FILTER_SOURCE: &str = r#"
+var descriptor = Object.getOwnPropertyDescriptor(Iterator.prototype, "filter");
+var shapeOk = typeof Iterator.prototype.filter === "function" &&
+  Iterator.prototype.filter.name === "filter" && Iterator.prototype.filter.length === 1 &&
+  descriptor.writable === true && descriptor.enumerable === false &&
+  descriptor.configurable === true;
+
+var invalidClosed = 0;
+var invalidTypeError = false;
+var invalid = {
+  __proto__: Iterator.prototype,
+  get next() { throw new Error("next must not be read"); },
+  return() { invalidClosed++; return {}; }
+};
+try { invalid.filter(); } catch (error) { invalidTypeError = error instanceof TypeError; }
+
+var values = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+var cursor = 0;
+var nextGets = 0;
+var nextCalls = 0;
+var source = Object.create(Iterator.prototype);
+Object.defineProperty(source, "next", {
+  get: function() {
+    nextGets++;
+    return function() {
+      nextCalls++;
+      return cursor < values.length ? { value: values[cursor++], done: false } : { done: true };
+    };
+  }
+});
+var seen = "";
+var filtered = source.filter(function(value, index) {
+  seen += value.id + ":" + index + ";";
+  var pressure = { value: value, index: index };
+  return pressure.index === 2 ? pressure : false;
+});
+var selected = filtered.next();
+var exhausted = filtered.next();
+var after = filtered.next();
+var iterationOk = nextGets === 1 && nextCalls === 5 &&
+  seen === "1:0;2:1;3:2;4:3;" && selected.value === values[2] &&
+  selected.done === false && exhausted.done === true && after.done === true;
+
+var returnCalls = 0;
+var closeSource = Object.create(Iterator.prototype);
+closeSource.next = function() { return { value: 1, done: false }; };
+closeSource.return = function() { returnCalls++; return {}; };
+var closeHelper = closeSource.filter(function() { return true; });
+closeHelper.next();
+var returned = closeHelper.return();
+closeHelper.return();
+var returnOk = returnCalls === 1 && returned.done === true;
+
+var abruptReturnCalls = 0;
+var original = new Error("predicate");
+var abruptSource = Object.create(Iterator.prototype);
+abruptSource.next = function() { return { value: 1, done: false }; };
+abruptSource.return = function() { abruptReturnCalls++; throw new Error("close"); };
+var abruptHelper = abruptSource.filter(function() { throw original; });
+var preservedOriginal = false;
+try { abruptHelper.next(); } catch (error) { preservedOriginal = error === original; }
+var abruptDone = abruptHelper.next();
+var abruptOk = preservedOriginal && abruptReturnCalls === 1 && abruptDone.done === true;
+
+var protocolCloseCalls = 0;
+var protocolSource = Object.create(Iterator.prototype);
+protocolSource.next = function() { throw new Error("next"); };
+protocolSource.return = function() { protocolCloseCalls++; return {}; };
+var protocolHelper = protocolSource.filter(function() { return true; });
+try { protocolHelper.next(); } catch (error) {}
+var protocolOk = protocolCloseCalls === 0 && protocolHelper.next().done === true;
+
+var chainCursor = 0;
+var chainSource = Object.create(Iterator.prototype);
+chainSource.next = function() {
+  return chainCursor < 3 ? { value: ++chainCursor, done: false } : { done: true };
+};
+var chained = chainSource.map(function(value) { return value * 2; })
+  .filter(function(value, index) { return value > 2 && index < 2; });
+var chainFirst = chained.next();
+var chainDone = chained.next();
+var chainOk = chainFirst.value === 4 && chainFirst.done === false && chainDone.done === true;
+
+var reentryClosed = 0;
+var reentrySource = Object.create(Iterator.prototype);
+reentrySource.next = function() { return { value: 1, done: false }; };
+reentrySource.return = function() { reentryClosed++; return {}; };
+var reentryHelper;
+reentryHelper = reentrySource.filter(function() { reentryHelper.next(); return true; });
+var reentryTypeError = false;
+try { reentryHelper.next(); } catch (error) { reentryTypeError = error instanceof TypeError; }
+var reentryDone = reentryHelper.next();
+var reentryOk = reentryTypeError && reentryClosed === 1 && reentryDone.done === true;
+
+shapeOk && invalidClosed === 1 && invalidTypeError && iterationOk && returnOk && abruptOk &&
+  protocolOk && chainOk && reentryOk;
+"#;
+
 #[test]
 fn iterator_intrinsics_are_stable_for_every_dispatch_batch() {
     assert_iterator_intrinsics::<1>(8_901, false);
@@ -401,6 +499,20 @@ fn iterator_map_roots_survive_forced_major_collection() {
     assert_iterator_map::<8>(8_990, true);
 }
 
+#[test]
+fn iterator_filter_is_stable_for_every_dispatch_batch() {
+    assert_iterator_filter::<1>(9_001, false);
+    assert_iterator_filter::<2>(9_002, false);
+    assert_iterator_filter::<4>(9_004, false);
+    assert_iterator_filter::<8>(9_008, false);
+    assert_iterator_filter::<16>(9_016, false);
+}
+
+#[test]
+fn iterator_filter_roots_survive_forced_major_collection() {
+    assert_iterator_filter::<8>(9_020, true);
+}
+
 /// Compiles and executes the Iterator intrinsic graph under one dispatch and GC policy.
 fn assert_iterator_intrinsics<const N: usize>(source_id: u32, forced_major: bool) {
     let module = compile_iterator_intrinsics(source_id);
@@ -480,6 +592,34 @@ fn assert_iterator_map<const N: usize>(source_id: u32, forced_major: bool) {
             },
         )
         .expect("Iterator.map fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Executes filter's rejection loop, retained value, close policy, and re-entry behavior.
+fn assert_iterator_filter<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_iterator_source(ITERATOR_FILTER_SOURCE, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Iterator.filter fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
         RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
