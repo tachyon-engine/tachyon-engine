@@ -2565,6 +2565,9 @@ impl Isolate {
             NativeContinuationKind::ErrorStackSetter(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::IteratorPrototypeSetter { .. } => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ObjectToString => (continuation.first(), 0, None, 0),
             NativeContinuationKind::ObjectIsPrototypeOf => {
                 return Err(ExecutionError::MissingNativeContinuation);
@@ -5182,6 +5185,14 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::BigIntConstructor) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorConstructor) => {
+                    if site.new_target == site.callee {
+                        let realm = self.realm_for_callable(site.callee)?;
+                        return Err(self.iterator_type_error(realm)?);
+                    }
+                    let iterator = self.construct_iterator_from_site(&site)?;
+                    return self.write(site.caller_base, site.destination, iterator);
+                }
                 FunctionExecutable::Native(NativeFunction::DateConstructor) => {
                     return self.begin_date_constructor(&site);
                 }
@@ -7536,6 +7547,30 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorIdentity) => {
                     return self.write(site.caller_base, site.destination, site.this_value);
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorConstructor) => {
+                    let realm = self.realm_for_callable(site.callee)?;
+                    return Err(self.iterator_type_error(realm)?);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorConstructorGetter) => {
+                    let value = self.iterator_constructor_getter(&site)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorConstructorSetter) => {
+                    return self.begin_iterator_prototype_setter(
+                        &site,
+                        IteratorPrototypeSetterKey::Constructor,
+                    );
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorToStringTagGetter) => {
+                    let value = self.iterator_to_string_tag_getter()?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorToStringTagSetter) => {
+                    return self.begin_iterator_prototype_setter(
+                        &site,
+                        IteratorPrototypeSetterKey::ToStringTag,
+                    );
+                }
                 FunctionExecutable::Native(NativeFunction::JsonParse) => {
                     return self.begin_json_parse(&site);
                 }
@@ -8438,6 +8473,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::ErrorStackSetter(stage) => {
                     self.resume_error_stack_setter(continuation, stage, value)
+                }
+                NativeContinuationKind::IteratorPrototypeSetter { key, stage } => {
+                    self.resume_iterator_prototype_setter(continuation, key, stage, value)
                 }
                 NativeContinuationKind::DynamicFunctionPrototype => {
                     self.resume_dynamic_function_prototype(continuation, value)

@@ -1244,6 +1244,23 @@ pub(crate) enum ErrorStackSetterStage {
     Set,
 }
 
+/// Property identity retained by Iterator prototype's two special setters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IteratorPrototypeSetterKey {
+    Constructor,
+    ToStringTag,
+}
+
+/// Observable steps in Iterator's SetterThatIgnoresPrototypeProperties operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum IteratorPrototypeSetterStage {
+    GetOwn,
+    Define,
+    Set,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ObjectToLocaleStringStage {
@@ -1467,6 +1484,10 @@ pub(crate) enum NativeContinuationKind {
     ErrorConstructor(ErrorConstructorStage),
     ErrorToString(ErrorToStringStage),
     ErrorStackSetter(ErrorStackSetterStage),
+    IteratorPrototypeSetter {
+        key: IteratorPrototypeSetterKey,
+        stage: IteratorPrototypeSetterStage,
+    },
     DynamicFunctionPrototype,
     ObjectToString,
     ObjectIsPrototypeOf,
@@ -2023,6 +2044,23 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ErrorStackSetter(stage),
+            first: receiver,
+            second: value,
+        }
+    }
+
+    /// Roots both setter operands while the property key stays in compact continuation metadata.
+    #[inline]
+    pub(crate) const fn iterator_prototype_setter(
+        site: NativeContinuationSite,
+        key: IteratorPrototypeSetterKey,
+        stage: IteratorPrototypeSetterStage,
+        receiver: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::IteratorPrototypeSetter { key, stage },
             first: receiver,
             second: value,
         }

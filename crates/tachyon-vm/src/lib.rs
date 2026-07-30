@@ -49,6 +49,8 @@ mod host;
 mod interpreter;
 mod isolate;
 mod iterator;
+mod iterator_helper;
+mod iterator_intrinsics;
 mod module;
 mod number;
 mod object;
@@ -235,6 +237,7 @@ use iterator::{
     ArrayIterationKind, ArrayIteratorNextAction, ArrayIteratorObject, CollectionIterationKind,
     CollectionIteratorObject,
 };
+use iterator_helper::{IteratorHelperObject, WrapForValidIteratorObject};
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
     PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject,
@@ -292,7 +295,8 @@ use runtime::{
         ConversionConsumer, ConversionContinuation, ConversionNativeFunction,
         CopyDataPropertiesStage, DateToJsonStage, DefinePropertiesStage, ErrorConstructorStage,
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
-        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, JsonStringifyStage,
+        GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage,
+        IteratorPrototypeSetterKey, IteratorPrototypeSetterStage, JsonStringifyStage,
         NativeContinuation, NativeContinuationKind, NativeContinuationSite,
         ObjectLookupAccessorStage, ObjectToLocaleStringStage, PreferredType, PromiseCatchStage,
         PromiseFinallyMethodStage, PromiseResolutionMode, PromiseStaticResolveStage,

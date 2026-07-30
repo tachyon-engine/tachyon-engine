@@ -557,6 +557,11 @@ pub(crate) enum NativeFunction {
     AsyncGeneratorNext,
     AsyncGeneratorReturn,
     AsyncGeneratorThrow,
+    IteratorConstructor,
+    IteratorConstructorGetter,
+    IteratorConstructorSetter,
+    IteratorToStringTagGetter,
+    IteratorToStringTagSetter,
     IteratorIdentity,
     MapConstructor,
     MapGet,
@@ -941,6 +946,7 @@ impl NativeFunction {
                 | Self::AsyncFunctionConstructor
                 | Self::GeneratorFunctionConstructor
                 | Self::AsyncGeneratorFunctionConstructor
+                | Self::IteratorConstructor
                 | Self::ErrorConstructor(_)
                 | Self::ProxyConstructor
                 | Self::PromiseConstructor
@@ -1328,7 +1334,11 @@ impl NativeFunction {
             | Self::ArrayValues
             | Self::ArrayEntries
             | Self::ArrayIteratorNext
+            | Self::IteratorConstructor
+            | Self::IteratorConstructorGetter
+            | Self::IteratorToStringTagGetter
             | Self::IteratorIdentity => 0,
+            Self::IteratorConstructorSetter | Self::IteratorToStringTagSetter => 1,
             Self::SymbolFor | Self::SymbolKeyFor => 1,
             Self::SymbolToString
             | Self::SymbolValueOf
@@ -1663,6 +1673,11 @@ impl NativeFunction {
             Self::AsyncGeneratorNext => "next",
             Self::AsyncGeneratorReturn => "return",
             Self::AsyncGeneratorThrow => "throw",
+            Self::IteratorConstructor => "Iterator",
+            Self::IteratorConstructorGetter => "get constructor",
+            Self::IteratorConstructorSetter => "set constructor",
+            Self::IteratorToStringTagGetter => "get [Symbol.toStringTag]",
+            Self::IteratorToStringTagSetter => "set [Symbol.toStringTag]",
             Self::IteratorIdentity => "[Symbol.iterator]",
             Self::MapConstructor => "Map",
             Self::MapGet => "get",
@@ -2043,6 +2058,8 @@ pub(crate) enum ObjectReceiver {
     CollectionIterator(GcRef<CollectionIteratorObject>),
     RegExpStringIterator(GcRef<RegExpStringIteratorObject>),
     AsyncFromSyncIterator(GcRef<AsyncFromSyncIteratorObject>),
+    IteratorHelper(GcRef<IteratorHelperObject>),
+    WrapForValidIterator(GcRef<WrapForValidIteratorObject>),
 }
 
 impl ObjectReceiver {
@@ -2080,6 +2097,8 @@ impl ObjectReceiver {
             Self::CollectionIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::RegExpStringIterator(iterator) => Value::from_heap_ref(iterator.raw()),
             Self::AsyncFromSyncIterator(iterator) => Value::from_heap_ref(iterator.raw()),
+            Self::IteratorHelper(iterator) => Value::from_heap_ref(iterator.raw()),
+            Self::WrapForValidIterator(iterator) => Value::from_heap_ref(iterator.raw()),
         }
     }
 }
@@ -2258,6 +2277,8 @@ pub(crate) struct VmTypes {
     pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) generator_object: GcType<GeneratorObject>,
     pub(crate) async_from_sync_iterator: GcType<AsyncFromSyncIteratorObject>,
+    pub(crate) iterator_helper: GcType<IteratorHelperObject>,
+    pub(crate) wrap_for_valid_iterator: GcType<WrapForValidIteratorObject>,
     pub(crate) async_function_state: GcType<AsyncFunctionState>,
     pub(crate) async_module_state: GcType<AsyncModuleState>,
     pub(crate) pending_signal_watcher_operation: GcType<PendingSignalWatcherOperation>,
@@ -2356,6 +2377,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) infinity: AtomId,
     pub(crate) errors: [AtomId; NativeErrorKind::ALL.len()],
     pub(crate) array: AtomId,
+    pub(crate) iterator: AtomId,
     pub(crate) array_buffer: AtomId,
     pub(crate) data_view: AtomId,
     pub(crate) typed_arrays: [AtomId; TypedArrayKind::ALL.len()],
@@ -2386,7 +2408,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 28
+    pub(crate) const BINDING_COUNT: usize = 29
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()

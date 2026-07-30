@@ -425,6 +425,22 @@ impl Isolate {
                         .map_err(ExecutionError::HeapReference)
                 })?;
             }
+            ObjectReceiver::IteratorHelper(iterator) => {
+                self.set_embedded_object_prototype(
+                    iterator,
+                    self.types.iterator_helper,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
+            ObjectReceiver::WrapForValidIterator(iterator) => {
+                self.set_embedded_object_prototype(
+                    iterator,
+                    self.types.wrap_for_valid_iterator,
+                    prototype,
+                    |object| &mut object.ordinary,
+                )?;
+            }
             _ => return Err(ExecutionError::UnsupportedAccessorDescriptor),
         }
         Ok(true)
@@ -1141,6 +1157,33 @@ impl Isolate {
             })?;
             return Ok((ObjectReceiver::AsyncFromSyncIterator(iterator), ordinary));
         }
+        if let Ok(iterator) = self.heap.checked_reference(raw, self.types.iterator_helper) {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(iterator, self.types.iterator_helper)
+                        .map(|iterator| iterator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::IteratorHelper(iterator), ordinary));
+        }
+        if let Ok(iterator) = self
+            .heap
+            .checked_reference(raw, self.types.wrap_for_valid_iterator)
+        {
+            let ordinary = self.heap.with_running_scope(|scope| {
+                let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(iterator, self.types.wrap_for_valid_iterator)
+                        .map(|iterator| iterator.ordinary)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            })?;
+            return Ok((ObjectReceiver::WrapForValidIterator(iterator), ordinary));
+        }
         if let Ok(date) = self.heap.checked_reference(raw, self.types.date_object) {
             let ordinary = self.heap.with_running_scope(|scope| {
                 let local = scope.root(date).map_err(ExecutionError::Root)?;
@@ -1730,6 +1773,18 @@ impl Isolate {
                     })
                 })
             }
+            ObjectReceiver::IteratorHelper(iterator) => self.set_embedded_object_extensible(
+                iterator,
+                self.types.iterator_helper,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::WrapForValidIterator(iterator) => self.set_embedded_object_extensible(
+                iterator,
+                self.types.wrap_for_valid_iterator,
+                extensible,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2086,6 +2141,18 @@ impl Isolate {
                     })
                 })
             }
+            ObjectReceiver::IteratorHelper(iterator) => self.set_embedded_object_shape(
+                iterator,
+                self.types.iterator_helper,
+                shape,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::WrapForValidIterator(iterator) => self.set_embedded_object_shape(
+                iterator,
+                self.types.wrap_for_valid_iterator,
+                shape,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 scope.with_no_gc_scope(|no_gc| {
@@ -2318,21 +2385,21 @@ impl Isolate {
                 }
                 Ok(())
             }),
-            ObjectReceiver::SignalState(signal) => self.update_signal_storage(
+            ObjectReceiver::SignalState(signal) => self.update_embedded_object_storage(
                 signal,
                 self.types.signal_state,
                 shape,
                 storage,
                 |node| &mut node.ordinary,
             ),
-            ObjectReceiver::SignalComputed(signal) => self.update_signal_storage(
+            ObjectReceiver::SignalComputed(signal) => self.update_embedded_object_storage(
                 signal,
                 self.types.signal_computed,
                 shape,
                 storage,
                 |node| &mut node.ordinary,
             ),
-            ObjectReceiver::SignalWatcher(signal) => self.update_signal_storage(
+            ObjectReceiver::SignalWatcher(signal) => self.update_embedded_object_storage(
                 signal,
                 self.types.signal_watcher,
                 shape,
@@ -2702,6 +2769,20 @@ impl Isolate {
                     Ok(())
                 })
             }
+            ObjectReceiver::IteratorHelper(iterator) => self.update_embedded_object_storage(
+                iterator,
+                self.types.iterator_helper,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
+            ObjectReceiver::WrapForValidIterator(iterator) => self.update_embedded_object_storage(
+                iterator,
+                self.types.wrap_for_valid_iterator,
+                shape,
+                storage,
+                |object| &mut object.ordinary,
+            ),
             ObjectReceiver::CollectionIterator(iterator) => self.heap.with_running_scope(|scope| {
                 let iterator = scope.root(iterator).map_err(ExecutionError::Root)?;
                 let storage_local = storage
@@ -2726,33 +2807,103 @@ impl Isolate {
         }
     }
 
-    /// Updates a Signal payload's ordinary storage and publishes its generational edge.
-    fn update_signal_storage<T: Trace + 'static>(
+    /// Mutates an embedded ordinary prototype and publishes its generational Value edge.
+    fn set_embedded_object_prototype<T: Trace + 'static>(
         &mut self,
-        signal: GcRef<T>,
-        signal_type: GcType<T>,
+        receiver: GcRef<T>,
+        receiver_type: GcType<T>,
+        prototype: Value,
+        ordinary: fn(&mut T) -> &mut OrdinaryObject,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let receiver = scope.root(receiver).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                ordinary(
+                    no_gc
+                        .borrow_mut(receiver, receiver_type)
+                        .map_err(ExecutionError::NoGcBorrow)?,
+                )
+                .prototype = prototype;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(receiver, prototype)
+                .map_err(ExecutionError::HeapReference)?;
+            Ok(())
+        })
+    }
+
+    /// Mutates the extensibility bit shared by a dedicated object payload.
+    fn set_embedded_object_extensible<T: Trace + 'static>(
+        &mut self,
+        receiver: GcRef<T>,
+        receiver_type: GcType<T>,
+        extensible: bool,
+        ordinary: fn(&mut T) -> &mut OrdinaryObject,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let receiver = scope.root(receiver).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                ordinary(
+                    no_gc
+                        .borrow_mut(receiver, receiver_type)
+                        .map_err(ExecutionError::NoGcBorrow)?,
+                )
+                .extensible = extensible;
+                Ok(())
+            })
+        })
+    }
+
+    /// Switches the immutable shape id stored in a dedicated object payload.
+    fn set_embedded_object_shape<T: Trace + 'static>(
+        &mut self,
+        receiver: GcRef<T>,
+        receiver_type: GcType<T>,
+        shape: ShapeId,
+        ordinary: fn(&mut T) -> &mut OrdinaryObject,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let receiver = scope.root(receiver).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                ordinary(
+                    no_gc
+                        .borrow_mut(receiver, receiver_type)
+                        .map_err(ExecutionError::NoGcBorrow)?,
+                )
+                .shape = shape;
+                Ok(())
+            })
+        })
+    }
+
+    /// Updates an embedded ordinary payload and publishes its generational storage edge.
+    fn update_embedded_object_storage<T: Trace + 'static>(
+        &mut self,
+        receiver: GcRef<T>,
+        receiver_type: GcType<T>,
         shape: ShapeId,
         storage: Option<GcRef<PropertyStorage>>,
         ordinary: fn(&mut T) -> &mut OrdinaryObject,
     ) -> Result<(), ExecutionError> {
         self.heap.with_running_scope(|scope| {
-            let signal = scope.root(signal).map_err(ExecutionError::Root)?;
+            let receiver = scope.root(receiver).map_err(ExecutionError::Root)?;
             let storage_local = storage
                 .map(|storage| scope.root(storage))
                 .transpose()
                 .map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
-                let signal = no_gc
-                    .borrow_mut(signal, signal_type)
+                let receiver = no_gc
+                    .borrow_mut(receiver, receiver_type)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                let object = ordinary(signal);
+                let object = ordinary(receiver);
                 object.shape = shape;
                 object.storage = storage;
                 Ok::<(), ExecutionError>(())
             })?;
             if let Some(storage) = storage_local {
                 scope
-                    .write_barrier(signal, storage)
+                    .write_barrier(receiver, storage)
                     .map_err(ExecutionError::HeapReference)?;
             }
             Ok(())
@@ -2879,6 +3030,14 @@ impl Isolate {
             || self
                 .heap
                 .checked_reference(raw, self.types.collection_iterator)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.iterator_helper)
+                .is_ok()
+            || self
+                .heap
+                .checked_reference(raw, self.types.wrap_for_valid_iterator)
                 .is_ok()
             || self
                 .heap

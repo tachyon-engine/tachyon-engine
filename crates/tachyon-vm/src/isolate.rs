@@ -450,6 +450,12 @@ impl Isolate {
             async_from_sync_iterator: registry
                 .try_register("AsyncFromSyncIteratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            iterator_helper: registry
+                .try_register("IteratorHelperObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            wrap_for_valid_iterator: registry
+                .try_register("WrapForValidIteratorObject")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             async_function_state: registry
                 .try_register("AsyncFunctionState")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -1975,6 +1975,7 @@ impl Isolate {
                 self.intern_intrinsic_name(b"SuppressedError")?,
             ],
             array: self.intern_intrinsic_name(b"Array")?,
+            iterator: self.intern_intrinsic_name(b"Iterator")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
             data_view: self.intern_intrinsic_name(b"DataView")?,
             typed_arrays: [
@@ -2531,6 +2532,73 @@ impl Isolate {
         self.set_intrinsic_data_property(prototype, to_locale_string_atom, to_locale_string, true)
     }
 
+    /// Publishes the abstract Iterator constructor and both proposal-mandated prototype accessors.
+    fn initialize_iterator_constructor_intrinsics(
+        &mut self,
+        iterator_prototype: Value,
+        function_prototype: Value,
+    ) -> Result<(), ExecutionError> {
+        let function_object = || OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: function_prototype,
+        };
+        let constructor =
+            self.allocate_native_function(NativeFunction::IteratorConstructor, function_object())?;
+        self.realm.iterator_constructor = Some(constructor);
+        self.set_function_prototype(constructor, iterator_prototype)?;
+
+        let constructor_getter = self.allocate_native_function(
+            NativeFunction::IteratorConstructorGetter,
+            function_object(),
+        )?;
+        self.realm.iterator_constructor_getter = Some(constructor_getter);
+        let constructor_setter = self.allocate_native_function(
+            NativeFunction::IteratorConstructorSetter,
+            function_object(),
+        )?;
+        self.realm.iterator_constructor_setter = Some(constructor_setter);
+        let constructor_atom = self.constructor_atom()?;
+        self.define_property(
+            iterator_prototype,
+            PropertyKey::Atom(constructor_atom),
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(constructor_getter),
+                setter: Some(constructor_setter),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )?;
+
+        let tag_getter = self.allocate_native_function(
+            NativeFunction::IteratorToStringTagGetter,
+            function_object(),
+        )?;
+        self.realm.iterator_to_string_tag_getter = Some(tag_getter);
+        let tag_setter = self.allocate_native_function(
+            NativeFunction::IteratorToStringTagSetter,
+            function_object(),
+        )?;
+        self.realm.iterator_to_string_tag_setter = Some(tag_setter);
+        let tag = self.property_key(
+            self.agent
+                .well_known_symbols
+                .to_string_tag
+                .expect("well-known symbols initialize before Iterator"),
+        )?;
+        self.define_property(
+            iterator_prototype,
+            tag,
+            PropertyDescriptor::Accessor(AccessorPropertyDescriptor {
+                getter: Some(tag_getter),
+                setter: Some(tag_setter),
+                enumerable: Some(false),
+                configurable: Some(true),
+            }),
+        )
+    }
+
     /// Builds `%IteratorPrototype%`, `%ArrayIteratorPrototype%`, and Array `values`/`@@iterator`.
     fn initialize_array_iterator_intrinsics(
         &mut self,
@@ -2548,6 +2616,7 @@ impl Isolate {
             prototype: object_prototype,
         })?;
         self.realm.iterator_prototype = Some(iterator_prototype);
+        self.initialize_iterator_constructor_intrinsics(iterator_prototype, function_prototype)?;
         let identity = self.allocate_native_function(
             NativeFunction::IteratorIdentity,
             OrdinaryObject {
@@ -2574,7 +2643,6 @@ impl Isolate {
                 configurable: Some(true),
             },
         )?;
-        self.define_intrinsic_to_string_tag(iterator_prototype, b"Iterator")?;
         let array_iterator_prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
             shape: ShapeId::EMPTY,
             extensible: true,
@@ -4154,6 +4222,13 @@ impl Isolate {
             self.realm
                 .array_constructor
                 .expect("Array initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.iterator,
+            self.realm
+                .iterator_constructor
+                .expect("Iterator initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

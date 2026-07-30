@@ -59,6 +59,7 @@ mod function_to_string;
 mod generator;
 mod grouping;
 mod instance_of;
+mod iterator_intrinsics;
 mod module;
 mod object_prototype;
 mod optional_chaining;
