@@ -56,6 +56,105 @@ fn compiler_preserves_string_literal_utf16_code_units() {
 }
 
 #[test]
+fn compiler_emits_distinct_tagged_template_site_constants_and_receiver_calls() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "receiver.tag`same${first}`; receiver.tag`same${second}`;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let sites: Vec<_> = module
+        .constants()
+        .iter()
+        .filter_map(|constant| match constant {
+            tachyon_bytecode::BytecodeConstant::TemplateSite { cooked, raw } => Some((cooked, raw)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sites.len(),
+        2,
+        "identical source sites must not be interned"
+    );
+    assert_eq!(sites[0], sites[1]);
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(disassembly.matches("LoadTemplateObject").count(), 2);
+    assert_eq!(disassembly.matches("CallWithReceiver").count(), 2);
+    for section in disassembly.split("CallWithReceiver").take(2) {
+        let getter = section
+            .rfind("GetById")
+            .expect("tag getter must be emitted");
+        let template = section
+            .rfind("LoadTemplateObject")
+            .expect("template load must be emitted");
+        assert!(
+            getter < template,
+            "tag getter must run before template lookup"
+        );
+    }
+}
+
+#[test]
+fn compiler_never_marks_a_tagged_eval_as_direct_eval() {
+    let module = Compiler
+        .compile(
+            source(MediaType::JavaScript, "eval`source`;"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassembly = tachyon_bytecode::disassemble(
+        module
+            .function(tachyon_bytecode::FunctionId::new(0))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(disassembly.contains("LoadTemplateObject"));
+    assert!(disassembly.contains("Call"));
+    assert!(!disassembly.contains("DirectEval"));
+}
+
+#[test]
+fn compiler_preserves_private_and_super_tag_receivers() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "class Base { tag(parts) { return parts; } } class Derived extends Base { #tag(parts) { return parts; } privateSite() { return this.#tag`private`; } superSite() { return super.tag`super`; } computedSuperSite() { return super['tag']`computed`; } }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let disassemblies: Vec<_> = module
+        .functions()
+        .iter()
+        .map(|function| tachyon_bytecode::disassemble(function).unwrap())
+        .collect();
+    assert!(
+        disassemblies
+            .iter()
+            .any(|text| { text.contains("GetPrivate") && text.contains("LoadTemplateObject") })
+    );
+    assert!(
+        disassemblies
+            .iter()
+            .any(|text| { text.contains("GetSuperById") && text.contains("LoadTemplateObject") })
+    );
+    assert!(
+        disassemblies.iter().any(|text| {
+            text.contains("GetSuperByValue") && text.contains("LoadTemplateObject")
+        })
+    );
+}
+
+#[test]
 fn compiler_preserves_lone_surrogates_in_directives_and_property_keys() {
     let module = Compiler
         .compile(

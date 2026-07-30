@@ -52,7 +52,7 @@ impl Bytecode {
     pub fn words(&self) -> &[u32] {
         &self.words
     }
-    pub fn verify(&self, context: VerifyContext) -> Result<VerifiedBytecode, VerifyError> {
+    pub fn verify(&self, context: VerifyContext<'_>) -> Result<VerifiedBytecode, VerifyError> {
         verify::verify(self.clone(), context)
     }
 }
@@ -234,7 +234,15 @@ pub enum BytecodeConstant {
     NumberBits(u64),
     String(Arc<[u16]>),
     BigInt(Arc<str>),
-    RegExp { pattern: Arc<[u16]>, flags: u8 },
+    RegExp {
+        pattern: Arc<[u16]>,
+        flags: u8,
+    },
+    /// Realm-independent source data for one syntactically distinct tagged-template site.
+    TemplateSite {
+        cooked: Arc<[Option<Arc<[u16]>>]>,
+        raw: Arc<[Arc<[u16]>]>,
+    },
 }
 
 impl BytecodeConstant {
@@ -901,10 +909,9 @@ impl CompiledModule {
             u32::try_from(source.len()).map_err(|_| ModuleBuildError::SourceTooLarge {
                 byte_len: source.len(),
             })?;
-        let constant_count =
-            u32::try_from(constants.len()).map_err(|_| ModuleBuildError::TooManyConstants {
-                count: constants.len(),
-            })?;
+        u32::try_from(constants.len()).map_err(|_| ModuleBuildError::TooManyConstants {
+            count: constants.len(),
+        })?;
         let scope_name_count =
             u32::try_from(scope_names.len()).map_err(|_| ModuleBuildError::TooManyScopeNames {
                 count: scope_names.len(),
@@ -952,7 +959,7 @@ impl CompiledModule {
             .max(encoded_class_environment_slots);
         let context = VerifyContext {
             register_count: 0,
-            constant_count,
+            constants: &constants,
             function_count,
             scope_name_count,
             max_environment_slot_count,

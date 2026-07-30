@@ -588,6 +588,51 @@ fn expression_instruction_count(expression: &HirExpression) -> Result<usize, Com
             }
             Ok(count)
         }
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => {
+            let mut count = match &tag.kind {
+                HirExpressionKind::StaticMember { object, .. } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    2,
+                    "bytecode instructions",
+                )?,
+                HirExpressionKind::ComputedMember { object, property } => {
+                    let nested = checked_count_add(
+                        expression_instruction_count(object)?,
+                        expression_instruction_count(property)?,
+                        "bytecode instructions",
+                    )?;
+                    checked_count_add(nested, 3, "bytecode instructions")?
+                }
+                HirExpressionKind::PrivateMember { object, .. } => checked_count_add(
+                    expression_instruction_count(object)?,
+                    3,
+                    "bytecode instructions",
+                )?,
+                HirExpressionKind::SuperStaticMember(_) => 2,
+                HirExpressionKind::SuperComputedMember(property) => checked_count_add(
+                    expression_instruction_count(property)?,
+                    5,
+                    "bytecode instructions",
+                )?,
+                _ => checked_count_add(
+                    expression_instruction_count(tag)?,
+                    1,
+                    "bytecode instructions",
+                )?,
+            };
+            count = checked_count_add(count, 2, "bytecode instructions")?;
+            for substitution in substitutions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_instruction_count(substitution)?,
+                    "bytecode instructions",
+                )?;
+                count = checked_count_add(count, 1, "bytecode instructions")?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = checked_count_add(
                 expression_instruction_count(callee)?,

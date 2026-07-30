@@ -957,6 +957,19 @@ fn expression_label_count(expression: &HirExpression) -> Result<usize, CompileEr
             }
             Ok(count)
         }
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => {
+            let mut count = expression_label_count(tag)?;
+            for substitution in substitutions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_label_count(substitution)?,
+                    "bytecode labels",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_label_count(callee)?;
             for argument in arguments.iter() {

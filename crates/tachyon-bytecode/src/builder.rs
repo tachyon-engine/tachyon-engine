@@ -258,6 +258,7 @@ impl BytecodeBuilder {
             | Opcode::LoadTrue
             | Opcode::LoadImmediate
             | Opcode::LoadConstant
+            | Opcode::LoadTemplateObject
             | Opcode::LoadScope
             | Opcode::CreateClosure
             | Opcode::CreateBaseClass

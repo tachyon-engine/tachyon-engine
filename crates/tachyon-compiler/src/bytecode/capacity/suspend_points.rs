@@ -325,6 +325,12 @@ fn expression_suspend_point_count(expression: &HirExpression) -> Result<usize, C
             expression_suspend_point_count(callee)?,
             expression_list_count(arguments)?,
         ),
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => add(
+            expression_suspend_point_count(tag)?,
+            expression_list_count(substitutions)?,
+        ),
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_suspend_point_count(callee)?;
             for argument in arguments.iter() {

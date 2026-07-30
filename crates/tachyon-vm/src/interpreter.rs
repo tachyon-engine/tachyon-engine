@@ -885,8 +885,14 @@ impl Isolate {
                     BytecodeConstant::RegExp { pattern, flags } => {
                         self.create_regexp_literal(&pattern, flags)?
                     }
+                    BytecodeConstant::TemplateSite { .. } => {
+                        return Err(ExecutionError::UnsupportedConstant(operands[1]));
+                    }
                 };
                 self.write(base, operands[0], value)?;
+            }
+            Opcode::LoadTemplateObject => {
+                self.load_template_object(code, base, operands[0], operands[1])?;
             }
             Opcode::Move => {
                 let value = self.read(base, operands[1])?;

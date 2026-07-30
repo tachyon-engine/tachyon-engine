@@ -398,7 +398,7 @@ struct GlobalLexicalPlan {
 }
 
 impl EnvironmentPlans {
-    /// Assigns exact slots only to bindings whose semantic references cross a function boundary.
+    /// Assigns slots to captures and dynamic-name bindings without reclassifying root globals.
     fn new(hir: &HirProgram, direct_eval: bool) -> Result<Self, CompileError> {
         let module_entry = hir.kind() == ProgramKind::Module;
         let mut global_lexicals =
@@ -457,6 +457,17 @@ impl EnvironmentPlans {
                     .is_some_and(|name| name.id == *binding)
             })
         });
+        let force_entry_dynamic_bindings = hir
+            .scopes()
+            .get(hir.root_scope().index() as usize)
+            .is_some_and(|scope| scope.flags.direct_eval);
+        collect_captured_slots(
+            hir.statements(),
+            force_entry_dynamic_bindings,
+            &forced_captures,
+            Some(hir.root_scope()),
+            &mut entry_slots,
+        )?;
         let mut functions = Vec::with_capacity(hir.functions().len());
         let mut function_self_bindings = Vec::with_capacity(hir.functions().len());
         for function in hir.functions() {
@@ -539,6 +550,7 @@ impl EnvironmentPlans {
                 &function.body,
                 force_dynamic_bindings,
                 &forced_captures,
+                None,
                 &mut slots,
             )?;
             functions.push(FunctionEnvironmentPlan {
@@ -874,6 +886,7 @@ fn collect_captured_slots(
     statements: &[HirStatement],
     force_dynamic_bindings: bool,
     forced_captures: &[BindingId],
+    excluded_scope: Option<ScopeId>,
     slots: &mut Vec<CapturedSlot>,
 ) -> Result<(), CompileError> {
     for statement in statements {
@@ -883,6 +896,9 @@ fn collect_captured_slots(
                 let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                 for declarator in declaration.declarators.iter() {
                     for binding in pattern_bindings(&declarator.pattern) {
+                        if excluded_scope == Some(binding.scope) {
+                            continue;
+                        }
                         push_captured_slot(
                             &binding,
                             mutable,
@@ -895,6 +911,9 @@ fn collect_captured_slots(
                 }
             }
             HirStatementKind::FunctionDeclaration(declaration) => {
+                if excluded_scope == Some(declaration.binding.scope) {
+                    continue;
+                }
                 push_captured_slot(
                     &declaration.binding,
                     true,
@@ -904,9 +923,13 @@ fn collect_captured_slots(
                     slots,
                 )?;
             }
-            HirStatementKind::Block(body) => {
-                collect_captured_slots(body, force_dynamic_bindings, forced_captures, slots)?
-            }
+            HirStatementKind::Block(body) => collect_captured_slots(
+                body,
+                force_dynamic_bindings,
+                forced_captures,
+                excluded_scope,
+                slots,
+            )?,
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -916,6 +939,7 @@ fn collect_captured_slots(
                     core::slice::from_ref(consequent),
                     force_dynamic_bindings,
                     forced_captures,
+                    excluded_scope,
                     slots,
                 )?;
                 if let Some(alternate) = alternate {
@@ -923,6 +947,7 @@ fn collect_captured_slots(
                         core::slice::from_ref(alternate),
                         force_dynamic_bindings,
                         forced_captures,
+                        excluded_scope,
                         slots,
                     )?;
                 }
@@ -935,6 +960,9 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
+                            if excluded_scope == Some(binding.scope) {
+                                continue;
+                            }
                             push_captured_slot(
                                 &binding,
                                 mutable,
@@ -950,6 +978,7 @@ fn collect_captured_slots(
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
+                    excluded_scope,
                     slots,
                 )?;
             }
@@ -959,6 +988,9 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
+                            if excluded_scope == Some(binding.scope) {
+                                continue;
+                            }
                             push_captured_slot(
                                 &binding,
                                 mutable,
@@ -974,6 +1006,7 @@ fn collect_captured_slots(
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
+                    excluded_scope,
                     slots,
                 )?;
             }
@@ -983,6 +1016,9 @@ fn collect_captured_slots(
                     let initialized = declaration.kind == HirVariableDeclarationKind::Var;
                     for declarator in declaration.declarators.iter() {
                         for binding in pattern_bindings(&declarator.pattern) {
+                            if excluded_scope == Some(binding.scope) {
+                                continue;
+                            }
                             push_captured_slot(
                                 &binding,
                                 mutable,
@@ -998,6 +1034,7 @@ fn collect_captured_slots(
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
+                    excluded_scope,
                     slots,
                 )?;
             }
@@ -1006,6 +1043,7 @@ fn collect_captured_slots(
                     core::slice::from_ref(body),
                     force_dynamic_bindings,
                     forced_captures,
+                    excluded_scope,
                     slots,
                 )?;
             }
@@ -1015,6 +1053,7 @@ fn collect_captured_slots(
                         &case.consequent,
                         force_dynamic_bindings,
                         forced_captures,
+                        excluded_scope,
                         slots,
                     )?;
                 }
@@ -1024,10 +1063,19 @@ fn collect_captured_slots(
                 handler,
                 finalizer,
             } => {
-                collect_captured_slots(block, force_dynamic_bindings, forced_captures, slots)?;
+                collect_captured_slots(
+                    block,
+                    force_dynamic_bindings,
+                    forced_captures,
+                    excluded_scope,
+                    slots,
+                )?;
                 if let Some(handler) = handler {
                     if let Some(parameter) = &handler.parameter {
                         for binding in pattern_bindings(parameter) {
+                            if excluded_scope == Some(binding.scope) {
+                                continue;
+                            }
                             push_captured_slot(
                                 &binding,
                                 true,
@@ -1042,6 +1090,7 @@ fn collect_captured_slots(
                         &handler.body,
                         force_dynamic_bindings,
                         forced_captures,
+                        excluded_scope,
                         slots,
                     )?;
                 }
@@ -1050,6 +1099,7 @@ fn collect_captured_slots(
                         finalizer,
                         force_dynamic_bindings,
                         forced_captures,
+                        excluded_scope,
                         slots,
                     )?;
                 }

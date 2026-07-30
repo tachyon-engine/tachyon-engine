@@ -1,16 +1,16 @@
 //! Bytecode and compiled-module structural verification.
 
 use super::{
-    BindingLocation, BindingPlanEntry, Bytecode, DecodeError, DecodedInstruction,
+    BindingLocation, BindingPlanEntry, Bytecode, BytecodeConstant, DecodeError, DecodedInstruction,
     EnvironmentSlotMetadata, FeedbackSite, FunctionId, FunctionKind, FunctionLayout, FunctionRole,
     HandlerEntry, HandlerKind, ModuleBuildError, Opcode, SourceMapEntry, SuspendPoint,
     SuspendPointId, VerifiedBytecode, WordOffset, decode_instruction,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VerifyContext {
+pub struct VerifyContext<'constants> {
     pub register_count: u32,
-    pub constant_count: u32,
+    pub constants: &'constants [BytecodeConstant],
     pub function_count: u32,
     pub scope_name_count: u32,
     pub max_environment_slot_count: u32,
@@ -31,6 +31,10 @@ pub enum VerifyError {
         offset: WordOffset,
         constant: u32,
         constant_count: u32,
+    },
+    TemplateSiteConstantRequired {
+        offset: WordOffset,
+        constant: u32,
     },
     ScopeNameOutOfRange {
         offset: WordOffset,
@@ -811,7 +815,7 @@ fn validate_suspend_opcodes(
 /// Verifies the complete stream in two passes so jumps can only land on decoded instruction boundaries.
 pub(super) fn verify(
     bytecode: Bytecode,
-    context: VerifyContext,
+    context: VerifyContext<'_>,
 ) -> Result<VerifiedBytecode, VerifyError> {
     let words = bytecode.words();
     if words.len() > u32::MAX as usize {
@@ -848,7 +852,7 @@ fn verify_instruction(
     instruction: DecodedInstruction,
     offset: WordOffset,
     starts: &[bool],
-    context: VerifyContext,
+    context: VerifyContext<'_>,
 ) -> Result<(), VerifyError> {
     let operands = instruction.operands;
     let check_register = |register| {
@@ -888,6 +892,7 @@ fn verify_instruction(
         | Opcode::LoadTrue
         | Opcode::LoadImmediate
         | Opcode::LoadConstant
+        | Opcode::LoadTemplateObject
         | Opcode::LoadScope => check_register(operands[0])?,
         Opcode::CreatePrivateName => {
             check_register(operands[0])?;
@@ -1154,12 +1159,26 @@ fn verify_instruction(
             check_register(operands[0])?
         }
     }
-    if instruction.opcode == Opcode::LoadConstant && operands[1] >= context.constant_count {
-        return Err(VerifyError::ConstantOutOfRange {
-            offset,
-            constant: operands[1],
-            constant_count: context.constant_count,
-        });
+    if matches!(
+        instruction.opcode,
+        Opcode::LoadConstant | Opcode::LoadTemplateObject
+    ) {
+        let constant_count = u32::try_from(context.constants.len()).unwrap_or(u32::MAX);
+        let Some(constant) = context.constants.get(operands[1] as usize) else {
+            return Err(VerifyError::ConstantOutOfRange {
+                offset,
+                constant: operands[1],
+                constant_count,
+            });
+        };
+        if instruction.opcode == Opcode::LoadTemplateObject
+            && !matches!(constant, BytecodeConstant::TemplateSite { .. })
+        {
+            return Err(VerifyError::TemplateSiteConstantRequired {
+                offset,
+                constant: operands[1],
+            });
+        }
     }
     let scope_name = match instruction.opcode {
         Opcode::LoadScope | Opcode::StoreScope | Opcode::StoreResolvedScope => Some(operands[1]),

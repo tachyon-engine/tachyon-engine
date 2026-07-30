@@ -1,5 +1,6 @@
 use super::*;
 use crate::FunctionStencilId;
+use std::sync::Arc;
 use tachyon_bytecode::ClassInstanceElementKind;
 
 #[derive(Clone, Copy)]
@@ -400,6 +401,20 @@ impl Lowerer<'_> {
         match &expression.kind {
             HirExpressionKind::Call { callee, arguments } => {
                 let result = self.call_expression(callee, arguments, expression.span, true)?;
+                self.emit(Opcode::Return, &[result.index()], expression.span)
+            }
+            HirExpressionKind::TaggedTemplate {
+                tag,
+                elements,
+                substitutions,
+            } => {
+                let result = self.tagged_template_expression(
+                    tag,
+                    elements,
+                    substitutions,
+                    expression.span,
+                    true,
+                )?;
                 self.emit(Opcode::Return, &[result.index()], expression.span)
             }
             HirExpressionKind::CallSpread { callee, arguments } => {
@@ -1067,6 +1082,17 @@ impl Lowerer<'_> {
             HirExpressionKind::Call { callee, arguments } => {
                 self.call_expression(callee, arguments, expression.span, false)
             }
+            HirExpressionKind::TaggedTemplate {
+                tag,
+                elements,
+                substitutions,
+            } => self.tagged_template_expression(
+                tag,
+                elements,
+                substitutions,
+                expression.span,
+                false,
+            ),
             HirExpressionKind::CallSpread { callee, arguments } => {
                 self.call_spread_expression(callee, arguments, expression.span, false)
             }
@@ -2407,6 +2433,159 @@ impl Lowerer<'_> {
         let destination = self.register()?;
         let argument_count =
             u32::try_from(arguments.len()).map_err(|_| CompileError::RegisterOverflow)?;
+        self.emit(
+            opcode,
+            &[destination.index(), call_base.index(), argument_count],
+            span,
+        )?;
+        Ok(destination)
+    }
+
+    /// Resolves one tag reference before loading its Realm-local template object and substitutions.
+    fn tagged_template_expression(
+        &mut self,
+        tag: &HirExpression,
+        elements: &[crate::HirTemplateElement],
+        substitutions: &[HirExpression],
+        span: SourceSpan,
+        tail: bool,
+    ) -> Result<RegisterId, CompileError> {
+        let constant = self.template_site_constant(elements)?;
+        if let HirExpressionKind::StaticMember { object, property } = &tag.kind {
+            let receiver = self.expression(object)?;
+            let call_base = self.register()?;
+            self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+            let callee = self.register()?;
+            let property = self.scope_name(property)?;
+            self.emit(
+                Opcode::GetById,
+                &[callee.index(), call_base.index(), property],
+                span,
+            )?;
+            return self.emit_tagged_call(call_base, constant, substitutions, span, tail, true);
+        }
+        if let HirExpressionKind::ComputedMember { object, property } = &tag.kind {
+            let receiver = self.expression(object)?;
+            let property = self.expression(property)?;
+            self.prepare_property_key(property, receiver, false, span)?;
+            let call_base = self.register()?;
+            self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+            let callee = self.register()?;
+            self.emit(
+                Opcode::GetByValue,
+                &[callee.index(), call_base.index(), property.index()],
+                span,
+            )?;
+            return self.emit_tagged_call(call_base, constant, substitutions, span, tail, true);
+        }
+        if let HirExpressionKind::PrivateMember { object, name } = &tag.kind {
+            let receiver = self.expression(object)?;
+            let key = self.load_private_name(name, span)?;
+            let call_base = self.register()?;
+            self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+            let callee = self.register()?;
+            self.emit(
+                Opcode::GetPrivate,
+                &[callee.index(), call_base.index(), key.index()],
+                span,
+            )?;
+            return self.emit_tagged_call(call_base, constant, substitutions, span, tail, true);
+        }
+        if let HirExpressionKind::SuperStaticMember(property) = &tag.kind {
+            let call_base = self.register()?;
+            self.emit(Opcode::LoadThis, &[call_base.index()], span)?;
+            let callee = self.register()?;
+            let property = self.scope_name(property)?;
+            self.emit(Opcode::GetSuperById, &[callee.index(), property], span)?;
+            return self.emit_tagged_call(call_base, constant, substitutions, span, tail, true);
+        }
+        if let HirExpressionKind::SuperComputedMember(property) = &tag.kind {
+            let receiver = self.register()?;
+            self.emit(Opcode::LoadThis, &[receiver.index()], span)?;
+            let base = self.register()?;
+            self.emit(Opcode::LoadSuperBase, &[base.index()], span)?;
+            let property = self.expression(property)?;
+            self.prepare_property_key(property, base, false, span)?;
+            let call_base = self.register()?;
+            self.emit(Opcode::Move, &[call_base.index(), receiver.index()], span)?;
+            let callee = self.register()?;
+            self.emit(
+                Opcode::GetSuperByValue,
+                &[callee.index(), base.index(), property.index()],
+                span,
+            )?;
+            return self.emit_tagged_call(call_base, constant, substitutions, span, tail, true);
+        }
+        let callee = self.expression(tag)?;
+        let call_base = self.register()?;
+        self.emit(Opcode::Move, &[call_base.index(), callee.index()], span)?;
+        self.emit_tagged_call(call_base, constant, substitutions, span, tail, false)
+    }
+
+    /// Appends one syntax-site constant without interning identical template text.
+    fn template_site_constant(
+        &mut self,
+        elements: &[crate::HirTemplateElement],
+    ) -> Result<u32, CompileError> {
+        let index =
+            u32::try_from(self.constants.len()).map_err(|_| CompileError::ConstantOverflow)?;
+        let mut cooked = Vec::new();
+        cooked
+            .try_reserve_exact(elements.len())
+            .map_err(|_| CompileError::ConstantAllocationFailed)?;
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(elements.len())
+            .map_err(|_| CompileError::ConstantAllocationFailed)?;
+        for element in elements {
+            cooked.push(element.cooked.clone());
+            raw.push(element.raw.clone());
+        }
+        let cooked: Arc<[Option<Arc<[u16]>>]> = cooked.into();
+        let raw: Arc<[Arc<[u16]>]> = raw.into();
+        self.constants
+            .push(BytecodeConstant::TemplateSite { cooked, raw });
+        Ok(index)
+    }
+
+    /// Emits the stable call window after the tag getter has completed observably.
+    fn emit_tagged_call(
+        &mut self,
+        call_base: RegisterId,
+        constant: u32,
+        substitutions: &[HirExpression],
+        span: SourceSpan,
+        tail: bool,
+        with_receiver: bool,
+    ) -> Result<RegisterId, CompileError> {
+        let template = self.register()?;
+        self.emit(
+            Opcode::LoadTemplateObject,
+            &[template.index(), constant],
+            span,
+        )?;
+        let mut substitution_slots = Vec::with_capacity(substitutions.len());
+        for _ in substitutions {
+            substitution_slots.push(self.register()?);
+        }
+        for (substitution, slot) in substitutions.iter().zip(substitution_slots) {
+            let value = self.expression(substitution)?;
+            self.emit(
+                Opcode::Move,
+                &[slot.index(), value.index()],
+                substitution.span,
+            )?;
+        }
+        let destination = self.register()?;
+        let argument_count = u32::try_from(substitutions.len())
+            .map_err(|_| CompileError::RegisterOverflow)?
+            .checked_add(1)
+            .ok_or(CompileError::RegisterOverflow)?;
+        let opcode = match (with_receiver, tail) {
+            (true, true) => Opcode::TailCallWithReceiver,
+            (true, false) => Opcode::CallWithReceiver,
+            (false, true) => Opcode::TailCall,
+            (false, false) => Opcode::Call,
+        };
         self.emit(
             opcode,
             &[destination.index(), call_base.index(), argument_count],

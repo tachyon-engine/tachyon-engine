@@ -71,6 +71,7 @@ mod runtime;
 mod string;
 mod string_replace_all;
 mod string_split;
+mod tagged_template;
 mod tuning;
 mod weak_collection;
 

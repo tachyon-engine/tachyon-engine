@@ -454,6 +454,19 @@ fn expression_scope_name_count(expression: &HirExpression) -> Result<usize, Comp
             }
             Ok(count)
         }
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => {
+            let mut count = expression_scope_name_count(tag)?;
+            for substitution in substitutions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_scope_name_count(substitution)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             let mut count = expression_scope_name_count(callee)?;
             for argument in arguments.iter() {
@@ -877,6 +890,20 @@ fn expression_literal_count(expression: &HirExpression) -> Result<usize, Compile
                 count = checked_count_add(
                     count,
                     expression_literal_count(argument)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => {
+            let mut count =
+                checked_count_add(expression_literal_count(tag)?, 1, "bytecode constants")?;
+            for substitution in substitutions.iter() {
+                count = checked_count_add(
+                    count,
+                    expression_literal_count(substitution)?,
                     "bytecode constants",
                 )?;
             }

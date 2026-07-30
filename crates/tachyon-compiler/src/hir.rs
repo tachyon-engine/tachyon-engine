@@ -11,7 +11,8 @@ pub use expression::{
     HirClass, HirClassElement, HirClassField, HirClassMethod, HirClassMethodKind, HirExpression,
     HirExpressionKind, HirLogicalOperator, HirObjectExpressionPart, HirObjectProperty,
     HirObjectPropertyKey, HirObjectPropertyValue, HirPrivateAccessor, HirPrivateField,
-    HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirUnaryOperator, HirUpdateOperator,
+    HirPrivateMethod, HirPrivateName, HirPrivateNameId, HirTemplateElement, HirUnaryOperator,
+    HirUpdateOperator,
 };
 pub use module::{
     HirModuleAttribute, HirModuleExportEntry, HirModuleImportEntry, HirModuleImportName,

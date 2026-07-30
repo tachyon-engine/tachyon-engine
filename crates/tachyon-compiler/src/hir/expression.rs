@@ -66,6 +66,13 @@ pub struct HirExpression {
     pub kind: HirExpressionKind,
 }
 
+/// One immutable pair of cooked/raw strings owned by a tagged-template syntax site.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HirTemplateElement {
+    pub cooked: Option<Arc<[u16]>>,
+    pub raw: Arc<[u16]>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HirFunctionExpression {
     pub stencil: FunctionStencilId,
@@ -267,6 +274,12 @@ pub enum HirExpressionKind {
         callee: Box<HirExpression>,
         arguments: Arc<[HirExpression]>,
     },
+    /// A distinct syntax site whose template object is cached by its bytecode constant index.
+    TaggedTemplate {
+        tag: Box<HirExpression>,
+        elements: Arc<[HirTemplateElement]>,
+        substitutions: Arc<[HirExpression]>,
+    },
     /// A call whose ordered argument list contains at least one iterator spread.
     CallSpread {
         callee: Box<HirExpression>,
@@ -399,6 +412,49 @@ pub(super) fn lower_expression(
                 }
             }
             accumulated.kind
+        }
+        Expression::TaggedTemplateExpression(expression) if expression.type_arguments.is_none() => {
+            if expression.quasi.quasis.len() != expression.quasi.expressions.len() + 1 {
+                return Err(unsupported(
+                    source.name(),
+                    span,
+                    "malformed tagged template",
+                ));
+            }
+            let mut elements = Vec::with_capacity(expression.quasi.quasis.len());
+            for quasi in &expression.quasi.quasis {
+                let cooked = quasi
+                    .value
+                    .cooked
+                    .as_ref()
+                    .map(|cooked| {
+                        super::copy_oxc_string_units(
+                            cooked.as_str(),
+                            quasi.lone_surrogates,
+                            source,
+                            source_span(quasi.span),
+                        )
+                    })
+                    .transpose()?;
+                elements.push(HirTemplateElement {
+                    cooked,
+                    raw: copy_template_raw(quasi.value.raw.as_str())?,
+                });
+            }
+            let mut substitutions = Vec::with_capacity(expression.quasi.expressions.len());
+            for substitution in &expression.quasi.expressions {
+                substitutions.push(lower_expression(substitution, source, semantic, functions)?);
+            }
+            HirExpressionKind::TaggedTemplate {
+                tag: Box::new(lower_expression(
+                    &expression.tag,
+                    source,
+                    semantic,
+                    functions,
+                )?),
+                elements: elements.into(),
+                substitutions: substitutions.into(),
+            }
         }
         Expression::RegExpLiteral(literal) => HirExpressionKind::RegExp {
             pattern: Arc::from(literal.regex.pattern.text.as_str()),
@@ -899,6 +955,27 @@ pub(super) fn lower_expression(
         _ => return Err(unsupported(source.name(), span, "expression")),
     };
     Ok(HirExpression { span, kind })
+}
+
+/// Copies raw template text while defensively applying ECMAScript CR and CRLF normalization.
+fn copy_template_raw(raw: &str) -> Result<Arc<[u16]>, CompileError> {
+    let mut units = Vec::new();
+    units
+        .try_reserve_exact(raw.encode_utf16().count())
+        .map_err(|_| CompileError::ConstantAllocationFailed)?;
+    let mut chars = raw.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            units.push(b'\n' as u16);
+        } else {
+            let mut encoded = [0; 2];
+            units.extend_from_slice(character.encode_utf16(&mut encoded));
+        }
+    }
+    Ok(units.into())
 }
 
 /// Copies one class into ordered elements and independent field-initializer stencils.

@@ -1,9 +1,9 @@
 use super::*;
 use proptest::prelude::*;
-fn context() -> VerifyContext {
+fn context() -> VerifyContext<'static> {
     VerifyContext {
         register_count: 4,
-        constant_count: 2,
+        constants: &[],
         function_count: 1,
         scope_name_count: 1,
         max_environment_slot_count: 2,
@@ -86,6 +86,7 @@ fn operand_count_table_covers_every_opcode_once() {
             &[
                 Opcode::LoadImmediate,
                 Opcode::LoadConstant,
+                Opcode::LoadTemplateObject,
                 Opcode::Move,
                 Opcode::Not,
                 Opcode::Negate,
@@ -294,6 +295,7 @@ fn verified_decoder_matches_checked_decoder_at_stream_boundaries() {
         (Opcode::CreateArray, &[1][..]),
         (Opcode::CreateForInIterator, &[2, 1][..]),
         (Opcode::DeleteById, &[2, 1, 0][..]),
+        (Opcode::LoadTemplateObject, &[2, 1][..]),
     ] {
         append_decoder_case(
             &mut words,
@@ -311,9 +313,17 @@ fn verified_decoder_matches_checked_decoder_at_stream_boundaries() {
         OperandWidth::Wide,
     );
 
+    let constants = [
+        BytecodeConstant::NumberBits(0),
+        BytecodeConstant::TemplateSite {
+            cooked: Arc::from([Some(Arc::from([b'x' as u16]))]),
+            raw: Arc::from([Arc::from([b'x' as u16])]),
+        },
+    ];
     let verified = Bytecode::from_words(words)
         .verify(VerifyContext {
             register_count: 65_537,
+            constants: &constants,
             ..context()
         })
         .unwrap();
@@ -625,6 +635,114 @@ fn builder_tracks_call_register_window() {
     builder.emit(Opcode::Return, &[0], span).unwrap();
     let (_, _, register_count) = builder.finish().unwrap();
     assert_eq!(register_count, 4);
+}
+
+#[test]
+fn builder_tracks_only_the_template_destination_as_a_register() {
+    let span = SourceSpan { start: 0, end: 0 };
+    let mut builder = BytecodeBuilder::default();
+    builder
+        .emit(Opcode::LoadTemplateObject, &[7, u32::MAX], span)
+        .unwrap();
+    builder.emit(Opcode::Return, &[7], span).unwrap();
+    let (_, _, register_count) = builder.finish().unwrap();
+    assert_eq!(register_count, 8);
+}
+
+#[test]
+fn template_site_constant_roundtrips_through_module_and_disassembly() {
+    let cooked: Arc<[Option<Arc<[u16]>>]> = Arc::from([
+        Some(Arc::from([b'a' as u16])),
+        None,
+        Some(Arc::from([0xd800])),
+    ]);
+    let raw: Arc<[Arc<[u16]>]> = Arc::from([
+        Arc::from([b'a' as u16]),
+        Arc::from([b'\\' as u16, b'u' as u16, b'{' as u16]),
+        Arc::from([0xd800]),
+    ]);
+    let mut words = encode_instruction(Opcode::LoadTemplateObject, &[0, 0]).unwrap();
+    words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+    let module = CompiledModule::new(
+        Arc::from("tag`a${x}b`"),
+        vec![BytecodeConstant::TemplateSite {
+            cooked: cooked.clone(),
+            raw: raw.clone(),
+        }],
+        Vec::new(),
+        vec![CompiledFunctionTemplate::new(
+            FunctionId::new(0),
+            Bytecode::from_words(words),
+            FunctionMetadata::new(
+                FunctionKind::Script,
+                FunctionLayout {
+                    register_count: 1,
+                    ..FunctionLayout::default()
+                },
+            ),
+        )],
+        FunctionId::new(0),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &module.constants()[0],
+        BytecodeConstant::TemplateSite {
+            cooked: found_cooked,
+            raw: found_raw,
+        } if found_cooked == &cooked && found_raw == &raw
+    ));
+    assert_eq!(
+        disassemble(module.function(FunctionId::new(0)).unwrap()).unwrap(),
+        "000000 [--] LoadTemplateObject r0, template=0\n000003 [--] Return r0\n"
+    );
+}
+
+#[test]
+fn verifier_rejects_invalid_template_constant_references() {
+    for (constants, expected_out_of_range) in [
+        (vec![BytecodeConstant::NumberBits(0)], false),
+        (Vec::new(), true),
+    ] {
+        let mut words = encode_instruction(Opcode::LoadTemplateObject, &[0, 0]).unwrap();
+        words.extend(encode_instruction(Opcode::Return, &[0]).unwrap());
+        let error = CompiledModule::new(
+            Arc::from(""),
+            constants,
+            Vec::new(),
+            vec![CompiledFunctionTemplate::new(
+                FunctionId::new(0),
+                Bytecode::from_words(words),
+                FunctionMetadata::new(
+                    FunctionKind::Script,
+                    FunctionLayout {
+                        register_count: 1,
+                        ..FunctionLayout::default()
+                    },
+                ),
+            )],
+            FunctionId::new(0),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ModuleBuildError::VerifyFunction {
+                    error: VerifyError::ConstantOutOfRange { .. },
+                    ..
+                }
+            ) == expected_out_of_range
+        );
+        assert!(
+            matches!(
+                error,
+                ModuleBuildError::VerifyFunction {
+                    error: VerifyError::TemplateSiteConstantRequired { .. },
+                    ..
+                }
+            ) == !expected_out_of_range
+        );
+    }
 }
 
 #[test]

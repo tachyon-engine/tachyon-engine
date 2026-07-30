@@ -317,9 +317,11 @@ pub enum Opcode {
     InitialYield = 135,
     /// Requests host-defined dynamic module loading from evaluated source and options values.
     DynamicImport = 136,
+    /// Loads or creates the active Realm's frozen template object for one syntax site.
+    LoadTemplateObject = 137,
 }
 
-pub(super) const OPCODE_COUNT: usize = 137;
+pub(super) const OPCODE_COUNT: usize = 138;
 const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     0, // Nop
     2, // LoadImmediate
@@ -458,10 +460,11 @@ const OPCODE_OPERAND_COUNTS: [u8; OPCODE_COUNT] = [
     3, // CreateAsyncFromSyncIterator
     0, // InitialYield
     3, // DynamicImport
+    2, // LoadTemplateObject
 ];
 
 const _: [(); OPCODE_COUNT] = [(); OPCODE_OPERAND_COUNTS.len()];
-const _: [(); OPCODE_COUNT] = [(); Opcode::DynamicImport as usize + 1];
+const _: [(); OPCODE_COUNT] = [(); Opcode::LoadTemplateObject as usize + 1];
 
 impl Opcode {
     /// Number of semantic opcodes represented by this bytecode version.
@@ -644,6 +647,7 @@ impl Opcode {
             70 => Some(Self::CreateAsyncFromSyncIterator),
             71 => Some(Self::InitialYield),
             72 => Some(Self::DynamicImport),
+            73 => Some(Self::LoadTemplateObject),
             _ => None,
         }
     }

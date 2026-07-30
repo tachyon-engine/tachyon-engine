@@ -242,6 +242,14 @@ fn collect_expression(expression: &HirExpression, bindings: &mut Vec<BindingId>)
                 collect_expression(argument, bindings);
             }
         }
+        HirExpressionKind::TaggedTemplate {
+            tag, substitutions, ..
+        } => {
+            collect_expression(tag, bindings);
+            for substitution in substitutions.iter() {
+                collect_expression(substitution, bindings);
+            }
+        }
         HirExpressionKind::CallSpread { callee, arguments } => {
             collect_expression(callee, bindings);
             for argument in arguments.iter() {

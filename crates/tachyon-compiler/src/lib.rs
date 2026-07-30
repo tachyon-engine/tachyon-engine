@@ -30,8 +30,8 @@ pub use hir::{
     HirObjectPropertyKey, HirObjectPropertyValue, HirPattern, HirPatternKind, HirPatternProperty,
     HirPrivateAccessor, HirPrivateField, HirPrivateMethod, HirPrivateName, HirPrivateNameId,
     HirProgram, HirScope, HirScopeFlags, HirStatement, HirStatementKind, HirSwitchCase,
-    HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration, HirVariableDeclarationKind,
-    HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
+    HirTemplateElement, HirUnaryOperator, HirUpdateOperator, HirVariableDeclaration,
+    HirVariableDeclarationKind, HirVariableDeclarator, ReferenceId, ScopeId, StatementCompletion,
 };
 pub use parser::{ParsedSource, ProgramKind};
 pub use source::{CompileOptions, MediaType, SourceId, SourceMode, SourceName, SourceText};

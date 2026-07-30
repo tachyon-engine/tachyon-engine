@@ -125,6 +125,94 @@ fn hir_lowering_owns_dynamic_import_source_and_options() {
 }
 
 #[test]
+fn hir_lowering_owns_tagged_template_cooked_raw_and_substitutions() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(
+                MediaType::JavaScript,
+                "receiver.tag`line\\r\\n${value}\\uD800`;",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let HirStatementKind::Expression(HirExpression {
+        kind:
+            HirExpressionKind::TaggedTemplate {
+                tag,
+                elements,
+                substitutions,
+            },
+        ..
+    }) = &hir.statements()[0].kind
+    else {
+        panic!("expected owned tagged-template expression");
+    };
+    assert!(matches!(tag.kind, HirExpressionKind::StaticMember { .. }));
+    assert_eq!(elements.len(), 2);
+    assert_eq!(
+        elements[0].cooked.as_deref(),
+        Some(&[0x006c, 0x0069, 0x006e, 0x0065, 0x000d, 0x000a][..])
+    );
+    assert_eq!(
+        elements[0].raw.as_ref(),
+        "line\\r\\n".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(elements[1].cooked.as_deref(), Some(&[0xd800][..]));
+    assert_eq!(
+        elements[1].raw.as_ref(),
+        "\\uD800".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(substitutions.len(), 1);
+    assert!(matches!(
+        substitutions[0].kind,
+        HirExpressionKind::Identifier(_)
+    ));
+}
+
+#[test]
+fn hir_lowering_preserves_invalid_tagged_escape_as_missing_cooked_value() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(MediaType::JavaScript, "tag`\\unicode`;"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let HirStatementKind::Expression(HirExpression {
+        kind: HirExpressionKind::TaggedTemplate { elements, .. },
+        ..
+    }) = &hir.statements()[0].kind
+    else {
+        panic!("expected tagged-template expression");
+    };
+    assert_eq!(elements[0].cooked, None);
+    assert_eq!(
+        elements[0].raw.as_ref(),
+        "\\unicode".encode_utf16().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn hir_lowering_normalizes_actual_crlf_in_tagged_raw_text() {
+    let hir = Compiler
+        .lower_to_hir(
+            source(MediaType::JavaScript, "tag`first\r\nsecond\rthird`;"),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let HirStatementKind::Expression(HirExpression {
+        kind: HirExpressionKind::TaggedTemplate { elements, .. },
+        ..
+    }) = &hir.statements()[0].kind
+    else {
+        panic!("expected tagged-template expression");
+    };
+    assert_eq!(
+        elements[0].raw.as_ref(),
+        "first\nsecond\nthird".encode_utf16().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 /// Confirms logical structure and operator identity survive after the Oxc arena is dropped.
 fn hir_lowering_owns_logical_expression_and_operator() {
     let hir = Compiler
@@ -290,6 +378,51 @@ fn direct_eval_promotes_every_activation_binding_into_named_environment_slots() 
     assert_eq!(function.layout().environment_slot_count, 3);
     for name in ["param", "hoisted", "lexical"] {
         assert!(function.binding_plan().iter().any(|binding| {
+            binding.name.as_ref() == name
+                && matches!(
+                    binding.location,
+                    tachyon_bytecode::BindingLocation::Environment { depth: 0, .. }
+                )
+        }));
+    }
+}
+
+#[test]
+fn script_direct_eval_promotes_block_lexicals_without_reclassifying_globals() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "var globalVar = 0; let globalLexical = 0; for (let iteration = 0; iteration < 1; iteration++) { const blockValue = iteration; eval('(function () { return iteration + blockValue; })()'); }",
+            ),
+            CompileOptions::default(),
+        )
+        .unwrap();
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .expect("script entry must exist");
+    let slots = entry
+        .environment_slots()
+        .iter()
+        .map(|metadata| metadata.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(slots, vec!["iteration", "blockValue"]);
+    assert!(entry.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "globalVar"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::GlobalProperty
+            )
+    }));
+    assert!(entry.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "globalLexical"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::GlobalLexical
+            )
+    }));
+    for name in ["iteration", "blockValue"] {
+        assert!(entry.binding_plan().iter().any(|binding| {
             binding.name.as_ref() == name
                 && matches!(
                     binding.location,
