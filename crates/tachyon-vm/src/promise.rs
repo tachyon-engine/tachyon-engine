@@ -968,17 +968,23 @@ impl Isolate {
                 };
                 let callback = pending.values[FIN_CALLBACK];
                 let callable = self.resolve_function_object(callback).is_ok();
-                let (on_fulfilled, on_rejected) = if callable {
-                    (
-                        self.allocate_promise_finally_handler(callback, constructor, false)?,
-                        self.allocate_promise_finally_handler(callback, constructor, true)?,
-                    )
+                if callable {
+                    let on_fulfilled =
+                        self.allocate_promise_finally_handler(callback, constructor, false)?;
+                    self.set_promise_then_value(state, FIN_FULFILLED, on_fulfilled)?;
+                    let pending = self.native_call_state_snapshot(state)?;
+                    let on_rejected = self.allocate_promise_finally_handler(
+                        pending.values[FIN_CALLBACK],
+                        pending.values[FIN_CONSTRUCTOR],
+                        true,
+                    )?;
+                    self.set_promise_then_value(state, FIN_REJECTED, on_rejected)?;
                 } else {
-                    (callback, callback)
-                };
-                self.set_promise_then_value(state, FIN_FULFILLED, on_fulfilled)?;
-                self.set_promise_then_value(state, FIN_REJECTED, on_rejected)?;
+                    self.set_promise_then_value(state, FIN_FULFILLED, callback)?;
+                    self.set_promise_then_value(state, FIN_REJECTED, callback)?;
+                }
                 let then_atom = self.intern_intrinsic_name(b"then")?;
+                let pending = self.native_call_state_snapshot(state)?;
                 self.dispatch_promise_finally_get(
                     site,
                     state,
@@ -990,6 +996,7 @@ impl Isolate {
             PromiseFinallyMethodStage::Then => {
                 self.resolve_function_object(value)
                     .map_err(|_| ExecutionError::NonCallable(value))?;
+                self.set_promise_then_value(state, FIN_CALLBACK, value)?;
                 let pending = self.native_call_state_snapshot(state)?;
                 let mapping = pending.count == 4;
                 let arguments = self.allocate_promise_then_state(NativeCallState {
@@ -1006,11 +1013,13 @@ impl Isolate {
                     ],
                     count: if mapping { 1 } else { 2 },
                 })?;
+                let pending = self.native_call_state_snapshot(state)?;
+                let then = pending.values[FIN_CALLBACK];
                 let continuation = NativeContinuation::promise_finally_method(
                     site,
                     PromiseFinallyMethodStage::ThenCall,
                     Value::from_heap_ref(state.raw()),
-                    value,
+                    then,
                 );
                 let completion_depth = self.fiber.completions.len();
                 self.fiber
@@ -1021,7 +1030,7 @@ impl Isolate {
                 if let Err(error) = self.call(CallSite {
                     caller_base: site.caller_base,
                     destination: site.destination,
-                    callee: value,
+                    callee: then,
                     argument_base: 0,
                     argument_source: Some(arguments),
                     argument_prefix: None,
@@ -1264,7 +1273,8 @@ impl Isolate {
         original: Value,
         rejected: bool,
     ) -> Result<(), ExecutionError> {
-        let handler = self.allocate_promise_finally_result_handler(original, rejected)?;
+        let (handler, promise) =
+            self.allocate_promise_finally_result_handler(original, rejected, promise)?;
         let state = self.allocate_promise_then_state(NativeCallState {
             values: [
                 promise,

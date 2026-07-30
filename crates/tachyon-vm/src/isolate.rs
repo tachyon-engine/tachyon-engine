@@ -33,6 +33,11 @@ struct RegExpAllocationRoots<'a> {
     prototype: Value,
 }
 
+struct PromiseFinallyResultRoots<'a> {
+    vm: VmRoots<'a>,
+    retained: Value,
+}
+
 impl Trace for RegExpAllocationRoots<'_> {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
@@ -40,6 +45,14 @@ impl Trace for RegExpAllocationRoots<'_> {
         self.source.trace(tracer);
         self.flags.trace(tracer);
         self.prototype.trace(tracer);
+    }
+}
+
+impl Trace for PromiseFinallyResultRoots<'_> {
+    #[inline(always)]
+    fn trace(&mut self, tracer: &mut dyn Tracer) {
+        self.vm.trace(tracer);
+        self.retained.trace(tracer);
     }
 }
 
@@ -835,30 +848,45 @@ impl Isolate {
         &mut self,
         value: Value,
         rejected: bool,
-    ) -> Result<Value, ExecutionError> {
+        retained: Value,
+    ) -> Result<(Value, Value), ExecutionError> {
         let function_prototype = self
             .realm
             .function_prototype
             .expect("Function prototype initializes before Promise.finally");
-        let state = self.allocate_promise_then_state(NativeCallState {
-            values: [
-                value,
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
-                Value::from_immediate(Immediate::Undefined),
-            ],
-            count: 1,
-        })?;
-        let roots = &mut VmRoots {
-            fiber: &mut self.fiber,
-            finalization_jobs: &mut self.finalization_jobs,
-            promise_jobs: &mut self.promise_jobs,
-            realm: &mut self.realm,
-            loaded_code: &mut self.loaded_code,
-            module_graph: &mut self.module_graph,
+        let mut roots = PromiseFinallyResultRoots {
+            vm: VmRoots {
+                fiber: &mut self.fiber,
+                finalization_jobs: &mut self.finalization_jobs,
+                promise_jobs: &mut self.promise_jobs,
+                realm: &mut self.realm,
+                loaded_code: &mut self.loaded_code,
+                module_graph: &mut self.module_graph,
+            },
+            retained,
         };
-        self.heap
+        let state = self
+            .heap
+            .try_allocate_with_gc(
+                self.types.native_call_state,
+                0,
+                0,
+                NativeCallState {
+                    values: [
+                        value,
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                        Value::from_immediate(Immediate::Undefined),
+                    ],
+                    count: 1,
+                },
+                AllocationSpace::Young,
+                &mut roots,
+            )
+            .map_err(ExecutionError::HeapAllocation)?;
+        let function = self
+            .heap
             .try_allocate_with_gc(
                 self.types.function,
                 0,
@@ -874,10 +902,11 @@ impl Isolate {
                     },
                 },
                 AllocationSpace::Young,
-                roots,
+                &mut roots,
             )
             .map(|function| Value::from_heap_ref(function.raw()))
-            .map_err(ExecutionError::HeapAllocation)
+            .map_err(ExecutionError::HeapAllocation)?;
+        Ok((function, roots.retained))
     }
 
     /// Creates one bound exotic while flattening nested wrappers into one immutable argument prefix.

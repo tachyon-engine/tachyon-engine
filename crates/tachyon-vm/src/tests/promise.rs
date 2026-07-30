@@ -748,11 +748,12 @@ fn promise_catch_invokes_generic_then_with_exact_arguments() {
 
 #[test]
 fn promise_finally_does_not_consume_the_enclosing_reaction_for_any_dispatch_batch() {
-    assert_promise_finally_reaction_boundary::<1>(5_951);
-    assert_promise_finally_reaction_boundary::<2>(5_953);
-    assert_promise_finally_reaction_boundary::<4>(5_955);
-    assert_promise_finally_reaction_boundary::<8>(5_957);
-    assert_promise_finally_reaction_boundary::<16>(5_959);
+    assert_promise_finally_reaction_boundary::<1>(5_951, false);
+    assert_promise_finally_reaction_boundary::<2>(5_953, false);
+    assert_promise_finally_reaction_boundary::<4>(5_955, false);
+    assert_promise_finally_reaction_boundary::<8>(5_957, false);
+    assert_promise_finally_reaction_boundary::<16>(5_959, false);
+    assert_promise_finally_reaction_boundary::<8>(5_961, true);
 }
 
 #[test]
@@ -1034,18 +1035,23 @@ fn assert_promise_constructor_prototype<const N: usize>(source_id: u32, forced_m
 }
 
 /// Keeps inner finally settlement above the active reaction handler's completion checkpoint.
-fn assert_promise_finally_reaction_boundary<const N: usize>(source_id: u32) {
+fn assert_promise_finally_reaction_boundary<const N: usize>(source_id: u32, forced_major: bool) {
     let setup = compile_promise_source(source_id, PROMISE_FINALLY_REACTION_BOUNDARY_SOURCE);
     let probe = compile_promise_source(
         source_id + 1,
         "fulfilledFinallyCalls === 1 && fulfilledFinallyValue === 1 && rejectedFinallyCalls === 1 && rejectedFinallyValue === 2 && abruptFinallyIdentity;",
     );
     let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
     run_promise_module::<N>(&mut isolate, &setup);
     let outcome = run_promise_module::<N>(&mut isolate, &probe);
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
-        "dispatch batch {N} returned {outcome:?}"
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 
