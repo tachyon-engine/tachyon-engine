@@ -220,4 +220,22 @@ impl Isolate {
         self.intrinsic_property_atoms.length = Some(atom);
         Ok(atom)
     }
+
+    pub(crate) fn done_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.done {
+            return Ok(atom);
+        }
+        let atom = self.intern_intrinsic_name(b"done")?;
+        self.intrinsic_property_atoms.done = Some(atom);
+        Ok(atom)
+    }
+
+    pub(crate) fn value_atom(&mut self) -> Result<AtomId, ExecutionError> {
+        if let Some(atom) = self.intrinsic_property_atoms.value {
+            return Ok(atom);
+        }
+        let atom = self.intern_intrinsic_name(b"value")?;
+        self.intrinsic_property_atoms.value = Some(atom);
+        Ok(atom)
+    }
 }

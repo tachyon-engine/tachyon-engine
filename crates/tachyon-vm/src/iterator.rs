@@ -678,8 +678,8 @@ impl Isolate {
         value: Value,
         done: bool,
     ) -> Result<Value, ExecutionError> {
-        let value_atom = self.intern_intrinsic_name(b"value")?;
-        let done_atom = self.intern_intrinsic_name(b"done")?;
+        let value_atom = self.value_atom()?;
+        let done_atom = self.done_atom()?;
         let prototype = self
             .realm
             .object_prototype

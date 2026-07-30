@@ -1,9 +1,12 @@
 //! GC-owned substrate for synchronous Iterator Helpers.
 
+mod drop;
 mod filter;
 mod lazy;
 mod map;
 mod object;
+mod state;
+mod take;
 
 #[allow(
     unused_imports,

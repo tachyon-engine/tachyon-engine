@@ -1286,6 +1286,10 @@ pub(crate) enum WrapForValidIteratorStage {
 pub(crate) enum IteratorHelperStage {
     CreateMapNextGet,
     CreateFilterNextGet,
+    CreateTakeLimitConversion,
+    CreateDropLimitConversion,
+    CreateTakeNextGet,
+    CreateDropNextGet,
     CreateCloseReturnGet,
     CreateCloseReturnCall,
     NextCall,

@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
-use super::{fixtures::test_isolate, *};
+use super::{
+    fixtures::{test_isolate, test_isolate_with_heap_spans},
+    *,
+};
 
 const ITERATOR_INTRINSICS_SOURCE: &str = r#"
 var iteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
@@ -394,6 +397,97 @@ shapeOk && invalidClosed === 1 && invalidTypeError && iterationOk && returnOk &&
   protocolOk && chainOk && reentryOk;
 "#;
 
+const ITERATOR_TAKE_DROP_SOURCE: &str = r#"
+var takeDescriptor = Object.getOwnPropertyDescriptor(Iterator.prototype, "take");
+var dropDescriptor = Object.getOwnPropertyDescriptor(Iterator.prototype, "drop");
+var shapeOk = Iterator.prototype.take.name === "take" && Iterator.prototype.take.length === 1 &&
+  takeDescriptor.writable === true && takeDescriptor.enumerable === false &&
+  takeDescriptor.configurable === true && Iterator.prototype.drop.name === "drop" &&
+  Iterator.prototype.drop.length === 1 && dropDescriptor.writable === true &&
+  dropDescriptor.enumerable === false && dropDescriptor.configurable === true;
+
+var order = "";
+var values = [{ id: 1 }, { id: 2 }, { id: 3 }];
+var cursor = 0;
+var takeCloseCalls = 0;
+var takeSource = Object.create(Iterator.prototype);
+Object.defineProperty(takeSource, "next", {
+  get: function() {
+    order += "n";
+    return function() {
+      order += "c";
+      return cursor < values.length ? { value: values[cursor++], done: false } : { done: true };
+    };
+  }
+});
+takeSource.return = function() { takeCloseCalls++; return {}; };
+var limit = { valueOf: function() { order += "v"; return 2.9; } };
+var taken = takeSource.take(limit);
+var takeFirst = taken.next();
+var takeSecond = taken.next();
+var takeDone = taken.next();
+var takeAfter = taken.next();
+var takeOk = order === "vncc" && takeFirst.value === values[0] &&
+  takeSecond.value === values[1] && takeDone.done === true && takeAfter.done === true &&
+  takeCloseCalls === 1;
+
+var zeroNextCalls = 0;
+var zeroCloseCalls = 0;
+var zeroSource = Object.create(Iterator.prototype);
+zeroSource.next = function() { zeroNextCalls++; return { value: 1, done: false }; };
+zeroSource.return = function() { zeroCloseCalls++; return {}; };
+var zeroDone = zeroSource.take(-0.5).next();
+var zeroOk = zeroDone.done === true && zeroNextCalls === 0 && zeroCloseCalls === 1;
+
+var invalidCloseCalls = 0;
+var invalidSource = Object.create(Iterator.prototype);
+Object.defineProperty(invalidSource, "next", {
+  get: function() { throw new Error("next must not be read"); }
+});
+invalidSource.return = function() { invalidCloseCalls++; return {}; };
+var invalidRange = false;
+try { invalidSource.drop(NaN); } catch (error) { invalidRange = error instanceof RangeError; }
+
+var droppedValueGets = 0;
+var dropCursor = 0;
+var dropSource = Object.create(Iterator.prototype);
+dropSource.next = function() {
+  var current = ++dropCursor;
+  if (current > 4) return { done: true };
+  var result = { done: false };
+  Object.defineProperty(result, "value", {
+    get: function() { droppedValueGets++; return { id: current }; }
+  });
+  return result;
+};
+var dropped = dropSource.drop({ valueOf: function() { return 2; } });
+var dropFirst = dropped.next();
+var dropSecond = dropped.next();
+var dropDone = dropped.next();
+var dropOk = dropFirst.value.id === 3 && dropSecond.value.id === 4 && dropDone.done === true &&
+  droppedValueGets === 2;
+
+var infinityCalls = 0;
+var infinitySource = Object.create(Iterator.prototype);
+infinitySource.next = function() {
+  infinityCalls++;
+  return infinityCalls < 4 ? { value: infinityCalls, done: false } : { done: true };
+};
+var infinityDone = infinitySource.drop(Infinity).next();
+var infinityOk = infinityDone.done === true && infinityCalls === 4;
+
+var reentrySource = Object.create(Iterator.prototype);
+var reentryHelper;
+reentrySource.next = function() { reentryHelper.next(); return { done: true }; };
+reentryHelper = reentrySource.take(1);
+var reentryTypeError = false;
+try { reentryHelper.next(); } catch (error) { reentryTypeError = error instanceof TypeError; }
+var reentryOk = reentryTypeError && reentryHelper.next().done === true;
+
+shapeOk && takeOk && zeroOk && invalidRange && invalidCloseCalls === 1 && dropOk &&
+  infinityOk && reentryOk;
+"#;
+
 #[test]
 fn iterator_intrinsics_are_stable_for_every_dispatch_batch() {
     assert_iterator_intrinsics::<1>(8_901, false);
@@ -513,6 +607,46 @@ fn iterator_filter_roots_survive_forced_major_collection() {
     assert_iterator_filter::<8>(9_020, true);
 }
 
+#[test]
+fn iterator_take_and_drop_are_stable_for_every_dispatch_batch() {
+    assert_iterator_take_drop::<1>(9_031, false);
+    assert_iterator_take_drop::<2>(9_032, false);
+    assert_iterator_take_drop::<4>(9_034, false);
+    assert_iterator_take_drop::<8>(9_038, false);
+    assert_iterator_take_drop::<16>(9_046, false);
+}
+
+#[test]
+fn iterator_take_and_drop_roots_survive_forced_major_collection() {
+    assert_iterator_take_drop::<8>(9_050, true);
+}
+
+#[test]
+fn lazy_helpers_do_not_grow_the_rust_stack_for_large_native_loops() {
+    let source = r#"
+var values = "x".repeat(2000);
+var dropped = values[Symbol.iterator]().drop(2000).next();
+var filtered = values[Symbol.iterator]().filter(Number.isNaN).next();
+dropped.done === true && dropped.value === undefined &&
+  filtered.done === true && filtered.value === undefined;
+"#;
+    let module = compile_iterator_source(source, 9_051);
+    let mut isolate = test_isolate_with_heap_spans(128);
+    let outcome = isolate
+        .execute_with_batch::<8>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_194_304,
+                quantum: 4_194_304,
+            },
+        )
+        .expect("large native lazy-helper fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "large native lazy helper returned {outcome:?}"
+    );
+}
+
 /// Compiles and executes the Iterator intrinsic graph under one dispatch and GC policy.
 fn assert_iterator_intrinsics<const N: usize>(source_id: u32, forced_major: bool) {
     let module = compile_iterator_intrinsics(source_id);
@@ -620,6 +754,34 @@ fn assert_iterator_filter<const N: usize>(source_id: u32, forced_major: bool) {
             },
         )
         .expect("Iterator.filter fixture executes");
+    let thrown_kind = match outcome {
+        RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
+        RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,
+    };
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}, kind={thrown_kind:?}"
+    );
+}
+
+/// Executes take/drop conversion, skipping, early close, re-entry, and exhaustion behavior.
+fn assert_iterator_take_drop<const N: usize>(source_id: u32, forced_major: bool) {
+    let module = compile_iterator_source(ITERATOR_TAKE_DROP_SOURCE, source_id);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 262_144,
+                quantum: 262_144,
+            },
+        )
+        .expect("Iterator.take/drop fixture executes");
     let thrown_kind = match outcome {
         RunOutcome::Thrown(error) => isolate.native_error_kind(error).ok().flatten(),
         RunOutcome::Completed(_) | RunOutcome::BudgetExhausted => None,

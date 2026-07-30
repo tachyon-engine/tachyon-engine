@@ -2563,6 +2563,16 @@ impl Isolate {
         self.realm.iterator_filter = Some(filter);
         let filter_atom = self.intern_intrinsic_name(b"filter")?;
         self.set_intrinsic_data_property(iterator_prototype, filter_atom, filter, true)?;
+        let take =
+            self.allocate_native_function(NativeFunction::IteratorTake, function_object())?;
+        self.realm.iterator_take = Some(take);
+        let take_atom = self.intern_intrinsic_name(b"take")?;
+        self.set_intrinsic_data_property(iterator_prototype, take_atom, take, true)?;
+        let drop =
+            self.allocate_native_function(NativeFunction::IteratorDrop, function_object())?;
+        self.realm.iterator_drop = Some(drop);
+        let drop_atom = self.intern_intrinsic_name(b"drop")?;
+        self.set_intrinsic_data_property(iterator_prototype, drop_atom, drop, true)?;
 
         let constructor_getter = self.allocate_native_function(
             NativeFunction::IteratorConstructorGetter,

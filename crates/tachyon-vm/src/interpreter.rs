@@ -7599,6 +7599,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::IteratorFilter) => {
                     return self.begin_iterator_filter(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::IteratorTake) => {
+                    return self.begin_iterator_take(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::IteratorDrop) => {
+                    return self.begin_iterator_drop(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::IteratorHelperNext) => {
                     return self.begin_iterator_helper_next(&site);
                 }
@@ -8676,6 +8682,12 @@ impl Isolate {
                 }
             };
             if let Err(error) = result {
+                if continuation.as_conversion().is_some()
+                    && self.iterator_helper_limit_conversion_pending()
+                {
+                    self.handle_iterator_helper_limit_conversion_error(error)?;
+                    return Ok(None);
+                }
                 if let ExecutionError::HostThrown(thrown) = &error
                     && let Some(outcome) =
                         self.handle_iterator_helper_thrown(continuation, *thrown)?
