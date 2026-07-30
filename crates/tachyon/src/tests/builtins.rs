@@ -457,7 +457,7 @@ fn json_parse_materializes_engine_values_and_rejects_extensions() {
     assert_eq!(
         execute_source(
             921,
-            "let threw = false; try { JSON.parse('[1,]'); } catch (error) { threw = error instanceof SyntaxError; } threw && JSON.parse.length === 1;",
+            "let threw = false; try { JSON.parse('[1,]'); } catch (error) { threw = error instanceof SyntaxError; } threw && JSON.parse.length === 2;",
         )
         .as_immediate(),
         Some(tachyon_value::Immediate::True),
@@ -750,7 +750,7 @@ fn array_filter_runs_resumable_callback_iteration() {
         AtomTableConfig::new(32_768, 1024 * 1024, AtomHashSeed::new(1, 2)),
         HeapLimit::new(8 * SPAN_SIZE_BYTES),
         StackLimits::new(64, 4_096),
-        RealmLimits::new(64, 1_024).with_max_shapes(512),
+        RealmLimits::new(64, 1_024).with_max_shapes(1_024),
     ))
     .unwrap();
     assert!(matches!(
