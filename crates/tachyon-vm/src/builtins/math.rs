@@ -55,7 +55,11 @@ impl Isolate {
             MathFunction::Tan => first.tan(),
             MathFunction::Tanh => first.tanh(),
             MathFunction::Trunc => first.trunc(),
-            MathFunction::Hypot | MathFunction::Max | MathFunction::Min | MathFunction::Random => {
+            MathFunction::Hypot
+            | MathFunction::Max
+            | MathFunction::Min
+            | MathFunction::Random
+            | MathFunction::SumPrecise => {
                 unreachable!("special Math methods return before unary dispatch")
             }
         };

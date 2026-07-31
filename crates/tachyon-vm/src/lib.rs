@@ -52,6 +52,7 @@ mod iterator;
 mod iterator_eager;
 mod iterator_helper;
 mod iterator_intrinsics;
+mod math_sum_precise;
 mod module;
 mod number;
 mod object;
@@ -247,6 +248,7 @@ use iterator::{
 };
 use iterator_eager::{IteratorEagerKind, IteratorEagerOperation};
 use iterator_helper::{IteratorHelperObject, WrapForValidIteratorObject};
+use math_sum_precise::ExactSumAccumulator;
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
     PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject,
@@ -306,7 +308,7 @@ use runtime::{
         ErrorStackSetterStage, ErrorToStringStage, EvalVarEnvironment, Fiber, Frame,
         GetOwnPropertyDescriptorsStage, InstanceElementStage, InstanceOfStage, IteratorEagerStage,
         IteratorFromStage, IteratorHelperStage, IteratorPrototypeSetterKey,
-        IteratorPrototypeSetterStage, JsonStringifyStage, NativeContinuation,
+        IteratorPrototypeSetterStage, JsonStringifyStage, MathSumPreciseStage, NativeContinuation,
         NativeContinuationKind, NativeContinuationSite, ObjectLookupAccessorStage,
         ObjectToLocaleStringStage, PreferredType, PromiseCatchStage, PromiseFinallyMethodStage,
         PromiseResolutionMode, PromiseStaticResolveStage, PromiseThenStage, PropertyCallbackMode,

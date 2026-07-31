@@ -2596,10 +2596,12 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::IteratorFrom(IteratorFromStage::IteratorMethodCall)
+            | NativeContinuationKind::MathSumPrecise(MathSumPreciseStage::IteratorMethodCall)
             | NativeContinuationKind::WrapForValidIterator(
                 WrapForValidIteratorStage::NextCall | WrapForValidIteratorStage::ReturnCall,
             ) => (continuation.first(), 0, None, 0),
             NativeContinuationKind::IteratorFrom(_)
+            | NativeContinuationKind::MathSumPrecise(_)
             | NativeContinuationKind::IteratorHelper(_)
             | NativeContinuationKind::IteratorEager(_)
             | NativeContinuationKind::WrapForValidIterator(_) => {
@@ -2781,7 +2783,7 @@ impl Isolate {
         };
         // The continuation omits `callee` to stay 32 bytes: before frame publication it remains
         // reachable through the receiver's accessor pair (or descriptor state -> source chain).
-        let completion_depth = self.fiber.completions.len();
+        let continuation_kind = continuation.kind();
         self.fiber
             .completions
             .push_native(continuation)
@@ -2810,10 +2812,21 @@ impl Isolate {
             call_site: site.call_site,
         });
         if let Err(error) = call_result {
-            if self.fiber.completions.len() > completion_depth {
+            if self
+                .fiber
+                .completions
+                .last_native_matches(continuation_kind, site)
+            {
                 self.pop_native_continuation()?;
             }
             return Err(error);
+        }
+        if !self
+            .fiber
+            .completions
+            .last_native_matches(continuation_kind, site)
+        {
+            return Ok(None);
         }
         if self.fiber.frames.len() != frame_depth {
             let frame = self
@@ -2823,9 +2836,6 @@ impl Isolate {
                 .expect("a suspended accessor callback publishes its callee frame");
             frame.return_register = None;
             frame.return_continuation = true;
-            return Ok(None);
-        }
-        if self.fiber.completions.len() <= completion_depth {
             return Ok(None);
         }
         let continuation = self.pop_native_continuation()?;
@@ -7742,6 +7752,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::JsonStringify) => {
                     return self.begin_json_stringify(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::MathSumPrecise) => {
+                    return self.begin_math_sum_precise(&site);
+                }
                 FunctionExecutable::Native(native) if native.math_function().is_some() => {
                     let function = native
                         .math_function()
@@ -8687,6 +8700,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::IteratorFrom(stage) => {
                     self.resume_iterator_from(continuation, stage, value)
+                }
+                NativeContinuationKind::MathSumPrecise(stage) => {
+                    self.resume_math_sum_precise(continuation, stage, value)
                 }
                 NativeContinuationKind::IteratorHelper(stage) => {
                     self.resume_iterator_helper(continuation, stage, value)

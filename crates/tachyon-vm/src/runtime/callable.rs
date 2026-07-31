@@ -663,6 +663,7 @@ pub(crate) enum NativeFunction {
     MathSin,
     MathSinh,
     MathSqrt,
+    MathSumPrecise,
     MathTan,
     MathTanh,
     MathTrunc,
@@ -811,13 +812,14 @@ pub(crate) enum MathFunction {
     Sin,
     Sinh,
     Sqrt,
+    SumPrecise,
     Tan,
     Tanh,
     Trunc,
 }
 
 impl MathFunction {
-    pub(crate) const ALL: [Self; 36] = [
+    pub(crate) const ALL: [Self; 37] = [
         Self::Abs,
         Self::Acos,
         Self::Acosh,
@@ -851,6 +853,7 @@ impl MathFunction {
         Self::Sin,
         Self::Sinh,
         Self::Sqrt,
+        Self::SumPrecise,
         Self::Tan,
         Self::Tanh,
         Self::Trunc,
@@ -891,6 +894,7 @@ impl MathFunction {
             Self::Sin => "sin",
             Self::Sinh => "sinh",
             Self::Sqrt => "sqrt",
+            Self::SumPrecise => "sumPrecise",
             Self::Tan => "tan",
             Self::Tanh => "tanh",
             Self::Trunc => "trunc",
@@ -941,6 +945,7 @@ impl MathFunction {
             M::Sin => NativeFunction::MathSin,
             M::Sinh => NativeFunction::MathSinh,
             M::Sqrt => NativeFunction::MathSqrt,
+            M::SumPrecise => NativeFunction::MathSumPrecise,
             M::Tan => NativeFunction::MathTan,
             M::Tanh => NativeFunction::MathTanh,
             M::Trunc => NativeFunction::MathTrunc,
@@ -1304,6 +1309,7 @@ impl NativeFunction {
             | Self::MathSin
             | Self::MathSinh
             | Self::MathSqrt
+            | Self::MathSumPrecise
             | Self::MathTan
             | Self::MathTanh
             | Self::MathTrunc
@@ -1837,6 +1843,7 @@ impl NativeFunction {
             | Self::MathSin
             | Self::MathSinh
             | Self::MathSqrt
+            | Self::MathSumPrecise
             | Self::MathTan
             | Self::MathTanh
             | Self::MathTrunc
@@ -1887,6 +1894,7 @@ impl NativeFunction {
             Self::MathSin => M::Sin,
             Self::MathSinh => M::Sinh,
             Self::MathSqrt => M::Sqrt,
+            Self::MathSumPrecise => M::SumPrecise,
             Self::MathTan => M::Tan,
             Self::MathTanh => M::Tanh,
             Self::MathTrunc => M::Trunc,
@@ -2358,6 +2366,7 @@ pub(crate) struct VmTypes {
     pub(crate) signal_watcher: GcType<WatcherSignal>,
     pub(crate) generator_object: GcType<GeneratorObject>,
     pub(crate) async_from_sync_iterator: GcType<AsyncFromSyncIteratorObject>,
+    pub(crate) exact_sum_accumulator: GcType<ExactSumAccumulator>,
     pub(crate) iterator_eager_operation: GcType<IteratorEagerOperation>,
     pub(crate) iterator_helper: GcType<IteratorHelperObject>,
     pub(crate) wrap_for_valid_iterator: GcType<WrapForValidIteratorObject>,

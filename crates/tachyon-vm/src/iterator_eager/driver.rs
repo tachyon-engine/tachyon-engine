@@ -77,6 +77,39 @@ impl Isolate {
         )
     }
 
+    /// Creates the exact accumulator only after GetIterator has produced a rooted iterator.
+    pub(crate) fn begin_iterator_eager_sum_precise(
+        &mut self,
+        site: NativeContinuationSite,
+        iterator: Value,
+    ) -> Result<(), ExecutionError> {
+        self.write(site.caller_base, site.destination, iterator)?;
+        let accumulator = self.allocate_exact_sum_accumulator()?;
+        let iterator = self.read(site.caller_base, site.destination)?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let operation = IteratorEagerOperation {
+            iterator,
+            next_method: undefined,
+            callback: undefined,
+            accumulator_or_output: Value::from_heap_ref(accumulator.raw()),
+            current_value: undefined,
+            counter: 0,
+            kind: IteratorEagerKind::SumPrecise,
+            has_accumulator: true,
+        };
+        let state = self.allocate_iterator_eager_operation(operation)?;
+        let state_value = Value::from_heap_ref(state.raw());
+        let key = self.next_atom()?;
+        self.dispatch_iterator_eager_get(
+            site,
+            IteratorEagerStage::NextGet,
+            state_value,
+            undefined,
+            iterator,
+            key.into(),
+        )
+    }
+
     /// Resumes one eager boundary and trampolines all synchronous steps in constant Rust stack.
     pub(crate) fn resume_iterator_eager(
         &mut self,
@@ -160,6 +193,49 @@ impl Isolate {
                 IteratorEagerStage::ValueGet => {
                     let snapshot = self.iterator_eager_snapshot(state)?;
                     match snapshot.kind {
+                        IteratorEagerKind::SumPrecise => {
+                            const ITERATION_MAX: u64 = (1_u64 << 53) - 1;
+                            if snapshot.counter >= ITERATION_MAX {
+                                self.write(site.caller_base, site.destination, state_value)?;
+                                let original =
+                                    self.create_native_error(NativeErrorKind::Range, None)?;
+                                let state_value = self.read(site.caller_base, site.destination)?;
+                                return self.begin_iterator_eager_close(
+                                    site,
+                                    IteratorEagerStage::ThrowCloseReturnGet,
+                                    state_value,
+                                    original,
+                                );
+                            }
+                            let Some(number) = numeric_value(value) else {
+                                self.write(site.caller_base, site.destination, state_value)?;
+                                let original =
+                                    self.create_native_error(NativeErrorKind::Type, None)?;
+                                let state_value = self.read(site.caller_base, site.destination)?;
+                                return self.begin_iterator_eager_close(
+                                    site,
+                                    IteratorEagerStage::ThrowCloseReturnGet,
+                                    state_value,
+                                    original,
+                                );
+                            };
+                            let accumulator =
+                                self.exact_sum_reference(snapshot.accumulator_or_output)?;
+                            self.add_exact_sum(accumulator, number)?;
+                            let counter = snapshot.counter + 1;
+                            self.update_iterator_eager(state, |operation| {
+                                operation.counter = counter;
+                            })?;
+                            self.call_iterator_eager_effect(
+                                site,
+                                IteratorEagerStage::NextCall,
+                                state_value,
+                                snapshot.next_method,
+                                snapshot.iterator,
+                                Value::from_immediate(Immediate::Undefined),
+                                &[],
+                            )?
+                        }
                         IteratorEagerKind::ToArray => {
                             let index = u32::try_from(snapshot.counter)
                                 .map_err(|_| ExecutionError::ArrayLengthOverflow)?;
@@ -345,6 +421,10 @@ impl Isolate {
             IteratorEagerKind::Some => boolean_value(false),
             IteratorEagerKind::Every => boolean_value(true),
             IteratorEagerKind::Find => Value::from_immediate(Immediate::Undefined),
+            IteratorEagerKind::SumPrecise => {
+                let accumulator = self.exact_sum_reference(snapshot.accumulator_or_output)?;
+                Value::from_f64(self.exact_sum_result(accumulator)?)
+            }
         };
         self.write(site.caller_base, site.destination, result)
     }

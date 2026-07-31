@@ -474,6 +474,9 @@ impl Isolate {
             async_from_sync_iterator: registry
                 .try_register("AsyncFromSyncIteratorObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            exact_sum_accumulator: registry
+                .try_register("ExactSumAccumulator")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             iterator_eager_operation: registry
                 .try_register("IteratorEagerOperation")
                 .map_err(IsolateCreationError::TypeRegistration)?,

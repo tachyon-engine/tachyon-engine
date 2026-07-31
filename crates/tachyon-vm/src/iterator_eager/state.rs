@@ -12,6 +12,7 @@ pub(crate) enum IteratorEagerKind {
     Some,
     Every,
     Find,
+    SumPrecise,
 }
 
 /// Non-object GC payload that owns all values live across observable boundaries.

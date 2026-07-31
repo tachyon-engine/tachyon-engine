@@ -1404,6 +1404,14 @@ pub(crate) enum IteratorFromStage {
     HasInstance,
 }
 
+/// Observable GetIterator boundaries used before `Math.sumPrecise` enters its eager driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum MathSumPreciseStage {
+    IteratorMethodGet,
+    IteratorMethodCall,
+}
+
 /// Observable boundaries in `%WrapForValidIteratorPrototype%` methods.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1716,6 +1724,7 @@ pub(crate) enum NativeContinuationKind {
         stage: IteratorPrototypeSetterStage,
     },
     IteratorFrom(IteratorFromStage),
+    MathSumPrecise(MathSumPreciseStage),
     IteratorHelper(IteratorHelperStage),
     IteratorEager(IteratorEagerStage),
     WrapForValidIterator(WrapForValidIteratorStage),
@@ -2359,6 +2368,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::IteratorFrom(stage),
+            first,
+            second,
+        }
+    }
+
+    /// Retains the iterable and iterator method across one GetIterator boundary.
+    #[inline]
+    pub(crate) const fn math_sum_precise(
+        site: NativeContinuationSite,
+        stage: MathSumPreciseStage,
+        first: Value,
+        second: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::MathSumPrecise(stage),
             first,
             second,
         }
