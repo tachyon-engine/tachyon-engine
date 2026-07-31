@@ -5508,10 +5508,7 @@ impl Isolate {
             return self.call(site);
         }
         loop {
-            let (executable, callee_realm) = self.resolve_function_dispatch(site.callee)?;
-            if !matches!(executable, FunctionExecutable::Bound(_)) {
-                self.activate_realm_for_frame(callee_realm)?;
-            }
+            let (executable, _) = self.resolve_function_dispatch(site.callee)?;
             match executable {
                 FunctionExecutable::Bound(data) => {
                     if site.argument_prefix.is_some() {
@@ -5823,7 +5820,12 @@ impl Isolate {
                 }
             }
             let (executable, callee_realm) = self.resolve_function_dispatch(site.callee)?;
-            if !matches!(executable, FunctionExecutable::Bound(_)) {
+            if !matches!(
+                executable,
+                FunctionExecutable::Bound(_)
+                    | FunctionExecutable::Bytecode { .. }
+                    | FunctionExecutable::ClassBytecode(_)
+            ) {
                 self.activate_realm_for_frame(callee_realm)?;
             }
             match executable {
@@ -5890,6 +5892,7 @@ impl Isolate {
                         FunctionKind::DerivedClassConstructor | FunctionKind::BaseClassConstructor
                     ) && site.new_target.as_immediate() == Some(Immediate::Undefined)
                     {
+                        self.activate_realm_for_frame(callee_realm)?;
                         return Err(ExecutionError::ClassConstructorCalledWithoutNew(
                             site.callee,
                         ));
@@ -5957,6 +5960,7 @@ impl Isolate {
                         )
                     };
                     if site.new_target.as_immediate() == Some(Immediate::Undefined) {
+                        self.activate_realm_for_frame(callee_realm)?;
                         return Err(ExecutionError::ClassConstructorCalledWithoutNew(
                             site.callee,
                         ));
