@@ -321,6 +321,7 @@ pub(crate) enum ConversionConsumer {
     ToNumber,
     ToString,
     StringConcatElement,
+    StringFromCodesElement,
     StringRawLength,
     StringRawLiteral,
     StringRawSubstitution,
@@ -453,6 +454,7 @@ impl ConversionConsumer {
             Self::ToNumber
             | Self::ToString
             | Self::StringConcatElement
+            | Self::StringFromCodesElement
             | Self::StringRawLength
             | Self::StringRawLiteral
             | Self::StringRawSubstitution
@@ -666,6 +668,7 @@ impl ConversionConsumer {
             Self::ToNumber
                 | Self::ToString
                 | Self::StringConcatElement
+                | Self::StringFromCodesElement
                 | Self::StringRawLength
                 | Self::StringRawLiteral
                 | Self::StringRawSubstitution

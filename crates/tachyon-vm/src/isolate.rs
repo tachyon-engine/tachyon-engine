@@ -657,6 +657,9 @@ impl Isolate {
             pending_string_concat: registry
                 .try_register("PendingStringConcat")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_string_from_codes: registry
+                .try_register("PendingStringFromCodes")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_string_raw: registry
                 .try_register("PendingStringRaw")
                 .map_err(IsolateCreationError::TypeRegistration)?,

@@ -6166,12 +6166,10 @@ impl Isolate {
                     );
                 }
                 FunctionExecutable::Native(NativeFunction::StringFromCharCode) => {
-                    let value = self.string_from_char_code(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_from_char_code(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringFromCodePoint) => {
-                    let value = self.string_from_code_point(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_from_code_point(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringRaw) => {
                     return self.begin_string_raw(&site);

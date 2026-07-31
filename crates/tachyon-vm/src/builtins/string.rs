@@ -179,69 +179,6 @@ impl Isolate {
         )
     }
 
-    /// Materializes each argument's ToUint16 value into a single UTF-16 string.
-    pub(crate) fn string_from_char_code(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        let mut units = Vec::new();
-        units
-            .try_reserve_exact(site.argument_count as usize)
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        for index in 0..site.argument_count {
-            let value = self
-                .call_argument(site, index)?
-                .expect("argument count is bounded");
-            let number = numeric_value(self.convert_to_number(value)?)
-                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-            let unit = if !number.is_finite() || number == 0.0 {
-                0
-            } else {
-                number.trunc().rem_euclid(65_536.0) as u16
-            };
-            units.push(unit);
-        }
-        self.allocate_runtime_string(
-            JsString::try_from_owned_code_units(units)
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )
-    }
-
-    /// Validates Unicode scalar arguments and writes their exact UTF-16 encoding once.
-    pub(crate) fn string_from_code_point(
-        &mut self,
-        site: &CallSite,
-    ) -> Result<Value, ExecutionError> {
-        let mut units = Vec::new();
-        units
-            .try_reserve_exact(site.argument_count as usize)
-            .map_err(|_| ExecutionError::StringBufferAllocationFailed)?;
-        for index in 0..site.argument_count {
-            let value = self
-                .call_argument(site, index)?
-                .expect("argument count is bounded");
-            let number = numeric_value(self.convert_to_number(value)?)
-                .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
-            if !number.is_finite()
-                || number.fract() != 0.0
-                || !(0.0..=0x10_ffff as f64).contains(&number)
-            {
-                return Err(ExecutionError::InvalidStringLength);
-            }
-            let code_point = number as u32;
-            if let Some(character) = char::from_u32(code_point) {
-                let mut encoded = [0; 2];
-                units.extend_from_slice(character.encode_utf16(&mut encoded));
-            } else {
-                return Err(ExecutionError::InvalidStringLength);
-            }
-        }
-        self.allocate_runtime_string(
-            JsString::try_from_owned_code_units(units)
-                .map_err(ExecutionError::PropertyKeyString)?,
-        )
-    }
-
     /// Trims ECMAScript WhiteSpace and LineTerminator code units from either string boundary.
     pub(crate) fn string_trim(
         &mut self,

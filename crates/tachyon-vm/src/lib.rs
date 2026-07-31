@@ -73,6 +73,7 @@ mod regexp_search;
 mod runtime;
 mod string;
 mod string_concat;
+mod string_from_codes;
 mod string_match;
 mod string_normalization;
 mod string_prototype;
@@ -325,6 +326,7 @@ use runtime::{
     },
 };
 use string_concat::PendingStringConcat;
+use string_from_codes::PendingStringFromCodes;
 use string_raw::PendingStringRaw;
 use weak_collection::{WeakCollection, WeakMapObject, WeakRefObject, WeakSetObject};
 

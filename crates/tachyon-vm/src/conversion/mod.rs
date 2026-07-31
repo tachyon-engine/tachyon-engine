@@ -511,6 +511,13 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::StringFromCodesElement {
+                        return self.resume_string_from_codes_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::StringRawLength
@@ -1457,6 +1464,9 @@ impl Isolate {
                 ConversionConsumer::ToString => self.primitive_to_string_value(argument)?,
                 ConversionConsumer::StringConcatElement => {
                     unreachable!("String concat conversion resumes inside its state machine")
+                }
+                ConversionConsumer::StringFromCodesElement => {
+                    unreachable!("String code conversion resumes inside its state machine")
                 }
                 ConversionConsumer::StringRawLength
                 | ConversionConsumer::StringRawLiteral
