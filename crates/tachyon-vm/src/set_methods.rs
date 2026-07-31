@@ -724,7 +724,6 @@ impl Isolate {
             Value::from_heap_ref(state.raw()),
             callee,
         );
-        let completion_depth = self.fiber.completions.len();
         self.fiber
             .completions
             .push_native(continuation)
@@ -748,7 +747,11 @@ impl Isolate {
             self.pop_native_continuation()?;
             return Err(error);
         }
-        if self.fiber.completions.len() > completion_depth + 1 {
+        if !self
+            .fiber
+            .completions
+            .last_native_matches(NativeContinuationKind::SetOperation(stage), site)
+        {
             return Ok(());
         }
         if self.fiber.frames.len() != frame_depth {

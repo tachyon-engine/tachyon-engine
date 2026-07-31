@@ -4,7 +4,7 @@ use tachyon_bytecode::WordOffset;
 use tachyon_gc::{Trace, Tracer};
 use tachyon_value::Value;
 
-use super::fiber::NativeContinuation;
+use super::fiber::{NativeContinuation, NativeContinuationKind, NativeContinuationSite};
 
 /// The five completion kinds defined by ECMAScript evaluation algorithms.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,6 +258,21 @@ impl CompletionStack {
             Some(CompletionEntry::Native(continuation)) => Some(*continuation),
             Some(CompletionEntry::Language(_)) | None => None,
         }
+    }
+
+    /// Checks that native work still belongs to the active Fiber after an observable dispatch.
+    ///
+    /// Frame and completion depths are not Fiber identities: a generator handoff can replace the
+    /// active Fiber with another one having identical depths. The kind/site pair contains no GC
+    /// edges and therefore remains safe to compare after the dispatch safepoint.
+    #[inline]
+    pub(crate) fn last_native_matches(
+        &self,
+        kind: NativeContinuationKind,
+        site: NativeContinuationSite,
+    ) -> bool {
+        self.last_native()
+            .is_some_and(|continuation| continuation.kind() == kind && continuation.site() == site)
     }
 
     /// Returns a native continuation at a frame-owned index without changing stack ownership.

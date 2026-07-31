@@ -203,11 +203,40 @@ Array.from(symmetricResult).join(",") === "3,2" &&
 Array.from(emptyUnionResult).join(",") === "4";
 "#;
 
-const SET_METHOD_FIXTURES: [(&str, &str); 4] = [
+const GENERATOR_SET_LIKE_SOURCE: &str = r#"
+var receiver = new Set(["a", "b", "c"]);
+var other = {
+  size: 3,
+  has() { throw new Error("has must not be called"); },
+  *keys() {
+    yield "a";
+    receiver.delete("b");
+    receiver.delete("c");
+    receiver.add("b");
+    yield "b";
+  }
+};
+var superset = receiver.isSupersetOf(other);
+
+var union = new Set([1, 2]).union({
+  size: 2,
+  has() { throw new Error("has must not be called"); },
+  keys: function* keys() {
+    yield 2;
+    yield 3;
+  }
+});
+
+superset === true && Array.from(receiver).join(",") === "a,b" &&
+Array.from(union).join(",") === "1,2,3";
+"#;
+
+const SET_METHOD_FIXTURES: [(&str, &str); 5] = [
     ("GetSetRecord", GET_SET_RECORD_SOURCE),
     ("live mutation", LIVE_MUTATION_SOURCE),
     ("IteratorClose", ITERATOR_CLOSE_SOURCE),
     ("result construction", RESULT_CONSTRUCTION_SOURCE),
+    ("generator set-like", GENERATOR_SET_LIKE_SOURCE),
 ];
 
 #[test]

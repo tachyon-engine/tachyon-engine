@@ -111,7 +111,7 @@ pub(crate) struct CodeLoadRoots<'a> {
     pub(crate) constant_values: &'a mut Vec<Option<Value>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeContinuationSite {
     pub(crate) caller_base: u32,
     pub(crate) destination: u32,

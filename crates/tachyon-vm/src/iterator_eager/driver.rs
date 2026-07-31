@@ -530,9 +530,10 @@ impl Isolate {
             }
             return Err(error);
         }
-        let parent_is_active = self.fiber.completions.last_native().is_some_and(|parent| {
-            parent.kind() == NativeContinuationKind::IteratorEager(stage) && parent.first() == state
-        });
+        let parent_is_active = self
+            .fiber
+            .completions
+            .last_native_matches(NativeContinuationKind::IteratorEager(stage), site);
         if !parent_is_active {
             return Ok(IteratorEagerEffect::Settled);
         }
