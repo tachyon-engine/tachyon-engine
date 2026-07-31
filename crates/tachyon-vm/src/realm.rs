@@ -1125,6 +1125,7 @@ impl Isolate {
                 NativeFunction::StringFromCodePoint,
                 b"fromCodePoint".as_slice(),
             ),
+            (NativeFunction::StringRaw, b"raw".as_slice()),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;

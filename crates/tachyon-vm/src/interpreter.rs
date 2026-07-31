@@ -2657,12 +2657,18 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
             }
+            NativeContinuationKind::StringRaw(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::StringReplaceAll(stage) => {
                 if stage != StringReplaceAllStage::ReplaceCall {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
+            }
+            NativeContinuationKind::StringPrototype(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::TypedArrayConstruction(stage) => {
                 let state =
@@ -6130,20 +6136,24 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::StringCharAt) => {
-                    let value = self.string_char_at(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .begin_string_prototype_operation(StringPrototypeOperation::CharAt, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringCharCodeAt) => {
-                    let value = self.string_char_code_at(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::CharCodeAt,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringAt) => {
-                    let value = self.string_at(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .begin_string_prototype_operation(StringPrototypeOperation::At, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringCodePointAt) => {
-                    let value = self.string_code_point_at(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::CodePointAt,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringFromCharCode) => {
                     let value = self.string_from_char_code(&site)?;
@@ -6153,6 +6163,9 @@ impl Isolate {
                     let value = self.string_from_code_point(&site)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::StringRaw) => {
+                    return self.begin_string_raw(&site);
+                }
                 FunctionExecutable::Native(
                     NativeFunction::StringToString | NativeFunction::StringValueOf,
                 ) => {
@@ -6160,55 +6173,73 @@ impl Isolate {
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(NativeFunction::StringIsWellFormed) => {
-                    let value = self.string_is_well_formed(site.this_value)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::IsWellFormed,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringToWellFormed) => {
-                    let value = self.string_to_well_formed(site.this_value)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::ToWellFormed,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringSlice) => {
-                    let value = self.string_slice(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .begin_string_prototype_operation(StringPrototypeOperation::Slice, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringSubstring) => {
-                    let value = self.string_substring(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::Substring,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringIndexOf) => {
-                    let value = self.string_index_of(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::IndexOf,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringIncludes) => {
-                    let value = self.string_includes(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::Includes,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringLastIndexOf) => {
-                    let value = self.string_last_index_of(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::LastIndexOf,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringStartsWith) => {
-                    let value = self.string_starts_with(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::StartsWith,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringEndsWith) => {
-                    let value = self.string_ends_with(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::EndsWith,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringConcat) => {
                     return self.begin_string_concat(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringRepeat) => {
-                    let value = self.string_repeat(&site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .begin_string_prototype_operation(StringPrototypeOperation::Repeat, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringPadStart) => {
-                    let value = self.string_pad(&site, false)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_string_prototype_operation(
+                        StringPrototypeOperation::PadStart,
+                        &site,
+                    );
                 }
                 FunctionExecutable::Native(NativeFunction::StringPadEnd) => {
-                    let value = self.string_pad(&site, true)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self
+                        .begin_string_prototype_operation(StringPrototypeOperation::PadEnd, &site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringSplit) => {
                     return self.begin_string_split(&site);
@@ -8607,8 +8638,14 @@ impl Isolate {
                 NativeContinuationKind::StringSplit(stage) => {
                     self.resume_string_split(continuation, stage, value)
                 }
+                NativeContinuationKind::StringRaw(stage) => {
+                    self.resume_string_raw(continuation, stage, value)
+                }
                 NativeContinuationKind::StringReplaceAll(stage) => {
                     self.resume_string_replace_all(continuation, stage, value)
+                }
+                NativeContinuationKind::StringPrototype(stage) => {
+                    self.resume_string_prototype(continuation, stage, value)
                 }
                 NativeContinuationKind::TypedArrayConstruction(stage) => {
                     self.resume_typed_array_construction(continuation, stage, value)

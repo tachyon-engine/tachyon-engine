@@ -346,6 +346,7 @@ pub(crate) enum NativeFunction {
     StringCodePointAt,
     StringFromCharCode,
     StringFromCodePoint,
+    StringRaw,
     StringToString,
     StringValueOf,
     StringIsWellFormed,
@@ -1045,6 +1046,8 @@ impl NativeFunction {
             | Self::StringSplit
             | Self::StringReplace
             | Self::StringReplaceAll
+            | Self::StringSlice
+            | Self::StringSubstring
             | Self::RegExpSplit
             | Self::RegExpReplace
             | Self::ArraySlice
@@ -1125,12 +1128,7 @@ impl NativeFunction {
             | Self::StringCodePointAt
             | Self::StringFromCharCode
             | Self::StringFromCodePoint
-            | Self::StringToString
-            | Self::StringValueOf
-            | Self::StringIsWellFormed
-            | Self::StringToWellFormed
-            | Self::StringSlice
-            | Self::StringSubstring
+            | Self::StringRaw
             | Self::StringIndexOf
             | Self::StringIncludes
             | Self::StringLastIndexOf
@@ -1141,9 +1139,6 @@ impl NativeFunction {
             | Self::StringSearch
             | Self::StringPadStart
             | Self::StringPadEnd
-            | Self::StringTrim
-            | Self::StringTrimStart
-            | Self::StringTrimEnd
             | Self::NumberConstructor
             | Self::BigIntConstructor
             | Self::BooleanConstructor
@@ -1212,6 +1207,13 @@ impl NativeFunction {
             | Self::SetConstructor
             | Self::WeakMapConstructor
             | Self::WeakSetConstructor => 0,
+            Self::StringToString
+            | Self::StringValueOf
+            | Self::StringIsWellFormed
+            | Self::StringToWellFormed
+            | Self::StringTrim
+            | Self::StringTrimStart
+            | Self::StringTrimEnd => 0,
             Self::WeakRefConstructor => 1,
             Self::WeakRefDeref => 0,
             Self::FinalizationRegistryConstructor => 1,
@@ -1497,6 +1499,7 @@ impl NativeFunction {
             Self::StringCodePointAt => "codePointAt",
             Self::StringFromCharCode => "fromCharCode",
             Self::StringFromCodePoint => "fromCodePoint",
+            Self::StringRaw => "raw",
             Self::StringToString => "toString",
             Self::StringValueOf => "valueOf",
             Self::StringIsWellFormed => "isWellFormed",
@@ -2390,6 +2393,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_fill: GcType<PendingArrayFill>,
     pub(crate) pending_array_join: GcType<PendingArrayJoin>,
     pub(crate) pending_string_concat: GcType<PendingStringConcat>,
+    pub(crate) pending_string_raw: GcType<PendingStringRaw>,
     pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
     pub(crate) pending_array_slice: GcType<PendingArraySlice>,

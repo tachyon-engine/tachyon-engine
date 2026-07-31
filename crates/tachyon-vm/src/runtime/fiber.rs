@@ -138,6 +138,52 @@ pub(crate) enum ConversionCallbackStage {
     MethodCall,
 }
 
+/// Closed identity for generic, non-RegExp String prototype algorithms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringPrototypeOperation {
+    CharAt,
+    CharCodeAt,
+    At,
+    CodePointAt,
+    Slice,
+    Substring,
+    IndexOf,
+    LastIndexOf,
+    Repeat,
+    PadStart,
+    PadEnd,
+    IsWellFormed,
+    ToWellFormed,
+    Includes,
+    StartsWith,
+    EndsWith,
+}
+
+impl StringPrototypeOperation {
+    pub(crate) const fn from_u8(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => Self::CharAt,
+            1 => Self::CharCodeAt,
+            2 => Self::At,
+            3 => Self::CodePointAt,
+            4 => Self::Slice,
+            5 => Self::Substring,
+            6 => Self::IndexOf,
+            7 => Self::LastIndexOf,
+            8 => Self::Repeat,
+            9 => Self::PadStart,
+            10 => Self::PadEnd,
+            11 => Self::IsWellFormed,
+            12 => Self::ToWellFormed,
+            13 => Self::Includes,
+            14 => Self::StartsWith,
+            15 => Self::EndsWith,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum BuiltinPropertyKeyConsumer {
@@ -275,6 +321,9 @@ pub(crate) enum ConversionConsumer {
     ToNumber,
     ToString,
     StringConcatElement,
+    StringRawLength,
+    StringRawLiteral,
+    StringRawSubstitution,
     Negate,
     BitwiseNot,
     BinaryLeft(Opcode),
@@ -361,6 +410,11 @@ pub(crate) enum ConversionConsumer {
     StringReplaceAllReceiver,
     StringReplaceAllSearch,
     StringReplaceAllReplacement,
+    StringPrototypeReceiver,
+    StringPrototypeString,
+    StringPrototypeFiller,
+    StringPrototypeFirstNumber,
+    StringPrototypeSecondNumber,
     TypedArrayByteOffset,
     TypedArrayLength,
     TypedArrayElement,
@@ -394,6 +448,9 @@ impl ConversionConsumer {
             Self::ToNumber
             | Self::ToString
             | Self::StringConcatElement
+            | Self::StringRawLength
+            | Self::StringRawLiteral
+            | Self::StringRawSubstitution
             | Self::Negate
             | Self::BitwiseNot
             | Self::BinaryLeft(_)
@@ -480,6 +537,11 @@ impl ConversionConsumer {
             | Self::StringReplaceAllReceiver
             | Self::StringReplaceAllSearch
             | Self::StringReplaceAllReplacement
+            | Self::StringPrototypeReceiver
+            | Self::StringPrototypeString
+            | Self::StringPrototypeFiller
+            | Self::StringPrototypeFirstNumber
+            | Self::StringPrototypeSecondNumber
             | Self::TypedArrayByteOffset
             | Self::TypedArrayLength
             | Self::TypedArrayElement
@@ -530,6 +592,8 @@ impl ConversionConsumer {
                 | Self::NativeCall(ConversionNativeFunction::DateParse)
                 | Self::ToString
                 | Self::StringConcatElement
+                | Self::StringRawLiteral
+                | Self::StringRawSubstitution
                 | Self::ToPropertyKey
                 | Self::BuiltinPropertyKey(_)
                 | Self::ErrorConstructorMessage
@@ -560,6 +624,9 @@ impl ConversionConsumer {
                 | Self::StringReplaceAllReceiver
                 | Self::StringReplaceAllSearch
                 | Self::StringReplaceAllReplacement
+                | Self::StringPrototypeReceiver
+                | Self::StringPrototypeString
+                | Self::StringPrototypeFiller
         )
     }
 
@@ -584,6 +651,9 @@ impl ConversionConsumer {
             Self::ToNumber
                 | Self::ToString
                 | Self::StringConcatElement
+                | Self::StringRawLength
+                | Self::StringRawLiteral
+                | Self::StringRawSubstitution
                 | Self::Negate
                 | Self::BitwiseNot
                 | Self::BinaryLeft(_)
@@ -651,6 +721,11 @@ impl ConversionConsumer {
                 | Self::StringReplaceAllReceiver
                 | Self::StringReplaceAllSearch
                 | Self::StringReplaceAllReplacement
+                | Self::StringPrototypeReceiver
+                | Self::StringPrototypeString
+                | Self::StringPrototypeFiller
+                | Self::StringPrototypeFirstNumber
+                | Self::StringPrototypeSecondNumber
                 | Self::TypedArrayByteOffset
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
@@ -1364,6 +1439,15 @@ pub(crate) enum StringSplitStage {
     SplitterCall,
 }
 
+/// Observable property-read boundaries in `String.raw`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringRawStage {
+    Raw,
+    Length,
+    Element,
+}
+
 /// Observable boundaries in `String.prototype.replaceAll`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1372,6 +1456,13 @@ pub(crate) enum StringReplaceAllStage {
     FlagsGet,
     ReplaceGet,
     ReplaceCall,
+}
+
+/// Observable IsRegExp boundary in String containment methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringPrototypeStage {
+    MatchGet,
 }
 
 /// Observable callback boundaries in `RegExp.prototype.test`.
@@ -1588,7 +1679,9 @@ pub(crate) enum NativeContinuationKind {
     RegExpReplace,
     RegExpFlags(u8),
     StringSplit(StringSplitStage),
+    StringRaw(StringRawStage),
     StringReplaceAll(StringReplaceAllStage),
+    StringPrototype(StringPrototypeStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
     TypedArraySlice(TypedArraySliceStage),
@@ -1996,6 +2089,22 @@ impl NativeContinuation {
         }
     }
 
+    /// Roots String.raw state across one Proxy/accessor-aware property read.
+    #[inline]
+    pub(crate) const fn string_raw(
+        site: NativeContinuationSite,
+        stage: StringRawStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::StringRaw(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
     /// Roots the replaceAll protocol state across one observable Get or Call.
     #[inline]
     pub(crate) const fn string_replace_all(
@@ -2007,6 +2116,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::StringReplaceAll(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots a generic String operation across one observable `@@match` read.
+    #[inline]
+    pub(crate) const fn string_prototype(
+        site: NativeContinuationSite,
+        stage: StringPrototypeStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::StringPrototype(stage),
             first: state,
             second: receiver,
         }

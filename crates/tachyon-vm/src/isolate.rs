@@ -405,6 +405,30 @@ impl Isolate {
         })
     }
 
+    /// Replaces one traced value in a fixed native state and records its generational edge.
+    pub(crate) fn update_native_call_state_value(
+        &mut self,
+        state: GcRef<NativeCallState>,
+        slot: usize,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(slot < 5);
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.native_call_state)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .values[slot] = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(state, value)
+                .map_err(ExecutionError::HeapReference)
+                .map(|_| ())
+        })
+    }
+
     /// Registers VM payload descriptors before constructing an otherwise empty isolate heap.
     pub fn new(config: IsolateConfig) -> Result<Self, IsolateCreationError> {
         Self::new_with_host_providers(config, HostProviders::new())
@@ -632,6 +656,9 @@ impl Isolate {
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_string_concat: registry
                 .try_register("PendingStringConcat")
+                .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_string_raw: registry
+                .try_register("PendingStringRaw")
                 .map_err(IsolateCreationError::TypeRegistration)?,
             pending_array_flat: registry
                 .try_register("PendingArrayFlat")

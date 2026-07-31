@@ -511,6 +511,20 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringRawLength
+                            | ConversionConsumer::StringRawLiteral
+                            | ConversionConsumer::StringRawSubstitution
+                    ) {
+                        let state = self.pending_string_raw_reference(continuation.receiver)?;
+                        return self.resume_string_raw_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::JsonParseText {
                         let text = self.primitive_string_value(Some(value))?;
                         return self.finish_json_parse_text(
@@ -844,6 +858,22 @@ impl Isolate {
                     ) {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_string_replace_all_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringPrototypeReceiver
+                            | ConversionConsumer::StringPrototypeString
+                            | ConversionConsumer::StringPrototypeFiller
+                            | ConversionConsumer::StringPrototypeFirstNumber
+                            | ConversionConsumer::StringPrototypeSecondNumber
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_prototype_conversion(
                             continuation.site,
                             state,
                             continuation.consumer,
@@ -1401,6 +1431,11 @@ impl Isolate {
                 ConversionConsumer::StringConcatElement => {
                     unreachable!("String concat conversion resumes inside its state machine")
                 }
+                ConversionConsumer::StringRawLength
+                | ConversionConsumer::StringRawLiteral
+                | ConversionConsumer::StringRawSubstitution => {
+                    unreachable!("String.raw conversion resumes inside its state machine")
+                }
                 ConversionConsumer::Negate => self.numeric_primitive_negate(argument)?,
                 ConversionConsumer::BitwiseNot => self.numeric_primitive_bitwise_not(argument)?,
                 ConversionConsumer::BinaryLeft(_) | ConversionConsumer::BinaryRight(_) => {
@@ -1546,6 +1581,13 @@ impl Isolate {
                 | ConversionConsumer::StringReplaceAllReplacement => {
                     unreachable!("String replaceAll conversion resumes inside its state machine")
                 }
+                ConversionConsumer::StringPrototypeReceiver
+                | ConversionConsumer::StringPrototypeString
+                | ConversionConsumer::StringPrototypeFiller
+                | ConversionConsumer::StringPrototypeFirstNumber
+                | ConversionConsumer::StringPrototypeSecondNumber => {
+                    unreachable!("String prototype conversion resumes inside its state machine")
+                }
                 ConversionConsumer::RegExpTestInput => {
                     unreachable!("RegExp test conversion resumes inside its state machine")
                 }
@@ -1644,21 +1686,24 @@ impl Isolate {
                 let string = self.primitive_string_value(argument)?;
                 self.create_string_iterator(string)
             }
-            NativeFunction::StringTrim => self.string_trim(
-                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
-                true,
-                true,
-            ),
-            NativeFunction::StringTrimStart => self.string_trim(
-                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
-                true,
-                false,
-            ),
-            NativeFunction::StringTrimEnd => self.string_trim(
-                argument.ok_or(ExecutionError::MissingNativeContinuation)?,
-                false,
-                true,
-            ),
+            NativeFunction::StringTrim => {
+                let receiver = self.primitive_to_string_value(
+                    argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                )?;
+                self.string_trim(receiver, true, true)
+            }
+            NativeFunction::StringTrimStart => {
+                let receiver = self.primitive_to_string_value(
+                    argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                )?;
+                self.string_trim(receiver, true, false)
+            }
+            NativeFunction::StringTrimEnd => {
+                let receiver = self.primitive_to_string_value(
+                    argument.ok_or(ExecutionError::MissingNativeContinuation)?,
+                )?;
+                self.string_trim(receiver, false, true)
+            }
             NativeFunction::NumberConstructor => {
                 let argument = argument.unwrap_or(Value::from_i32(0));
                 let number = if self.is_bigint_value(argument) {

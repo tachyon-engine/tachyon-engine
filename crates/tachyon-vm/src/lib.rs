@@ -73,6 +73,8 @@ mod regexp_search;
 mod runtime;
 mod string;
 mod string_concat;
+mod string_prototype;
+mod string_raw;
 mod string_replace_all;
 mod string_split;
 mod tagged_template;
@@ -309,10 +311,11 @@ use runtime::{
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
         ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
-        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringReplaceAllStage,
-        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
-        TypedArraySetStage, TypedArraySliceStage, TypedArraySubarrayStage, VmRoots,
-        WrapForValidIteratorStage, next_to_primitive_stage,
+        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringPrototypeOperation,
+        StringPrototypeStage, StringRawStage, StringReplaceAllStage, StringSplitStage,
+        SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage, TypedArraySetStage,
+        TypedArraySliceStage, TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage,
+        next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
@@ -320,6 +323,7 @@ use runtime::{
     },
 };
 use string_concat::PendingStringConcat;
+use string_raw::PendingStringRaw;
 use weak_collection::{WeakCollection, WeakMapObject, WeakRefObject, WeakSetObject};
 
 /// Shareable immutable engine configuration. Host services deliberately do not live here.
