@@ -357,10 +357,11 @@ impl Isolate {
                 Value::from_heap_ref(exec_state.raw()),
             ))
             .map_err(Self::completion_stack_error)?;
-        let outcome = self.regexp_builtin_exec(receiver, input, exec_state, 0);
-        if self.fiber.completions.len() > depth {
-            self.pop_native_continuation()?;
-        }
+        let outcome = self.regexp_builtin_exec(site, receiver, input, exec_state, 0);
+        debug_assert_eq!(self.fiber.completions.len(), depth + 1);
+        let parent = self.pop_native_continuation()?;
+        let state = self.native_call_state_reference(parent.first())?;
+        self.root_regexp_search_state(site, state)?;
         let outcome = outcome?;
         self.update_regexp_exec_state_value(state, SEARCH_RESULT, outcome.value)?;
         if let Some(last_index) = outcome.last_index {

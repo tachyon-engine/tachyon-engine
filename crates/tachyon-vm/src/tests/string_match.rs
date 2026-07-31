@@ -146,6 +146,21 @@ Object.defineProperty(RegExp.prototype, Symbol.matchAll, {
 match === "abc" && matchAll === "abc" && custom === receiver && order === "sgcsadiftmx";
 "#;
 
+const STRING_MATCH_BRANDED_SOURCE: &str = r#"
+var basic = "abc".match(/b/);
+var named = "zab".match(/(a)(?<tail>b)/);
+var indexed = "ac".match(/(?:(?<left>a)|(b))(?<tail>c)?/d);
+var global = "ababa".match(/a/g);
+
+basic[0] === "b" && basic.index === 1 && basic.input === "abc" &&
+basic.groups === undefined && named[0] === "ab" && named[1] === "a" &&
+named.groups.tail === "b" && indexed.indices[0][0] === 0 &&
+indexed.indices[0][1] === 2 && indexed.indices[2] === undefined &&
+indexed.indices.groups.left === indexed.indices[1] &&
+indexed.indices.groups.tail === indexed.indices[3] && global.length === 3 &&
+global[0] === "a" && global[1] === "a" && global[2] === "a";
+"#;
+
 #[test]
 fn string_match_protocol_covers_dispatch_and_gc_matrix() {
     assert_string_match_protocol::<1>(false);
@@ -154,6 +169,50 @@ fn string_match_protocol_covers_dispatch_and_gc_matrix() {
     assert_string_match_protocol::<8>(false);
     assert_string_match_protocol::<16>(false);
     assert_string_match_gc::<8>();
+}
+
+#[test]
+fn intrinsic_string_match_materialization_is_rooted_for_every_dispatch_batch() {
+    assert_branded_string_match::<1>(false);
+    assert_branded_string_match::<2>(false);
+    assert_branded_string_match::<4>(false);
+    assert_branded_string_match::<8>(false);
+    assert_branded_string_match::<16>(false);
+    assert_branded_string_match::<8>(true);
+}
+
+/// Exercises the unmodified intrinsic path, including captures, named groups, indices, and global results.
+fn assert_branded_string_match<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(10_700 + N as u32 + u32::from(forced_major) * 32),
+                SourceName::new("string-match-branded-fixture"),
+                MediaType::JavaScript,
+                Arc::from(STRING_MATCH_BRANDED_SOURCE),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("intrinsic String match fixture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 524_288,
+                quantum: 524_288,
+            },
+        )
+        .expect("intrinsic String match fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }
 
 /// Exercises every new traced edge while forcing relocation at each allocation.

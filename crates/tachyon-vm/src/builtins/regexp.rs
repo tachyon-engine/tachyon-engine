@@ -2,7 +2,9 @@
 
 use super::super::*;
 use crate::regexp::backend::{CompiledRegExp, RegExpMatch};
-use crate::regexp_exec::{REGEXP_EXEC_GROUPS, REGEXP_EXEC_RESULT, REGEXP_EXEC_TEMPORARY};
+use crate::regexp_exec::{
+    REGEXP_EXEC_GROUPS, REGEXP_EXEC_RESULT, REGEXP_EXEC_TEMPORARY, REGEXP_TEST_INPUT,
+};
 
 pub(crate) struct RegExpBuiltinOutcome {
     pub(crate) value: Value,
@@ -149,11 +151,21 @@ impl Isolate {
         let receiver = site.this_value;
         let argument = self.call_argument(site, 0)?;
         let input = self.regexp_string_argument(argument)?;
-        self.regexp_match_values(receiver, input)
+        self.regexp_match_values(
+            NativeContinuationSite {
+                caller_base: site.caller_base,
+                destination: site.destination,
+                call_site: site.call_site,
+            },
+            receiver,
+            input,
+        )
     }
 
+    /// Runs the intrinsic `@@match` kernel with all result edges rooted in one fixed state.
     pub(crate) fn regexp_match_values(
         &mut self,
+        site: NativeContinuationSite,
         receiver: Value,
         input: Value,
     ) -> Result<Value, ExecutionError> {
@@ -165,9 +177,10 @@ impl Isolate {
         let input_units = self.regexp_string_units(input)?;
         let program = CompiledRegExp::compile_units_with_flags(&source_units, &backend_flags)
             .map_err(|_| ExecutionError::InvalidRegExpPattern)?;
+        let state = self.allocate_regexp_exec_state(receiver, input, 0)?;
+        self.root_regexp_exec_state(site, state)?;
         if !flags.global {
-            let state = self.allocate_regexp_exec_state(receiver, input, 0)?;
-            let outcome = self.regexp_builtin_exec(receiver, input, state, 0)?;
+            let outcome = self.regexp_builtin_exec(site, receiver, input, state, 0)?;
             return Ok(outcome.value);
         }
         let prototype = self
@@ -175,6 +188,8 @@ impl Isolate {
             .array_prototype
             .expect("Array prototype initializes before RegExp match");
         let result = self.create_array_object_with_prototype(prototype)?;
+        let state = self.reload_regexp_exec_state(site)?;
+        self.update_regexp_exec_state_value(state, REGEXP_EXEC_RESULT, result)?;
         let unicode = flags.unicode || flags.unicode_sets;
         let mut search = 0;
         let mut index = 0_i32;
@@ -186,7 +201,13 @@ impl Isolate {
                 JsString::try_from_utf16(&input_units[matched.start..matched.end])
                     .map_err(ExecutionError::PropertyKeyString)?,
             )?;
+            let state = self.reload_regexp_exec_state(site)?;
+            self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
             let key = self.property_key_atom(Value::from_i32(index))?;
+            let state = self.reload_regexp_exec_state(site)?;
+            let pending = self.native_call_state_snapshot(state)?;
+            let result = pending.values[REGEXP_EXEC_RESULT];
+            let value = pending.values[REGEXP_EXEC_TEMPORARY];
             self.set_own_data_property(result, key, value)?;
             index = index.saturating_add(1);
             search = if matched.end == matched.start {
@@ -196,11 +217,13 @@ impl Isolate {
             };
         }
         let length = self.intern_intrinsic_name(b"length")?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
         self.set_own_data_property(result, length, Value::from_i32(index))?;
         if index == 0 {
             return Ok(Value::from_immediate(Immediate::Null));
         }
-        Ok(result)
+        Ok(self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT])
     }
 
     /// Creates the RegExpCreate fallback used after String search has converted its pattern.
@@ -453,11 +476,13 @@ impl Isolate {
     /// Matches and materializes RegExpBuiltinExec after observable lastIndex conversion.
     pub(crate) fn regexp_builtin_exec(
         &mut self,
+        site: NativeContinuationSite,
         receiver: Value,
         input: Value,
         state: GcRef<NativeCallState>,
         observed_last_index: u64,
     ) -> Result<RegExpBuiltinOutcome, ExecutionError> {
+        self.root_regexp_exec_state(site, state)?;
         let (source, flags) = self.regexp_data(receiver)?;
         let source = self.regexp_string_units(source)?;
         let flags = self.regexp_flags(flags)?;
@@ -486,8 +511,7 @@ impl Isolate {
         let end = safe_integer_value(
             u64::try_from(matched.end).map_err(|_| ExecutionError::InvalidStringLength)?,
         );
-        let result =
-            self.materialize_regexp_match(input, &input_units, matched, flags.indices, state)?;
+        let result = self.materialize_regexp_match(site, &input_units, matched, flags.indices)?;
         Ok(RegExpBuiltinOutcome {
             value: result,
             last_index: (flags.global || flags.sticky).then_some(end),
@@ -497,17 +521,17 @@ impl Isolate {
     /// Creates the exact match Array while publishing every managed intermediate before GC.
     fn materialize_regexp_match(
         &mut self,
-        input: Value,
+        site: NativeContinuationSite,
         input_units: &[u16],
         matched: RegExpMatch,
         has_indices: bool,
-        state: GcRef<NativeCallState>,
     ) -> Result<Value, ExecutionError> {
         let prototype = self
             .realm
             .array_prototype
             .expect("Array prototype initializes before RegExp result construction");
         let result = self.create_array_object_with_prototype(prototype)?;
+        let state = self.reload_regexp_exec_state(site)?;
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_RESULT, result)?;
         let capture_count = matched.captures.len();
         let mut ranges = Vec::new();
@@ -527,10 +551,15 @@ impl Isolate {
                 )?,
                 None => Value::from_immediate(Immediate::Undefined),
             };
+            let state = self.reload_regexp_exec_state(site)?;
             self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
+            let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
             self.set_own_data_property(result, key, value)?;
         }
         let length = self.intern_intrinsic_name(b"length")?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let result = pending.values[REGEXP_EXEC_RESULT];
         self.set_own_data_property(
             result,
             length,
@@ -540,6 +569,8 @@ impl Isolate {
             ),
         )?;
         let index = self.intern_intrinsic_name(b"index")?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
         self.set_own_data_property(
             result,
             index,
@@ -548,12 +579,17 @@ impl Isolate {
             ),
         )?;
         let input_atom = self.intern_intrinsic_name(b"input")?;
-        self.set_own_data_property(result, input_atom, input)?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let pending = self.native_call_state_snapshot(state)?;
+        let result = pending.values[REGEXP_EXEC_RESULT];
+        self.set_own_data_property(result, input_atom, pending.values[REGEXP_TEST_INPUT])?;
         let groups_atom = self.intern_intrinsic_name(b"groups")?;
         if !matched.named_captures.is_empty() {
             let groups =
                 self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
+            let state = self.reload_regexp_exec_state(site)?;
             self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
+            let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
             self.set_own_data_property(result, groups_atom, groups)?;
             for capture in &matched.named_captures {
                 let atom = self.intern_regexp_capture_name(&capture.name)?;
@@ -564,10 +600,14 @@ impl Isolate {
                     )?,
                     None => Value::from_immediate(Immediate::Undefined),
                 };
+                let state = self.reload_regexp_exec_state(site)?;
                 self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, value)?;
+                let groups = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_GROUPS];
                 self.set_own_data_property(groups, atom, value)?;
             }
         } else {
+            let state = self.reload_regexp_exec_state(site)?;
+            let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
             self.set_own_data_property(
                 result,
                 groups_atom,
@@ -575,18 +615,18 @@ impl Isolate {
             )?;
         }
         if has_indices {
-            self.materialize_regexp_indices(result, &matched, groups_atom, state)?;
+            self.materialize_regexp_indices(site, &matched, groups_atom)?;
         }
-        Ok(result)
+        let state = self.reload_regexp_exec_state(site)?;
+        Ok(self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT])
     }
 
     /// Builds the `d` result graph, publishing each Array before another allocation can occur.
     fn materialize_regexp_indices(
         &mut self,
-        result: Value,
+        site: NativeContinuationSite,
         matched: &RegExpMatch,
         groups_atom: AtomId,
-        state: GcRef<NativeCallState>,
     ) -> Result<(), ExecutionError> {
         let prototype = self
             .realm
@@ -594,7 +634,9 @@ impl Isolate {
             .expect("Array prototype initializes before RegExp indices construction");
         let indices_atom = self.intern_intrinsic_name(b"indices")?;
         let indices = self.create_array_object_with_prototype(prototype)?;
+        let state = self.reload_regexp_exec_state(site)?;
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, indices)?;
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
         self.set_own_data_property(result, indices_atom, indices)?;
         let mut ranges = Vec::new();
         ranges
@@ -606,10 +648,20 @@ impl Isolate {
             let key = self.property_key_atom(Value::from_i32(
                 i32::try_from(index).map_err(|_| ExecutionError::InvalidStringLength)?,
             ))?;
-            let value = self.regexp_indices_pair(range.as_ref(), prototype, state)?;
+            let value = self.regexp_indices_pair(site, range.as_ref(), prototype)?;
+            let state = self.reload_regexp_exec_state(site)?;
+            let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
+            let indices = self
+                .get_data_property(result, indices_atom)?
+                .ok_or(ExecutionError::InvalidRegExpPattern)?;
             self.set_own_data_property(indices, key, value)?;
         }
         let length = self.intern_intrinsic_name(b"length")?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
+        let indices = self
+            .get_data_property(result, indices_atom)?
+            .ok_or(ExecutionError::InvalidRegExpPattern)?;
         self.set_own_data_property(
             indices,
             length,
@@ -627,11 +679,23 @@ impl Isolate {
         }
         let groups =
             self.create_ordinary_object_with_prototype(Value::from_immediate(Immediate::Null))?;
+        let state = self.reload_regexp_exec_state(site)?;
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_GROUPS, groups)?;
+        let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
+        let indices = self
+            .get_data_property(result, indices_atom)?
+            .ok_or(ExecutionError::InvalidRegExpPattern)?;
         self.set_own_data_property(indices, groups_atom, groups)?;
         for capture in &matched.named_captures {
             let atom = self.intern_regexp_capture_name(&capture.name)?;
+            let state = self.reload_regexp_exec_state(site)?;
+            let result = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_RESULT];
+            let indices = self
+                .get_data_property(result, indices_atom)?
+                .ok_or(ExecutionError::InvalidRegExpPattern)?;
             let value = self.regexp_named_indices_pair(indices, capture)?;
+            let state = self.reload_regexp_exec_state(site)?;
+            let groups = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_GROUPS];
             self.set_own_data_property(groups, atom, value)?;
         }
         Ok(())
@@ -671,25 +735,31 @@ impl Isolate {
     /// Allocates one `[start, end]` pair, or returns `undefined` for an unmatched capture.
     fn regexp_indices_pair(
         &mut self,
+        site: NativeContinuationSite,
         range: Option<&core::ops::Range<usize>>,
         prototype: Value,
-        state: GcRef<NativeCallState>,
     ) -> Result<Value, ExecutionError> {
         let Some(range) = range else {
             return Ok(Value::from_immediate(Immediate::Undefined));
         };
         let pair = self.create_array_object_with_prototype(prototype)?;
+        let state = self.reload_regexp_exec_state(site)?;
         self.update_regexp_exec_state_value(state, REGEXP_EXEC_TEMPORARY, pair)?;
         for (index, offset) in [range.start, range.end].into_iter().enumerate() {
             let key = self.property_key_atom(Value::from_i32(index as i32))?;
+            let state = self.reload_regexp_exec_state(site)?;
+            let pair = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_TEMPORARY];
             let value = Value::from_i32(
                 i32::try_from(offset).map_err(|_| ExecutionError::InvalidStringLength)?,
             );
             self.set_own_data_property(pair, key, value)?;
         }
         let length = self.intern_intrinsic_name(b"length")?;
+        let state = self.reload_regexp_exec_state(site)?;
+        let pair = self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_TEMPORARY];
         self.set_own_data_property(pair, length, Value::from_i32(2))?;
-        Ok(pair)
+        let state = self.reload_regexp_exec_state(site)?;
+        Ok(self.native_call_state_snapshot(state)?.values[REGEXP_EXEC_TEMPORARY])
     }
 
     /// Matches the branded test-only path without allocating a result Array or capture strings.

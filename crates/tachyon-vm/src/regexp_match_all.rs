@@ -238,7 +238,7 @@ impl Isolate {
             site.destination,
             Value::from_heap_ref(exec_state.raw()),
         )?;
-        let outcome = self.regexp_builtin_exec(matcher, input, exec_state, index);
+        let outcome = self.regexp_builtin_exec(site, matcher, input, exec_state, index);
         let rooted_exec_state = self.read(site.caller_base, site.destination)?;
         let prepared = (|| -> Result<Value, ExecutionError> {
             let outcome = outcome?;

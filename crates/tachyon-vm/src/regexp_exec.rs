@@ -2,7 +2,7 @@
 
 use super::*;
 
-const REGEXP_TEST_INPUT: usize = 0;
+pub(crate) const REGEXP_TEST_INPUT: usize = 0;
 const REGEXP_TEST_RECEIVER: usize = 1;
 pub(crate) const REGEXP_EXEC_RESULT: usize = 2;
 pub(crate) const REGEXP_EXEC_GROUPS: usize = 3;
@@ -318,7 +318,7 @@ impl Isolate {
         let receiver = pending.values[REGEXP_TEST_RECEIVER];
         let input = pending.values[REGEXP_TEST_INPUT];
         let outcome = if pending.count == 0 {
-            self.regexp_builtin_exec(receiver, input, state, last_index)?
+            self.regexp_builtin_exec(site, receiver, input, state, last_index)?
         } else {
             self.regexp_builtin_test(receiver, input, last_index)?
         };
@@ -393,7 +393,7 @@ impl Isolate {
     }
 
     #[inline(always)]
-    fn root_regexp_exec_state(
+    pub(crate) fn root_regexp_exec_state(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
@@ -403,6 +403,16 @@ impl Isolate {
             site.destination,
             Value::from_heap_ref(state.raw()),
         )
+    }
+
+    /// Re-resolves the current exec state from the traced destination after a safepoint.
+    #[inline(always)]
+    pub(crate) fn reload_regexp_exec_state(
+        &mut self,
+        site: NativeContinuationSite,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let rooted = self.read(site.caller_base, site.destination)?;
+        self.native_call_state_reference(rooted)
     }
 
     /// Publishes one managed exec intermediate before any subsequent allocation can collect it.
