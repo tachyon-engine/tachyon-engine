@@ -94,6 +94,20 @@ fn strict_and_sloppy_this_binding_work_for_every_dispatch_batch() {
 }
 
 #[test]
+fn sloppy_primitive_this_is_boxed_for_every_dispatch_batch_and_forced_major() {
+    assert_sloppy_primitive_this::<1>(false);
+    assert_sloppy_primitive_this::<2>(false);
+    assert_sloppy_primitive_this::<4>(false);
+    assert_sloppy_primitive_this::<8>(false);
+    assert_sloppy_primitive_this::<16>(false);
+    assert_sloppy_primitive_this::<1>(true);
+    assert_sloppy_primitive_this::<2>(true);
+    assert_sloppy_primitive_this::<4>(true);
+    assert_sloppy_primitive_this::<8>(true);
+    assert_sloppy_primitive_this::<16>(true);
+}
+
+#[test]
 fn strict_and_sloppy_unresolved_assignment_work_for_every_dispatch_batch() {
     assert_reference_error_batch::<1>();
     assert_reference_error_batch::<2>();
@@ -340,4 +354,39 @@ fn compile_tail_source(source: &str, source_id: u32) -> CompiledModule {
             CompileOptions::default(),
         )
         .expect("tail-call fixture compiles")
+}
+
+/// Verifies OrdinaryCallBindThis boxing, strict preservation, and apply metadata together.
+fn assert_sloppy_primitive_this<const N: usize>(forced_major: bool) {
+    let source = r#"
+        function sloppy() { return this; }
+        function strict() { "use strict"; return this; }
+        var number = sloppy.call(7);
+        var boolean = sloppy.apply(true);
+        var string = sloppy.call("x");
+        Object.getPrototypeOf(number) === Number.prototype && number.valueOf() === 7 &&
+        Object.getPrototypeOf(boolean) === Boolean.prototype && boolean.valueOf() === true &&
+        Object.getPrototypeOf(string) === String.prototype && string.valueOf() === "x" &&
+        strict.call(7) === 7 && Function.prototype.apply.length === 2;
+    "#;
+    let module = compile_tail_source(source, 40 + N as u32 + u32::from(forced_major) * 100);
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 4_096,
+                quantum: 4_096,
+            },
+        )
+        .expect("sloppy primitive this fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }

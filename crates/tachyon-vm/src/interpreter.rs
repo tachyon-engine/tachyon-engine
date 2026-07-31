@@ -3148,13 +3148,7 @@ impl Isolate {
         kind: NativeErrorKind,
         instruction_offset: WordOffset,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
-        let error_realm = self
-            .fiber
-            .frames
-            .last()
-            .and_then(|frame| self.loaded_code(frame.code).ok().map(|code| code.realm))
-            .unwrap_or(self.active_realm);
-        let error = self.create_native_error_in_realm(kind, None, error_realm)?;
+        let error = self.create_native_error_in_realm(kind, None, self.active_realm)?;
         self.throw_value(error, instruction_offset)
     }
 
@@ -5166,7 +5160,11 @@ impl Isolate {
             let callable = self
                 .resolve_function_object(site.callee)
                 .map_err(|_| ExecutionError::NonConstructor(site.callee))?;
-            match callable.executable {
+            let executable = callable.executable;
+            if matches!(executable, FunctionExecutable::Native(native) if native.is_constructor()) {
+                self.activate_realm_for_frame(callable.realm)?;
+            }
+            match executable {
                 FunctionExecutable::Bound(data) => {
                     let bound = self.bound_function_snapshot(data)?;
                     if site.argument_prefix.is_some() || site.argument_source.is_some() {
@@ -5252,7 +5250,7 @@ impl Isolate {
                     return self.begin_date_constructor(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::ObjectConstructor) => {
-                    let object = self.create_object_from_site(&site)?;
+                    let object = self.construct_object_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, object);
                 }
                 FunctionExecutable::Native(NativeFunction::ErrorConstructor(kind)) => {
@@ -5510,7 +5508,11 @@ impl Isolate {
             return self.call(site);
         }
         loop {
-            match self.resolve_function_executable(site.callee)? {
+            let (executable, callee_realm) = self.resolve_function_dispatch(site.callee)?;
+            if !matches!(executable, FunctionExecutable::Bound(_)) {
+                self.activate_realm_for_frame(callee_realm)?;
+            }
+            match executable {
                 FunctionExecutable::Bound(data) => {
                     if site.argument_prefix.is_some() {
                         return self.call(site);
@@ -5581,6 +5583,8 @@ impl Isolate {
         target: ResolvedCallTarget,
         site: CallSite,
     ) -> Result<(), ExecutionError> {
+        let target_realm = self.loaded_code(target.code)?.realm;
+        self.activate_realm_for_frame(target_realm)?;
         let old = *self
             .fiber
             .frames
@@ -5624,7 +5628,7 @@ impl Isolate {
         self.copy_tail_call_parameters(&site, old.base, copied)?;
         self.fiber.registers[(old.base + copied) as usize..requested as usize]
             .fill(Value::from_immediate(Immediate::Undefined));
-        let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
+        let this_value = self.bind_ordinary_this(target.strictness, site.this_value)?;
         let receiver_or_home_object = if target.role.has_home_object() {
             Some(self.function_home_object(site.callee)?)
         } else {
@@ -5818,7 +5822,11 @@ impl Isolate {
                     }
                 }
             }
-            match self.resolve_function_executable(site.callee)? {
+            let (executable, callee_realm) = self.resolve_function_dispatch(site.callee)?;
+            if !matches!(executable, FunctionExecutable::Bound(_)) {
+                self.activate_realm_for_frame(callee_realm)?;
+            }
+            match executable {
                 FunctionExecutable::Bound(data) => {
                     let bound = self.bound_function_snapshot(data)?;
                     if site.argument_prefix.is_some() || site.argument_source.is_some() {
@@ -7826,6 +7834,23 @@ impl Isolate {
         })
     }
 
+    /// Copies the two dispatcher fields in one checked borrow on ordinary call and tail paths.
+    #[inline(always)]
+    fn resolve_function_dispatch(
+        &mut self,
+        callee: Value,
+    ) -> Result<(FunctionExecutable, RealmId), ExecutionError> {
+        let raw = callee
+            .as_heap_ref()
+            .ok_or(ExecutionError::NonCallable(callee))?;
+        self.heap.with_no_gc_scope(|no_gc| {
+            no_gc
+                .borrow_raw_reference(raw, self.types.function)
+                .map(|function| (function.executable, function.realm))
+                .map_err(|_| ExecutionError::NonCallable(callee))
+        })
+    }
+
     #[inline(always)]
     pub(crate) fn call_argument(
         &mut self,
@@ -8130,7 +8155,9 @@ impl Isolate {
                 .expect("copied argument index is within total count");
             self.write(callee_base, index, value)?;
         }
-        let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
+        let target_realm = self.loaded_code(target.code)?.realm;
+        self.activate_realm_for_frame(target_realm)?;
+        let this_value = self.bind_ordinary_this(target.strictness, site.this_value)?;
         let receiver_or_home_object = if target.role.has_home_object() {
             Some(self.function_home_object(site.callee)?)
         } else {
@@ -8218,21 +8245,23 @@ impl Isolate {
 
     #[inline(always)]
     pub(crate) fn bind_ordinary_this(
-        &self,
+        &mut self,
         strictness: FunctionStrictness,
         this_argument: Value,
-    ) -> Value {
-        if strictness == FunctionStrictness::Strict
-            || !matches!(
-                this_argument.as_immediate(),
-                Some(Immediate::Undefined | Immediate::Null)
-            )
-        {
-            return this_argument;
+    ) -> Result<Value, ExecutionError> {
+        if strictness == FunctionStrictness::Strict || self.is_object_value(this_argument) {
+            return Ok(this_argument);
         }
-        self.realm
-            .global_object
-            .expect("realm initialization publishes a global object")
+        if matches!(
+            this_argument.as_immediate(),
+            Some(Immediate::Undefined | Immediate::Null)
+        ) {
+            return Ok(self
+                .realm
+                .global_object
+                .expect("callee Realm initialization publishes a global object"));
+        }
+        self.coerce_to_object(this_argument)
     }
 
     /// Selects top-level completion or the hot ordinary-callee frame return path.
@@ -8275,9 +8304,9 @@ impl Isolate {
             .last()
             .copied()
             .is_some_and(|activation| activation.frame_depth as usize == self.fiber.frames.len());
-        let value = if derived {
+        let (value, return_error) = if derived {
             if self.is_object_value(value) {
-                value
+                (value, None)
             } else if value.as_immediate() == Some(Immediate::Undefined) {
                 let this_value = self
                     .fiber
@@ -8286,14 +8315,21 @@ impl Isolate {
                     .expect("derived return retains its frame")
                     .this_value;
                 if this_value.as_immediate() == Some(Immediate::Uninitialized) {
-                    return Err(ExecutionError::UninitializedThis);
+                    (
+                        Value::from_immediate(Immediate::Undefined),
+                        Some(ExecutionError::UninitializedThis),
+                    )
+                } else {
+                    (this_value, None)
                 }
-                this_value
             } else {
-                return Err(ExecutionError::InvalidDerivedConstructorReturn(value));
+                (
+                    Value::from_immediate(Immediate::Undefined),
+                    Some(ExecutionError::InvalidDerivedConstructorReturn(value)),
+                )
             }
         } else {
-            value
+            (value, None)
         };
         if let Some(arguments) = self.fiber.argument_objects.last().copied().flatten() {
             self.detach_mapped_arguments(arguments)?;
@@ -8346,6 +8382,18 @@ impl Isolate {
         self.fiber
             .completions
             .truncate(frame.completion_base as usize);
+        if let Some(caller) = self.fiber.frames.last() {
+            let caller_realm = self.loaded_code(caller.code)?.realm;
+            self.activate_realm_for_frame(caller_realm)?;
+        }
+        if let Some(error) = return_error {
+            let kind = execution_error_kind(&error)
+                .expect("derived return validation always produces a native error kind");
+            let call_site = frame
+                .call_site
+                .expect("non-entry derived constructors retain their caller call site");
+            return self.throw_native_error(kind, call_site);
+        }
         if let Some(continuation) = continuation {
             return self.resume_native_continuation(continuation, value);
         }

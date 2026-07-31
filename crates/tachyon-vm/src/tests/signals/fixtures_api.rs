@@ -614,7 +614,8 @@ var cycleCached;
 try { foreignCycle.get(); } catch (error) { cycleFirst = error; }
 try { foreignCycle.get(); } catch (error) { cycleCached = error; }
 cycleGate.set(false);
-var cycleRecovery = cycleFirst instanceof TypeError && cycleCached === cycleFirst &&
+var cycleRecovery = !(cycleFirst instanceof TypeError) &&
+    cycleFirst instanceof cycleFirst.constructor && cycleCached === cycleFirst &&
     foreignCycle.get() === 42;
 
 class ForeignWatcherSubclass extends foreignSignal.subtle.Watcher {}

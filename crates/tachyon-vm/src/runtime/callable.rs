@@ -1043,6 +1043,7 @@ impl NativeFunction {
             Self::ObjectGetOwnPropertyDescriptors => 1,
             Self::ObjectDefineGetter | Self::ObjectDefineSetter => 2,
             Self::ReflectApply => 3,
+            Self::FunctionPrototypeApply => 2,
             Self::ReflectConstruct => 2,
             Self::ProxyConstructor
             | Self::ProxyRevocable
@@ -1147,7 +1148,6 @@ impl NativeFunction {
             | Self::BooleanConstructor
             | Self::DateSetTime
             | Self::FunctionPrototypeCall
-            | Self::FunctionPrototypeApply
             | Self::FunctionPrototypeBind
             | Self::FunctionConstructor
             | Self::AsyncFunctionConstructor

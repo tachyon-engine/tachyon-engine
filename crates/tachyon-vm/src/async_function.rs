@@ -76,6 +76,9 @@ impl Isolate {
         site: &CallSite,
         target: ResolvedCallTarget,
     ) -> Result<(), ExecutionError> {
+        let target_realm = self.loaded_code(target.code)?.realm;
+        self.activate_realm_for_frame(target_realm)?;
+        let this_value = self.bind_ordinary_this(target.strictness, site.this_value)?;
         let mut arguments = Vec::new();
         arguments
             .try_reserve_exact(site.argument_count as usize)
@@ -86,7 +89,6 @@ impl Isolate {
                     .expect("async call argument remains in the call view"),
             );
         }
-        let this_value = self.bind_ordinary_this(target.strictness, site.this_value);
         let argument_prefix =
             self.create_apply_argument_prefix(site.callee, this_value, arguments)?;
         self.write(

@@ -518,6 +518,33 @@ impl Isolate {
         Ok(object)
     }
 
+    /// Implements Object's distinct [[Construct]] newTarget prototype selection.
+    pub(crate) fn construct_object_from_site(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<Value, ExecutionError> {
+        if site.new_target == site.callee {
+            return self.create_object_from_site(site);
+        }
+        let prototype_atom = self.prototype_atom()?;
+        let prototype = self
+            .constructor_prototype_value(site.new_target, prototype_atom)?
+            .filter(|value| self.is_object_value(*value))
+            .or_else(|| {
+                self.realm_for_callable(site.new_target)
+                    .ok()
+                    .and_then(|realm| {
+                        self.realm_intrinsic_prototype(realm, IntrinsicPrototypeKind::Object)
+                    })
+            })
+            .unwrap_or_else(|| {
+                self.realm
+                    .object_prototype
+                    .expect("Object prototype initializes before Object construction")
+            });
+        self.create_ordinary_object_with_prototype(prototype)
+    }
+
     /// Implements Object.prototype.valueOf by applying the specification's ToObject operation.
     pub(crate) fn object_value_of(&mut self, value: Value) -> Result<Value, ExecutionError> {
         self.coerce_to_object(value)

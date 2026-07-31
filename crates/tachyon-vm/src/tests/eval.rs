@@ -162,6 +162,20 @@ fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
 }
 
 #[test]
+fn cross_realm_sloppy_this_uses_callee_wrappers_for_every_dispatch_batch() {
+    assert_cross_realm_this_binding::<1>(false);
+    assert_cross_realm_this_binding::<2>(false);
+    assert_cross_realm_this_binding::<4>(false);
+    assert_cross_realm_this_binding::<8>(false);
+    assert_cross_realm_this_binding::<16>(false);
+    assert_cross_realm_this_binding::<1>(true);
+    assert_cross_realm_this_binding::<2>(true);
+    assert_cross_realm_this_binding::<4>(true);
+    assert_cross_realm_this_binding::<8>(true);
+    assert_cross_realm_this_binding::<16>(true);
+}
+
+#[test]
 fn dynamic_function_to_string_returns_the_canonical_generated_source() {
     let module = compile_source(
         r#"var f = Function("a", " /* a */ b, c /* b */ //", "/* c */ ; /* d */ //");
@@ -326,6 +340,60 @@ fn assert_direct_eval_batch<const N: usize>(module: &CompiledModule, forced_majo
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "batch {N} direct eval returned {outcome:?}"
+    );
+}
+
+/// Executes callee-Realm global substitution and primitive boxing under one dispatch policy.
+fn assert_cross_realm_this_binding<const N: usize>(forced_major: bool) {
+    let module = compile_source(
+        r#"
+var other = $262.createRealm().global;
+var sloppy = other.Function("return this;");
+var strict = other.Function("'use strict'; return this;");
+var number = sloppy.call(1);
+var boolean = sloppy.apply(false);
+var string = sloppy.call("");
+var generator = other.eval("(function*(){ yield this; })");
+var yielded = generator.call(2).next().value;
+var directObject = new other.Object();
+var newTarget = other.Function();
+newTarget.prototype = 1;
+var nestedBoundNewTarget = newTarget.bind().bind();
+var reflectedObject = Reflect.construct(other.Object, [], nestedBoundNewTarget);
+sloppy.call(null) === other &&
+Object.getPrototypeOf(number) === other.Number.prototype &&
+Object.getPrototypeOf(boolean) === other.Boolean.prototype &&
+Object.getPrototypeOf(string) === other.String.prototype &&
+Object.getPrototypeOf(yielded) === other.Number.prototype && yielded.valueOf() === 2 &&
+Object.getPrototypeOf(directObject) === other.Object.prototype &&
+Object.getPrototypeOf(reflectedObject) === other.Object.prototype &&
+strict.call(1) === 1;
+"#,
+        1_180 + N as u32 + u32::from(forced_major) * 100,
+    );
+    let mut isolate = test_isolate_with_heap_spans(18);
+    isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .expect("cross-Realm hooks install");
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .unwrap_or_else(|error| {
+            panic!("dispatch batch {N}, forced_major={forced_major} failed to execute: {error:?}")
+        });
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
     );
 }
 
