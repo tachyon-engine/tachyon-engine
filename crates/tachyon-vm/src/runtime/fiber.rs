@@ -363,6 +363,9 @@ pub(crate) enum ConversionConsumer {
     RegExpStringIteratorLastIndex,
     StringSearchReceiver,
     StringSearchPattern,
+    StringMatchReceiver,
+    StringMatchPattern,
+    StringMatchAllFlags,
     RegExpLastIndex,
     ArrayLength,
     ArraySearchIndex,
@@ -415,6 +418,8 @@ pub(crate) enum ConversionConsumer {
     StringPrototypeFiller,
     StringPrototypeFirstNumber,
     StringPrototypeSecondNumber,
+    StringUnicodeReceiver,
+    StringUnicodeArgument,
     TypedArrayByteOffset,
     TypedArrayLength,
     TypedArrayElement,
@@ -490,6 +495,9 @@ impl ConversionConsumer {
             | Self::RegExpStringIteratorLastIndex
             | Self::StringSearchReceiver
             | Self::StringSearchPattern
+            | Self::StringMatchReceiver
+            | Self::StringMatchPattern
+            | Self::StringMatchAllFlags
             | Self::RegExpLastIndex
             | Self::ArrayLength
             | Self::ArraySearchIndex
@@ -542,6 +550,8 @@ impl ConversionConsumer {
             | Self::StringPrototypeFiller
             | Self::StringPrototypeFirstNumber
             | Self::StringPrototypeSecondNumber
+            | Self::StringUnicodeReceiver
+            | Self::StringUnicodeArgument
             | Self::TypedArrayByteOffset
             | Self::TypedArrayLength
             | Self::TypedArrayElement
@@ -613,6 +623,9 @@ impl ConversionConsumer {
                 | Self::RegExpStringIteratorLastIndex
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
+                | Self::StringMatchReceiver
+                | Self::StringMatchPattern
+                | Self::StringMatchAllFlags
                 | Self::ArrayToSortedLeftString
                 | Self::ArrayToSortedRightString
                 | Self::ArrayJoinSeparator
@@ -627,6 +640,8 @@ impl ConversionConsumer {
                 | Self::StringPrototypeReceiver
                 | Self::StringPrototypeString
                 | Self::StringPrototypeFiller
+                | Self::StringUnicodeReceiver
+                | Self::StringUnicodeArgument
         )
     }
 
@@ -691,6 +706,9 @@ impl ConversionConsumer {
                 | Self::RegExpStringIteratorLastIndex
                 | Self::StringSearchReceiver
                 | Self::StringSearchPattern
+                | Self::StringMatchReceiver
+                | Self::StringMatchPattern
+                | Self::StringMatchAllFlags
                 | Self::RegExpLastIndex
                 | Self::ArrayLength
                 | Self::ArrayJoinLength
@@ -726,6 +744,8 @@ impl ConversionConsumer {
                 | Self::StringPrototypeFiller
                 | Self::StringPrototypeFirstNumber
                 | Self::StringPrototypeSecondNumber
+                | Self::StringUnicodeReceiver
+                | Self::StringUnicodeArgument
                 | Self::TypedArrayByteOffset
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
@@ -1458,6 +1478,18 @@ pub(crate) enum StringReplaceAllStage {
     ReplaceCall,
 }
 
+/// Observable boundaries shared by String match and matchAll protocols.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum StringMatchStage {
+    IsRegExpMatchGet,
+    FlagsGet,
+    MethodGet,
+    MethodCall,
+    CreatedMethodGet,
+    CreatedMethodCall,
+}
+
 /// Observable IsRegExp boundary in String containment methods.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1681,6 +1713,7 @@ pub(crate) enum NativeContinuationKind {
     StringSplit(StringSplitStage),
     StringRaw(StringRawStage),
     StringReplaceAll(StringReplaceAllStage),
+    StringMatch(StringMatchStage),
     StringPrototype(StringPrototypeStage),
     TypedArrayConstruction(TypedArrayConstructionStage),
     TypedArraySet(TypedArraySetStage),
@@ -2116,6 +2149,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::StringReplaceAll(stage),
+            first: state,
+            second: receiver,
+        }
+    }
+
+    /// Roots a String match protocol state across one observable Get or Call.
+    #[inline]
+    pub(crate) const fn string_match(
+        site: NativeContinuationSite,
+        stage: StringMatchStage,
+        state: Value,
+        receiver: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::StringMatch(stage),
             first: state,
             second: receiver,
         }

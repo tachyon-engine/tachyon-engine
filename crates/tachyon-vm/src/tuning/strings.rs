@@ -10,6 +10,8 @@ pub(crate) const ATOM_LOAD_DENOMINATOR: usize = 4;
 pub(crate) const RAW_INITIAL_UNITS_PER_SEGMENT: usize = 8;
 /// Caps speculative String.raw reservation for adversarial array-like lengths.
 pub(crate) const RAW_MAX_INITIAL_UNITS: usize = 4_096;
+/// Covers common canonical/compatibility expansion without repeated UTF-16 backing growth.
+pub(crate) const NORMALIZATION_INITIAL_EXPANSION_FACTOR: usize = 2;
 
 /// Doubles String.raw backing while satisfying the current exact append request.
 #[inline(always)]

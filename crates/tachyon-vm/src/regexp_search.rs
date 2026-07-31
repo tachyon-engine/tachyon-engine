@@ -237,7 +237,21 @@ impl Isolate {
         state: GcRef<NativeCallState>,
         pattern: Value,
     ) -> Result<(), ExecutionError> {
-        let regexp = self.create_regexp_for_string_search(pattern)?;
+        self.update_regexp_exec_state_value(state, SEARCH_RECEIVER, pattern)?;
+        self.root_regexp_search_state(site, state)?;
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::regexp_search(
+                site,
+                RegExpSearchStage::StringCreatedMethodGet,
+                Value::from_heap_ref(state.raw()),
+                pattern,
+            ))
+            .map_err(Self::completion_stack_error)?;
+        let created = self.create_regexp_for_string_search(site, pattern);
+        let continuation = self.pop_native_continuation()?;
+        let state = self.native_call_state_reference(continuation.first())?;
+        let regexp = created?;
         self.update_regexp_exec_state_value(state, SEARCH_RECEIVER, regexp)?;
         self.begin_regexp_search_symbol_lookup(
             site,

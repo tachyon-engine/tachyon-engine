@@ -1111,6 +1111,11 @@ impl Isolate {
             (NativeFunction::StringMatchAll, b"matchAll".as_slice()),
             (NativeFunction::StringReplace, b"replace".as_slice()),
             (NativeFunction::StringReplaceAll, b"replaceAll".as_slice()),
+            (NativeFunction::StringNormalize, b"normalize".as_slice()),
+            (
+                NativeFunction::StringLocaleCompare,
+                b"localeCompare".as_slice(),
+            ),
         ] {
             let method = allocate(self, native)?;
             let atom = self.intern_intrinsic_name(name)?;

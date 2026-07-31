@@ -880,6 +880,19 @@ impl Isolate {
                             value,
                         );
                     }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringUnicodeReceiver
+                            | ConversionConsumer::StringUnicodeArgument
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_unicode_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::RegExpTestInput {
                         return self.resume_regexp_test_conversion(
                             continuation.site,
@@ -925,6 +938,20 @@ impl Isolate {
                     ) {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_string_search_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
+                        ConversionConsumer::StringMatchReceiver
+                            | ConversionConsumer::StringMatchPattern
+                            | ConversionConsumer::StringMatchAllFlags
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_string_match_conversion(
                             continuation.site,
                             state,
                             continuation.consumer,
@@ -1588,6 +1615,10 @@ impl Isolate {
                 | ConversionConsumer::StringPrototypeSecondNumber => {
                     unreachable!("String prototype conversion resumes inside its state machine")
                 }
+                ConversionConsumer::StringUnicodeReceiver
+                | ConversionConsumer::StringUnicodeArgument => {
+                    unreachable!("String Unicode conversion resumes inside its state machine")
+                }
                 ConversionConsumer::RegExpTestInput => {
                     unreachable!("RegExp test conversion resumes inside its state machine")
                 }
@@ -1598,6 +1629,11 @@ impl Isolate {
                 | ConversionConsumer::StringSearchReceiver
                 | ConversionConsumer::StringSearchPattern => {
                     unreachable!("RegExp search conversion resumes inside its state machine")
+                }
+                ConversionConsumer::StringMatchReceiver
+                | ConversionConsumer::StringMatchPattern
+                | ConversionConsumer::StringMatchAllFlags => {
+                    unreachable!("String match conversion resumes inside its state machine")
                 }
                 ConversionConsumer::RegExpExecInput => {
                     unreachable!("RegExp exec conversion resumes inside its state machine")

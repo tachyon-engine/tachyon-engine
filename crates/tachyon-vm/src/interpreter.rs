@@ -2667,6 +2667,16 @@ impl Isolate {
                 let state = self.native_call_state_reference(continuation.first())?;
                 (continuation.second(), 0, Some(state), 2)
             }
+            NativeContinuationKind::StringMatch(stage) => {
+                if !matches!(
+                    stage,
+                    StringMatchStage::MethodCall | StringMatchStage::CreatedMethodCall
+                ) {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
+                let state = self.native_call_state_reference(continuation.first())?;
+                (continuation.second(), 0, Some(state), 1)
+            }
             NativeContinuationKind::StringPrototype(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -6314,18 +6324,22 @@ impl Isolate {
                     return self.begin_string_search(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringMatch) => {
-                    let result = self.string_match(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_string_match(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringMatchAll) => {
-                    let result = self.string_match_all(&site)?;
-                    return self.write(site.caller_base, site.destination, result);
+                    return self.begin_string_match_all(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringReplace) => {
                     return self.string_replace(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::StringReplaceAll) => {
                     return self.begin_string_replace_all(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::StringNormalize) => {
+                    return self.begin_string_normalize(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::StringLocaleCompare) => {
+                    return self.begin_string_locale_compare(&site);
                 }
                 FunctionExecutable::Native(NativeFunction::RegExpEscape) => {
                     let result = self.regexp_escape(&site)?;
@@ -8643,6 +8657,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::StringReplaceAll(stage) => {
                     self.resume_string_replace_all(continuation, stage, value)
+                }
+                NativeContinuationKind::StringMatch(stage) => {
+                    self.resume_string_match(continuation, stage, value)
                 }
                 NativeContinuationKind::StringPrototype(stage) => {
                     self.resume_string_prototype(continuation, stage, value)

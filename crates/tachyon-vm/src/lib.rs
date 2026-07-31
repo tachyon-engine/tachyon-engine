@@ -73,6 +73,8 @@ mod regexp_search;
 mod runtime;
 mod string;
 mod string_concat;
+mod string_match;
+mod string_normalization;
 mod string_prototype;
 mod string_raw;
 mod string_replace_all;
@@ -311,11 +313,11 @@ use runtime::{
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
         ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
-        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringPrototypeOperation,
-        StringPrototypeStage, StringRawStage, StringReplaceAllStage, StringSplitStage,
-        SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage, TypedArraySetStage,
-        TypedArraySliceStage, TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage,
-        next_to_primitive_stage,
+        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringMatchStage,
+        StringPrototypeOperation, StringPrototypeStage, StringRawStage, StringReplaceAllStage,
+        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
+        TypedArraySetStage, TypedArraySliceStage, TypedArraySubarrayStage, VmRoots,
+        WrapForValidIteratorStage, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
@@ -521,6 +523,7 @@ pub enum ExecutionError {
     StringBufferAllocationFailed,
     InvalidStringLength,
     InvalidStringRepeatCount(Value),
+    InvalidNormalizationForm,
     InvalidUriEncoding,
     UnsupportedTypeof(Value),
     InvalidCode(CodeId),

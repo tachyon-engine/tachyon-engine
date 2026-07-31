@@ -20,6 +20,7 @@ tachyon-gc = { path = "../tachyon-gc" }
 tachyon-value = { path = "../tachyon-value" }
 ryu-js = "=1.0.3"
 regress = { version = "=0.11.1", default-features = false, features = ["backend-pikevm", "index-positions", "prohibit-unsafe", "std", "utf16"] }
+unicode-normalization = "=0.1.24"
 
 [dev-dependencies]
 tachyon-compiler = { path = "../tachyon-compiler" }

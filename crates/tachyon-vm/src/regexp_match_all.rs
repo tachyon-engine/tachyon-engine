@@ -68,28 +68,6 @@ impl Isolate {
         self.regexp_match_all_values(site, site.this_value, input)
     }
 
-    /// Implements the common primitive-string `String.prototype.matchAll` path.
-    pub(crate) fn string_match_all(
-        &mut self,
-        site: &crate::CallSite,
-    ) -> Result<Value, ExecutionError> {
-        let input = self.string_primitive_value(site.this_value)?;
-        let pattern = self
-            .call_argument(site, 0)?
-            .unwrap_or(Value::from_immediate(Immediate::Undefined));
-        let regexp = if self.is_object_value(pattern) && self.regexp_data(pattern).is_ok() {
-            let flags_value = self.regexp_data(pattern)?.1;
-            let flags = self.regexp_flags(flags_value)?;
-            if !flags.global {
-                return Err(ExecutionError::RegExpMatchAllRequiresGlobal);
-            }
-            pattern
-        } else {
-            self.create_global_regexp_for_match_all(site, pattern)?
-        };
-        self.regexp_match_all_values(site, regexp, input)
-    }
-
     /// Clones the matcher and cursor into a new lazy RegExp String Iterator.
     fn regexp_match_all_values(
         &mut self,
@@ -515,12 +493,14 @@ impl Isolate {
     }
 
     /// Allocates a globally flagged matcher for a non-RegExp String pattern.
-    fn create_global_regexp_for_match_all(
+    pub(crate) fn create_global_regexp_for_match_all(
         &mut self,
-        site: &crate::CallSite,
+        site: NativeContinuationSite,
         pattern: Value,
     ) -> Result<Value, ExecutionError> {
-        let source = if pattern.as_immediate() == Some(Immediate::Undefined) {
+        let source = if self.is_regexp_value(pattern) {
+            self.regexp_data(pattern)?.0
+        } else if pattern.as_immediate() == Some(Immediate::Undefined) {
             self.allocate_runtime_string(
                 JsString::try_from_latin1(b"(?:)").map_err(ExecutionError::ConstantString)?,
             )?
@@ -538,13 +518,14 @@ impl Isolate {
         let regexp = self.allocate_regexp_object(source, flags, prototype)?;
         self.write(site.caller_base, site.destination, regexp)?;
         let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        let regexp = self.read(site.caller_base, site.destination)?;
         self.define_fresh_data_property(
             regexp,
             last_index,
             Value::from_i32(0),
             PropertyAttributes::data(true, false, false),
         )?;
-        Ok(regexp)
+        self.read(site.caller_base, site.destination)
     }
 
     /// Allocates the traced iterator payload after matcher cloning has completed.

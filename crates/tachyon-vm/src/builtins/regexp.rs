@@ -207,6 +207,7 @@ impl Isolate {
     #[allow(dead_code, reason = "wired by the pending RegExp search integration")]
     pub(crate) fn create_regexp_for_string_search(
         &mut self,
+        site: NativeContinuationSite,
         pattern: Value,
     ) -> Result<Value, ExecutionError> {
         let (mut source, mut flags) = if self.is_object_value(pattern)
@@ -243,14 +244,16 @@ impl Isolate {
             .regexp_prototype
             .expect("RegExp prototype initializes before String.prototype.search");
         let regexp = self.allocate_regexp_object(source, flags, prototype)?;
+        self.write(site.caller_base, site.destination, regexp)?;
         let last_index = self.intern_intrinsic_name(b"lastIndex")?;
+        let regexp = self.read(site.caller_base, site.destination)?;
         self.define_fresh_data_property(
             regexp,
             last_index,
             Value::from_i32(0),
             PropertyAttributes::data(true, false, false),
         )?;
-        Ok(regexp)
+        self.read(site.caller_base, site.destination)
     }
 
     /// Implements `RegExp.escape` over code points while preserving exact UTF-16 output.

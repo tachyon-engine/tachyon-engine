@@ -166,7 +166,7 @@ impl Isolate {
     }
 
     /// Uses the private flags slot only when the complete intrinsic accessor chain is unchanged.
-    fn intrinsic_regexp_flags_value(
+    pub(crate) fn intrinsic_regexp_flags_value(
         &mut self,
         search: Value,
         flags: AtomId,

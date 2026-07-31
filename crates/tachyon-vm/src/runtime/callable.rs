@@ -375,6 +375,8 @@ pub(crate) enum NativeFunction {
     StringMatchAll,
     StringReplace,
     StringReplaceAll,
+    StringNormalize,
+    StringLocaleCompare,
     StringIterator,
     StringIteratorNext,
     RegExpConstructor,
@@ -1004,6 +1006,7 @@ impl NativeFunction {
             Self::SignalStateSet
             | Self::StringMatch
             | Self::StringMatchAll
+            | Self::StringLocaleCompare
             | Self::RegExpMatch
             | Self::RegExpMatchAll
             | Self::SignalUntrack
@@ -1346,6 +1349,7 @@ impl NativeFunction {
             | Self::StringToUpperCase
             | Self::StringToLocaleLowerCase
             | Self::StringToLocaleUpperCase
+            | Self::StringNormalize
             | Self::StringIterator
             | Self::StringIteratorNext
             | Self::RegExpGetter(_)
@@ -1528,6 +1532,8 @@ impl NativeFunction {
             Self::StringMatchAll => "matchAll",
             Self::StringReplace => "replace",
             Self::StringReplaceAll => "replaceAll",
+            Self::StringNormalize => "normalize",
+            Self::StringLocaleCompare => "localeCompare",
             Self::StringIterator => "[Symbol.iterator]",
             Self::StringIteratorNext => "next",
             Self::SymbolConstructor => "Symbol",
@@ -2545,7 +2551,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidDateValue
         | ExecutionError::InvalidStringLength
         | ExecutionError::JsonSerializationDepthExceeded
-        | ExecutionError::InvalidStringRepeatCount(_) => Some(NativeErrorKind::Range),
+        | ExecutionError::InvalidStringRepeatCount(_)
+        | ExecutionError::InvalidNormalizationForm => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,
     }

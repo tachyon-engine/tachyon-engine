@@ -77,6 +77,8 @@ mod regexp_replace;
 mod regexp_search;
 mod signals;
 mod string_case;
+mod string_match;
+mod string_normalization;
 mod string_prototype;
 mod string_raw;
 mod string_replace_all;
