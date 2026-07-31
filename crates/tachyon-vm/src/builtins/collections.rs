@@ -1139,7 +1139,10 @@ impl Isolate {
         })
     }
 
-    fn collection_len(&mut self, storage: GcRef<OrderedCollection>) -> Result<u32, ExecutionError> {
+    pub(crate) fn collection_len(
+        &mut self,
+        storage: GcRef<OrderedCollection>,
+    ) -> Result<u32, ExecutionError> {
         self.heap.with_running_scope(|scope| {
             let storage = scope.root(storage).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
@@ -1198,7 +1201,7 @@ impl Isolate {
         })
     }
 
-    fn collection_delete(
+    pub(crate) fn collection_delete(
         &mut self,
         storage: GcRef<OrderedCollection>,
         index: u32,
@@ -1240,7 +1243,7 @@ impl Isolate {
         self.ensure_collection_capacity(receiver, storage, true)
     }
 
-    fn ensure_set_capacity(
+    pub(crate) fn ensure_set_capacity(
         &mut self,
         receiver: Value,
         storage: GcRef<OrderedCollection>,
@@ -1303,6 +1306,7 @@ impl Isolate {
                 &mut roots,
             )
             .map_err(ExecutionError::HeapAllocation)?;
+        let receiver = roots.receiver;
         let raw = receiver
             .as_heap_ref()
             .ok_or(ExecutionError::IncompatibleCollectionReceiver(receiver))?;

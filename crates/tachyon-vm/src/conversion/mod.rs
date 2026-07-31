@@ -428,6 +428,10 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::SetRecordSize {
+                        let state = self.pending_set_operation_reference(continuation.receiver)?;
+                        return self.resume_set_size_conversion(continuation.site, state, value);
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::JsonStringifyNumberSpace
@@ -1502,6 +1506,9 @@ impl Isolate {
                 ConversionConsumer::ArraySetLengthUint32
                 | ConversionConsumer::ArraySetLengthNumber => {
                     unreachable!("ArraySetLength conversions finish inside the state machine")
+                }
+                ConversionConsumer::SetRecordSize => {
+                    unreachable!("Set size conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ErrorConstructorMessage
                 | ConversionConsumer::ErrorToStringName

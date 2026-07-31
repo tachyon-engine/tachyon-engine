@@ -3370,6 +3370,19 @@ impl Isolate {
             (b"delete".as_slice(), NativeFunction::SetDelete),
             (b"clear".as_slice(), NativeFunction::SetClear),
             (b"forEach".as_slice(), NativeFunction::SetForEach),
+            (b"union".as_slice(), NativeFunction::SetUnion),
+            (b"difference".as_slice(), NativeFunction::SetDifference),
+            (b"intersection".as_slice(), NativeFunction::SetIntersection),
+            (
+                b"symmetricDifference".as_slice(),
+                NativeFunction::SetSymmetricDifference,
+            ),
+            (b"isSubsetOf".as_slice(), NativeFunction::SetIsSubsetOf),
+            (b"isSupersetOf".as_slice(), NativeFunction::SetIsSupersetOf),
+            (
+                b"isDisjointFrom".as_slice(),
+                NativeFunction::SetIsDisjointFrom,
+            ),
         ] {
             self.install_collection_method(set_prototype, function_prototype, name, native)?;
         }

@@ -76,6 +76,7 @@ mod regexp_exec;
 mod regexp_match_all;
 mod regexp_replace;
 mod regexp_search;
+mod set_methods;
 mod signals;
 mod string_case;
 mod string_from_codes;

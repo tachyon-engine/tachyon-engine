@@ -702,6 +702,9 @@ impl Isolate {
             pending_collection_for_each: registry
                 .try_register("PendingCollectionForEach")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            pending_set_operation: registry
+                .try_register("PendingSetOperation")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             pending_regexp_replace: registry
                 .try_register("PendingRegExpReplace")
                 .map_err(IsolateCreationError::TypeRegistration)?,
@@ -1802,6 +1805,18 @@ impl Isolate {
         &mut self,
         prototype: Value,
     ) -> Result<Value, ExecutionError> {
+        self.allocate_set_object_with_capacity(
+            prototype,
+            tuning::collections::INITIAL_ENTRY_CAPACITY,
+        )
+    }
+
+    /// Allocates a Set result with an educated internal-cardinality capacity hint.
+    pub(crate) fn allocate_set_object_with_capacity(
+        &mut self,
+        prototype: Value,
+        capacity: usize,
+    ) -> Result<Value, ExecutionError> {
         let mut roots = CollectionAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
@@ -1821,7 +1836,7 @@ impl Isolate {
             .try_allocate_external_with_gc(
                 self.types.ordered_collection,
                 0,
-                OrderedCollection::with_capacity(tuning::collections::INITIAL_ENTRY_CAPACITY)
+                OrderedCollection::with_capacity(capacity)
                     .map_err(|_| ExecutionError::CollectionStorageAllocationFailed)?,
                 AllocationSpace::Young,
                 &mut roots,

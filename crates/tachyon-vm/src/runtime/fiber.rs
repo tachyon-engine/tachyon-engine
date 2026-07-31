@@ -339,6 +339,7 @@ pub(crate) enum ConversionConsumer {
     BuiltinPropertyKey(BuiltinPropertyKeyConsumer),
     ArraySetLengthUint32,
     ArraySetLengthNumber,
+    SetRecordSize,
     ErrorConstructorMessage,
     ErrorToStringName,
     ErrorToStringMessage,
@@ -472,6 +473,7 @@ impl ConversionConsumer {
             | Self::BuiltinPropertyKey(_)
             | Self::ArraySetLengthUint32
             | Self::ArraySetLengthNumber
+            | Self::SetRecordSize
             | Self::ErrorConstructorMessage
             | Self::ErrorToStringName
             | Self::ErrorToStringMessage
@@ -1326,6 +1328,23 @@ pub(crate) enum CollectionIteratorCloseStage {
     ReturnCall,
 }
 
+/// Observable Get/Call stages shared by the ES2025 Set methods.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SetOperationStage {
+    Size,
+    Has,
+    Keys,
+    IteratorCall,
+    NextMethod,
+    NextCall,
+    ResultDone,
+    ResultValue,
+    HasCall,
+    CloseReturnGetter,
+    CloseReturnCall,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub(crate) enum InstanceElementStage {
@@ -1664,6 +1683,7 @@ pub(crate) enum NativeContinuationKind {
     },
     CollectionInitializer(CollectionInitializerStage),
     CollectionIteratorClose(CollectionIteratorCloseStage),
+    SetOperation(SetOperationStage),
     CopyDataProperties(CopyDataPropertiesStage),
     DefineProperties(DefinePropertiesStage),
     GetOwnPropertyDescriptors(GetOwnPropertyDescriptorsStage),
@@ -2955,6 +2975,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::CollectionIteratorClose(stage),
             first: state,
             second: original_throw,
+        }
+    }
+
+    /// Roots a Set operation while one observable protocol step executes.
+    #[inline]
+    pub(crate) const fn set_operation(
+        site: NativeContinuationSite,
+        stage: SetOperationStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SetOperation(stage),
+            first: state,
+            second: retained,
         }
     }
 

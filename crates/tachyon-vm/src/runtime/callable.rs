@@ -605,6 +605,13 @@ pub(crate) enum NativeFunction {
     SetValues,
     SetEntries,
     SetForEach,
+    SetUnion,
+    SetDifference,
+    SetIntersection,
+    SetSymmetricDifference,
+    SetIsSubsetOf,
+    SetIsSupersetOf,
+    SetIsDisjointFrom,
     WeakMapConstructor,
     WeakMapGet,
     WeakMapSet,
@@ -1231,6 +1238,13 @@ impl NativeFunction {
             | Self::SetHas
             | Self::SetDelete
             | Self::SetForEach => 1,
+            Self::SetUnion
+            | Self::SetDifference
+            | Self::SetIntersection
+            | Self::SetSymmetricDifference
+            | Self::SetIsSubsetOf
+            | Self::SetIsSupersetOf
+            | Self::SetIsDisjointFrom => 1,
             Self::WeakMapGet
             | Self::WeakMapSet
             | Self::WeakMapHas
@@ -1762,6 +1776,13 @@ impl NativeFunction {
             Self::SetValues => "values",
             Self::SetEntries => "entries",
             Self::SetForEach => "forEach",
+            Self::SetUnion => "union",
+            Self::SetDifference => "difference",
+            Self::SetIntersection => "intersection",
+            Self::SetSymmetricDifference => "symmetricDifference",
+            Self::SetIsSubsetOf => "isSubsetOf",
+            Self::SetIsSupersetOf => "isSupersetOf",
+            Self::SetIsDisjointFrom => "isDisjointFrom",
             Self::WeakMapConstructor => "WeakMap",
             Self::WeakMapGet => "get",
             Self::WeakMapSet => "set",
@@ -2414,6 +2435,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_object_assign: GcType<PendingObjectAssign>,
     pub(crate) pending_collection_initializer: GcType<PendingCollectionInitializer>,
     pub(crate) pending_collection_for_each: GcType<PendingCollectionForEach>,
+    pub(crate) pending_set_operation: GcType<PendingSetOperation>,
     pub(crate) pending_regexp_replace: GcType<PendingRegExpReplace>,
     pub(crate) pending_json_stringify: GcType<PendingJsonStringify>,
     pub(crate) pending_map_get_or_insert_computed: GcType<PendingMapGetOrInsertComputed>,
@@ -2520,6 +2542,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::ProxyRevoked
         | ExecutionError::ProxyInvariantViolation
         | ExecutionError::UnsupportedPropertyKey(_)
+        | ExecutionError::UnsupportedNumberConversion(_)
+        | ExecutionError::InvalidSetSize(_)
         | ExecutionError::IncompatibleCollectionReceiver(_)
         | ExecutionError::IncompatibleFinalizationRegistryReceiver(_)
         | ExecutionError::InvalidFinalizationRegistration(_)
@@ -2553,6 +2577,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidStringLength
         | ExecutionError::JsonSerializationDepthExceeded
         | ExecutionError::InvalidStringRepeatCount(_)
+        | ExecutionError::NegativeSetSize(_)
         | ExecutionError::InvalidNormalizationForm => Some(NativeErrorKind::Range),
         ExecutionError::InvalidUriEncoding => Some(NativeErrorKind::Uri),
         _ => None,

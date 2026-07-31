@@ -2499,6 +2499,7 @@ impl Isolate {
             NativeContinuationKind::CollectionIteratorClose(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::SetOperation(_) => (continuation.second(), 0, None, 0),
             NativeContinuationKind::CopyDataProperties(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -7465,6 +7466,27 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::SetForEach) => {
                     return self.begin_collection_for_each(&site, false);
                 }
+                FunctionExecutable::Native(NativeFunction::SetUnion) => {
+                    return self.begin_set_operation(&site, SetOperationKind::Union);
+                }
+                FunctionExecutable::Native(NativeFunction::SetDifference) => {
+                    return self.begin_set_operation(&site, SetOperationKind::Difference);
+                }
+                FunctionExecutable::Native(NativeFunction::SetIntersection) => {
+                    return self.begin_set_operation(&site, SetOperationKind::Intersection);
+                }
+                FunctionExecutable::Native(NativeFunction::SetSymmetricDifference) => {
+                    return self.begin_set_operation(&site, SetOperationKind::SymmetricDifference);
+                }
+                FunctionExecutable::Native(NativeFunction::SetIsSubsetOf) => {
+                    return self.begin_set_operation(&site, SetOperationKind::IsSubsetOf);
+                }
+                FunctionExecutable::Native(NativeFunction::SetIsSupersetOf) => {
+                    return self.begin_set_operation(&site, SetOperationKind::IsSupersetOf);
+                }
+                FunctionExecutable::Native(NativeFunction::SetIsDisjointFrom) => {
+                    return self.begin_set_operation(&site, SetOperationKind::IsDisjointFrom);
+                }
                 FunctionExecutable::Native(NativeFunction::CollectionIteratorNext) => {
                     let value = self.collection_iterator_next(site.this_value)?;
                     return self.write(site.caller_base, site.destination, value);
@@ -8550,6 +8572,9 @@ impl Isolate {
                 }
                 NativeContinuationKind::CollectionIteratorClose(_) => {
                     unreachable!("iterator close resumes before native dispatch")
+                }
+                NativeContinuationKind::SetOperation(stage) => {
+                    self.resume_set_operation(continuation, stage, value)
                 }
                 NativeContinuationKind::CopyDataProperties(stage) => self
                     .resume_copy_data_properties_stage(continuation, stage, value)

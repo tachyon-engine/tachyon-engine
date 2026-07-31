@@ -71,6 +71,7 @@ mod regexp_match_all;
 mod regexp_replace;
 mod regexp_search;
 mod runtime;
+mod set_methods;
 mod string;
 mod string_concat;
 mod string_from_codes;
@@ -314,17 +315,18 @@ use runtime::{
         ProxyDeleteStage, ProxyGetOwnMode, ProxyGetOwnStage, ProxyGetStage, ProxyHasStage,
         ProxyInternalMethod, ProxyOwnKeysMode, ProxyOwnKeysStage, ProxySetMode,
         ProxySetPrototypeMode, ProxySetPrototypeStage, ProxySetStage, RegExpSearchStage,
-        RegExpStringIteratorStage, RegExpTestStage, SignalStateStage, StringMatchStage,
-        StringPrototypeOperation, StringPrototypeStage, StringRawStage, StringReplaceAllStage,
-        StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage, TypedArrayConstructionStage,
-        TypedArraySetStage, TypedArraySliceStage, TypedArraySubarrayStage, VmRoots,
-        WrapForValidIteratorStage, next_to_primitive_stage,
+        RegExpStringIteratorStage, RegExpTestStage, SetOperationStage, SignalStateStage,
+        StringMatchStage, StringPrototypeOperation, StringPrototypeStage, StringRawStage,
+        StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
+        TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
+        TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage, next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,
         TypeofStrings,
     },
 };
+use set_methods::{PendingSetOperation, SetOperationKind};
 use string_concat::PendingStringConcat;
 use string_from_codes::PendingStringFromCodes;
 use string_raw::PendingStringRaw;
@@ -514,6 +516,8 @@ pub enum ExecutionError {
     PropertyKeyString(StringAllocationError),
     UnsupportedPropertyKey(Value),
     UnsupportedNumberConversion(Value),
+    InvalidSetSize(Value),
+    NegativeSetSize(Value),
     TypedArrayContentTypeMismatch,
     InvalidNumberRadix(Value),
     InvalidNumberPrecision(Value),
