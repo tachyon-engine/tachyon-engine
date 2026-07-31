@@ -62,6 +62,7 @@ mod instance_of;
 mod iterator_flat_map;
 mod iterator_intrinsics;
 mod module;
+mod object_enumeration;
 mod object_prototype;
 mod optional_chaining;
 mod promise;

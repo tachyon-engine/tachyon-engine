@@ -456,18 +456,6 @@ impl Isolate {
             .map(|value| value.is_some())
     }
 
-    /// Reads a known ordinary snapshot's fixed slot without repeating receiver classification.
-    pub(crate) fn data_property_from_snapshot(
-        &mut self,
-        snapshot: OrdinaryObject,
-        key: impl Into<PropertyKey>,
-    ) -> Result<Option<Value>, ExecutionError> {
-        let Some(property) = self.shapes.lookup(snapshot.shape, key) else {
-            return Ok(None);
-        };
-        self.property_value_from_snapshot(snapshot, property)
-    }
-
     /// Reads one resolved fixed slot and maps the retained deletion sentinel back to absence.
     pub(crate) fn property_value_from_snapshot(
         &mut self,

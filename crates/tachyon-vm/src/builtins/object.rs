@@ -1457,12 +1457,13 @@ impl Isolate {
         )
     }
 
-    /// Materializes Object.keys/values/entries from ordinary enumerable data slots.
+    /// Materializes Object.keys without reading any enumerable property value.
     pub(crate) fn object_enumeration(
         &mut self,
         site: &CallSite,
         native: NativeFunction,
     ) -> Result<Value, ExecutionError> {
+        debug_assert_eq!(native, NativeFunction::ObjectKeys);
         let source = self
             .call_argument(site, 0)?
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
@@ -1479,7 +1480,7 @@ impl Isolate {
         if let Some(raw) = source.as_heap_ref()
             && let Ok(string) = self.heap.checked_reference(raw, self.types.string)
         {
-            return self.enumerate_string_primitive(result, string, native);
+            return self.enumerate_string_primitive_keys(result, string);
         }
         if !self.is_object_value(source) {
             return Ok(result);
@@ -1500,26 +1501,8 @@ impl Isolate {
             let Some(key_atom) = key.atom() else {
                 continue;
             };
-            if native == NativeFunction::ObjectKeys {
-                let key_value = self.atom_string_value(key_atom)?;
-                self.append_object_enumeration_item(result, output_index, key_value, native)?;
-                output_index = output_index
-                    .checked_add(1)
-                    .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
-                continue;
-            }
-            let Some(value) = self.data_property_from_snapshot(snapshot, key)? else {
-                continue;
-            };
-            match native {
-                NativeFunction::ObjectEntries => {
-                    self.append_object_entry(result, output_index, key_atom, value)?;
-                }
-                NativeFunction::ObjectValues => {
-                    self.append_object_enumeration_item(result, output_index, value, native)?;
-                }
-                _ => return Err(ExecutionError::NonCallable(source)),
-            }
+            let key_value = self.atom_string_value(key_atom)?;
+            self.append_object_enumeration_item(result, output_index, key_value)?;
             output_index = output_index
                 .checked_add(1)
                 .ok_or(ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
@@ -1821,61 +1804,29 @@ impl Isolate {
         Ok(value)
     }
 
-    /// Enumerates the virtual indexed properties exposed by one primitive string.
-    fn enumerate_string_primitive(
+    /// Enumerates the virtual indexed keys exposed by one primitive string.
+    fn enumerate_string_primitive_keys(
         &mut self,
         result: Value,
         string: GcRef<JsString>,
-        native: NativeFunction,
     ) -> Result<Value, ExecutionError> {
-        let units = self.heap.with_running_scope(|scope| {
+        let unit_count = self.heap.with_running_scope(|scope| {
             let string = scope.root(string).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
                 let string = no_gc
                     .borrow(string, self.types.string)
                     .map_err(ExecutionError::NoGcBorrow)?;
-                Ok::<Vec<u16>, ExecutionError>(match string.as_view() {
-                    JsStringView::Latin1(bytes) => {
-                        bytes.iter().map(|&byte| u16::from(byte)).collect()
-                    }
-                    JsStringView::Utf16(units) => units.to_vec(),
-                })
+                Ok::<usize, ExecutionError>(string.len())
             })
         })?;
-        let length = i32::try_from(units.len())
+        let length = i32::try_from(unit_count)
             .map_err(|_| ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
-        for (index, unit) in units.into_iter().enumerate() {
+        for index in 0..unit_count {
             let index = i32::try_from(index)
                 .map_err(|_| ExecutionError::RegisterWindowTooLarge(u32::MAX))?;
             let key_atom = self.property_key_atom(Value::from_i32(index))?;
-            match native {
-                NativeFunction::ObjectEntries => {
-                    let pair = self.create_and_root_entry_pair(result, index)?;
-                    let zero = self.property_key_atom(Value::from_i32(0))?;
-                    let key = self.atom_string_value(key_atom)?;
-                    self.set_own_data_property(pair, zero, key)?;
-                    let one = self.property_key_atom(Value::from_i32(1))?;
-                    let value = self.allocate_runtime_string(
-                        JsString::try_from_utf16(&[unit])
-                            .map_err(ExecutionError::PropertyKeyString)?,
-                    )?;
-                    self.set_own_data_property(pair, one, value)?;
-                    let pair_length = self.intern_intrinsic_name(b"length")?;
-                    self.set_own_data_property(pair, pair_length, Value::from_i32(2))?;
-                }
-                NativeFunction::ObjectKeys => {
-                    let key = self.atom_string_value(key_atom)?;
-                    self.append_object_enumeration_item(result, index, key, native)?;
-                }
-                NativeFunction::ObjectValues => {
-                    let value = self.allocate_runtime_string(
-                        JsString::try_from_utf16(&[unit])
-                            .map_err(ExecutionError::PropertyKeyString)?,
-                    )?;
-                    self.append_object_enumeration_item(result, index, value, native)?;
-                }
-                _ => return Err(ExecutionError::NonCallable(result)),
-            }
+            let key = self.atom_string_value(key_atom)?;
+            self.append_object_enumeration_item(result, index, key)?;
         }
         let length_atom = self.intern_intrinsic_name(b"length")?;
         self.set_own_data_property(result, length_atom, Value::from_i32(length))?;
@@ -1888,53 +1839,9 @@ impl Isolate {
         result: Value,
         output_index: i32,
         item: Value,
-        native: NativeFunction,
     ) -> Result<(), ExecutionError> {
-        debug_assert!(matches!(
-            native,
-            NativeFunction::ObjectKeys | NativeFunction::ObjectValues
-        ));
         let result_key = self.property_key_atom(Value::from_i32(output_index))?;
         self.set_own_data_property(result, result_key, item)
-    }
-
-    /// Creates and roots an Object.entries pair before allocating its key string.
-    fn create_and_root_entry_pair(
-        &mut self,
-        result: Value,
-        output_index: i32,
-    ) -> Result<Value, ExecutionError> {
-        let pair = self.create_unrooted_array()?;
-        let pair_key = self.property_key_atom(Value::from_i32(output_index))?;
-        self.set_own_data_property(result, pair_key, pair)?;
-        Ok(pair)
-    }
-
-    /// Appends one Object.entries pair whose source value remains rooted by the source object.
-    fn append_object_entry(
-        &mut self,
-        result: Value,
-        output_index: i32,
-        key: AtomId,
-        value: Value,
-    ) -> Result<(), ExecutionError> {
-        let pair = self.create_and_root_entry_pair(result, output_index)?;
-        let zero = self.property_key_atom(Value::from_i32(0))?;
-        let key = self.atom_string_value(key)?;
-        self.set_own_data_property(pair, zero, key)?;
-        let one = self.property_key_atom(Value::from_i32(1))?;
-        self.set_own_data_property(pair, one, value)?;
-        let length = self.intern_intrinsic_name(b"length")?;
-        self.set_own_data_property(pair, length, Value::from_i32(2))
-    }
-
-    /// Allocates an empty Array value whose caller immediately publishes it into a rooted owner.
-    fn create_unrooted_array(&mut self) -> Result<Value, ExecutionError> {
-        let prototype = self
-            .realm
-            .array_prototype
-            .expect("Array prototype initializes before Object.entries");
-        self.create_array_object_with_prototype(prototype)
     }
 
     /// Copies an immortal atom spelling into one GC-managed ECMAScript string value.

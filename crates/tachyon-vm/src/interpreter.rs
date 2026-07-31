@@ -6766,6 +6766,12 @@ impl Isolate {
                     | NativeFunction::ObjectValues
                     | NativeFunction::ObjectEntries),
                 ) => {
+                    if matches!(
+                        native,
+                        NativeFunction::ObjectValues | NativeFunction::ObjectEntries
+                    ) {
+                        return self.begin_object_enumeration(&site, native);
+                    }
                     if native == NativeFunction::ObjectKeys
                         && self
                             .try_dispatch_proxy_own_keys(&site, ProxyOwnKeysMode::EnumerableNames)?

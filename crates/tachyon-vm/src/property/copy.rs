@@ -49,8 +49,10 @@ pub(crate) struct PendingCopyDataProperties {
     target: Value,
     source: Value,
     exclusions: Value,
+    retained_value: Value,
     keys: Box<[PropertyKey]>,
     index: usize,
+    output_index: u32,
     consumer: CopyDataPropertiesConsumer,
 }
 
@@ -58,6 +60,7 @@ pub(crate) struct PendingCopyDataProperties {
 enum CopyDataPropertiesConsumer {
     Bytecode,
     ObjectAssign(Value),
+    ObjectEnumeration(NativeFunction),
 }
 
 enum CopyDataPropertyAction {
@@ -80,6 +83,7 @@ impl Trace for PendingCopyDataProperties {
         self.target.trace(tracer);
         self.source.trace(tracer);
         self.exclusions.trace(tracer);
+        self.retained_value.trace(tracer);
         self.keys.trace(tracer);
         if let CopyDataPropertiesConsumer::ObjectAssign(state) = &mut self.consumer {
             state.trace(tracer);
@@ -147,6 +151,53 @@ impl Isolate {
                 call_site: site.call_site,
             },
             state,
+        )
+        .map(|_| ())
+    }
+
+    /// Starts Object.values/entries on the shared EnumerableOwnProperties state machine.
+    pub(crate) fn begin_object_enumeration(
+        &mut self,
+        site: &CallSite,
+        native: NativeFunction,
+    ) -> Result<(), ExecutionError> {
+        debug_assert!(matches!(
+            native,
+            NativeFunction::ObjectValues | NativeFunction::ObjectEntries
+        ));
+        let source = self
+            .call_argument(site, 0)?
+            .unwrap_or(Value::from_immediate(Immediate::Undefined));
+        let source = self.coerce_to_object(source)?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.fiber
+            .completions
+            .push_native(NativeContinuation::copy_data_properties_stage(
+                native_site,
+                CopyDataPropertiesStage::OwnKeys,
+                source,
+                Value::from_immediate(Immediate::Undefined),
+            ))
+            .map_err(Self::completion_stack_error)?;
+        if let Err(error) = self.create_array_from_site(&CallSite {
+            argument_count: 0,
+            ..*site
+        }) {
+            self.pop_native_continuation()?;
+            return Err(error);
+        }
+        let result = self.read(site.caller_base, site.destination)?;
+        let source = self.pop_native_continuation()?.first();
+        self.begin_copy_data_properties_for_consumer(
+            native_site,
+            result,
+            source,
+            Value::from_immediate(Immediate::Undefined),
+            CopyDataPropertiesConsumer::ObjectEnumeration(native),
         )
         .map(|_| ())
     }
@@ -243,22 +294,26 @@ impl Isolate {
             return Err(ExecutionError::NotObject(source));
         }
         if !self.is_object_value(source) {
-            return self.finish_copy_data_properties(site, target, consumer);
+            return self.finish_copy_data_properties(site, target, consumer, 0);
         }
-        let raw = exclusions
-            .as_heap_ref()
-            .ok_or(ExecutionError::InvalidExclusionList(exclusions))?;
-        let _exclusion_list = self
-            .heap
-            .checked_reference(raw, self.types.exclusion_list)
-            .map_err(|_| ExecutionError::InvalidExclusionList(exclusions))?;
+        if !matches!(consumer, CopyDataPropertiesConsumer::ObjectEnumeration(_)) {
+            let raw = exclusions
+                .as_heap_ref()
+                .ok_or(ExecutionError::InvalidExclusionList(exclusions))?;
+            let _exclusion_list = self
+                .heap
+                .checked_reference(raw, self.types.exclusion_list)
+                .map_err(|_| ExecutionError::InvalidExclusionList(exclusions))?;
+        }
         if self.is_proxy_value(source) {
             let state = self.allocate_pending_copy_data_properties(PendingCopyDataProperties {
                 target,
                 source,
                 exclusions,
+                retained_value: Value::from_immediate(Immediate::Undefined),
                 keys: Box::new([]),
                 index: 0,
+                output_index: 0,
                 consumer,
             })?;
             self.write(
@@ -270,27 +325,19 @@ impl Isolate {
         }
         let (_, snapshot) = self.object_snapshot(source)?;
         let keys = self.ordinary_own_property_keys(source, snapshot)?;
-        let string_length = if self.is_string_wrapper(source) {
-            self.string_value_length(source)?
-        } else {
-            0
-        };
         let mut copied_keys = Vec::new();
         copied_keys
-            .try_reserve_exact(keys.len().saturating_add(string_length))
+            .try_reserve_exact(keys.len())
             .map_err(|_| ExecutionError::CopyDataPropertiesAllocationFailed)?;
-        for index in 0..string_length {
-            copied_keys.push(PropertyKey::Atom(
-                self.safe_integer_property_atom(index as u64)?,
-            ));
-        }
         copied_keys.extend(keys);
         let state = self.allocate_pending_copy_data_properties(PendingCopyDataProperties {
             target,
             source,
             exclusions,
+            retained_value: Value::from_immediate(Immediate::Undefined),
             keys: copied_keys.into_boxed_slice(),
             index: 0,
+            output_index: 0,
             consumer,
         })?;
         self.write(
@@ -334,6 +381,7 @@ impl Isolate {
         site: NativeContinuationSite,
         target: Value,
         consumer: CopyDataPropertiesConsumer,
+        output_index: u32,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
         match consumer {
             CopyDataPropertiesConsumer::Bytecode => {
@@ -343,6 +391,16 @@ impl Isolate {
             CopyDataPropertiesConsumer::ObjectAssign(state) => {
                 let state = self.pending_object_assign_reference(state)?;
                 self.advance_object_assign(site, state)
+            }
+            CopyDataPropertiesConsumer::ObjectEnumeration(_) => {
+                let length = self.length_atom()?;
+                self.set_own_data_property(
+                    target,
+                    length,
+                    safe_integer_value(u64::from(output_index)),
+                )?;
+                self.write(site.caller_base, site.destination, target)?;
+                Ok(None)
             }
         }
     }
@@ -427,8 +485,10 @@ impl Isolate {
             target: pending.target,
             source: pending.source,
             exclusions: pending.exclusions,
+            retained_value: Value::from_immediate(Immediate::Undefined),
             keys: keys.into_boxed_slice(),
             index: 0,
+            output_index: 0,
             consumer: pending.consumer,
         })?;
         self.write(
@@ -445,13 +505,35 @@ impl Isolate {
         site: NativeContinuationSite,
         state: GcRef<PendingCopyDataProperties>,
     ) -> Result<Option<RunOutcome>, ExecutionError> {
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
         loop {
+            let state = self.reload_pending_copy_state(site)?;
             let pending = self.pending_copy_data_properties(state)?;
             let Some(key) = pending.key else {
-                return self.finish_copy_data_properties(site, pending.target, pending.consumer);
+                return self.finish_copy_data_properties(
+                    site,
+                    pending.target,
+                    pending.consumer,
+                    pending.output_index,
+                );
             };
             self.advance_pending_copy_data_properties(state)?;
-            if self.exclusion_list_contains_value(pending.exclusions, key)? {
+            if matches!(
+                pending.consumer,
+                CopyDataPropertiesConsumer::ObjectEnumeration(_)
+            ) && key.atom().is_none()
+            {
+                continue;
+            }
+            if !matches!(
+                pending.consumer,
+                CopyDataPropertiesConsumer::ObjectEnumeration(_)
+            ) && self.exclusion_list_contains_value(pending.exclusions, key)?
+            {
                 continue;
             }
             if self.is_proxy_value(pending.source) {
@@ -470,7 +552,10 @@ impl Isolate {
             if !descriptor.enumerable().unwrap_or(false) {
                 continue;
             }
-            match self.resolve_property_read(pending.source, key)? {
+            let read = self.resolve_property_read(pending.source, key)?;
+            let state = self.reload_pending_copy_state(site)?;
+            let pending = self.pending_copy_data_properties(state)?;
+            match read {
                 PropertyRead::Missing => continue,
                 PropertyRead::Data(value) => {
                     match self.write_copy_data_property(site, state, pending, key, value)? {
@@ -542,6 +627,18 @@ impl Isolate {
         key: PropertyKey,
         value: Value,
     ) -> Result<CopyDataPropertyAction, ExecutionError> {
+        if let CopyDataPropertiesConsumer::ObjectEnumeration(native) = pending.consumer {
+            self.retain_pending_copy_value(state, value)?;
+            self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_heap_ref(state.raw()),
+            )?;
+            self.append_pending_object_enumeration(site, state, key, native)?;
+            let state = self.reload_pending_copy_state(site)?;
+            self.advance_pending_copy_output(state)?;
+            return Ok(CopyDataPropertyAction::Continue);
+        }
         if matches!(pending.consumer, CopyDataPropertiesConsumer::Bytecode) {
             self.copy_data_property(pending.target, key, value)?;
             return Ok(CopyDataPropertyAction::Continue);
@@ -899,7 +996,9 @@ impl Isolate {
                         target: pending.target,
                         source: pending.source,
                         exclusions: pending.exclusions,
+                        retained_value: pending.retained_value,
                         key: pending.keys.get(pending.index).copied(),
+                        output_index: pending.output_index,
                         consumer: pending.consumer,
                     })
                     .map_err(ExecutionError::NoGcBorrow)
@@ -940,6 +1039,115 @@ impl Isolate {
             })
         })
     }
+
+    /// Retains a callback-produced value before result allocation can trigger moving GC.
+    fn retain_pending_copy_value(
+        &mut self,
+        state: GcRef<PendingCopyDataProperties>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow_mut(state, self.types.pending_copy_data_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?
+                    .retained_value = value;
+                Ok::<(), ExecutionError>(())
+            })?;
+            scope
+                .write_value_barrier(state, value)
+                .map(|_| ())
+                .map_err(ExecutionError::HeapReference)
+        })
+    }
+
+    /// Appends one values/entries result while reloading movable identities after allocation.
+    fn append_pending_object_enumeration(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingCopyDataProperties>,
+        key: PropertyKey,
+        native: NativeFunction,
+    ) -> Result<(), ExecutionError> {
+        let key = key
+            .atom()
+            .ok_or(ExecutionError::PrivatePropertyKeyEscaped)?;
+        let pending = self.pending_copy_data_properties(state)?;
+        let output_index =
+            i32::try_from(pending.output_index).map_err(|_| ExecutionError::ArrayLengthOverflow)?;
+        let output_key = self.property_key_atom(Value::from_i32(output_index))?;
+        if native == NativeFunction::ObjectValues {
+            return self.set_own_data_property(pending.target, output_key, pending.retained_value);
+        }
+        debug_assert_eq!(native, NativeFunction::ObjectEntries);
+        let prototype = self
+            .realm
+            .array_prototype
+            .expect("Array prototype initializes before Object.entries");
+        let pair = self.create_array_object_with_prototype(prototype)?;
+        let state = self.reload_pending_copy_state(site)?;
+        let pending = self.pending_copy_data_properties(state)?;
+        self.set_own_data_property(pending.target, output_key, pair)?;
+
+        let key_value = self.atom_string_value(key)?;
+        let state = self.reload_pending_copy_state(site)?;
+        let pending = self.pending_copy_data_properties(state)?;
+        let pair = self.pending_entry_pair(pending.target, output_key)?;
+        let zero = self.property_key_atom(Value::from_i32(0))?;
+        self.set_own_data_property(pair, zero, key_value)?;
+
+        let state = self.reload_pending_copy_state(site)?;
+        let pending = self.pending_copy_data_properties(state)?;
+        let pair = self.pending_entry_pair(pending.target, output_key)?;
+        let one = self.property_key_atom(Value::from_i32(1))?;
+        self.set_own_data_property(pair, one, pending.retained_value)?;
+
+        let state = self.reload_pending_copy_state(site)?;
+        let pending = self.pending_copy_data_properties(state)?;
+        let pair = self.pending_entry_pair(pending.target, output_key)?;
+        let length = self.length_atom()?;
+        self.set_own_data_property(pair, length, Value::from_i32(2))
+    }
+
+    #[inline]
+    fn pending_entry_pair(
+        &mut self,
+        result: Value,
+        output_key: AtomId,
+    ) -> Result<Value, ExecutionError> {
+        self.get_data_property(result, output_key)?
+            .ok_or(ExecutionError::MissingNativeContinuation)
+    }
+
+    /// Reloads the state identity published in the native caller destination.
+    fn reload_pending_copy_state(
+        &mut self,
+        site: NativeContinuationSite,
+    ) -> Result<GcRef<PendingCopyDataProperties>, ExecutionError> {
+        let value = self.read(site.caller_base, site.destination)?;
+        self.pending_copy_data_properties_reference(value)
+    }
+
+    /// Advances the compact result index independently from the own-key cursor.
+    fn advance_pending_copy_output(
+        &mut self,
+        state: GcRef<PendingCopyDataProperties>,
+    ) -> Result<(), ExecutionError> {
+        self.heap.with_running_scope(|scope| {
+            let state = scope.root(state).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                let pending = no_gc
+                    .borrow_mut(state, self.types.pending_copy_data_properties)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                pending.output_index = pending
+                    .output_index
+                    .checked_add(1)
+                    .ok_or(ExecutionError::ArrayLengthOverflow)?;
+                Ok(())
+            })
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -947,7 +1155,9 @@ struct PendingCopyDataPropertiesSnapshot {
     target: Value,
     source: Value,
     exclusions: Value,
+    retained_value: Value,
     key: Option<PropertyKey>,
+    output_index: u32,
     consumer: CopyDataPropertiesConsumer,
 }
 
