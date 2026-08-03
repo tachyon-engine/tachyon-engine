@@ -4,6 +4,7 @@
 //! Host filesystem traversal belongs to [`suite`]. Engine adapters consume only owned or borrowed
 //! in-memory inputs, so Tachyon's engine crates never depend on this tool or perform ambient I/O.
 
+mod agent;
 mod compare;
 mod config;
 mod edition;

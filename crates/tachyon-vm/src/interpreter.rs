@@ -6104,6 +6104,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ThrowTypeError) => {
                     return Err(ExecutionError::ReadOnlyProperty(site.this_value));
                 }
+                FunctionExecutable::Native(NativeFunction::HostAgent(function)) => {
+                    return self.call_host_agent(&site, function);
+                }
                 FunctionExecutable::Native(NativeFunction::HostCreateRealm) => {
                     let (_, global) = self.create_realm()?;
                     let result = self.create_ordinary_object()?;

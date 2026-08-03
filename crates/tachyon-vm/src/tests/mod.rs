@@ -59,6 +59,7 @@ mod fixtures;
 mod function_to_string;
 mod generator;
 mod grouping;
+mod host_agent;
 mod instance_of;
 mod iterator_flat_map;
 mod iterator_intrinsics;

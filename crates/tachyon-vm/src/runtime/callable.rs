@@ -129,6 +129,56 @@ pub(crate) enum AtomicsFunction {
     Xor,
 }
 
+/// Raw host-agent operations wrapped by the Test262 adapter's observable JavaScript surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum HostAgentFunction {
+    Start,
+    Broadcast,
+    ReceiveBroadcast,
+    Report,
+    GetReport,
+    Sleep,
+    MonotonicNow,
+    Leaving,
+}
+
+impl HostAgentFunction {
+    pub(crate) const ALL: [Self; 8] = [
+        Self::Start,
+        Self::Broadcast,
+        Self::ReceiveBroadcast,
+        Self::Report,
+        Self::GetReport,
+        Self::Sleep,
+        Self::MonotonicNow,
+        Self::Leaving,
+    ];
+
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Start => "_start",
+            Self::Broadcast => "_broadcast",
+            Self::ReceiveBroadcast => "_receiveBroadcast",
+            Self::Report => "_report",
+            Self::GetReport => "_getReport",
+            Self::Sleep => "_sleep",
+            Self::MonotonicNow => "_monotonicNow",
+            Self::Leaving => "_leaving",
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::Broadcast => 2,
+            Self::Start | Self::Report | Self::Sleep => 1,
+            Self::ReceiveBroadcast | Self::GetReport | Self::MonotonicNow | Self::Leaving => 0,
+        }
+    }
+}
+
 impl AtomicsFunction {
     pub(crate) const ALL: [Self; 13] = [
         Self::Add,
@@ -370,6 +420,7 @@ pub(crate) enum NativeFunction {
     SignalIsComputed,
     SignalIsWatcher,
     Atomics(AtomicsFunction),
+    HostAgent(HostAgentFunction),
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -1098,6 +1149,9 @@ impl NativeFunction {
         if let Self::Atomics(function) = self {
             return function.length();
         }
+        if let Self::HostAgent(function) = self {
+            return function.length();
+        }
         if let Some(function) = self.math_function() {
             return function.length();
         }
@@ -1513,13 +1567,16 @@ impl NativeFunction {
             Self::HostCreateRealm => 0,
             Self::HostEvalScript => 1,
             Self::HostDetachArrayBuffer => 1,
-            Self::Atomics(_) => unreachable!(),
+            Self::Atomics(_) | Self::HostAgent(_) => unreachable!(),
         }
     }
 
     #[inline]
     pub(crate) const fn name(self) -> &'static str {
         if let Self::Atomics(function) = self {
+            return function.name();
+        }
+        if let Self::HostAgent(function) = self {
             return function.name();
         }
         if let Some(function) = self.math_function() {
@@ -1925,6 +1982,7 @@ impl NativeFunction {
             Self::HostCreateRealm => "createRealm",
             Self::HostEvalScript => "evalScript",
             Self::HostDetachArrayBuffer => "detachArrayBuffer",
+            Self::HostAgent(_) => unreachable!(),
             Self::MathAbs
             | Self::MathAcos
             | Self::MathAcosh

@@ -1,14 +1,14 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     future::Future,
     num::NonZeroU32,
     pin::Pin,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     task::{Context, Wake, Waker},
-    time::Instant,
 };
 
 use tachyon_compiler::{
@@ -17,14 +17,17 @@ use tachyon_compiler::{
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
-    DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget, ExecutionError, HostProviderError,
-    HostProviders, Isolate, IsolateConfig, LoadedModule, ModuleError, ModuleIdentity,
-    ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId, RealmLimits, ResolvedModuleRequest,
-    RunOutcome, StackLimits, TimeZoneProvider, Value, WallClockProvider,
+    AtomHashSeed, AtomTableConfig, DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget,
+    ExecutionError, HostProviderError, HostProviders, Isolate, IsolateConfig, LoadedModule,
+    ModuleError, ModuleIdentity, ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId,
+    RealmLimits, ResolvedModuleRequest, RunOutcome, StackLimits, TimeZoneProvider, Value,
+    WallClockProvider,
 };
 
-use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
+use crate::{
+    EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit,
+    agent::{AgentController, Test262AgentCluster},
+};
 
 const ATOM_MAX_ENTRIES: u32 = 1 << 18;
 const ATOM_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -61,6 +64,33 @@ function $DONE(error) {
 globalThis.$DONE = $DONE;
 "#;
 const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
+const AGENT_BOOTSTRAP_SOURCE: &str = r#"
+(function (agent) {
+  const rawStart = agent._start;
+  const rawBroadcast = agent._broadcast;
+  const rawReceiveBroadcast = agent._receiveBroadcast;
+  const rawReport = agent._report;
+  const rawGetReport = agent._getReport;
+  const rawSleep = agent._sleep;
+  const rawMonotonicNow = agent._monotonicNow;
+  const rawLeaving = agent._leaving;
+
+  agent.start = function (source) { return rawStart(String(source)); };
+  agent.broadcast = function (sab, value) {
+    if (value !== undefined && typeof value !== "bigint") value = Number(value) | 0;
+    return rawBroadcast(sab, value);
+  };
+  agent.receiveBroadcast = function (callback) {
+    const packet = rawReceiveBroadcast();
+    return callback(packet.buffer, packet.value);
+  };
+  agent.report = function (message) { return rawReport(String(message)); };
+  agent.getReport = function () { return rawGetReport(); };
+  agent.sleep = function (milliseconds) { return rawSleep(Number(milliseconds)); };
+  agent.monotonicNow = function () { return rawMonotonicNow(); };
+  agent.leaving = function () { return rawLeaving(); };
+})(globalThis.$262.agent);
+"#;
 
 /// Deterministic clock that also permits conformance fixtures to observe forward progress.
 #[derive(Default)]
@@ -91,121 +121,6 @@ impl TimeZoneProvider for Test262UtcTimeZone {
         local_milliseconds: i64,
     ) -> Result<i64, HostProviderError> {
         Ok(local_milliseconds)
-    }
-}
-
-#[derive(Default)]
-struct Test262WaiterCluster {
-    state: Mutex<Test262WaiterState>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct Test262WaiterState {
-    queues: HashMap<AtomicsWaitLocation, VecDeque<u64>>,
-    next_waiter: u64,
-}
-
-#[derive(Clone, Default)]
-struct Test262AtomicsWaiter {
-    cluster: Arc<Test262WaiterCluster>,
-}
-
-impl AtomicsWaiterProvider for Test262AtomicsWaiter {
-    /// Removes the requested FIFO prefix while holding the location critical section.
-    fn notify(
-        &mut self,
-        location: AtomicsWaitLocation,
-        count: u64,
-    ) -> Result<u64, HostProviderError> {
-        let mut state = self.cluster.state.lock().map_err(waiter_failure)?;
-        let mut notified = 0_u64;
-        if let Some(queue) = state.queues.get_mut(&location) {
-            while notified < count && queue.pop_front().is_some() {
-                notified += 1;
-            }
-            if queue.is_empty() {
-                state.queues.remove(&location);
-            }
-        }
-        drop(state);
-        if notified != 0 {
-            self.cluster.changed.notify_all();
-        }
-        Ok(notified)
-    }
-
-    /// Compares and publishes atomically against notify, then parks only inside the runner.
-    fn wait(
-        &mut self,
-        location: AtomicsWaitLocation,
-        timeout: Option<core::time::Duration>,
-        condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
-    ) -> Result<AtomicsWaitResult, HostProviderError> {
-        let mut state = self.cluster.state.lock().map_err(waiter_failure)?;
-        if !condition()? {
-            return Ok(AtomicsWaitResult::NotEqual);
-        }
-        if timeout == Some(core::time::Duration::ZERO) {
-            return Ok(AtomicsWaitResult::TimedOut);
-        }
-        let waiter = state.next_waiter;
-        state.next_waiter = state.next_waiter.wrapping_add(1);
-        state.queues.entry(location).or_default().push_back(waiter);
-        let started = Instant::now();
-        loop {
-            if !waiter_is_registered(&state, location, waiter) {
-                return Ok(AtomicsWaitResult::Ok);
-            }
-            let Some(limit) = timeout else {
-                state = self.cluster.changed.wait(state).map_err(waiter_failure)?;
-                continue;
-            };
-            let Some(remaining) = limit.checked_sub(started.elapsed()) else {
-                remove_waiter(&mut state, location, waiter);
-                return Ok(AtomicsWaitResult::TimedOut);
-            };
-            let (next, elapsed) = self
-                .cluster
-                .changed
-                .wait_timeout(state, remaining)
-                .map_err(waiter_failure)?;
-            state = next;
-            if elapsed.timed_out() && waiter_is_registered(&state, location, waiter) {
-                remove_waiter(&mut state, location, waiter);
-                return Ok(AtomicsWaitResult::TimedOut);
-            }
-        }
-    }
-}
-
-#[inline]
-fn waiter_failure<T>(_error: std::sync::PoisonError<T>) -> HostProviderError {
-    HostProviderError::Failure(1)
-}
-
-#[inline]
-fn waiter_is_registered(
-    state: &Test262WaiterState,
-    location: AtomicsWaitLocation,
-    waiter: u64,
-) -> bool {
-    state
-        .queues
-        .get(&location)
-        .is_some_and(|queue| queue.contains(&waiter))
-}
-
-/// Removes one timed-out waiter without disturbing FIFO order for remaining agents.
-fn remove_waiter(state: &mut Test262WaiterState, location: AtomicsWaitLocation, waiter: u64) {
-    let Some(queue) = state.queues.get_mut(&location) else {
-        return;
-    };
-    if let Some(position) = queue.iter().position(|candidate| *candidate == waiter) {
-        queue.remove(position);
-    }
-    if queue.is_empty() {
-        state.queues.remove(&location);
     }
 }
 
@@ -333,6 +248,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         }
     }
 
+    let agent_controller = AgentController::new();
     let mut isolate = match Isolate::new_with_host_providers(
         IsolateConfig::new(
             AtomTableConfig::new(
@@ -347,7 +263,8 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
             .with_time_zone(Test262UtcTimeZone)
-            .with_atomics_waiter(Test262AtomicsWaiter::default())
+            .with_atomics_waiter(agent_controller.waiter())
+            .with_agent_host(agent_controller.main_host())
             .with_agent_can_suspend(request.can_block),
     ) {
         Ok(isolate) => isolate,
@@ -356,6 +273,9 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
     if let Err(error) = isolate.install_realm_hooks(eval_script_callback, dynamic_function_callback)
     {
         return unsupported(format!("Tachyon realm hook installation failed: {error:?}"));
+    }
+    if let Some(outcome) = install_agent_bootstrap(&mut isolate) {
+        return outcome;
     }
     for (index, prelude) in request.test.preludes.iter().enumerate() {
         let module = match Compiler.compile(
@@ -405,6 +325,91 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         return execute_async_probe(&mut isolate);
     }
     EngineOutcome::Completed
+}
+
+/// Builds and executes the adapter-owned wrappers around raw host-agent native functions.
+fn install_agent_bootstrap(isolate: &mut Isolate) -> Option<EngineOutcome> {
+    let source = SourceText::new(
+        SourceId::new(u32::MAX - 3),
+        SourceName::new("test262-agent-bootstrap"),
+        MediaType::JavaScript,
+        Arc::from(AGENT_BOOTSTRAP_SOURCE),
+    );
+    let module = match Compiler.compile(source, options(SourceMode::Script)) {
+        Ok(module) => module,
+        Err(error) => {
+            return Some(unsupported(format!(
+                "Tachyon cannot lower its agent bootstrap: {}",
+                compile_error_message(&error)
+            )));
+        }
+    };
+    execute_module(isolate, &module)
+}
+
+/// Owns one worker isolate from hook installation through source completion and teardown.
+pub(super) fn run_agent_worker(
+    source: Box<[u16]>,
+    cluster: Arc<Test262AgentCluster>,
+    worker: u64,
+    ready: mpsc::SyncSender<Result<(), HostProviderError>>,
+) {
+    let mut isolate = match Isolate::new_with_host_providers(
+        IsolateConfig::new(
+            AtomTableConfig::new(
+                ATOM_MAX_ENTRIES,
+                ATOM_MAX_BYTES,
+                AtomHashSeed::new(0x7461_6368_796f_6e31, 0x7465_7374_3236_3231),
+            ),
+            HeapLimit::new(HEAP_LIMIT_BYTES),
+            StackLimits::new(STACK_MAX_FRAMES, STACK_MAX_REGISTERS),
+            RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
+        ),
+        HostProviders::new()
+            .with_wall_clock(Test262WallClock::default())
+            .with_time_zone(Test262UtcTimeZone)
+            .with_atomics_waiter(cluster.waiter())
+            .with_agent_host(cluster.worker_host(worker))
+            .with_agent_can_suspend(true),
+    ) {
+        Ok(isolate) => isolate,
+        Err(_) => {
+            let _ = ready.send(Err(HostProviderError::Failure(4)));
+            cluster.worker_finished(worker);
+            return;
+        }
+    };
+    if isolate
+        .install_realm_hooks(eval_script_callback, dynamic_function_callback)
+        .is_err()
+        || install_agent_bootstrap(&mut isolate).is_some()
+    {
+        let _ = ready.send(Err(HostProviderError::Failure(5)));
+        return;
+    }
+    let module = match Compiler.compile(
+        SourceText::new(
+            SourceId::new(u32::MAX - 4),
+            SourceName::new("test262-agent-source"),
+            MediaType::JavaScript,
+            Arc::<str>::from(String::from_utf16_lossy(&source)),
+        ),
+        options(SourceMode::Script),
+    ) {
+        Ok(module) => module,
+        Err(_) => {
+            let _ = ready.send(Err(HostProviderError::Failure(6)));
+            return;
+        }
+    };
+    if let Err(error) = cluster.worker_ready(worker) {
+        let _ = ready.send(Err(error));
+        return;
+    }
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+    let _ = execute_module(&mut isolate, &module);
 }
 
 fn options(source_mode: SourceMode) -> CompileOptions {
@@ -879,7 +884,7 @@ mod tests {
         TachyonAdapter
             .execute(ExecutionRequest {
                 test,
-                can_block: false,
+                can_block: test.variant.can_block,
                 is_module: false,
                 is_async: test.variant.is_async,
             })
@@ -946,6 +951,58 @@ mod tests {
             execute(&composed("1 + 2;", &[], false)),
             EngineOutcome::Completed
         );
+    }
+
+    #[test]
+    /// Covers source/message conversion, SAB identity, report FIFO, and normal worker teardown.
+    fn adapter_agents_share_sab_and_report_without_leaking_workers() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(function (sab) {
+                const values = new Int32Array(sab);
+                Atomics.store(values, 0, 42);
+                $262.agent.report(Atomics.load(values, 0));
+                $262.agent.leaving();
+              });
+            `);
+            const values = new Int32Array(new SharedArrayBuffer(4));
+            $262.agent.broadcast(values.buffer);
+            let report;
+            while ((report = $262.agent.getReport()) === null) {
+              $262.agent.sleep(1);
+            }
+            if (report !== "42" || Atomics.load(values, 0) !== 42) {
+              throw new Error("agent coordination failed");
+            }
+            "#,
+            &[],
+            false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
+    }
+
+    #[test]
+    /// Proves request teardown cancels an infinite wait before joining the worker thread.
+    fn adapter_cancels_and_joins_blocked_agents_on_request_teardown() {
+        let mut test = composed(
+            r#"
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(function (sab) {
+                const values = new Int32Array(sab);
+                Atomics.wait(values, 0, 0);
+                $262.agent.leaving();
+              });
+            `);
+            const values = new Int32Array(new SharedArrayBuffer(4));
+            $262.agent.broadcast(values.buffer);
+            "#,
+            &[],
+            false,
+        );
+        test.variant.can_block = true;
+        assert_eq!(execute(&test), EngineOutcome::Completed);
     }
 
     #[test]

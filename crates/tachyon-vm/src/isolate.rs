@@ -244,6 +244,8 @@ impl Isolate {
         let harness_atom = self.intern_intrinsic_name(b"$262")?;
         self.set_own_data_property(global, harness_atom, hooks)?;
         self.realm.set(harness_atom, hooks)?;
+        let global_atom = self.intern_intrinsic_name(b"global")?;
+        self.set_own_data_property(hooks, global_atom, global)?;
         let prototype = self
             .realm
             .function_prototype
@@ -283,7 +285,8 @@ impl Isolate {
             },
         )?;
         let detach_atom = self.intern_intrinsic_name(b"detachArrayBuffer")?;
-        self.set_own_data_property(hooks, detach_atom, detach)
+        self.set_own_data_property(hooks, detach_atom, detach)?;
+        self.install_host_agent_hooks(hooks, prototype)
     }
 
     /// Executes one compiled module with a selected Realm as the active execution context.

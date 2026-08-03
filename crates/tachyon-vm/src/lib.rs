@@ -46,6 +46,7 @@ mod finalization_registry;
 mod for_in;
 mod generator;
 mod host;
+mod host_agent;
 mod interpreter;
 mod isolate;
 mod iterator;
@@ -98,8 +99,9 @@ pub use finalization::{
     FinalizationSafepointStats,
 };
 pub use host::{
-    AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider, HostProviderError,
-    HostProviders, SharedMemoryId, TimeZoneProvider, WallClockProvider,
+    AgentBroadcast, AgentBroadcastValue, AgentHostProvider, AtomicsWaitLocation, AtomicsWaitResult,
+    AtomicsWaiterProvider, HostProviderError, HostProviders, SharedMemoryId, TimeZoneProvider,
+    WallClockProvider,
 };
 pub use isolate::Isolate;
 pub use module::{
@@ -292,9 +294,10 @@ use runtime::{
         AccessorPair, AccessorPropertyDescriptor, AtomicsFunction, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics,
         FunctionAuxiliaryEdge, FunctionExecutable, FunctionObject, GenericPropertyDescriptor,
-        GlobalNumberFunction, GlobalUriFunction, IntrinsicPropertyAtoms, MathFunction,
-        NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor, RealmIntrinsicAtoms,
-        RegExpGetter, ResolvedCallTarget, SymbolValue, VmTypes, execution_error_kind,
+        GlobalNumberFunction, GlobalUriFunction, HostAgentFunction, IntrinsicPropertyAtoms,
+        MathFunction, NativeCallState, NativeFunction, ObjectReceiver, PropertyDescriptor,
+        RealmIntrinsicAtoms, RegExpGetter, ResolvedCallTarget, SymbolValue, VmTypes,
+        execution_error_kind,
     },
     class::{
         ClassConstructorData, ClassInstanceElementPlan, ClassInstanceElementRecord,
@@ -467,6 +470,8 @@ pub enum ExecutionError {
     TimeZoneProvider(HostProviderError),
     MissingAtomicsWaiterProvider,
     AtomicsWaiterProvider(HostProviderError),
+    MissingAgentHostProvider,
+    AgentHostProvider(HostProviderError),
     MissingEntryFunction(FunctionId),
     MissingFunctionSource { code: CodeId, function: FunctionId },
     RegisterWindowTooLarge(u32),

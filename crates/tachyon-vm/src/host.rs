@@ -2,6 +2,8 @@
 
 use core::{fmt, num::NonZeroUsize, time::Duration};
 
+use crate::SharedArrayBufferHandle;
+
 /// Stable provider failure code suitable for Rust and FFI adapters without allocating messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostProviderError {
@@ -53,6 +55,21 @@ pub enum AtomicsWaitResult {
     TimedOut,
 }
 
+/// Engine-neutral scalar accompanying one Test262-style SharedArrayBuffer broadcast.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentBroadcastValue {
+    Undefined,
+    Int32(i32),
+    BigInt(Box<[u16]>),
+}
+
+/// Owned message transferred from an agent-cluster provider into one isolate.
+#[derive(Clone, Debug)]
+pub struct AgentBroadcast {
+    pub buffer: SharedArrayBufferHandle,
+    pub value: AgentBroadcastValue,
+}
+
 /// Host-owned waiter registry and parking capability for one ECMAScript agent cluster.
 ///
 /// `wait` must serialize `condition` and waiter publication against `notify` for the same
@@ -71,6 +88,29 @@ pub trait AtomicsWaiterProvider: Send {
         timeout: Option<Duration>,
         condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
     ) -> Result<AtomicsWaitResult, HostProviderError>;
+}
+
+/// Host-owned lifecycle and coordination capability for one ECMAScript agent cluster.
+///
+/// The engine transfers only owned UTF-16 strings and opaque SharedArrayBuffer handles across
+/// this boundary. Thread creation, blocking, clocks, cancellation, and worker joining remain
+/// entirely host-owned.
+pub trait AgentHostProvider: Send {
+    fn start(&mut self, source: Box<[u16]>) -> Result<(), HostProviderError>;
+
+    fn broadcast(&mut self, message: AgentBroadcast) -> Result<(), HostProviderError>;
+
+    fn receive_broadcast(&mut self) -> Result<AgentBroadcast, HostProviderError>;
+
+    fn report(&mut self, message: Box<[u16]>) -> Result<(), HostProviderError>;
+
+    fn get_report(&mut self) -> Result<Option<Box<[u16]>>, HostProviderError>;
+
+    fn sleep(&mut self, milliseconds: f64) -> Result<(), HostProviderError>;
+
+    fn monotonic_now(&mut self) -> Result<f64, HostProviderError>;
+
+    fn leaving(&mut self) -> Result<(), HostProviderError>;
 }
 
 /// Supplies Unix wall-clock milliseconds for `Date` without exposing `std::time` to the VM.
@@ -99,6 +139,7 @@ pub struct HostProviders {
     wall_clock: Option<Box<dyn WallClockProvider>>,
     time_zone: Option<Box<dyn TimeZoneProvider>>,
     atomics_waiter: Option<Box<dyn AtomicsWaiterProvider>>,
+    agent_host: Option<Box<dyn AgentHostProvider>>,
     agent_can_suspend: bool,
 }
 
@@ -109,6 +150,7 @@ impl HostProviders {
             wall_clock: None,
             time_zone: None,
             atomics_waiter: None,
+            agent_host: None,
             agent_can_suspend: false,
         }
     }
@@ -132,6 +174,12 @@ impl HostProviders {
     }
 
     #[must_use]
+    pub fn with_agent_host(mut self, provider: impl AgentHostProvider + 'static) -> Self {
+        self.agent_host = Some(Box::new(provider));
+        self
+    }
+
+    #[must_use]
     pub const fn with_agent_can_suspend(mut self, can_suspend: bool) -> Self {
         self.agent_can_suspend = can_suspend;
         self
@@ -151,6 +199,10 @@ impl HostProviders {
         self.atomics_waiter.as_deref_mut()
     }
 
+    pub(crate) fn agent_host_mut(&mut self) -> Option<&mut (dyn AgentHostProvider + 'static)> {
+        self.agent_host.as_deref_mut()
+    }
+
     pub(crate) const fn agent_can_suspend(&self) -> bool {
         self.agent_can_suspend
     }
@@ -163,6 +215,7 @@ impl fmt::Debug for HostProviders {
             .field("wall_clock", &self.wall_clock.is_some())
             .field("time_zone", &self.time_zone.is_some())
             .field("atomics_waiter", &self.atomics_waiter.is_some())
+            .field("agent_host", &self.agent_host.is_some())
             .field("agent_can_suspend", &self.agent_can_suspend)
             .finish()
     }
