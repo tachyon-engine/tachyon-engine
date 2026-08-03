@@ -2,7 +2,7 @@ use super::{checked_count_add, try_children_count};
 use crate::hir::{HirAssignmentOperator, HirAssignmentTarget, HirForInLeft};
 use crate::{
     CompileError, HirExpression, HirExpressionKind, HirForInitializer, HirObjectPropertyKey,
-    HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
+    HirPattern, HirPatternKind, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
 };
 
 /// Counts handler records exactly, including nested ranges in every try arm.
@@ -542,9 +542,19 @@ fn for_label_count(
 }
 
 fn for_in_left_label_count(left: &HirForInLeft) -> Result<usize, CompileError> {
-    let HirForInLeft::Assignment(pattern) = left else {
-        return Ok(0);
+    let pattern = match left {
+        HirForInLeft::Variable(declaration) => {
+            &declaration
+                .declarators
+                .first()
+                .expect("HIR validates one for-in declarator")
+                .pattern
+        }
+        HirForInLeft::Assignment(pattern) => pattern,
     };
+    if matches!(left, HirForInLeft::Variable(_)) {
+        return declared_pattern_label_count(pattern);
+    }
     let Some(target) = pattern.assignment_target() else {
         return Ok(0);
     };
@@ -557,6 +567,76 @@ fn for_in_left_label_count(left: &HirForInLeft) -> Result<usize, CompileError> {
             "bytecode labels",
         ),
         HirAssignmentTarget::PrivateMember { object, .. } => expression_label_count(object),
+    }
+}
+
+/// Counts labels emitted by recursive declaration-pattern initialization.
+fn declared_pattern_label_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) | HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default {
+            target,
+            initializer,
+        } => {
+            let nested = checked_count_add(
+                expression_label_count(initializer)?,
+                declared_pattern_label_count(target)?,
+                "bytecode labels",
+            )?;
+            checked_count_add(nested, 2, "bytecode labels")
+        }
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 0;
+            for property in properties.iter() {
+                if let HirObjectPropertyKey::Computed(expression) = &property.key {
+                    count = checked_count_add(
+                        count,
+                        expression_label_count(expression)?,
+                        "bytecode labels",
+                    )?;
+                }
+                count = checked_count_add(
+                    count,
+                    declared_pattern_label_count(&property.target)?,
+                    "bytecode labels",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(
+                    count,
+                    declared_pattern_label_count(rest)?,
+                    "bytecode labels",
+                )?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 1;
+            for element in elements.iter() {
+                count = checked_count_add(count, 2, "bytecode labels")?;
+                if let Some(element) = element {
+                    let branch = declared_pattern_label_count(element)?;
+                    count = checked_count_add(
+                        count,
+                        branch
+                            .checked_mul(2)
+                            .ok_or(CompileError::LoweringCapacityOverflow {
+                                collection: "bytecode labels",
+                            })?,
+                        "bytecode labels",
+                    )?;
+                }
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(count, 2, "bytecode labels")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_label_count(rest)?,
+                    "bytecode labels",
+                )?;
+            }
+            Ok(count)
+        }
     }
 }
 

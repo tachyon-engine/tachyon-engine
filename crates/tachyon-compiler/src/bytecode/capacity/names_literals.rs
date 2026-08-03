@@ -3,7 +3,8 @@ use super::{checked_count_add, try_children_count};
 use crate::hir::{HirAssignmentTarget, HirForInLeft};
 use crate::{
     CompileError, HirExpression, HirExpressionKind, HirForInitializer, HirObjectPropertyKey,
-    HirProgram, HirStatement, HirStatementKind, HirSwitchCase, HirVariableDeclaration,
+    HirPattern, HirPatternKind, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
+    HirVariableDeclaration,
 };
 
 /// Computes a checked upper bound for module scope-name interning before HIR lowering starts.
@@ -186,10 +187,88 @@ fn declaration_scope_name_count(
 
 fn for_in_left_scope_name_count(left: &HirForInLeft) -> Result<usize, CompileError> {
     match left {
-        HirForInLeft::Variable(_) => Ok(1),
+        HirForInLeft::Variable(declaration) => declared_pattern_scope_name_count(
+            &declaration
+                .declarators
+                .first()
+                .expect("HIR validates one for-in declarator")
+                .pattern,
+        ),
         HirForInLeft::Assignment(target) => target
             .assignment_target()
             .map_or(Ok(0), assignment_target_scope_name_count),
+    }
+}
+
+/// Counts every interned name emitted while recursively initializing a declaration pattern.
+fn declared_pattern_scope_name_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) => Ok(1),
+        HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default {
+            target,
+            initializer,
+        } => {
+            let nested = checked_count_add(
+                expression_scope_name_count(initializer)?,
+                declared_pattern_scope_name_count(target)?,
+                "scope names",
+            )?;
+            checked_count_add(nested, 1, "scope names")
+        }
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 0;
+            for property in properties.iter() {
+                let key = match &property.key {
+                    HirObjectPropertyKey::Static(_) => 1,
+                    HirObjectPropertyKey::Computed(expression) => {
+                        expression_scope_name_count(expression)?
+                    }
+                };
+                count = checked_count_add(count, key, "scope names")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_scope_name_count(&property.target)?,
+                    "scope names",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(
+                    count,
+                    declared_pattern_scope_name_count(rest)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 2;
+            for element in elements.iter() {
+                count = checked_count_add(count, 1, "scope names")?;
+                if let Some(element) = element {
+                    count = checked_count_add(count, 1, "scope names")?;
+                    let branch = declared_pattern_scope_name_count(element)?;
+                    count = checked_count_add(
+                        count,
+                        branch
+                            .checked_mul(2)
+                            .ok_or(CompileError::LoweringCapacityOverflow {
+                                collection: "scope names",
+                            })?,
+                        "scope names",
+                    )?;
+                }
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(count, 2, "scope names")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_scope_name_count(rest)?,
+                    "scope names",
+                )?;
+            }
+            Ok(count)
+        }
     }
 }
 
@@ -709,9 +788,19 @@ fn for_literal_count(
 }
 
 fn for_in_left_literal_count(left: &HirForInLeft) -> Result<usize, CompileError> {
-    let HirForInLeft::Assignment(pattern) = left else {
-        return Ok(0);
+    let pattern = match left {
+        HirForInLeft::Variable(declaration) => {
+            &declaration
+                .declarators
+                .first()
+                .expect("HIR validates one for-in declarator")
+                .pattern
+        }
+        HirForInLeft::Assignment(pattern) => pattern,
     };
+    if matches!(left, HirForInLeft::Variable(_)) {
+        return declared_pattern_literal_count(pattern);
+    }
     let Some(target) = pattern.assignment_target() else {
         return Ok(0);
     };
@@ -724,6 +813,74 @@ fn for_in_left_literal_count(left: &HirForInLeft) -> Result<usize, CompileError>
             "bytecode constants",
         ),
         HirAssignmentTarget::PrivateMember { object, .. } => expression_literal_count(object),
+    }
+}
+
+/// Counts constants emitted for static keys and nested declaration-pattern expressions.
+fn declared_pattern_literal_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) | HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default {
+            target,
+            initializer,
+        } => checked_count_add(
+            expression_literal_count(initializer)?,
+            declared_pattern_literal_count(target)?,
+            "bytecode constants",
+        ),
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 0;
+            for property in properties.iter() {
+                let key = match &property.key {
+                    HirObjectPropertyKey::Static(_) => 1,
+                    HirObjectPropertyKey::Computed(expression) => {
+                        expression_literal_count(expression)?
+                    }
+                };
+                count = checked_count_add(count, key, "bytecode constants")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_literal_count(&property.target)?,
+                    "bytecode constants",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(
+                    count,
+                    declared_pattern_literal_count(rest)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 0;
+            for element in elements.iter() {
+                count = checked_count_add(count, 1, "bytecode constants")?;
+                if let Some(element) = element {
+                    count = checked_count_add(count, 1, "bytecode constants")?;
+                    let branch = declared_pattern_literal_count(element)?;
+                    count = checked_count_add(
+                        count,
+                        branch
+                            .checked_mul(2)
+                            .ok_or(CompileError::LoweringCapacityOverflow {
+                                collection: "bytecode constants",
+                            })?,
+                        "bytecode constants",
+                    )?;
+                }
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(count, 2, "bytecode constants")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_literal_count(rest)?,
+                    "bytecode constants",
+                )?;
+            }
+            Ok(count)
+        }
     }
 }
 

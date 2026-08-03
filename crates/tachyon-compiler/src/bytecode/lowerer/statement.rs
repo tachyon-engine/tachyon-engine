@@ -778,7 +778,7 @@ impl Lowerer<'_> {
     pub(in crate::bytecode) fn prepare_for_in_binding(
         &mut self,
         left: &HirForInLeft,
-        span: SourceSpan,
+        _span: SourceSpan,
     ) -> Result<(), CompileError> {
         let HirForInLeft::Variable(declaration) = left else {
             return Ok(());
@@ -790,13 +790,46 @@ impl Lowerer<'_> {
             .declarators
             .first()
             .expect("HIR validates one for-in declarator");
-        let initial = self.load_undefined(span)?;
-        let binding = self.simple_binding(&declarator.pattern)?.clone();
-        self.add_local(
-            &binding,
-            Some(initial),
+        self.prepare_for_in_pattern(
+            &declarator.pattern,
             declaration.kind == HirVariableDeclarationKind::Let,
         )
+    }
+
+    /// Publishes every declaration leaf once before the iterator loop is emitted.
+    fn prepare_for_in_pattern(
+        &mut self,
+        pattern: &HirPattern,
+        mutable: bool,
+    ) -> Result<(), CompileError> {
+        match &pattern.kind {
+            HirPatternKind::Binding(binding) => {
+                let initial = self.load_undefined(binding.span)?;
+                self.add_local(binding, Some(initial), mutable)
+            }
+            HirPatternKind::Default { target, .. } => self.prepare_for_in_pattern(target, mutable),
+            HirPatternKind::Array { elements, rest } => {
+                for element in elements.iter().flatten() {
+                    self.prepare_for_in_pattern(element, mutable)?;
+                }
+                if let Some(rest) = rest {
+                    self.prepare_for_in_pattern(rest, mutable)?;
+                }
+                Ok(())
+            }
+            HirPatternKind::Object { properties, rest } => {
+                for property in properties.iter() {
+                    self.prepare_for_in_pattern(&property.target, mutable)?;
+                }
+                if let Some(rest) = rest {
+                    self.prepare_for_in_pattern(rest, mutable)?;
+                }
+                Ok(())
+            }
+            HirPatternKind::Assignment(_) => {
+                Err(self.unsupported(pattern.span, "declaration assignment pattern"))
+            }
+        }
     }
 
     /// Writes one iterator key into a declaration or re-evaluated assignment reference.
@@ -813,15 +846,7 @@ impl Lowerer<'_> {
                     .declarators
                     .first()
                     .expect("HIR validates one for-in declarator");
-                let binding = self.simple_binding(&declarator.pattern)?.clone();
-                if let Some(binding) = self.local_by_id(binding.id).cloned() {
-                    return self.write_local(&binding, value, span);
-                }
-                if self.script_scope && declaration.kind == HirVariableDeclarationKind::Var {
-                    let scope_name = self.global_binding(&binding.name, true)?;
-                    return self.emit(Opcode::StoreScope, &[value.index(), scope_name], span);
-                }
-                Err(self.unsupported(span, "uninstantiated for-in binding"))
+                self.initialize_declared_pattern(&declarator.pattern, value)
             }
         }
     }

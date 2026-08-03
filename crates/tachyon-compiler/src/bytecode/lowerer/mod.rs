@@ -884,17 +884,6 @@ impl Lowerer<'_> {
 }
 
 impl Lowerer<'_> {
-    /// Extracts a simple pattern leaf or reports the unimplemented destructuring backend.
-    #[inline(always)]
-    pub(super) fn simple_binding<'a>(
-        &self,
-        pattern: &'a crate::HirPattern,
-    ) -> Result<&'a crate::HirBinding, CompileError> {
-        pattern
-            .binding()
-            .ok_or_else(|| self.unsupported(pattern.span, "destructuring pattern bytecode"))
-    }
-
     /// Lowers one declaration list in source order so initializers can use preceding local bindings.
     pub(super) fn variable_declaration(
         &mut self,
@@ -995,13 +984,13 @@ impl Lowerer<'_> {
                 continue;
             };
             let value = self.expression(initializer)?;
-            self.initialize_var_pattern(&declarator.pattern, value)?;
+            self.initialize_declared_pattern(&declarator.pattern, value)?;
         }
         Ok(())
     }
 
-    /// Destructures one var initializer into bindings instantiated at function or script entry.
-    fn initialize_var_pattern(
+    /// Destructures into declaration bindings that were instantiated before this source position.
+    pub(super) fn initialize_declared_pattern(
         &mut self,
         pattern: &HirPattern,
         value: RegisterId,
@@ -1016,7 +1005,7 @@ impl Lowerer<'_> {
             } => {
                 let value =
                     self.default_pattern_value(value, initializer, target.inferred_name())?;
-                self.initialize_var_pattern(target, value)
+                self.initialize_declared_pattern(target, value)
             }
             HirPatternKind::Object { properties, rest } => {
                 self.require_object_coercible(value, pattern.span)?;
@@ -1030,7 +1019,7 @@ impl Lowerer<'_> {
                     if let Some(exclusions) = exclusions {
                         self.exclude_pattern_key(exclusions, key, property.span)?;
                     }
-                    self.initialize_var_pattern(&property.target, property_value)?;
+                    self.initialize_declared_pattern(&property.target, property_value)?;
                 }
                 if let Some(rest) = rest {
                     let target = self.register()?;
@@ -1044,7 +1033,7 @@ impl Lowerer<'_> {
                         ],
                         pattern.span,
                     )?;
-                    self.initialize_var_pattern(rest, target)?;
+                    self.initialize_declared_pattern(rest, target)?;
                 }
                 Ok(())
             }
@@ -1070,7 +1059,7 @@ impl Lowerer<'_> {
                             &HirObjectPropertyKey::Static("value".into()),
                             pattern.span,
                         )?;
-                        self.initialize_var_pattern(element, item)?;
+                        self.initialize_declared_pattern(element, item)?;
                     }
                     self.emit_jump(end, pattern.span)?;
                     self.builder
@@ -1078,7 +1067,7 @@ impl Lowerer<'_> {
                         .map_err(CompileError::Builder)?;
                     if let Some(element) = element {
                         let undefined = self.load_undefined(pattern.span)?;
-                        self.initialize_var_pattern(element, undefined)?;
+                        self.initialize_declared_pattern(element, undefined)?;
                     }
                     self.builder
                         .bind_label(end)
@@ -1086,7 +1075,7 @@ impl Lowerer<'_> {
                 }
                 if let Some(rest) = rest {
                     let array = self.collect_iterator_rest(iterator, pattern.span)?;
-                    self.initialize_var_pattern(rest, array)?;
+                    self.initialize_declared_pattern(rest, array)?;
                 }
                 self.close_iterator_normally(iterator, pattern.span)
             }

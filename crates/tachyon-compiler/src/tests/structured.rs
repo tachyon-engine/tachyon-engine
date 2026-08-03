@@ -175,6 +175,23 @@ fn compiler_emits_verified_for_of_iterator_bytecode() {
 }
 
 #[test]
+/// Compiles every declaration kind through nested iterator/object pattern initialization.
+fn compiler_lowers_destructuring_for_of_declaration_heads() {
+    for source_text in [
+        "var total = 0; for (var [first, ...rest] of [[1, 2, 3]]) total = first + rest[1]; total;",
+        "let total = 0; for (let { value: current = 1, ...rest } of [{ value: 4, tail: 2 }]) total = current + rest.tail; total;",
+        "let total = 0; for (const [{ value }, fallback = 2] of [[{ value: 5 }]]) total = value + fallback; total;",
+    ] {
+        Compiler
+            .compile(
+                source(MediaType::JavaScript, source_text),
+                CompileOptions::default(),
+            )
+            .expect("destructuring for-of head compiles to verified bytecode");
+    }
+}
+
+#[test]
 /// Owns ordinary object data properties and rejects descriptor-bearing syntax at the boundary.
 fn hir_owns_plain_object_literal_properties() {
     let hir = Compiler

@@ -1,5 +1,6 @@
 use super::fixtures::*;
 use super::*;
+use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
 #[test]
 fn for_in_iterator_loop_is_stable_for_every_dispatch_batch() {
@@ -8,6 +9,60 @@ fn for_in_iterator_loop_is_stable_for_every_dispatch_batch() {
     assert_for_in_batch::<4>();
     assert_for_in_batch::<8>();
     assert_for_in_batch::<16>();
+}
+
+#[test]
+fn destructuring_for_of_heads_are_stable_for_every_dispatch_batch() {
+    assert_destructuring_for_of_batch::<1>(false);
+    assert_destructuring_for_of_batch::<2>(false);
+    assert_destructuring_for_of_batch::<4>(true);
+    assert_destructuring_for_of_batch::<8>(true);
+    assert_destructuring_for_of_batch::<16>(false);
+}
+
+/// Compiles nested declaration patterns and executes them under one dispatch/collection policy.
+fn assert_destructuring_for_of_batch<const N: usize>(forced_major: bool) {
+    let source = r#"
+        var total = 0;
+        for (var [first, ...rest] of [[1, 2, 3]]) total += first + rest[1];
+        for (let { value: current = 1, ...tail } of [{ value: 4, extra: 5 }]) {
+            total += current + tail.extra;
+        }
+        for (const [{ value }, fallback = 2] of [[{ value: 6 }]]) {
+            total += value + fallback;
+        }
+        total === 21;
+    "#;
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(7_900 + N as u32),
+                SourceName::new("destructuring-for-of"),
+                MediaType::JavaScript,
+                Arc::from(source),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("destructuring for-of fixture compiles");
+    let mut isolate = test_isolate_with_heap_spans(64);
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 65_536,
+                quantum: 65_536,
+            },
+        )
+        .expect("destructuring for-of fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
 }
 
 #[test]

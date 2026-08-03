@@ -2,8 +2,8 @@ use super::{checked_count_add, try_children_count};
 use crate::hir::{HirAssignmentOperator, HirAssignmentTarget, HirForInLeft};
 use crate::{
     CompileError, HirBinaryOperator, HirExpression, HirExpressionKind, HirForInitializer,
-    HirObjectPropertyKey, HirProgram, HirStatement, HirStatementKind, HirSwitchCase,
-    HirVariableDeclaration, HirVariableDeclarationKind,
+    HirObjectPropertyKey, HirPattern, HirPatternKind, HirProgram, HirStatement, HirStatementKind,
+    HirSwitchCase, HirVariableDeclaration, HirVariableDeclarationKind,
 };
 
 pub(super) fn hir_instruction_count(hir: &HirProgram) -> Result<usize, CompileError> {
@@ -190,7 +190,18 @@ fn for_instruction_count(
 
 fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileError> {
     match left {
-        HirForInLeft::Variable(_) => Ok(1),
+        HirForInLeft::Variable(declaration) => {
+            let pattern = &declaration
+                .declarators
+                .first()
+                .expect("HIR validates one for-in declarator")
+                .pattern;
+            checked_count_add(
+                pattern_binding_count(pattern)?,
+                declared_pattern_instruction_count(pattern)?,
+                "bytecode instructions",
+            )
+        }
         HirForInLeft::Assignment(pattern) => match pattern.assignment_target() {
             None => Ok(0),
             Some(HirAssignmentTarget::Identifier(_)) => Ok(1),
@@ -213,6 +224,128 @@ fn for_in_left_instruction_count(left: &HirForInLeft) -> Result<usize, CompileEr
                 "bytecode instructions",
             ),
         },
+    }
+}
+
+/// Mirrors recursive declaration-pattern lowering, including both emitted array branches.
+fn declared_pattern_instruction_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) => Ok(1),
+        HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default {
+            target,
+            initializer,
+        } => {
+            let nested = checked_count_add(
+                expression_instruction_count(initializer)?,
+                declared_pattern_instruction_count(target)?,
+                "bytecode instructions",
+            )?;
+            checked_count_add(nested, 7, "bytecode instructions")
+        }
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 2 + usize::from(rest.is_some());
+            for property in properties.iter() {
+                let key = match &property.key {
+                    HirObjectPropertyKey::Static(_) => 2,
+                    HirObjectPropertyKey::Computed(expression) => checked_count_add(
+                        expression_instruction_count(expression)?,
+                        2,
+                        "bytecode instructions",
+                    )?,
+                };
+                count = checked_count_add(count, key, "bytecode instructions")?;
+                count =
+                    checked_count_add(count, usize::from(rest.is_some()), "bytecode instructions")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_instruction_count(&property.target)?,
+                    "bytecode instructions",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(count, 2, "bytecode instructions")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_instruction_count(rest)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 17;
+            for element in elements.iter() {
+                count = checked_count_add(count, 7, "bytecode instructions")?;
+                if let Some(element) = element {
+                    let branch = declared_pattern_instruction_count(element)?;
+                    count = checked_count_add(count, 3, "bytecode instructions")?;
+                    count = checked_count_add(
+                        count,
+                        branch
+                            .checked_mul(2)
+                            .ok_or(CompileError::LoweringCapacityOverflow {
+                                collection: "bytecode instructions",
+                            })?,
+                        "bytecode instructions",
+                    )?;
+                }
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(count, 15, "bytecode instructions")?;
+                count = checked_count_add(
+                    count,
+                    declared_pattern_instruction_count(rest)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
+    }
+}
+
+/// Counts declaration leaves initialized to undefined before the loop starts.
+fn pattern_binding_count(pattern: &HirPattern) -> Result<usize, CompileError> {
+    match &pattern.kind {
+        HirPatternKind::Binding(_) => Ok(1),
+        HirPatternKind::Assignment(_) => Ok(0),
+        HirPatternKind::Default { target, .. } => pattern_binding_count(target),
+        HirPatternKind::Array { elements, rest } => {
+            let mut count = 0;
+            for element in elements.iter().flatten() {
+                count = checked_count_add(
+                    count,
+                    pattern_binding_count(element)?,
+                    "bytecode instructions",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(
+                    count,
+                    pattern_binding_count(rest)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
+        HirPatternKind::Object { properties, rest } => {
+            let mut count = 0;
+            for property in properties.iter() {
+                count = checked_count_add(
+                    count,
+                    pattern_binding_count(&property.target)?,
+                    "bytecode instructions",
+                )?;
+            }
+            if let Some(rest) = rest {
+                count = checked_count_add(
+                    count,
+                    pattern_binding_count(rest)?,
+                    "bytecode instructions",
+                )?;
+            }
+            Ok(count)
+        }
     }
 }
 
