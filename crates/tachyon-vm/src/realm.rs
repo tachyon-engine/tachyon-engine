@@ -444,6 +444,22 @@ impl Isolate {
         )?;
         let join_atom = self.intern_intrinsic_name(b"join")?;
         self.set_intrinsic_data_property(base_prototype, join_atom, join, true)?;
+        let to_locale_string = self.allocate_native_function(
+            NativeFunction::TypedArrayToLocaleString,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let to_locale_string_atom = self.intern_intrinsic_name(b"toLocaleString")?;
+        self.set_intrinsic_data_property(
+            base_prototype,
+            to_locale_string_atom,
+            to_locale_string,
+            true,
+        )?;
         let slice = self.allocate_native_function(
             NativeFunction::TypedArraySlice,
             OrdinaryObject {

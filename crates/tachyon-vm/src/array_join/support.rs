@@ -29,6 +29,9 @@ impl Isolate {
         let rooted = self.pop_native_continuation()?;
         let state = self.pending_array_join_reference(rooted.first())?;
         let value = self.read(site.caller_base, site.destination)?;
+        if stage != ArrayJoinStage::ElementLocaleGet {
+            self.set_array_join_retained(state, value)?;
+        }
         Ok(Some((state, value)))
     }
 

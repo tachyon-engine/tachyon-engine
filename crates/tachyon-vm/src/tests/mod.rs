@@ -98,6 +98,7 @@ mod typed_array_copy_within;
 mod typed_array_fill;
 mod typed_array_includes;
 mod typed_array_join;
+mod typed_array_locale;
 mod typed_array_reverse;
 mod typed_array_search;
 mod typed_array_set;

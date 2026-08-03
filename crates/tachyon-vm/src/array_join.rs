@@ -65,6 +65,34 @@ impl Isolate {
         self.begin_array_join_mode(site, true)
     }
 
+    /// Validates a TypedArray and starts locale formatting from its internal length snapshot.
+    pub(crate) fn begin_typed_array_to_locale_string(
+        &mut self,
+        site: &CallSite,
+    ) -> Result<(), ExecutionError> {
+        let receiver = site.this_value;
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_array_join_state(PendingArrayJoin {
+            receiver,
+            separator_argument: undefined,
+            retained: undefined,
+            separator: Box::new([]),
+            output: Box::new([]),
+            length: snapshot.length as u64,
+            cursor: 0,
+            output_len: 0,
+            locale: true,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.root_array_join_state(continuation_site, state)?;
+        self.install_array_join_separator(continuation_site, state, vec![u16::from(b',')])
+    }
+
     /// Captures shared join state before the observable length lookup.
     fn begin_array_join_mode(
         &mut self,

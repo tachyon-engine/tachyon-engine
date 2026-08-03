@@ -509,6 +509,7 @@ pub(crate) enum NativeFunction {
     TypedArrayWith,
     TypedArraySet,
     TypedArrayJoin,
+    TypedArrayToLocaleString,
     TypedArraySlice,
     TypedArraySubarray,
     TypedArraySearch(TypedArraySearchDirection),
@@ -1366,6 +1367,7 @@ impl NativeFunction {
             | Self::DataViewByteOffset
             | Self::TypedArrayBaseConstructor
             | Self::TypedArrayGetter(_)
+            | Self::TypedArrayToLocaleString
             | Self::TypedArrayKeys
             | Self::TypedArrayValues
             | Self::TypedArrayEntries
@@ -1686,6 +1688,7 @@ impl NativeFunction {
             Self::TypedArrayWith => "with",
             Self::TypedArraySet => "set",
             Self::TypedArrayJoin => "join",
+            Self::TypedArrayToLocaleString => "toLocaleString",
             Self::TypedArraySlice => "slice",
             Self::TypedArraySubarray => "subarray",
             Self::TypedArraySearch(direction) => direction.name(),

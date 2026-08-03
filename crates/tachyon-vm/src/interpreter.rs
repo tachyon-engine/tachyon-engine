@@ -7240,6 +7240,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArrayJoin) => {
                     return self.begin_typed_array_join(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayToLocaleString) => {
+                    return self.begin_typed_array_to_locale_string(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArraySlice) => {
                     return self.begin_typed_array_slice(&site);
                 }
