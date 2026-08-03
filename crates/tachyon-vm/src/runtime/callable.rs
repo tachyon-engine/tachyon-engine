@@ -497,6 +497,8 @@ pub(crate) enum NativeFunction {
     DataViewSet(DataViewElement),
     TypedArrayBaseConstructor,
     TypedArrayConstructor(TypedArrayKind),
+    TypedArrayFrom,
+    TypedArrayOf,
     TypedArrayGetter(TypedArrayGetter),
     TypedArrayAt,
     TypedArrayIncludes,
@@ -1177,6 +1179,7 @@ impl NativeFunction {
             | Self::ArrayBufferIsView
             | Self::DataViewConstructor
             | Self::DataViewGet(_)
+            | Self::TypedArrayFrom
             | Self::TypedArrayAt
             | Self::TypedArrayIncludes
             | Self::TypedArrayFill
@@ -1366,6 +1369,7 @@ impl NativeFunction {
             | Self::DataViewByteLength
             | Self::DataViewByteOffset
             | Self::TypedArrayBaseConstructor
+            | Self::TypedArrayOf
             | Self::TypedArrayGetter(_)
             | Self::TypedArrayToLocaleString
             | Self::TypedArrayKeys
@@ -1672,6 +1676,8 @@ impl NativeFunction {
             Self::DataViewSet(element) => element.name(true),
             Self::TypedArrayBaseConstructor => "TypedArray",
             Self::TypedArrayConstructor(kind) => kind.name(),
+            Self::TypedArrayFrom => "from",
+            Self::TypedArrayOf => "of",
             Self::TypedArrayGetter(TypedArrayGetter::Length) => "get length",
             Self::TypedArrayGetter(TypedArrayGetter::Buffer) => "get buffer",
             Self::TypedArrayGetter(TypedArrayGetter::ByteLength) => "get byteLength",

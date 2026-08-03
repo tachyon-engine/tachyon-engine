@@ -82,6 +82,61 @@ impl Isolate {
         )
     }
 
+    /// Captures `%TypedArray%.from` inputs before its observable iterator-method lookup.
+    pub(crate) fn begin_typed_array_from(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if !self.is_constructor_value(site.this_value)? {
+            return Err(ExecutionError::NonConstructor(site.this_value));
+        }
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let source = self.call_argument(site, 0)?.unwrap_or(undefined);
+        let mapper = self.call_argument(site, 1)?.unwrap_or(undefined);
+        let mapping = mapper.as_immediate() != Some(Immediate::Undefined);
+        if mapping {
+            self.resolve_function_object(mapper)?;
+        }
+        let this_argument = self.call_argument(site, 2)?.unwrap_or(undefined);
+        let state = self.allocate_array_static_state(PendingArrayStatic {
+            result: undefined,
+            constructor: site.this_value,
+            retained: undefined,
+            source,
+            mapper,
+            this_argument,
+            iterator: undefined,
+            next_method: undefined,
+            iterator_result: undefined,
+            arguments: Box::new([]),
+            kind: ArrayStaticKind::TypedArrayFromArrayLike,
+            cursor: 0,
+            length: 0,
+            mapping,
+            close_on_abrupt: false,
+            require_iterable: false,
+        })?;
+        let native_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.root_array_static_state(native_site, state)?;
+        if is_nullish(source) {
+            return Err(ExecutionError::NotObject(source));
+        }
+        let iterator = self
+            .agent
+            .well_known_symbols
+            .iterator
+            .expect("Symbol.iterator initializes before TypedArray.from");
+        let key = self.property_key(iterator)?;
+        self.get_array_static_property(
+            native_site,
+            state,
+            ArrayStaticStage::IteratorMethod,
+            source,
+            key,
+        )
+    }
+
     /// Collects a required synchronous iterable into an intrinsic Array for another builtin.
     pub(crate) fn begin_iterable_to_list(
         &mut self,
@@ -221,8 +276,14 @@ impl Isolate {
         }
         self.resolve_function_object(method)?;
         self.set_array_static_value(state, |pending| &mut pending.next_method, method)?;
+        let typed_array =
+            self.array_static_snapshot(state)?.kind == ArrayStaticKind::TypedArrayFromArrayLike;
         self.update_array_static_scalars(state, |pending| {
-            pending.kind = ArrayStaticKind::FromIterable;
+            pending.kind = if typed_array {
+                ArrayStaticKind::TypedArrayCollectIterable
+            } else {
+                ArrayStaticKind::FromIterable
+            };
             pending.length = 0;
         })?;
         self.create_or_construct_array_from_result(site, state)
@@ -268,8 +329,14 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let converted = self.convert_to_number(value)?;
         let length = array_from_to_length(converted)?;
+        let typed_array =
+            self.array_static_snapshot(state)?.kind == ArrayStaticKind::TypedArrayFromArrayLike;
         self.update_array_static_scalars(state, |pending| {
-            pending.kind = ArrayStaticKind::FromArrayLike;
+            pending.kind = if typed_array {
+                ArrayStaticKind::TypedArrayFromArrayLike
+            } else {
+                ArrayStaticKind::FromArrayLike
+            };
             pending.length = length;
         })?;
         self.create_or_construct_array_from_result(site, state)
@@ -282,6 +349,23 @@ impl Isolate {
         state: GcRef<PendingArrayStatic>,
     ) -> Result<(), ExecutionError> {
         let snapshot = self.array_static_snapshot(state)?;
+        if snapshot.kind == ArrayStaticKind::TypedArrayCollectIterable {
+            let prototype = self
+                .realm
+                .array_prototype
+                .expect("Array prototype initializes before TypedArray.from collection");
+            let result = self.create_array_object_with_prototype(prototype)?;
+            let state = self
+                .pending_array_static_reference(self.read(site.caller_base, site.destination)?)?;
+            self.set_array_static_value(state, |pending| &mut pending.result, result)?;
+            return self.advance_array_from_iterable(site, state);
+        }
+        if matches!(
+            snapshot.kind,
+            ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList
+        ) {
+            return self.construct_array_static(site, state);
+        }
         if self.is_constructor_value(snapshot.constructor)? {
             return self.construct_array_static(site, state);
         }
@@ -433,9 +517,7 @@ impl Isolate {
                 .get_data_property(iterator_result, done_atom)?
                 .unwrap_or(Value::from_immediate(Immediate::Undefined));
             if self.is_truthy_value(done)? {
-                let snapshot = self.array_static_snapshot(state)?;
-                self.set_array_length_value(snapshot.result, safe_integer_value(snapshot.cursor))?;
-                return self.write(site.caller_base, site.destination, snapshot.result);
+                return self.finish_array_from_iterable(site, state);
             }
             let value = self
                 .get_data_property(iterator_result, value_atom)?
@@ -462,10 +544,13 @@ impl Isolate {
         &mut self,
         snapshot: ArrayStaticSnapshot,
     ) -> Result<bool, ExecutionError> {
-        if snapshot.mapping || snapshot.iterator.as_immediate() == Some(Immediate::Undefined) {
+        if (snapshot.mapping && snapshot.kind != ArrayStaticKind::TypedArrayCollectIterable)
+            || snapshot.iterator.as_immediate() == Some(Immediate::Undefined)
+        {
             return Ok(false);
         }
         let intrinsic_result = if snapshot.constructor.as_immediate() == Some(Immediate::Undefined)
+            || snapshot.kind == ArrayStaticKind::TypedArrayCollectIterable
         {
             true
         } else {
@@ -475,11 +560,15 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor)
             )
         };
-        Ok(matches!(
-            self.resolve_function_object(snapshot.next_method)?
-                .executable,
-            FunctionExecutable::Native(NativeFunction::ArrayIteratorNext)
-        ) && intrinsic_result)
+        Ok(
+            (!snapshot.mapping || snapshot.kind == ArrayStaticKind::TypedArrayCollectIterable)
+                && matches!(
+                    self.resolve_function_object(snapshot.next_method)?
+                        .executable,
+                    FunctionExecutable::Native(NativeFunction::ArrayIteratorNext)
+                )
+                && intrinsic_result,
+        )
     }
 
     /// Finishes iteration or reads the current iterator result's `value` property.
@@ -490,15 +579,7 @@ impl Isolate {
         done: Value,
     ) -> Result<(), ExecutionError> {
         if self.is_truthy_value(done)? {
-            let snapshot = self.array_static_snapshot(state)?;
-            let length = self.length_atom()?;
-            return self.dispatch_array_static_set(
-                site,
-                state,
-                snapshot.result,
-                length.into(),
-                safe_integer_value(snapshot.cursor),
-            );
+            return self.finish_array_from_iterable(site, state);
         }
         let result = self.array_static_snapshot(state)?.iterator_result;
         self.get_array_static_named_property(
@@ -518,6 +599,12 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let snapshot = self.array_static_snapshot(state)?;
         if snapshot.cursor >= snapshot.length {
+            if matches!(
+                snapshot.kind,
+                ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList
+            ) {
+                return self.write(site.caller_base, site.destination, snapshot.result);
+            }
             let length = self.length_atom()?;
             return self.dispatch_array_static_set(
                 site,
@@ -546,7 +633,7 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
         let snapshot = self.array_static_snapshot(state)?;
-        if snapshot.mapping {
+        if snapshot.mapping && snapshot.kind != ArrayStaticKind::TypedArrayCollectIterable {
             self.update_array_static_scalars(state, |pending| pending.close_on_abrupt = true)?;
             return self.call_array_static(
                 site,
@@ -569,6 +656,23 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
         let snapshot = self.array_static_snapshot(state)?;
+        if matches!(
+            snapshot.kind,
+            ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList
+        ) {
+            if self.is_object_value(value) {
+                return self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::TypedArrayStaticElement,
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                    site.call_site,
+                );
+            }
+            self.write_typed_array_static_element(state, value)?;
+            return self.advance_array_from_array_like(site, state);
+        }
         let key = self.safe_integer_property_atom(snapshot.cursor)?;
         let descriptor = DataPropertyDescriptor {
             value: Some(value),
@@ -590,6 +694,41 @@ impl Isolate {
         self.update_array_static_scalars(state, |pending| pending.close_on_abrupt = false)?;
         self.increment_array_static_cursor(state)?;
         self.advance_array_static_after_define(site, state)
+    }
+
+    /// Finalizes an iterator result, constructing TypedArray output only after full collection.
+    fn finish_array_from_iterable(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.array_static_snapshot(state)?;
+        if snapshot.kind == ArrayStaticKind::TypedArrayCollectIterable {
+            self.set_array_length_value(snapshot.result, safe_integer_value(snapshot.cursor))?;
+            self.set_array_static_value(state, |pending| &mut pending.source, snapshot.result)?;
+            self.set_array_static_value(
+                state,
+                |pending| &mut pending.result,
+                Value::from_immediate(Immediate::Undefined),
+            )?;
+            self.update_array_static_scalars(state, |pending| {
+                pending.kind = ArrayStaticKind::TypedArrayFromList;
+                pending.length = pending.cursor;
+                pending.cursor = 0;
+                pending.iterator = Value::from_immediate(Immediate::Undefined);
+                pending.next_method = Value::from_immediate(Immediate::Undefined);
+                pending.iterator_result = Value::from_immediate(Immediate::Undefined);
+            })?;
+            return self.construct_array_static(site, state);
+        }
+        let length = self.length_atom()?;
+        self.dispatch_array_static_set(
+            site,
+            state,
+            snapshot.result,
+            length.into(),
+            safe_integer_value(snapshot.cursor),
+        )
     }
 
     /// Reads one protocol property through ordinary, accessor, and Proxy paths.

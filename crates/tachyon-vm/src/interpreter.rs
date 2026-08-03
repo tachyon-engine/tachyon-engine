@@ -7237,6 +7237,12 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::TypedArraySet) => {
                     return self.begin_typed_array_set(&site);
                 }
+                FunctionExecutable::Native(NativeFunction::TypedArrayFrom) => {
+                    return self.begin_typed_array_from(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::TypedArrayOf) => {
+                    return self.begin_typed_array_of(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::TypedArrayJoin) => {
                     return self.begin_typed_array_join(&site);
                 }

@@ -284,6 +284,28 @@ impl Isolate {
         self.set_function_prototype(base_constructor, base_prototype)?;
         let constructor_atom = self.constructor_atom()?;
         self.set_intrinsic_data_property(base_prototype, constructor_atom, base_constructor, true)?;
+        let from = self.allocate_native_function(
+            NativeFunction::TypedArrayFrom,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let from_atom = self.intern_intrinsic_name(b"from")?;
+        self.set_intrinsic_data_property(base_constructor, from_atom, from, true)?;
+        let of = self.allocate_native_function(
+            NativeFunction::TypedArrayOf,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        let of_atom = self.intern_intrinsic_name(b"of")?;
+        self.set_intrinsic_data_property(base_constructor, of_atom, of, true)?;
         self.install_species_accessor(base_constructor, function_prototype)?;
         for (name, getter) in [
             (b"length".as_slice(), TypedArrayGetter::Length),

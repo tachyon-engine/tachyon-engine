@@ -427,6 +427,7 @@ pub(crate) enum ConversionConsumer {
     TypedArrayLength,
     TypedArrayElement,
     TypedArrayIndexSet,
+    TypedArrayStaticElement,
     TypedArrayAtIndex,
     TypedArrayWithIndex,
     TypedArrayWithValue,
@@ -563,6 +564,7 @@ impl ConversionConsumer {
             | Self::TypedArrayLength
             | Self::TypedArrayElement
             | Self::TypedArrayIndexSet
+            | Self::TypedArrayStaticElement
             | Self::TypedArrayAtIndex
             | Self::TypedArrayWithIndex
             | Self::TypedArrayWithValue
@@ -760,6 +762,7 @@ impl ConversionConsumer {
                 | Self::TypedArrayLength
                 | Self::TypedArrayElement
                 | Self::TypedArrayIndexSet
+                | Self::TypedArrayStaticElement
                 | Self::TypedArrayAtIndex
                 | Self::TypedArrayWithIndex
                 | Self::TypedArrayWithValue

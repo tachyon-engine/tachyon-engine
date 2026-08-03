@@ -103,6 +103,7 @@ mod typed_array_reverse;
 mod typed_array_search;
 mod typed_array_set;
 mod typed_array_slice;
+mod typed_array_static;
 mod typed_array_subarray;
 mod typed_array_transform;
 mod typed_array_with;

@@ -9,6 +9,10 @@ mod from;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArrayStaticKind {
     Of,
+    TypedArrayOf,
+    TypedArrayFromArrayLike,
+    TypedArrayCollectIterable,
+    TypedArrayFromList,
     FromArrayLike,
     FromIterable,
 }
@@ -131,6 +135,51 @@ impl Isolate {
         }
     }
 
+    /// Captures `%TypedArray%.of` arguments before invoking its generic constructor receiver.
+    pub(crate) fn begin_typed_array_of(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        if !self.is_constructor_value(site.this_value)? {
+            return Err(ExecutionError::NonConstructor(site.this_value));
+        }
+        let count = usize::try_from(site.argument_count)
+            .map_err(|_| ExecutionError::RegisterWindowTooLarge(site.argument_count))?;
+        let mut arguments = Vec::new();
+        arguments
+            .try_reserve_exact(count)
+            .map_err(|_| ExecutionError::RegisterAllocationFailed)?;
+        for index in 0..site.argument_count {
+            arguments.push(
+                self.call_argument(site, index)?
+                    .unwrap_or(Value::from_immediate(Immediate::Undefined)),
+            );
+        }
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let state = self.allocate_array_static_state(PendingArrayStatic {
+            result: undefined,
+            constructor: site.this_value,
+            retained: undefined,
+            source: undefined,
+            mapper: undefined,
+            this_argument: undefined,
+            iterator: undefined,
+            next_method: undefined,
+            iterator_result: undefined,
+            arguments: arguments.into_boxed_slice(),
+            kind: ArrayStaticKind::TypedArrayOf,
+            cursor: 0,
+            length: site.argument_count.into(),
+            mapping: false,
+            close_on_abrupt: false,
+            require_iterable: false,
+        })?;
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        self.root_array_static_state(continuation_site, state)?;
+        self.construct_array_static(continuation_site, state)
+    }
+
     /// Routes construct, define, and final Set completions to the next algorithm step.
     pub(crate) fn resume_array_static(
         &mut self,
@@ -235,9 +284,30 @@ impl Isolate {
         if !self.is_object_value(result) {
             return Err(ExecutionError::NotObject(result));
         }
+        let kind = self.array_static_snapshot(state)?.kind;
+        if matches!(
+            kind,
+            ArrayStaticKind::TypedArrayOf
+                | ArrayStaticKind::TypedArrayFromArrayLike
+                | ArrayStaticKind::TypedArrayFromList
+        ) {
+            let target = self.validated_typed_array_snapshot(result)?;
+            let required = usize::try_from(self.array_static_snapshot(state)?.length)
+                .map_err(|_| ExecutionError::InvalidArrayLength)?;
+            if target.length < required {
+                return Err(ExecutionError::TypedArraySpeciesResultTooShort);
+            }
+        }
         self.set_array_static_value(state, |pending| &mut pending.result, result)?;
-        match self.array_static_snapshot(state)?.kind {
+        match kind {
             ArrayStaticKind::Of => self.advance_array_of(site, state),
+            ArrayStaticKind::TypedArrayOf => self.advance_typed_array_of(site, state),
+            ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList => {
+                self.advance_array_from_array_like(site, state)
+            }
+            ArrayStaticKind::TypedArrayCollectIterable => {
+                Err(ExecutionError::MissingNativeContinuation)
+            }
             ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
             ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
         }
@@ -292,8 +362,91 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         match self.array_static_snapshot(state)?.kind {
             ArrayStaticKind::Of => self.advance_array_of(site, state),
+            ArrayStaticKind::TypedArrayOf => self.advance_typed_array_of(site, state),
+            ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList => {
+                self.advance_array_from_array_like(site, state)
+            }
+            ArrayStaticKind::TypedArrayCollectIterable => {
+                self.advance_array_from_iterable(site, state)
+            }
             ArrayStaticKind::FromArrayLike => self.advance_array_from_array_like(site, state),
             ArrayStaticKind::FromIterable => self.advance_array_from_iterable(site, state),
+        }
+    }
+
+    /// Converts and writes each captured `%TypedArray%.of` item without recursive advancement.
+    fn advance_typed_array_of(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+    ) -> Result<(), ExecutionError> {
+        loop {
+            let snapshot = self.array_static_snapshot(state)?;
+            if snapshot.cursor >= snapshot.length {
+                return self.write(site.caller_base, site.destination, snapshot.result);
+            }
+            let value = self.array_static_argument(state, snapshot.cursor)?;
+            self.set_array_static_value(state, |pending| &mut pending.retained, value)?;
+            if self.is_object_value(value) {
+                return self.dispatch_object_primitive_conversion(
+                    ConversionConsumer::TypedArrayStaticElement,
+                    site.caller_base,
+                    site.destination,
+                    Value::from_heap_ref(state.raw()),
+                    value,
+                    site.call_site,
+                );
+            }
+            self.write_typed_array_static_element(state, value)?;
+        }
+    }
+
+    /// Resumes one object item conversion and returns to the iterative static writer.
+    pub(crate) fn resume_typed_array_static_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        self.root_array_static_state(site, state)?;
+        self.write_typed_array_static_element(state, value)?;
+        self.advance_typed_array_static(site, state)
+    }
+
+    /// Applies one throw-on-false integer-indexed Set and advances the committed cursor.
+    fn write_typed_array_static_element(
+        &mut self,
+        state: GcRef<PendingArrayStatic>,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.array_static_snapshot(state)?;
+        let key = self.safe_integer_property_atom(snapshot.cursor)?;
+        let success = self
+            .typed_array_index_set(snapshot.result, key.into(), value)?
+            .ok_or(ExecutionError::MissingNativeContinuation)?;
+        if !success {
+            return Err(ExecutionError::ReadOnlyProperty(snapshot.result));
+        }
+        self.increment_array_static_cursor(state)?;
+        self.set_array_static_value(
+            state,
+            |pending| &mut pending.retained,
+            Value::from_immediate(Immediate::Undefined),
+        )
+    }
+
+    /// Resumes the active TypedArray static writer after one committed element.
+    fn advance_typed_array_static(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<PendingArrayStatic>,
+    ) -> Result<(), ExecutionError> {
+        match self.array_static_snapshot(state)?.kind {
+            ArrayStaticKind::TypedArrayOf => self.advance_typed_array_of(site, state),
+            ArrayStaticKind::TypedArrayFromArrayLike | ArrayStaticKind::TypedArrayFromList => {
+                self.advance_array_from_array_like(site, state)
+            }
+            _ => Err(ExecutionError::MissingNativeContinuation),
         }
     }
 
