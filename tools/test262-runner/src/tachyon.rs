@@ -3,8 +3,11 @@ use std::{
     future::Future,
     num::NonZeroU32,
     pin::Pin,
-    sync::Arc,
-    task::{Context, Waker},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Wake, Waker},
 };
 
 use tachyon_compiler::{
@@ -28,6 +31,10 @@ const ATOM_MAX_BYTES: usize = 32 * 1024 * 1024;
 // infinite loop from suppressing a complete report. The normative TCO helper performs 100,000
 // recursive calls, so the limit must cover several bytecodes per iteration without becoming open.
 const EXECUTION_FUEL_LIMIT: u64 = 20_000_000;
+// A transition can consume a full interpreter quantum. This permits sixteen scheduler passes for
+// every configured module while keeping a live-but-nonterminating job graph bounded independently
+// from bytecode instruction fuel.
+const MODULE_TRANSITION_LIMIT: u32 = MAX_LOADED_MODULES * 16;
 const HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const STACK_MAX_FRAMES: u32 = 4_096;
 const STACK_MAX_REGISTERS: u32 = 2 * 1024 * 1024;
@@ -54,11 +61,17 @@ globalThis.$DONE = $DONE;
 "#;
 const ASYNC_PROBE_SOURCE: &str = "__tachyonAsyncStatus;";
 
-struct Test262WallClock;
+/// Deterministic clock that also permits conformance fixtures to observe forward progress.
+#[derive(Default)]
+struct Test262WallClock {
+    next_millisecond: i64,
+}
 
 impl WallClockProvider for Test262WallClock {
     fn unix_time_milliseconds(&mut self) -> Result<i64, HostProviderError> {
-        Ok(0)
+        let current = self.next_millisecond;
+        self.next_millisecond = self.next_millisecond.saturating_add(1);
+        Ok(current)
     }
 }
 
@@ -216,7 +229,7 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
             RealmLimits::new(MAX_LOADED_MODULES, MAX_GLOBAL_BINDINGS),
         ),
         HostProviders::new()
-            .with_wall_clock(Test262WallClock)
+            .with_wall_clock(Test262WallClock::default())
             .with_time_zone(Test262UtcTimeZone),
     ) {
         Ok(isolate) => isolate,
@@ -400,11 +413,12 @@ fn drive_test262_work(
     loader: &mut Test262ModuleLoader,
     root_evaluation: Option<Value>,
 ) -> Option<EngineOutcome> {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
+    let wake = Arc::new(DriverWake::default());
+    let waker = Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
     let mut targets = root_evaluation.into_iter().collect::<VecDeque<_>>();
     let quantum = NonZeroU32::new(u32::MAX).expect("driver quantum is non-zero");
-    for _ in 0..EXECUTION_FUEL_LIMIT {
+    for _ in 0..MODULE_TRANSITION_LIMIT {
         while let Some(request) = isolate.take_pending_dynamic_import() {
             let import_promise = match isolate.load_dynamic_import_graph(loader, &request) {
                 Ok(module) => match isolate.complete_dynamic_import_success(request.id(), module) {
@@ -447,6 +461,7 @@ fn drive_test262_work(
                 }
             }
         };
+        wake.0.store(false, Ordering::Relaxed);
         let poll = {
             let mut driver = match isolate.drive_promise(target, quantum) {
                 Ok(driver) => driver,
@@ -469,12 +484,35 @@ fn drive_test262_work(
             core::task::Poll::Ready(Err(error)) => {
                 return Some(unsupported(format!("module driver failed: {error:?}")));
             }
+            core::task::Poll::Pending if !wake.0.load(Ordering::Relaxed) => {
+                return Some(EngineOutcome::Timeout {
+                    message: "Tachyon module driver is quiescent with a pending Promise".into(),
+                });
+            }
             core::task::Poll::Pending => {}
         }
     }
     Some(EngineOutcome::Timeout {
-        message: "Tachyon module driver exhausted its transition budget".into(),
+        message: format!(
+            "Tachyon module driver exhausted the {MODULE_TRANSITION_LIMIT} transition budget"
+        )
+        .into(),
     })
+}
+
+#[derive(Default)]
+struct DriverWake(AtomicBool);
+
+impl Wake for DriverWake {
+    #[inline]
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Deterministic source-module loader with no filesystem or ambient host capabilities.
@@ -687,11 +725,12 @@ fn unsupported(reason: impl Into<Box<str>>) -> EngineOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::TachyonAdapter;
+    use super::{TachyonAdapter, Test262WallClock};
     use crate::{
         ComposedTest, EngineAdapter, EngineOutcome, ExecutionRequest, Phase, SourceUnit,
         TestVariant, VariantKind,
     };
+    use tachyon_vm::WallClockProvider;
 
     /// Builds one content-independent adapter fixture without touching the checkout or filesystem.
     fn composed(body: &str, preludes: &[(&str, &str)], is_async: bool) -> ComposedTest {
@@ -727,6 +766,24 @@ mod tests {
                 is_async: test.variant.is_async,
             })
             .outcome
+    }
+
+    #[test]
+    fn deterministic_wall_clock_advances_without_host_time() {
+        let mut clock = Test262WallClock::default();
+        assert_eq!(clock.unix_time_milliseconds(), Ok(0));
+        assert_eq!(clock.unix_time_milliseconds(), Ok(1));
+        assert_eq!(clock.unix_time_milliseconds(), Ok(2));
+    }
+
+    #[test]
+    fn missing_dynamic_import_is_bounded_by_module_transitions() {
+        let outcome = execute(&composed(
+            "import('./missing_FIXTURE.js').catch(() => {}).then($DONE, $DONE);",
+            &[("doneprintHandle.js", "ignored by Tachyon")],
+            true,
+        ));
+        assert!(matches!(outcome, EngineOutcome::Timeout { .. }));
     }
 
     /// Proves module variants use the in-memory fixture graph and classify link failures correctly.

@@ -196,6 +196,7 @@ pub fn run_checkout_with_progress(
     let nested = if options.parallel {
         tests
             .par_iter()
+            .with_max_len(1)
             .map(execute)
             .collect::<Result<Vec<_>, _>>()?
     } else {
