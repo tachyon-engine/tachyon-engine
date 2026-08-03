@@ -20,25 +20,19 @@ impl Isolate {
             .byte_offset
             .checked_add(byte_length)
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if end > data.byte_length || end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                let bytes = &mut data.bytes[snapshot.byte_offset..end];
-                match width {
-                    1 => reverse_typed_array_elements::<1>(bytes, snapshot.length),
-                    2 => reverse_typed_array_elements::<2>(bytes, snapshot.length),
-                    4 => reverse_typed_array_elements::<4>(bytes, snapshot.length),
-                    8 => reverse_typed_array_elements::<8>(bytes, snapshot.length),
-                    _ => return Err(ExecutionError::InvalidArrayLength),
-                }
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            let bytes = &mut data[snapshot.byte_offset..end];
+            match width {
+                1 => reverse_typed_array_elements::<1>(bytes, snapshot.length),
+                2 => reverse_typed_array_elements::<2>(bytes, snapshot.length),
+                4 => reverse_typed_array_elements::<4>(bytes, snapshot.length),
+                8 => reverse_typed_array_elements::<8>(bytes, snapshot.length),
+                _ => return Err(ExecutionError::InvalidArrayLength),
+            }
+            Ok(())
         })?;
         self.write(site.caller_base, site.destination, receiver)
     }

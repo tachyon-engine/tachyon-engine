@@ -165,7 +165,7 @@ impl Isolate {
     fn scan_typed_array_search(
         &mut self,
         snapshot: TypedArraySnapshot,
-        backing: GcRef<ArrayBufferData>,
+        backing: BufferBacking,
         initial_length: usize,
         cursor: usize,
         search: Value,
@@ -187,42 +187,34 @@ impl Isolate {
                     .ok_or(ExecutionError::InvalidArrayLength)?,
             )
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        self.heap.with_running_scope(|scope| {
-            let backing = scope.root(backing).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(backing, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if end > data.byte_length || end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                let mut index = cursor.min(length);
-                while search_has_next(direction, index, length) {
-                    let current = search_index(direction, index);
-                    let start = snapshot.byte_offset + current * width;
-                    let mut bytes = [0_u8; 8];
-                    bytes[..width].copy_from_slice(&data.bytes[start..start + width]);
-                    let equal = match search {
-                        TypedArraySearchNeedle::Number(search) => {
-                            let element = numeric_value(data_view_decode(
-                                data_view_kind(snapshot.kind)?,
-                                bytes,
-                                true,
-                            ))
-                            .expect("Number TypedArray decoding always returns Number");
-                            search == element
-                        }
-                        TypedArraySearchNeedle::BigInt(search) => {
-                            search == u64::from_le_bytes(bytes)
-                        }
-                    };
-                    if equal {
-                        return Ok(Some(current));
+        self.with_buffer_backing_bytes(&backing, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            let mut index = cursor.min(length);
+            while search_has_next(direction, index, length) {
+                let current = search_index(direction, index);
+                let start = snapshot.byte_offset + current * width;
+                let mut bytes = [0_u8; 8];
+                bytes[..width].copy_from_slice(&data[start..start + width]);
+                let equal = match search {
+                    TypedArraySearchNeedle::Number(search) => {
+                        let element = numeric_value(data_view_decode(
+                            data_view_kind(snapshot.kind)?,
+                            bytes,
+                            true,
+                        ))
+                        .expect("Number TypedArray decoding always returns Number");
+                        search == element
                     }
-                    index = search_advance(direction, index);
+                    TypedArraySearchNeedle::BigInt(search) => search == u64::from_le_bytes(bytes),
+                };
+                if equal {
+                    return Ok(Some(current));
                 }
-                Ok(None)
-            })
+                index = search_advance(direction, index);
+            }
+            Ok(None)
         })
     }
 

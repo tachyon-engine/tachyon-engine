@@ -1,6 +1,7 @@
 //! Ordinary-object shapes and exactly accounted contiguous property storage.
 
 use core::mem::size_of;
+use std::sync::{Arc, Mutex};
 use tachyon_gc::{GcExternalMemory, GcRef, Trace, Tracer};
 use tachyon_value::{RawHeapRef, Value};
 
@@ -649,6 +650,34 @@ pub(crate) struct ArrayBufferData {
     pub(crate) resizable: bool,
 }
 
+/// Shared byte storage whose mutation is serialized only for SharedArrayBuffer access paths.
+#[derive(Debug)]
+pub(crate) struct SharedArrayBufferBacking {
+    pub(crate) bytes: Box<[u8]>,
+    pub(crate) byte_length: usize,
+    pub(crate) max_byte_length: usize,
+    pub(crate) growable: bool,
+}
+
+/// GC-owned reference-counted SharedArrayBuffer backing suitable for cross-agent cloning.
+#[derive(Debug)]
+pub(crate) struct SharedArrayBufferData {
+    pub(crate) backing: Arc<Mutex<SharedArrayBufferBacking>>,
+    pub(crate) external_bytes: usize,
+}
+
+impl Trace for SharedArrayBufferData {
+    #[inline(always)]
+    fn trace(&mut self, _tracer: &mut dyn Tracer) {}
+}
+
+impl GcExternalMemory for SharedArrayBufferData {
+    #[inline(always)]
+    fn external_memory_bytes(&self) -> usize {
+        self.external_bytes
+    }
+}
+
 impl Trace for ArrayBufferData {
     #[inline(always)]
     fn trace(&mut self, _tracer: &mut dyn Tracer) {}
@@ -666,6 +695,7 @@ impl GcExternalMemory for ArrayBufferData {
 #[repr(C)]
 pub(crate) struct ArrayBufferObject {
     pub(crate) data: Option<GcRef<ArrayBufferData>>,
+    pub(crate) shared_data: Option<GcRef<SharedArrayBufferData>>,
     pub(crate) ordinary: OrdinaryObject,
 }
 
@@ -673,6 +703,7 @@ impl Trace for ArrayBufferObject {
     #[inline(always)]
     fn trace(&mut self, tracer: &mut dyn Tracer) {
         self.data.trace(tracer);
+        self.shared_data.trace(tracer);
         self.ordinary.trace(tracer);
     }
 }

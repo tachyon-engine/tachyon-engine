@@ -308,23 +308,16 @@ impl Isolate {
             .checked_add(byte_count)
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let data = self.typed_array_backing(target.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if source_end > data.byte_length
-                    || target_end > data.byte_length
-                    || source_end > data.bytes.len()
-                    || target_end > data.bytes.len()
-                {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                data.bytes
-                    .copy_within(source.byte_offset..source_end, target_start);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            if source_end > visible
+                || target_end > visible
+                || source_end > data.len()
+                || target_end > data.len()
+            {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            data.copy_within(source.byte_offset..source_end, target_start);
+            Ok(())
         })
     }
 
@@ -346,18 +339,12 @@ impl Isolate {
         bytes
             .try_reserve_exact(byte_count)
             .map_err(|_| ExecutionError::TypedArraySetAllocationFailed)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if end > data.byte_length || end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                bytes.extend_from_slice(&data.bytes[source.byte_offset..end]);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes(&data, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            bytes.extend_from_slice(&data[source.byte_offset..end]);
+            Ok(())
         })?;
         Ok(bytes)
     }
@@ -381,18 +368,12 @@ impl Isolate {
             .checked_add(bytes.len())
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let data = self.typed_array_backing(target.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if end > data.byte_length || end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                data.bytes[start..end].copy_from_slice(bytes);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            data[start..end].copy_from_slice(bytes);
+            Ok(())
         })
     }
 

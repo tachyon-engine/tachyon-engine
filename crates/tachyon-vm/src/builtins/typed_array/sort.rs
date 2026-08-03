@@ -35,38 +35,29 @@ impl Isolate {
         elements
             .try_reserve_exact(snapshot.length)
             .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if end > data.byte_length || end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                for bytes in data.bytes[snapshot.byte_offset..end].chunks_exact(width) {
-                    let mut bits = [0; 8];
-                    bits[..width].copy_from_slice(bytes);
-                    elements.push(ElementBits(bits));
-                }
-                Ok(())
-            })
+        self.with_buffer_backing_bytes(&data, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            for bytes in data[snapshot.byte_offset..end].chunks_exact(width) {
+                let mut bits = [0; 8];
+                bits[..width].copy_from_slice(bytes);
+                elements.push(ElementBits(bits));
+            }
+            Ok(())
         })?;
         elements.sort_by(|left, right| compare_typed_array_bits(snapshot.kind, left, right));
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                for (target, element) in data.bytes[snapshot.byte_offset..end]
-                    .chunks_exact_mut(width)
-                    .zip(elements)
-                {
-                    target.copy_from_slice(&element.0[..width]);
-                }
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            for (target, element) in data[snapshot.byte_offset..end]
+                .chunks_exact_mut(width)
+                .zip(elements)
+            {
+                target.copy_from_slice(&element.0[..width]);
+            }
+            Ok(())
         })?;
         self.write(site.caller_base, site.destination, receiver)
     }

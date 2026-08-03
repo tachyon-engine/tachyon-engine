@@ -400,6 +400,11 @@ pub(crate) enum ConversionConsumer {
     ArrayBufferSliceStart,
     ArrayBufferSliceEnd,
     ArrayBufferTransferLength(bool),
+    SharedArrayBufferLength,
+    SharedArrayBufferMaxByteLength,
+    SharedArrayBufferGrowLength,
+    SharedArrayBufferSliceStart,
+    SharedArrayBufferSliceEnd,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -537,6 +542,11 @@ impl ConversionConsumer {
             | Self::ArrayBufferSliceStart
             | Self::ArrayBufferSliceEnd
             | Self::ArrayBufferTransferLength(_)
+            | Self::SharedArrayBufferLength
+            | Self::SharedArrayBufferMaxByteLength
+            | Self::SharedArrayBufferGrowLength
+            | Self::SharedArrayBufferSliceStart
+            | Self::SharedArrayBufferSliceEnd
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
@@ -1059,6 +1069,17 @@ pub(crate) enum ArrayBufferSliceStage {
     Constructor,
     Value,
     Construct,
+    SharedConstructor,
+    SharedValue,
+    SharedConstruct,
+}
+
+/// Observable property reads in SharedArrayBuffer construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum SharedArrayBufferConstructorStage {
+    Maximum,
+    Prototype,
 }
 
 /// One observable boundary in the resumable Array.prototype.splice algorithm.
@@ -1725,6 +1746,7 @@ pub(crate) enum NativeContinuationKind {
     ArrayToSorted(ArrayToSortedStage),
     ArraySlice(ArraySliceStage),
     ArrayBufferSlice(ArrayBufferSliceStage),
+    SharedArrayBufferConstructor(SharedArrayBufferConstructorStage),
     ArraySplice(ArraySpliceStage),
     ArrayRemove(ArrayRemoveStage),
     ArrayInsert(ArrayInsertStage),
@@ -3224,6 +3246,22 @@ impl NativeContinuation {
         Self {
             site,
             kind: NativeContinuationKind::ArrayBufferSlice(stage),
+            first: state,
+            second: retained,
+        }
+    }
+
+    /// Roots SharedArrayBuffer constructor state across one observable property read.
+    #[inline]
+    pub(crate) const fn shared_array_buffer_constructor(
+        site: NativeContinuationSite,
+        stage: SharedArrayBufferConstructorStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::SharedArrayBufferConstructor(stage),
             first: state,
             second: retained,
         }

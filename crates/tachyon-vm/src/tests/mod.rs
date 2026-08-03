@@ -79,6 +79,7 @@ mod regexp_match_all;
 mod regexp_replace;
 mod regexp_search;
 mod set_methods;
+mod shared_array_buffer;
 mod signals;
 mod string_case;
 mod string_from_codes;

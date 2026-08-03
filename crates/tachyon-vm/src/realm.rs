@@ -42,6 +42,7 @@ impl Isolate {
         self.initialize_array_intrinsics()?;
         self.initialize_generator_intrinsics()?;
         self.initialize_array_buffer_intrinsics()?;
+        self.initialize_shared_array_buffer_intrinsics()?;
         self.initialize_data_view_intrinsics()?;
         self.initialize_typed_array_intrinsics()?;
         self.initialize_collection_intrinsics()?;
@@ -154,6 +155,89 @@ impl Isolate {
                 .expect("well-known symbols initialize before ArrayBuffer"),
         )?;
         let tag_atom = self.intern_intrinsic_name(b"ArrayBuffer")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            prototype,
+            tag,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
+    /// Builds SharedArrayBuffer independently so ordinary ArrayBuffer paths remain lock-free.
+    fn initialize_shared_array_buffer_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("function intrinsics initialize before SharedArrayBuffer");
+        let object_prototype = self
+            .realm
+            .object_prototype
+            .expect("Object prototype initializes before SharedArrayBuffer");
+        let prototype = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: object_prototype,
+        })?;
+        self.realm.shared_array_buffer_prototype = Some(prototype);
+        let constructor = self.allocate_native_function(
+            NativeFunction::SharedArrayBufferConstructor,
+            OrdinaryObject {
+                shape: ShapeId::EMPTY,
+                extensible: true,
+                storage: None,
+                prototype: function_prototype,
+            },
+        )?;
+        self.realm.shared_array_buffer_constructor = Some(constructor);
+        self.set_function_prototype(constructor, prototype)?;
+        self.install_species_accessor(constructor, function_prototype)?;
+        let constructor_atom = self.constructor_atom()?;
+        self.set_intrinsic_data_property(prototype, constructor_atom, constructor, true)?;
+        for (name, native) in [
+            (
+                b"byteLength".as_slice(),
+                NativeFunction::SharedArrayBufferByteLength,
+            ),
+            (
+                b"maxByteLength".as_slice(),
+                NativeFunction::SharedArrayBufferMaxByteLength,
+            ),
+            (
+                b"growable".as_slice(),
+                NativeFunction::SharedArrayBufferGrowable,
+            ),
+        ] {
+            self.install_collection_accessor(prototype, function_prototype, name, native)?;
+        }
+        for (name, native) in [
+            (b"grow".as_slice(), NativeFunction::SharedArrayBufferGrow),
+            (b"slice".as_slice(), NativeFunction::SharedArrayBufferSlice),
+        ] {
+            let function = self.allocate_native_function(
+                native,
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let name = self.intern_intrinsic_name(name)?;
+            self.set_intrinsic_data_property(prototype, name, function, true)?;
+        }
+        let tag = self.property_key(
+            self.agent
+                .well_known_symbols
+                .to_string_tag
+                .expect("Symbol.toStringTag initializes before SharedArrayBuffer"),
+        )?;
+        let tag_atom = self.intern_intrinsic_name(b"SharedArrayBuffer")?;
         let tag_value = self.atom_string_value(tag_atom)?;
         self.define_data_property(
             prototype,
@@ -2029,6 +2113,7 @@ impl Isolate {
             array: self.intern_intrinsic_name(b"Array")?,
             iterator: self.intern_intrinsic_name(b"Iterator")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
+            shared_array_buffer: self.intern_intrinsic_name(b"SharedArrayBuffer")?,
             data_view: self.intern_intrinsic_name(b"DataView")?,
             typed_arrays: [
                 self.intern_intrinsic_name(b"Int8Array")?,
@@ -4402,6 +4487,13 @@ impl Isolate {
             self.realm
                 .array_buffer_constructor
                 .expect("ArrayBuffer initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.shared_array_buffer,
+            self.realm
+                .shared_array_buffer_constructor
+                .expect("SharedArrayBuffer initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

@@ -4,7 +4,8 @@ mod float16;
 
 use self::float16::{decode_float16, encode_float16};
 use super::super::*;
-use crate::object::{ArrayBufferData, DataViewObject, ViewLengthMode};
+use super::array_buffer::BufferBacking;
+use crate::object::{DataViewObject, ViewLengthMode};
 use crate::runtime::callable::DataViewElement;
 
 #[derive(Clone, Copy)]
@@ -37,15 +38,7 @@ impl Isolate {
             .unwrap_or(Value::from_immediate(Immediate::Undefined));
         let offset = self.ecma_to_index(offset_value)?;
         let data = self.data_view_backing(buffer)?;
-        let buffer_length = self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.byte_length)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })?;
+        let buffer_length = self.buffer_backing_byte_length(&data)?;
         if offset > buffer_length {
             return Err(ExecutionError::InvalidArrayLength);
         }
@@ -288,58 +281,14 @@ impl Isolate {
         &mut self,
         buffer: Value,
     ) -> Result<bool, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })?;
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.resizable)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })
+        let backing = self.resolve_buffer_backing(buffer)?;
+        self.buffer_backing_is_resizable(&backing)
     }
 
     /// Reads the current byte length of a branded, attached ArrayBuffer.
     fn data_view_buffer_length(&mut self, buffer: Value) -> Result<usize, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })?;
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.byte_length)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })
+        let backing = self.resolve_buffer_backing(buffer)?;
+        self.buffer_backing_byte_length(&backing)
     }
 
     /// Copies at most eight checked bytes from the backing store into a stack word.
@@ -351,17 +300,9 @@ impl Isolate {
     ) -> Result<[u8; 8], ExecutionError> {
         let data = self.data_view_backing(view.buffer)?;
         let range = data_view_range(view, offset, width)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let mut output = [0_u8; 8];
-                output[..width].copy_from_slice(&data.bytes[range]);
-                Ok(output)
-            })
-        })
+        let mut output = [0_u8; 8];
+        self.read_buffer_backing_bytes(&data, range, &mut output[..width])?;
+        Ok(output)
     }
 
     /// Writes at most eight checked bytes without exposing the backing allocation.
@@ -374,41 +315,12 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         let data = self.data_view_backing(view.buffer)?;
         let range = data_view_range(view, offset, width)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .bytes[range]
-                    .copy_from_slice(&bytes[..width]);
-                Ok(())
-            })
-        })
+        self.write_buffer_backing_bytes(&data, range, &bytes[..width])
     }
 
     /// Resolves the view's ArrayBuffer edge to its current non-detached backing.
-    fn data_view_backing(
-        &mut self,
-        buffer: Value,
-    ) -> Result<GcRef<ArrayBufferData>, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })
-        })
+    fn data_view_backing(&mut self, buffer: Value) -> Result<BufferBacking, ExecutionError> {
+        self.resolve_buffer_backing(buffer)
     }
 }
 

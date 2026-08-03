@@ -200,20 +200,14 @@ impl Isolate {
             )
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let bytes = self.encode_typed_array_fill_element(snapshot.kind, value)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if byte_end > data.byte_length || byte_end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                for chunk in data.bytes[byte_start..byte_end].chunks_exact_mut(width) {
-                    chunk.copy_from_slice(&bytes[..width]);
-                }
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            if byte_end > visible || byte_end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            for chunk in data[byte_start..byte_end].chunks_exact_mut(width) {
+                chunk.copy_from_slice(&bytes[..width]);
+            }
+            Ok(())
         })
     }
 

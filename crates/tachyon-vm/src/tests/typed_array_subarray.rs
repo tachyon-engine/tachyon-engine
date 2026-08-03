@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
-use super::{fixtures::test_isolate, *};
+use super::{
+    fixtures::{test_isolate, test_isolate_with_heap_spans},
+    *,
+};
 
 const TYPED_ARRAY_SUBARRAY_SOURCE: &str = r#"
 function verify(TA) {
@@ -161,7 +164,8 @@ fn typed_array_subarray_tracks_rab_species_arguments_and_oob_recovery() {
 fn typed_array_subarray_constructs_foreign_species_in_its_realm() {
     let module =
         compile_typed_array_subarray_fixture(TYPED_ARRAY_SUBARRAY_CROSS_REALM_SOURCE, 7_438);
-    let mut isolate = test_isolate();
+    // Two complete Realms include the default SharedArrayBuffer intrinsic surface.
+    let mut isolate = test_isolate_with_heap_spans(10);
     let (_, child_global) = isolate.create_realm().expect("child Realm initializes");
     let constructor_atom = isolate.intern_intrinsic_name(b"Uint16Array").unwrap();
     let foreign_constructor = isolate

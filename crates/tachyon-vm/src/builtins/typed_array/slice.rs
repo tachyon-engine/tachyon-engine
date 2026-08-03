@@ -357,40 +357,28 @@ impl Isolate {
         bytes
             .try_reserve_exact(byte_count)
             .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(source_data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let end = source_start
-                    .checked_add(byte_count)
-                    .ok_or(ExecutionError::InvalidArrayLength)?;
-                bytes.extend_from_slice(
-                    data.bytes
-                        .get(source_start..end)
-                        .ok_or(ExecutionError::InvalidArrayLength)?,
-                );
-                Ok::<(), ExecutionError>(())
-            })
+        self.with_buffer_backing_bytes(&source_data, |data, visible| {
+            let end = source_start
+                .checked_add(byte_count)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            let source = data
+                .get(source_start..end)
+                .filter(|_| end <= visible)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            bytes.extend_from_slice(source);
+            Ok(())
         })?;
         let target_data = self.typed_array_backing(target.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(target_data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let end = target
-                    .byte_offset
-                    .checked_add(byte_count)
-                    .ok_or(ExecutionError::InvalidArrayLength)?;
-                data.bytes
-                    .get_mut(target.byte_offset..end)
-                    .ok_or(ExecutionError::InvalidArrayLength)?
-                    .copy_from_slice(&bytes);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&target_data, |data, visible| {
+            let end = target
+                .byte_offset
+                .checked_add(byte_count)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            data.get_mut(target.byte_offset..end)
+                .filter(|_| end <= visible)
+                .ok_or(ExecutionError::InvalidArrayLength)?
+                .copy_from_slice(&bytes);
+            Ok(())
         })
     }
 
@@ -403,26 +391,24 @@ impl Isolate {
         byte_count: usize,
     ) -> Result<(), ExecutionError> {
         let data = self.typed_array_backing(buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let source_end = source_start
-                    .checked_add(byte_count)
-                    .ok_or(ExecutionError::InvalidArrayLength)?;
-                let target_end = target_start
-                    .checked_add(byte_count)
-                    .ok_or(ExecutionError::InvalidArrayLength)?;
-                if source_end > data.bytes.len() || target_end > data.bytes.len() {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                for offset in 0..byte_count {
-                    data.bytes[target_start + offset] = data.bytes[source_start + offset];
-                }
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |data, visible| {
+            let source_end = source_start
+                .checked_add(byte_count)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            let target_end = target_start
+                .checked_add(byte_count)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            if source_end > visible
+                || target_end > visible
+                || source_end > data.len()
+                || target_end > data.len()
+            {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            for offset in 0..byte_count {
+                data[target_start + offset] = data[source_start + offset];
+            }
+            Ok(())
         })
     }
 

@@ -8,7 +8,8 @@ use crate::builtins::typed_array::PendingTypedArrayConstruction;
 use crate::generator::GeneratorObject;
 use crate::module::ModuleNamespaceObject;
 use crate::object::{
-    ArrayBufferData, ArrayBufferObject, DataViewObject, TypedArrayKind, TypedArrayObject,
+    ArrayBufferData, ArrayBufferObject, DataViewObject, SharedArrayBufferData, TypedArrayKind,
+    TypedArrayObject,
 };
 
 /// Shared accessors installed on `%TypedArray.prototype%`.
@@ -489,6 +490,12 @@ pub(crate) enum NativeFunction {
     ArrayBufferSlice,
     ArrayBufferTransfer,
     ArrayBufferTransferToFixedLength,
+    SharedArrayBufferConstructor,
+    SharedArrayBufferByteLength,
+    SharedArrayBufferMaxByteLength,
+    SharedArrayBufferGrowable,
+    SharedArrayBufferGrow,
+    SharedArrayBufferSlice,
     DataViewConstructor,
     DataViewBuffer,
     DataViewByteLength,
@@ -991,6 +998,7 @@ impl NativeFunction {
                 | Self::PromiseConstructor
                 | Self::ArrayConstructor
                 | Self::ArrayBufferConstructor
+                | Self::SharedArrayBufferConstructor
                 | Self::DataViewConstructor
                 | Self::TypedArrayConstructor(_)
                 | Self::MapConstructor
@@ -1176,6 +1184,8 @@ impl NativeFunction {
             | Self::ErrorIsError
             | Self::ArrayConstructor
             | Self::ArrayBufferConstructor
+            | Self::SharedArrayBufferConstructor
+            | Self::SharedArrayBufferGrow
             | Self::ArrayBufferIsView
             | Self::DataViewConstructor
             | Self::DataViewGet(_)
@@ -1215,6 +1225,7 @@ impl NativeFunction {
             | Self::TypedArrayWith
             | Self::ArrayToSpliced
             | Self::ArrayBufferSlice
+            | Self::SharedArrayBufferSlice
             | Self::DataViewSet(_) => 2,
             Self::ArrayOf
             | Self::ArrayFlat
@@ -1365,6 +1376,9 @@ impl NativeFunction {
             | Self::ArrayBufferMaxByteLength
             | Self::ArrayBufferResizable
             | Self::ArrayBufferDetached
+            | Self::SharedArrayBufferByteLength
+            | Self::SharedArrayBufferMaxByteLength
+            | Self::SharedArrayBufferGrowable
             | Self::DataViewBuffer
             | Self::DataViewByteLength
             | Self::DataViewByteOffset
@@ -1668,6 +1682,12 @@ impl NativeFunction {
             Self::ArrayBufferSlice => "slice",
             Self::ArrayBufferTransfer => "transfer",
             Self::ArrayBufferTransferToFixedLength => "transferToFixedLength",
+            Self::SharedArrayBufferConstructor => "SharedArrayBuffer",
+            Self::SharedArrayBufferByteLength => "get byteLength",
+            Self::SharedArrayBufferMaxByteLength => "get maxByteLength",
+            Self::SharedArrayBufferGrowable => "get growable",
+            Self::SharedArrayBufferGrow => "grow",
+            Self::SharedArrayBufferSlice => "slice",
             Self::DataViewConstructor => "DataView",
             Self::DataViewBuffer => "get buffer",
             Self::DataViewByteLength => "get byteLength",
@@ -2371,6 +2391,7 @@ pub(crate) struct VmTypes {
     pub(crate) bigint: GcType<BigIntValue>,
     pub(crate) accessor_pair: GcType<AccessorPair>,
     pub(crate) array_buffer_data: GcType<ArrayBufferData>,
+    pub(crate) shared_array_buffer_data: GcType<SharedArrayBufferData>,
     pub(crate) array_buffer_object: GcType<ArrayBufferObject>,
     pub(crate) data_view_object: GcType<DataViewObject>,
     pub(crate) typed_array_object: GcType<TypedArrayObject>,
@@ -2491,6 +2512,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) array: AtomId,
     pub(crate) iterator: AtomId,
     pub(crate) array_buffer: AtomId,
+    pub(crate) shared_array_buffer: AtomId,
     pub(crate) data_view: AtomId,
     pub(crate) typed_arrays: [AtomId; TypedArrayKind::ALL.len()],
     pub(crate) object: AtomId,
@@ -2520,7 +2542,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 29
+    pub(crate) const BINDING_COUNT: usize = 30
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()
@@ -2579,6 +2601,7 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::TypedArraySpeciesResultTooShort
         | ExecutionError::DetachedArrayBuffer
+        | ExecutionError::FixedLengthSharedArrayBuffer
         | ExecutionError::OutOfBoundsTypedArray
         | ExecutionError::RegExpMatchAllRequiresGlobal => Some(NativeErrorKind::Type),
         ExecutionError::GlobalLexicalRedeclaration(_)

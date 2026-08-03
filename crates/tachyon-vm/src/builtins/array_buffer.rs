@@ -1,7 +1,12 @@
 //! Fixed-length ArrayBuffer construction and branded prototype accessors.
 
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
+
 use super::super::*;
-use crate::object::{ArrayBufferData, ArrayBufferObject};
+use crate::object::{
+    ArrayBufferData, ArrayBufferObject, SharedArrayBufferBacking, SharedArrayBufferData,
+};
 use crate::runtime::fiber::ArrayBufferSliceStage;
 use crate::tuning::buffers::ARRAY_BUFFER_SLICE_COPY_CHUNK_BYTES;
 
@@ -13,6 +18,20 @@ struct ArrayBufferDataSnapshot {
     byte_length: usize,
     max_byte_length: usize,
     resizable: bool,
+}
+
+/// Resolved backing identity for ordinary and shared ArrayBuffer access paths.
+#[derive(Clone)]
+pub(super) enum BufferBacking {
+    Ordinary(GcRef<ArrayBufferData>),
+    Shared(Arc<Mutex<SharedArrayBufferBacking>>),
+}
+
+/// Selects the ordinary or shared brand for the common resumable slice algorithm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum BufferSliceKind {
+    Ordinary,
+    Shared,
 }
 
 struct ArrayBufferAllocationRoots<'a> {
@@ -31,6 +50,175 @@ impl Trace for ArrayBufferAllocationRoots<'_> {
 }
 
 impl Isolate {
+    /// Resolves either ArrayBuffer backing without adding synchronization to ordinary buffers.
+    pub(super) fn resolve_buffer_backing(
+        &mut self,
+        value: Value,
+    ) -> Result<BufferBacking, ExecutionError> {
+        let raw = value
+            .as_heap_ref()
+            .ok_or(ExecutionError::NotObject(value))?;
+        let object = self
+            .heap
+            .checked_reference(raw, self.types.array_buffer_object)
+            .map_err(|_| ExecutionError::NotObject(value))?;
+        let (ordinary, shared) = self.heap.with_running_scope(|scope| {
+            let object = scope.root(object).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(object, self.types.array_buffer_object)
+                    .map(|object| (object.data, object.shared_data))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        if let Some(data) = ordinary {
+            return Ok(BufferBacking::Ordinary(data));
+        }
+        let shared = shared.ok_or(ExecutionError::DetachedArrayBuffer)?;
+        let backing = self.heap.with_running_scope(|scope| {
+            let shared = scope.root(shared).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(shared, self.types.shared_array_buffer_data)
+                    .map(|data: &SharedArrayBufferData| Arc::clone(&data.backing))
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        Ok(BufferBacking::Shared(backing))
+    }
+
+    /// Reads the currently visible byte length from one resolved backing.
+    pub(super) fn buffer_backing_byte_length(
+        &mut self,
+        backing: &BufferBacking,
+    ) -> Result<usize, ExecutionError> {
+        match backing {
+            BufferBacking::Ordinary(data) => self.heap.with_running_scope(|scope| {
+                let data = scope.root(*data).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(data, self.types.array_buffer_data)
+                        .map(|data| data.byte_length)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            }),
+            BufferBacking::Shared(backing) => Ok(lock_buffer_backing(backing).byte_length),
+        }
+    }
+
+    /// Reports whether views without explicit length track subsequent backing growth.
+    pub(super) fn buffer_backing_is_resizable(
+        &mut self,
+        backing: &BufferBacking,
+    ) -> Result<bool, ExecutionError> {
+        match backing {
+            BufferBacking::Ordinary(data) => self.heap.with_running_scope(|scope| {
+                let data = scope.root(*data).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    no_gc
+                        .borrow(data, self.types.array_buffer_data)
+                        .map(|data| data.resizable)
+                        .map_err(ExecutionError::NoGcBorrow)
+                })
+            }),
+            BufferBacking::Shared(backing) => Ok(lock_buffer_backing(backing).growable),
+        }
+    }
+
+    /// Borrows visible backing bytes for one non-suspending callback.
+    ///
+    /// Ordinary buffers retain the existing no-GC borrow path; shared buffers hold their mutex
+    /// only for the callback duration. Callers must not invoke JS or allocate through the GC.
+    pub(super) fn with_buffer_backing_bytes<R>(
+        &mut self,
+        backing: &BufferBacking,
+        callback: impl FnOnce(&[u8], usize) -> Result<R, ExecutionError>,
+    ) -> Result<R, ExecutionError> {
+        match backing {
+            BufferBacking::Ordinary(data) => self.heap.with_running_scope(|scope| {
+                let data = scope.root(*data).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let data = no_gc
+                        .borrow(data, self.types.array_buffer_data)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    callback(&data.bytes, data.byte_length)
+                })
+            }),
+            BufferBacking::Shared(backing) => {
+                let backing = lock_buffer_backing(backing);
+                callback(&backing.bytes, backing.byte_length)
+            }
+        }
+    }
+
+    /// Mutably borrows visible backing bytes for one non-suspending callback.
+    ///
+    /// This keeps ordinary ArrayBuffer mutation lock-free and serializes only the explicitly
+    /// shared backing path. The callback cannot outlive the corresponding borrow or mutex guard.
+    pub(super) fn with_buffer_backing_bytes_mut<R>(
+        &mut self,
+        backing: &BufferBacking,
+        callback: impl FnOnce(&mut [u8], usize) -> Result<R, ExecutionError>,
+    ) -> Result<R, ExecutionError> {
+        match backing {
+            BufferBacking::Ordinary(data) => self.heap.with_running_scope(|scope| {
+                let data = scope.root(*data).map_err(ExecutionError::Root)?;
+                scope.with_no_gc_scope(|no_gc| {
+                    let data = no_gc
+                        .borrow_mut(data, self.types.array_buffer_data)
+                        .map_err(ExecutionError::NoGcBorrow)?;
+                    let visible = data.byte_length;
+                    callback(&mut data.bytes, visible)
+                })
+            }),
+            BufferBacking::Shared(backing) => {
+                let mut backing = lock_buffer_backing(backing);
+                let visible = backing.byte_length;
+                callback(&mut backing.bytes, visible)
+            }
+        }
+    }
+
+    /// Copies one checked visible byte range into caller-owned stack or Vec storage.
+    pub(super) fn read_buffer_backing_bytes(
+        &mut self,
+        backing: &BufferBacking,
+        range: Range<usize>,
+        output: &mut [u8],
+    ) -> Result<(), ExecutionError> {
+        if range.len() != output.len() {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        self.with_buffer_backing_bytes(backing, |bytes, visible| {
+            let bytes = bytes
+                .get(range.clone())
+                .filter(|_| range.end <= visible)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            output.copy_from_slice(bytes);
+            Ok(())
+        })
+    }
+
+    /// Writes one checked visible byte range, locking only SharedArrayBuffer storage.
+    pub(super) fn write_buffer_backing_bytes(
+        &mut self,
+        backing: &BufferBacking,
+        range: Range<usize>,
+        input: &[u8],
+    ) -> Result<(), ExecutionError> {
+        if range.len() != input.len() {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        self.with_buffer_backing_bytes_mut(backing, |bytes, visible| {
+            let bytes = bytes
+                .get_mut(range.clone())
+                .filter(|_| range.end <= visible)
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            bytes.copy_from_slice(input);
+            Ok(())
+        })
+    }
+
     /// Clears one fixed ArrayBuffer's backing edge; repeated detach is a no-op.
     pub(crate) fn detach_array_buffer(&mut self, value: Value) -> Result<(), ExecutionError> {
         let raw = value
@@ -45,8 +233,14 @@ impl Isolate {
             scope.with_no_gc_scope(|no_gc| {
                 no_gc
                     .borrow_mut(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data = None;
+                    .map_err(ExecutionError::NoGcBorrow)
+                    .and_then(|object| {
+                        if object.shared_data.is_some() {
+                            return Err(ExecutionError::NotObject(value));
+                        }
+                        object.data = None;
+                        Ok(())
+                    })?;
                 Ok(())
             })
         })
@@ -205,6 +399,7 @@ impl Isolate {
                 0,
                 ArrayBufferObject {
                     data: Some(data),
+                    shared_data: None,
                     ordinary: OrdinaryObject {
                         shape: ShapeId::EMPTY,
                         extensible: true,
@@ -234,10 +429,13 @@ impl Isolate {
         let data = self.heap.with_running_scope(|scope| {
             let object = scope.root(object).map_err(ExecutionError::Root)?;
             scope.with_no_gc_scope(|no_gc| {
-                no_gc
+                let object = no_gc
                     .borrow(object, self.types.array_buffer_object)
-                    .map(|object| object.data)
-                    .map_err(ExecutionError::NoGcBorrow)
+                    .map_err(ExecutionError::NoGcBorrow)?;
+                if object.shared_data.is_some() {
+                    return Err(ExecutionError::NotObject(value));
+                }
+                Ok(object.data)
             })
         })?;
         let Some(data) = data else { return Ok(None) };
@@ -303,10 +501,17 @@ impl Isolate {
         &mut self,
         site: &CallSite,
     ) -> Result<(), ExecutionError> {
+        self.begin_buffer_slice(site, BufferSliceKind::Ordinary)
+    }
+
+    /// Begins either ArrayBuffer slice algorithm while sharing conversion/species machinery.
+    pub(super) fn begin_buffer_slice(
+        &mut self,
+        site: &CallSite,
+        kind: BufferSliceKind,
+    ) -> Result<(), ExecutionError> {
         let source = site.this_value;
-        let snapshot = self
-            .array_buffer_data_snapshot(source)?
-            .ok_or(ExecutionError::DetachedArrayBuffer)?;
+        let (_, byte_length) = self.buffer_slice_backing(source, kind)?;
         let undefined = Value::from_immediate(Immediate::Undefined);
         let start = self.call_argument(site, 0)?.unwrap_or(undefined);
         let end = self.call_argument(site, 1)?.unwrap_or(undefined);
@@ -315,7 +520,7 @@ impl Isolate {
                 source,
                 start,
                 end,
-                Value::from_f64(snapshot.byte_length as f64),
+                Value::from_f64(byte_length as f64),
                 undefined,
             ],
             count: 0,
@@ -328,7 +533,7 @@ impl Isolate {
         self.root_array_buffer_slice_state(site, state)?;
         if self.is_object_value(start) {
             return self.dispatch_object_primitive_conversion(
-                ConversionConsumer::ArrayBufferSliceStart,
+                buffer_slice_start_consumer(kind),
                 site.caller_base,
                 site.destination,
                 Value::from_heap_ref(state.raw()),
@@ -336,7 +541,7 @@ impl Isolate {
                 site.call_site,
             );
         }
-        self.finish_array_buffer_slice_start(site, state, start)
+        self.finish_array_buffer_slice_start(site, state, kind, start)
     }
 
     /// Begins fixed ArrayBuffer copy-and-detach while preserving observable ToIndex order.
@@ -436,10 +641,16 @@ impl Isolate {
         self.root_array_buffer_slice_state(site, state)?;
         match consumer {
             ConversionConsumer::ArrayBufferSliceStart => {
-                self.finish_array_buffer_slice_start(site, state, value)
+                self.finish_array_buffer_slice_start(site, state, BufferSliceKind::Ordinary, value)
             }
             ConversionConsumer::ArrayBufferSliceEnd => {
-                self.finish_array_buffer_slice_end(site, state, value)
+                self.finish_array_buffer_slice_end(site, state, BufferSliceKind::Ordinary, value)
+            }
+            ConversionConsumer::SharedArrayBufferSliceStart => {
+                self.finish_array_buffer_slice_start(site, state, BufferSliceKind::Shared, value)
+            }
+            ConversionConsumer::SharedArrayBufferSliceEnd => {
+                self.finish_array_buffer_slice_end(site, state, BufferSliceKind::Shared, value)
             }
             _ => Err(ExecutionError::MissingNativeContinuation),
         }
@@ -455,15 +666,44 @@ impl Isolate {
     ) -> Result<(), ExecutionError> {
         self.root_array_buffer_slice_state(site, state)?;
         match stage {
-            ArrayBufferSliceStage::Constructor => {
-                self.resume_array_buffer_slice_constructor(site, state, value)
-            }
-            ArrayBufferSliceStage::Value => {
-                self.finish_array_buffer_slice_species(site, state, value, true)
-            }
-            ArrayBufferSliceStage::Construct => {
-                self.finish_array_buffer_slice_construct(site, state, value)
-            }
+            ArrayBufferSliceStage::Constructor => self.resume_array_buffer_slice_constructor(
+                site,
+                state,
+                BufferSliceKind::Ordinary,
+                value,
+            ),
+            ArrayBufferSliceStage::Value => self.finish_array_buffer_slice_species(
+                site,
+                state,
+                BufferSliceKind::Ordinary,
+                value,
+                true,
+            ),
+            ArrayBufferSliceStage::Construct => self.finish_array_buffer_slice_construct(
+                site,
+                state,
+                BufferSliceKind::Ordinary,
+                value,
+            ),
+            ArrayBufferSliceStage::SharedConstructor => self.resume_array_buffer_slice_constructor(
+                site,
+                state,
+                BufferSliceKind::Shared,
+                value,
+            ),
+            ArrayBufferSliceStage::SharedValue => self.finish_array_buffer_slice_species(
+                site,
+                state,
+                BufferSliceKind::Shared,
+                value,
+                true,
+            ),
+            ArrayBufferSliceStage::SharedConstruct => self.finish_array_buffer_slice_construct(
+                site,
+                state,
+                BufferSliceKind::Shared,
+                value,
+            ),
         }
     }
 
@@ -472,6 +712,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         value: Value,
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
@@ -485,11 +726,11 @@ impl Isolate {
         self.update_array_buffer_slice_value(state, 1, safe_integer_value(first))?;
         let end = pending.values[2];
         if end.as_immediate() == Some(Immediate::Undefined) {
-            return self.finish_array_buffer_slice_indices(site, state, length);
+            return self.finish_array_buffer_slice_indices(site, state, kind, length);
         }
         if self.is_object_value(end) {
             return self.dispatch_object_primitive_conversion(
-                ConversionConsumer::ArrayBufferSliceEnd,
+                buffer_slice_end_consumer(kind),
                 site.caller_base,
                 site.destination,
                 Value::from_heap_ref(state.raw()),
@@ -497,7 +738,7 @@ impl Isolate {
                 site.call_site,
             );
         }
-        self.finish_array_buffer_slice_end(site, state, end)
+        self.finish_array_buffer_slice_end(site, state, kind, end)
     }
 
     /// Normalizes the explicit end argument and freezes the resulting byte count.
@@ -505,6 +746,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         value: Value,
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
@@ -515,7 +757,7 @@ impl Isolate {
             length,
             array_buffer_slice_integer(self.convert_to_number(value)?)?,
         );
-        self.finish_array_buffer_slice_indices(site, state, final_index)
+        self.finish_array_buffer_slice_indices(site, state, kind, final_index)
     }
 
     /// Saves `newLen`, then starts the observable SpeciesConstructor lookup.
@@ -523,6 +765,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         final_index: u64,
     ) -> Result<(), ExecutionError> {
         let pending = self.native_call_state_snapshot(state)?;
@@ -537,11 +780,11 @@ impl Isolate {
         if let Some(value) = self.dispatch_array_buffer_slice_get(
             site,
             state,
-            ArrayBufferSliceStage::Constructor,
+            buffer_slice_constructor_stage(kind),
             pending.values[0],
             constructor.into(),
         )? {
-            self.resume_array_buffer_slice_constructor(site, state, value)?;
+            self.resume_array_buffer_slice_constructor(site, state, kind, value)?;
         }
         Ok(())
     }
@@ -551,10 +794,11 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         constructor: Value,
     ) -> Result<(), ExecutionError> {
         if constructor.as_immediate() == Some(Immediate::Undefined) {
-            return self.finish_array_buffer_slice_species(site, state, constructor, false);
+            return self.finish_array_buffer_slice_species(site, state, kind, constructor, false);
         }
         if !self.is_object_value(constructor) {
             return Err(ExecutionError::NotObject(constructor));
@@ -569,11 +813,11 @@ impl Isolate {
         if let Some(value) = self.dispatch_array_buffer_slice_get(
             site,
             state,
-            ArrayBufferSliceStage::Value,
+            buffer_slice_value_stage(kind),
             constructor,
             species_key,
         )? {
-            self.finish_array_buffer_slice_species(site, state, value, true)?;
+            self.finish_array_buffer_slice_species(site, state, kind, value, true)?;
         }
         Ok(())
     }
@@ -583,22 +827,30 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         observed: Value,
         from_species: bool,
     ) -> Result<(), ExecutionError> {
         let constructor = if observed.as_immediate() == Some(Immediate::Undefined)
             || (from_species && observed.as_immediate() == Some(Immediate::Null))
         {
-            self.realm
-                .array_buffer_constructor
-                .expect("ArrayBuffer constructor initializes before slice")
+            match kind {
+                BufferSliceKind::Ordinary => self
+                    .realm
+                    .array_buffer_constructor
+                    .expect("ArrayBuffer constructor initializes before slice"),
+                BufferSliceKind::Shared => self
+                    .realm
+                    .shared_array_buffer_constructor
+                    .expect("SharedArrayBuffer constructor initializes before slice"),
+            }
         } else {
             observed
         };
         if !self.is_constructor_value(constructor)? {
             return Err(ExecutionError::NonConstructor(constructor));
         }
-        self.construct_array_buffer_slice_result(site, state, constructor)
+        self.construct_array_buffer_slice_result(site, state, kind, constructor)
     }
 
     /// Roots the one exact length argument while the selected constructor executes.
@@ -606,6 +858,7 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         constructor: Value,
     ) -> Result<(), ExecutionError> {
         self.update_array_buffer_slice_value(state, 3, constructor)?;
@@ -619,7 +872,7 @@ impl Isolate {
         self.push_array_buffer_slice_parent(
             site,
             state,
-            ArrayBufferSliceStage::Construct,
+            buffer_slice_construct_stage(kind),
             constructor,
         )?;
         let prefix = match self.create_apply_argument_prefix(constructor, undefined, arguments) {
@@ -635,7 +888,7 @@ impl Isolate {
         self.push_array_buffer_slice_parent(
             site,
             state,
-            ArrayBufferSliceStage::Construct,
+            buffer_slice_construct_stage(kind),
             Value::from_heap_ref(prefix.raw()),
         )?;
         let frame_depth = self.fiber.frames.len();
@@ -670,7 +923,7 @@ impl Isolate {
         let rooted = self.pop_native_continuation()?;
         let state = self.native_call_state_reference(rooted.first())?;
         let result = self.read(site.caller_base, site.destination)?;
-        self.finish_array_buffer_slice_construct(site, state, result)
+        self.finish_array_buffer_slice_construct(site, state, kind, result)
     }
 
     /// Validates the constructor result and source ordering before copying bytes.
@@ -678,11 +931,10 @@ impl Isolate {
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
+        kind: BufferSliceKind,
         result: Value,
     ) -> Result<(), ExecutionError> {
-        let result_snapshot = self
-            .array_buffer_data_snapshot(result)?
-            .ok_or(ExecutionError::DetachedArrayBuffer)?;
+        let (result_backing, result_length) = self.buffer_slice_backing(result, kind)?;
         let pending = self.native_call_state_snapshot(state)?;
         let source = pending.values[0];
         if result == source {
@@ -691,22 +943,62 @@ impl Isolate {
         let new_length = numeric_value(pending.values[2])
             .expect("ArrayBuffer slice stores new length as Number")
             as usize;
-        if result_snapshot.byte_length < new_length {
+        if result_length < new_length {
             return Err(ExecutionError::NotObject(result));
         }
-        let source_snapshot = self
-            .array_buffer_data_snapshot(source)?
-            .ok_or(ExecutionError::DetachedArrayBuffer)?;
+        let (source_backing, _) = self.buffer_slice_backing(source, kind)?;
         self.update_array_buffer_slice_value(state, 4, result)?;
         let first = numeric_value(pending.values[1])
             .expect("ArrayBuffer slice stores first as Number") as usize;
-        self.copy_array_buffer_slice_bytes(
-            source_snapshot.data,
-            result_snapshot.data,
-            first,
-            new_length,
-        )?;
+        self.copy_buffer_slice_backing_bytes(&source_backing, &result_backing, first, new_length)?;
         self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Resolves one backing and enforces the exact ordinary/shared slice result brand.
+    fn buffer_slice_backing(
+        &mut self,
+        value: Value,
+        kind: BufferSliceKind,
+    ) -> Result<(BufferBacking, usize), ExecutionError> {
+        let backing = self.resolve_buffer_backing(value)?;
+        let branded = matches!(
+            (&backing, kind),
+            (BufferBacking::Ordinary(_), BufferSliceKind::Ordinary)
+                | (BufferBacking::Shared(_), BufferSliceKind::Shared)
+        );
+        if !branded {
+            return Err(ExecutionError::NotObject(value));
+        }
+        let length = self.buffer_backing_byte_length(&backing)?;
+        Ok((backing, length))
+    }
+
+    /// Copies either ordinary or shared slice storage through bounded stack scratch.
+    fn copy_buffer_slice_backing_bytes(
+        &mut self,
+        source: &BufferBacking,
+        destination: &BufferBacking,
+        first: usize,
+        length: usize,
+    ) -> Result<(), ExecutionError> {
+        let mut scratch = [0_u8; ARRAY_BUFFER_SLICE_COPY_CHUNK_BYTES];
+        let mut copied = 0;
+        while copied < length {
+            let chunk = (length - copied).min(scratch.len());
+            let source_start = first + copied;
+            self.read_buffer_backing_bytes(
+                source,
+                source_start..source_start + chunk,
+                &mut scratch[..chunk],
+            )?;
+            self.write_buffer_backing_bytes(
+                destination,
+                copied..copied + chunk,
+                &scratch[..chunk],
+            )?;
+            copied += chunk;
+        }
+        Ok(())
     }
 
     /// Copies bytes through bounded stack scratch so no untraced allocation or aliased borrow exists.
@@ -827,7 +1119,7 @@ impl Isolate {
     }
 
     /// Allocates one existing fixed five-Value native state under all VM roots.
-    fn allocate_array_buffer_slice_state(
+    pub(super) fn allocate_array_buffer_slice_state(
         &mut self,
         pending: NativeCallState,
     ) -> Result<GcRef<NativeCallState>, ExecutionError> {
@@ -855,7 +1147,7 @@ impl Isolate {
 
     /// Keeps the state live in the caller destination across every allocation point.
     #[inline]
-    fn root_array_buffer_slice_state(
+    pub(super) fn root_array_buffer_slice_state(
         &mut self,
         site: NativeContinuationSite,
         state: GcRef<NativeCallState>,
@@ -868,7 +1160,7 @@ impl Isolate {
     }
 
     /// Updates one traced state slot and applies the old-to-young barrier.
-    fn update_array_buffer_slice_value(
+    pub(super) fn update_array_buffer_slice_value(
         &mut self,
         state: GcRef<NativeCallState>,
         slot: usize,
@@ -888,6 +1180,55 @@ impl Isolate {
                 .map_err(ExecutionError::HeapReference)
                 .map(|_| ())
         })
+    }
+}
+
+/// Recovers poisoned state only for non-default unwind builds; release builds use panic=abort.
+fn lock_buffer_backing(
+    backing: &Arc<Mutex<SharedArrayBufferBacking>>,
+) -> std::sync::MutexGuard<'_, SharedArrayBufferBacking> {
+    backing
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[inline(always)]
+const fn buffer_slice_start_consumer(kind: BufferSliceKind) -> ConversionConsumer {
+    match kind {
+        BufferSliceKind::Ordinary => ConversionConsumer::ArrayBufferSliceStart,
+        BufferSliceKind::Shared => ConversionConsumer::SharedArrayBufferSliceStart,
+    }
+}
+
+#[inline(always)]
+const fn buffer_slice_end_consumer(kind: BufferSliceKind) -> ConversionConsumer {
+    match kind {
+        BufferSliceKind::Ordinary => ConversionConsumer::ArrayBufferSliceEnd,
+        BufferSliceKind::Shared => ConversionConsumer::SharedArrayBufferSliceEnd,
+    }
+}
+
+#[inline(always)]
+const fn buffer_slice_constructor_stage(kind: BufferSliceKind) -> ArrayBufferSliceStage {
+    match kind {
+        BufferSliceKind::Ordinary => ArrayBufferSliceStage::Constructor,
+        BufferSliceKind::Shared => ArrayBufferSliceStage::SharedConstructor,
+    }
+}
+
+#[inline(always)]
+const fn buffer_slice_value_stage(kind: BufferSliceKind) -> ArrayBufferSliceStage {
+    match kind {
+        BufferSliceKind::Ordinary => ArrayBufferSliceStage::Value,
+        BufferSliceKind::Shared => ArrayBufferSliceStage::SharedValue,
+    }
+}
+
+#[inline(always)]
+const fn buffer_slice_construct_stage(kind: BufferSliceKind) -> ArrayBufferSliceStage {
+    match kind {
+        BufferSliceKind::Ordinary => ArrayBufferSliceStage::Construct,
+        BufferSliceKind::Shared => ArrayBufferSliceStage::SharedConstruct,
     }
 }
 

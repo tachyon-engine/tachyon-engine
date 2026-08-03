@@ -2546,6 +2546,9 @@ impl Isolate {
             NativeContinuationKind::ArrayBufferSlice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
+            NativeContinuationKind::SharedArrayBufferConstructor(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
             NativeContinuationKind::ArraySplice(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
@@ -5296,6 +5299,9 @@ impl Isolate {
                     let buffer = self.create_array_buffer_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, buffer);
                 }
+                FunctionExecutable::Native(NativeFunction::SharedArrayBufferConstructor) => {
+                    return self.begin_shared_array_buffer_constructor(&site);
+                }
                 FunctionExecutable::Native(NativeFunction::DataViewConstructor) => {
                     let view = self.create_data_view_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, view);
@@ -7146,6 +7152,9 @@ impl Isolate {
                 FunctionExecutable::Native(NativeFunction::ArrayBufferConstructor) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
+                FunctionExecutable::Native(NativeFunction::SharedArrayBufferConstructor) => {
+                    return Err(ExecutionError::NonConstructor(site.callee));
+                }
                 FunctionExecutable::Native(NativeFunction::DataViewConstructor) => {
                     return Err(ExecutionError::NonConstructor(site.callee));
                 }
@@ -7178,6 +7187,12 @@ impl Isolate {
                     let value = self.resize_array_buffer(site.this_value, argument)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
+                FunctionExecutable::Native(NativeFunction::SharedArrayBufferGrow) => {
+                    return self.begin_shared_array_buffer_grow(&site);
+                }
+                FunctionExecutable::Native(NativeFunction::SharedArrayBufferSlice) => {
+                    return self.begin_shared_array_buffer_slice(&site);
+                }
                 FunctionExecutable::Native(
                     native @ (NativeFunction::ArrayBufferByteLength
                     | NativeFunction::ArrayBufferMaxByteLength
@@ -7185,6 +7200,14 @@ impl Isolate {
                     | NativeFunction::ArrayBufferDetached),
                 ) => {
                     let value = self.array_buffer_getter(site.this_value, native)?;
+                    return self.write(site.caller_base, site.destination, value);
+                }
+                FunctionExecutable::Native(
+                    native @ (NativeFunction::SharedArrayBufferByteLength
+                    | NativeFunction::SharedArrayBufferMaxByteLength
+                    | NativeFunction::SharedArrayBufferGrowable),
+                ) => {
+                    let value = self.shared_array_buffer_getter(site.this_value, native)?;
                     return self.write(site.caller_base, site.destination, value);
                 }
                 FunctionExecutable::Native(
@@ -8675,6 +8698,10 @@ impl Isolate {
                 NativeContinuationKind::ArrayBufferSlice(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_array_buffer_slice(site, state, stage, value)
+                }
+                NativeContinuationKind::SharedArrayBufferConstructor(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_shared_array_buffer_constructor(stage, site, state, value)
                 }
                 NativeContinuationKind::ArraySplice(stage) => {
                     let state = self.pending_array_splice_reference(continuation.first())?;

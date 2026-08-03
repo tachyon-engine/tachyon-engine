@@ -450,6 +450,9 @@ impl Isolate {
             array_buffer_data: registry
                 .try_register("ArrayBufferData")
                 .map_err(IsolateCreationError::TypeRegistration)?,
+            shared_array_buffer_data: registry
+                .try_register("SharedArrayBufferData")
+                .map_err(IsolateCreationError::TypeRegistration)?,
             array_buffer_object: registry
                 .try_register("ArrayBufferObject")
                 .map_err(IsolateCreationError::TypeRegistration)?,

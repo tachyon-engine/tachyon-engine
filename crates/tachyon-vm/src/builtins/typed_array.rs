@@ -18,12 +18,11 @@ mod transform;
 mod with;
 
 use super::super::*;
+use super::array_buffer::BufferBacking;
 use super::data_view::{data_view_decode, data_view_encode};
 use crate::conversion::parse_number_code_units;
 use crate::iterator::ArrayIterationKind;
-use crate::object::{
-    ArrayBufferData, ContentType, TypedArrayKind, TypedArrayObject, ViewLengthMode,
-};
+use crate::object::{ContentType, TypedArrayKind, TypedArrayObject, ViewLengthMode};
 use crate::property::array_index;
 use crate::runtime::callable::{
     DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
@@ -791,29 +790,22 @@ impl Isolate {
         bytes
             .try_reserve_exact(byte_length)
             .map_err(|_| ExecutionError::PropertyStorageAllocationFailed)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(source_data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                bytes.extend_from_slice(
-                    &data.bytes[source.byte_offset..source.byte_offset + byte_length],
-                );
-                Ok::<(), ExecutionError>(())
-            })
+        self.with_buffer_backing_bytes(&source_data, |data, visible| {
+            let end = source.byte_offset + byte_length;
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            bytes.extend_from_slice(&data[source.byte_offset..end]);
+            Ok(())
         })?;
         let target_data = self.typed_array_backing(target.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(target_data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .bytes[target.byte_offset..target.byte_offset + byte_length]
-                    .copy_from_slice(&bytes);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&target_data, |data, visible| {
+            let end = target.byte_offset + byte_length;
+            if end > visible || end > data.len() {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            data[target.byte_offset..end].copy_from_slice(&bytes);
+            Ok(())
         })
     }
 
@@ -1303,30 +1295,8 @@ impl Isolate {
         &mut self,
         buffer: Value,
     ) -> Result<bool, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })?;
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.resizable)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })
+        let backing = self.resolve_buffer_backing(buffer)?;
+        self.buffer_backing_is_resizable(&backing)
     }
 
     /// Reads the current byte length through the ArrayBuffer edge for resize-aware views.
@@ -1334,30 +1304,8 @@ impl Isolate {
         &mut self,
         buffer: Value,
     ) -> Result<usize, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })?;
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.byte_length)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })
+        let backing = self.resolve_buffer_backing(buffer)?;
+        self.buffer_backing_byte_length(&backing)
     }
 
     /// Returns the current byte length while rejecting a detached ArrayBuffer edge.
@@ -1365,47 +1313,13 @@ impl Isolate {
         &mut self,
         buffer: GcRef<crate::object::ArrayBufferObject>,
     ) -> Result<usize, ExecutionError> {
-        self.heap.with_running_scope(|scope| {
-            let buffer = scope.root(buffer).map_err(ExecutionError::Root)?;
-            let data = scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(buffer, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })?;
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map(|data| data.byte_length)
-                    .map_err(ExecutionError::NoGcBorrow)
-            })
-        })
+        let backing = self.resolve_buffer_backing(Value::from_heap_ref(buffer.raw()))?;
+        self.buffer_backing_byte_length(&backing)
     }
 
     /// Resolves the ArrayBuffer edge to the currently attached byte backing.
-    fn typed_array_backing(
-        &mut self,
-        buffer: Value,
-    ) -> Result<GcRef<ArrayBufferData>, ExecutionError> {
-        let raw = buffer
-            .as_heap_ref()
-            .ok_or(ExecutionError::NotObject(buffer))?;
-        let object = self
-            .heap
-            .checked_reference(raw, self.types.array_buffer_object)
-            .map_err(|_| ExecutionError::NotObject(buffer))?;
-        self.heap.with_running_scope(|scope| {
-            let object = scope.root(object).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow(object, self.types.array_buffer_object)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .data
-                    .ok_or(ExecutionError::DetachedArrayBuffer)
-            })
-        })
+    fn typed_array_backing(&mut self, buffer: Value) -> Result<BufferBacking, ExecutionError> {
+        self.resolve_buffer_backing(buffer)
     }
 
     /// Copies one checked element into a stack word and decodes explicit little-endian storage.
@@ -1427,17 +1341,8 @@ impl Isolate {
             .checked_add(width)
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let data = self.typed_array_backing(array.buffer)?;
-        let bytes = self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                let mut bytes = [0_u8; 8];
-                bytes[..width].copy_from_slice(&data.bytes[start..end]);
-                Ok(bytes)
-            })
-        })?;
+        let mut bytes = [0_u8; 8];
+        self.read_buffer_backing_bytes(&data, start..end, &mut bytes[..width])?;
         match array.kind.content_type() {
             ContentType::Number => Ok(data_view_decode(data_view_kind(array.kind)?, bytes, true)),
             ContentType::BigInt => self.allocate_bigint_bits(
@@ -1519,17 +1424,7 @@ impl Isolate {
             data_view_encode(data_view_kind(array.kind)?, number, true)
         };
         let data = self.typed_array_backing(array.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .bytes[start..end]
-                    .copy_from_slice(&bytes[..width]);
-                Ok(())
-            })
-        })
+        self.write_buffer_backing_bytes(&data, start..end, &bytes[..width])
     }
 
     /// Stores one modulo-2^64 BigInt encoding as explicit little-endian two's complement bytes.
@@ -1551,17 +1446,7 @@ impl Isolate {
             .checked_add(8)
             .ok_or(ExecutionError::InvalidArrayLength)?;
         let data = self.typed_array_backing(array.buffer)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?
-                    .bytes[start..end]
-                    .copy_from_slice(&bits.to_le_bytes());
-                Ok(())
-            })
-        })
+        self.write_buffer_backing_bytes(&data, start..end, &bits.to_le_bytes())
     }
 }
 

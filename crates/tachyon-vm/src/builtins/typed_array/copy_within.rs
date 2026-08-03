@@ -230,22 +230,16 @@ impl Isolate {
         let to_end = to
             .checked_add(count_bytes)
             .ok_or(ExecutionError::InvalidArrayLength)?;
-        self.heap.with_running_scope(|scope| {
-            let data = scope.root(data).map_err(ExecutionError::Root)?;
-            scope.with_no_gc_scope(|no_gc| {
-                let data = no_gc
-                    .borrow_mut(data, self.types.array_buffer_data)
-                    .map_err(ExecutionError::NoGcBorrow)?;
-                if from_end > data.byte_length
-                    || to_end > data.byte_length
-                    || from_end > data.bytes.len()
-                    || to_end > data.bytes.len()
-                {
-                    return Err(ExecutionError::InvalidArrayLength);
-                }
-                data.bytes.copy_within(from..from_end, to);
-                Ok(())
-            })
+        self.with_buffer_backing_bytes_mut(&data, |bytes, visible| {
+            if from_end > visible
+                || to_end > visible
+                || from_end > bytes.len()
+                || to_end > bytes.len()
+            {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            bytes.copy_within(from..from_end, to);
+            Ok(())
         })
     }
 

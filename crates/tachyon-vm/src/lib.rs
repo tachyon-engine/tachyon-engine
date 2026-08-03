@@ -257,7 +257,8 @@ use math_sum_precise::ExactSumAccumulator;
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
     PropertyAttributes, PropertyKey, PropertyKind, PropertyLookup, PropertyStorage, RegExpObject,
-    ShapeId, ShapeTable, StringObject, SymbolId, SymbolObject, SymbolPropertyKey,
+    ShapeId, ShapeTable, SharedArrayBufferBacking, SharedArrayBufferData, StringObject, SymbolId,
+    SymbolObject, SymbolPropertyKey,
 };
 use promise_combinator_state::{
     PendingPromiseCombinator, PromiseCombinatorElement, PromiseCombinatorKind,
@@ -591,6 +592,7 @@ pub enum ExecutionError {
     BigIntMixedTypes,
     TypedArraySpeciesResultTooShort,
     DetachedArrayBuffer,
+    FixedLengthSharedArrayBuffer,
     OutOfBoundsTypedArray,
     TypedArraySetAllocationFailed,
     OwnPropertyKeyAllocationFailed,

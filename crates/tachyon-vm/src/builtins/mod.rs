@@ -16,6 +16,7 @@ mod math;
 pub(crate) mod object;
 mod promise_combinator;
 mod regexp;
+mod shared_array_buffer;
 pub(crate) use regexp::append_regexp_replacement;
 pub(crate) mod signals;
 mod string;

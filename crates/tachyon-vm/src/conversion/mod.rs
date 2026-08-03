@@ -645,6 +645,27 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::SharedArrayBufferLength
+                            | ConversionConsumer::SharedArrayBufferMaxByteLength
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_shared_array_buffer_constructor_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::SharedArrayBufferGrowLength {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_shared_array_buffer_grow_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::ErrorConstructorMessage
                             | ConversionConsumer::ErrorToStringName
                             | ConversionConsumer::ErrorToStringMessage
@@ -1168,6 +1189,8 @@ impl Isolate {
                         continuation.consumer,
                         ConversionConsumer::ArrayBufferSliceStart
                             | ConversionConsumer::ArrayBufferSliceEnd
+                            | ConversionConsumer::SharedArrayBufferSliceStart
+                            | ConversionConsumer::SharedArrayBufferSliceEnd
                     ) {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_array_buffer_slice_conversion(
@@ -1629,6 +1652,13 @@ impl Isolate {
                 }
                 ConversionConsumer::ArrayBufferTransferLength(_) => {
                     unreachable!("ArrayBuffer transfer conversion resumes inside its state machine")
+                }
+                ConversionConsumer::SharedArrayBufferLength
+                | ConversionConsumer::SharedArrayBufferMaxByteLength
+                | ConversionConsumer::SharedArrayBufferGrowLength
+                | ConversionConsumer::SharedArrayBufferSliceStart
+                | ConversionConsumer::SharedArrayBufferSliceEnd => {
+                    unreachable!("SharedArrayBuffer conversion resumes inside its state machine")
                 }
                 ConversionConsumer::ArraySpliceStart
                 | ConversionConsumer::ArraySpliceLength
