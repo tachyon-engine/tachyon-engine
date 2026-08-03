@@ -659,6 +659,12 @@ pub(crate) struct SharedArrayBufferBacking {
     pub(crate) growable: bool,
 }
 
+/// Cloneable host handle for sharing one SAB backing across isolate boundaries.
+#[derive(Clone, Debug)]
+pub struct SharedArrayBufferHandle {
+    pub(crate) backing: Arc<Mutex<SharedArrayBufferBacking>>,
+}
+
 /// GC-owned reference-counted SharedArrayBuffer backing suitable for cross-agent cloning.
 #[derive(Debug)]
 pub(crate) struct SharedArrayBufferData {

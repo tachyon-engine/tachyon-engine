@@ -122,6 +122,7 @@ pub(crate) enum AtomicsFunction {
     Load,
     Notify,
     Or,
+    Pause,
     Store,
     Sub,
     Wait,
@@ -129,7 +130,7 @@ pub(crate) enum AtomicsFunction {
 }
 
 impl AtomicsFunction {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Add,
         Self::And,
         Self::CompareExchange,
@@ -138,6 +139,7 @@ impl AtomicsFunction {
         Self::Load,
         Self::Notify,
         Self::Or,
+        Self::Pause,
         Self::Store,
         Self::Sub,
         Self::Wait,
@@ -155,6 +157,7 @@ impl AtomicsFunction {
             Self::Load => "load",
             Self::Notify => "notify",
             Self::Or => "or",
+            Self::Pause => "pause",
             Self::Store => "store",
             Self::Sub => "sub",
             Self::Wait => "wait",
@@ -165,6 +168,7 @@ impl AtomicsFunction {
     #[inline(always)]
     pub(crate) const fn length(self) -> i32 {
         match self {
+            Self::Pause => 0,
             Self::IsLockFree => 1,
             Self::Load => 2,
             Self::CompareExchange | Self::Wait => 4,

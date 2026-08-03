@@ -107,7 +107,7 @@ pub use module::{
     LoadedModule, ModuleError, ModuleEvaluationError, ModuleExportName, ModuleId, ModuleIdentity,
     ModuleLimits, ModuleLoadError, ModuleLoader, ResolvedModuleRequest,
 };
-pub use object::ShapeError;
+pub use object::{ShapeError, SharedArrayBufferHandle};
 pub use runtime::{callable::NativeErrorKind, code::CodeId};
 pub use string::{JsString, JsStringView, StringAllocationError, StringRepresentationTag};
 

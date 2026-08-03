@@ -54,6 +54,13 @@ impl Isolate {
         if function == AtomicsFunction::Wait {
             return self.begin_atomics_wait(site);
         }
+        if function == AtomicsFunction::Pause {
+            return self.write(
+                site.caller_base,
+                site.destination,
+                Value::from_immediate(Immediate::Undefined),
+            );
+        }
         let undefined = Value::from_immediate(Immediate::Undefined);
         let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
         let snapshot = self.validate_atomic_typed_array(receiver)?;
@@ -723,6 +730,9 @@ impl Isolate {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
                 AtomicsFunction::Or => old | operand,
+                AtomicsFunction::Pause => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
                 AtomicsFunction::Sub => old.wrapping_sub(operand),
                 AtomicsFunction::Xor => old ^ operand,
                 AtomicsFunction::IsLockFree | AtomicsFunction::Load | AtomicsFunction::Wait => {

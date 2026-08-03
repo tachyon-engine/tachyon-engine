@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::super::*;
+use super::array_buffer::BufferBacking;
 use super::array_buffer::BufferSliceKind;
 use crate::object::ArrayBufferObject;
 use crate::runtime::fiber::SharedArrayBufferConstructorStage;
@@ -344,6 +345,16 @@ impl Isolate {
             max_byte_length,
             growable,
         }));
+        self.allocate_shared_array_buffer_backing(backing, max_byte_length, prototype)
+    }
+
+    /// Publishes one existing Arc backing as a realm-local SharedArrayBuffer wrapper.
+    fn allocate_shared_array_buffer_backing(
+        &mut self,
+        backing: Arc<Mutex<SharedArrayBufferBacking>>,
+        external_bytes: usize,
+        prototype: Value,
+    ) -> Result<Value, ExecutionError> {
         let mut roots = SharedArrayBufferAllocationRoots {
             vm: VmRoots {
                 fiber: &mut self.fiber,
@@ -365,7 +376,7 @@ impl Isolate {
                 0,
                 SharedArrayBufferData {
                     backing,
-                    external_bytes: max_byte_length,
+                    external_bytes,
                 },
                 AllocationSpace::Old,
                 &mut roots,
@@ -392,6 +403,30 @@ impl Isolate {
             )
             .map(|object| Value::from_heap_ref(object.raw()))
             .map_err(ExecutionError::HeapAllocation)
+    }
+
+    /// Exports a shared backing without exposing its bytes or synchronization primitive.
+    pub fn export_shared_array_buffer(
+        &mut self,
+        value: Value,
+    ) -> Result<SharedArrayBufferHandle, ExecutionError> {
+        let BufferBacking::Shared(backing) = self.resolve_buffer_backing(value)? else {
+            return Err(ExecutionError::AtomicsWaitRequiresSharedArrayBuffer);
+        };
+        Ok(SharedArrayBufferHandle { backing })
+    }
+
+    /// Imports a host-retained backing with the active Realm's intrinsic SAB prototype.
+    pub fn import_shared_array_buffer(
+        &mut self,
+        handle: SharedArrayBufferHandle,
+    ) -> Result<Value, ExecutionError> {
+        let external_bytes = lock_shared_backing(&handle.backing).max_byte_length;
+        let prototype = self
+            .realm
+            .shared_array_buffer_prototype
+            .expect("initialized Realm publishes SharedArrayBuffer.prototype");
+        self.allocate_shared_array_buffer_backing(handle.backing, external_bytes, prototype)
     }
 
     /// Implements the three branded SharedArrayBuffer prototype accessors.

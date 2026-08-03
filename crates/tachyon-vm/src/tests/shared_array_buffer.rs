@@ -120,6 +120,29 @@ fn unreachable_shared_backing_releases_its_external_memory_charge() {
     );
 }
 
+#[test]
+fn shared_array_buffer_handle_preserves_backing_identity_across_isolates() {
+    let mut source = test_isolate();
+    let prototype = source.realm.shared_array_buffer_prototype.unwrap();
+    let buffer = source
+        .allocate_shared_array_buffer_object(16, 16, false, prototype)
+        .expect("source SharedArrayBuffer allocates");
+    let handle = source
+        .export_shared_array_buffer(buffer)
+        .expect("source SharedArrayBuffer exports");
+
+    let mut target = test_isolate();
+    let imported = target
+        .import_shared_array_buffer(handle.clone())
+        .expect("target SharedArrayBuffer imports");
+    let imported_handle = target
+        .export_shared_array_buffer(imported)
+        .expect("imported SharedArrayBuffer exports");
+
+    assert!(Arc::ptr_eq(&handle.backing, &imported_handle.backing));
+    assert_eq!(handle.backing.lock().unwrap().byte_length, 16);
+}
+
 /// Runs a complete major collection with every isolate-owned root category visible.
 fn collect_major(isolate: &mut Isolate) {
     let mut roots = VmRoots {
