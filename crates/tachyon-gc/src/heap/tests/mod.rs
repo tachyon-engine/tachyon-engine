@@ -18,6 +18,7 @@ mod fixtures;
 mod major;
 mod minor;
 mod stress;
+mod teardown;
 mod triggers;
 mod weak_finalization;
 

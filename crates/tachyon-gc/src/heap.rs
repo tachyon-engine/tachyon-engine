@@ -15,7 +15,7 @@ use crate::{
     persistent::{PersistentRootError, PersistentRootId, PersistentRootStats, PersistentRoots},
     roots::{KeptObjectError, KeptObjects, RootComposition, TemporaryRoots},
     scope::{NoGcBorrowError, NoGcScope, RootError, RunningScope},
-    sweep::{SweepWorklist, sweep_full, sweep_young},
+    sweep::{SweepWorklist, sweep_full, sweep_young, teardown_payloads},
     trigger::{CollectionAction, GcTrigger},
     tuning::SMALL_SIZE_CLASSES,
     weak::WeakOwners,
@@ -641,6 +641,20 @@ impl Heap {
             .payload_address(reference.raw(), descriptor)
             .map(core::ptr::NonNull::cast)
             .map_err(NoGcBorrowError::InvalidReference)
+    }
+}
+
+impl Drop for Heap {
+    fn drop(&mut self) {
+        let result = teardown_payloads(
+            &mut self.table,
+            &self.types,
+            &mut self.object_external_bytes,
+        );
+        debug_assert!(
+            result.is_ok(),
+            "heap metadata remains internally valid until teardown"
+        );
     }
 }
 

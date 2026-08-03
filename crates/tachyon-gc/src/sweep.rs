@@ -184,6 +184,75 @@ pub(crate) fn sweep_full(
     Ok(())
 }
 
+/// Drops every payload still published when its owning heap is destroyed.
+///
+/// Teardown deliberately ignores reachability and does not allocate: Rust-owned backing inside
+/// live GC payloads must be released even though ordinary roots would retain those objects during
+/// a major collection. Span storage remains installed until the surrounding `SpanTable` drops.
+pub(crate) fn teardown_payloads(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    external_bytes: &mut usize,
+) -> Result<(), SweepError> {
+    for index in 0..table.historical_span_count() {
+        let span_id = SpanId::new(index as u16);
+        match table.sweep_target(span_id) {
+            Some(SweepTarget::Small) => {
+                while let Some(reference) = table.next_allocated_reference(span_id, 0) {
+                    drop_small(table, types, reference, external_bytes)?;
+                }
+            }
+            Some(SweepTarget::LargeOwner) => {
+                drop_large_payload_for_teardown(table, types, span_id, external_bytes)?;
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+/// Drops one still-published large payload without rebuilding table free ranges during teardown.
+fn drop_large_payload_for_teardown(
+    table: &mut SpanTable,
+    types: &TypeRegistry,
+    span_id: SpanId,
+    external_bytes: &mut usize,
+) -> Result<(), SweepError> {
+    let Some(metadata) = table.large_metadata(span_id) else {
+        return Ok(());
+    };
+    if !metadata.is_allocated() {
+        return Ok(());
+    }
+    let reference = RawHeapRef::from_parts(
+        span_id,
+        crate::SpanOffset::new(MINIMUM_SLOT_SIZE_BYTES as u16)
+            .expect("large owner offset is non-zero"),
+    );
+    let header = table
+        .verify_reference(reference, None)
+        .map_err(SweepError::InvalidReference)?;
+    let type_id = header
+        .type_id()
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let descriptor = types
+        .descriptor(type_id)
+        .ok_or(SweepError::UnknownTypeId(reference))?;
+    let payload = table
+        .payload_address(reference, descriptor)
+        .map_err(SweepError::InvalidReference)?;
+    let charged = header.external_bytes().unwrap_or(0);
+    ensure_external_charge_available(reference, charged, *external_bytes)?;
+    table
+        .unpublish_large_for_drop(reference)
+        .map_err(SweepError::SpanTable)?;
+    *external_bytes -= charged;
+    // SAFETY: the verified owner header selects this immutable descriptor and payload layout;
+    // teardown retains the complete backing range until the `SpanTable` field is dropped.
+    unsafe { descriptor.drop(payload) };
+    Ok(())
+}
+
 struct YoungSweepContext<'a> {
     types: &'a TypeRegistry,
     epoch: CollectionEpoch,
