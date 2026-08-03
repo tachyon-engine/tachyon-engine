@@ -1308,6 +1308,59 @@ fn compiler_freezes_private_brand_check() {
     assert!(!function.contains("ToPropertyKey"));
 }
 
+#[test]
+/// Owns nested labels and named abrupt completions without publishing label text at runtime.
+fn compiler_owns_labelled_control_without_scope_name_atoms() {
+    let source = source(
+        MediaType::JavaScript,
+        "outer: inner: for (;;) { continue outer; break inner; }",
+    );
+    let hir = Compiler
+        .lower_to_hir(source.clone(), CompileOptions::default())
+        .unwrap();
+    let [outer] = hir.statements() else {
+        panic!("expected one outer label");
+    };
+    let HirStatementKind::Labeled {
+        label: outer_name,
+        body: inner,
+    } = &outer.kind
+    else {
+        panic!("expected owned outer label");
+    };
+    assert_eq!(outer_name.as_ref(), "outer");
+    let HirStatementKind::Labeled {
+        label: inner_name,
+        body: loop_statement,
+    } = &inner.kind
+    else {
+        panic!("expected owned inner label");
+    };
+    assert_eq!(inner_name.as_ref(), "inner");
+    let HirStatementKind::For { body, .. } = &loop_statement.kind else {
+        panic!("expected labels to wrap one loop");
+    };
+    let HirStatementKind::Block(statements) = &body.kind else {
+        panic!("expected loop block");
+    };
+    assert!(matches!(
+        &statements[0].kind,
+        HirStatementKind::ContinueLabeled(label) if label.as_ref() == "outer"
+    ));
+    assert!(matches!(
+        &statements[1].kind,
+        HirStatementKind::BreakLabeled(label) if label.as_ref() == "inner"
+    ));
+
+    let module = Compiler.compile(source, CompileOptions::default()).unwrap();
+    assert!(
+        module
+            .scope_names()
+            .iter()
+            .all(|name| name.as_ref() != "outer" && name.as_ref() != "inner")
+    );
+}
+
 proptest! {
     #[test]
     fn arbitrary_utf8_input_never_escapes_the_frontend(

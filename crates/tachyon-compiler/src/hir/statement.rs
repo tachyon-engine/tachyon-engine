@@ -65,8 +65,14 @@ pub enum HirStatementKind {
         handler: Option<HirCatchClause>,
         finalizer: Option<Arc<[HirStatement]>>,
     },
+    Labeled {
+        label: Arc<str>,
+        body: Box<HirStatement>,
+    },
     Break,
     Continue,
+    BreakLabeled(Arc<str>),
+    ContinueLabeled(Arc<str>),
     Return(Option<HirExpression>),
     Throw(HirExpression),
     Empty,
@@ -270,26 +276,40 @@ pub(super) fn lower_statement(
         Statement::TryStatement(statement) => {
             lower_try_statement(statement, source, semantic, functions, context)
         }
-        Statement::BreakStatement(statement) if statement.label.is_none() => Ok(HirStatement {
+        Statement::LabeledStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
-            kind: HirStatementKind::Break,
+            kind: HirStatementKind::Labeled {
+                label: Arc::from(statement.label.name.as_str()),
+                body: Box::new(lower_statement(
+                    &statement.body,
+                    source,
+                    semantic,
+                    functions,
+                    context.nested(),
+                )?),
+            },
         }),
-        Statement::BreakStatement(statement) => Err(unsupported(
-            source.name(),
-            source_span(statement.span),
-            "labelled break",
-        )),
-        Statement::ContinueStatement(statement) if statement.label.is_none() => Ok(HirStatement {
+        Statement::BreakStatement(statement) => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,
-            kind: HirStatementKind::Continue,
+            kind: statement
+                .label
+                .as_ref()
+                .map_or(HirStatementKind::Break, |label| {
+                    HirStatementKind::BreakLabeled(Arc::from(label.name.as_str()))
+                }),
         }),
-        Statement::ContinueStatement(statement) => Err(unsupported(
-            source.name(),
-            source_span(statement.span),
-            "labelled continue",
-        )),
+        Statement::ContinueStatement(statement) => Ok(HirStatement {
+            span: source_span(statement.span),
+            completion: StatementCompletion::Empty,
+            kind: statement
+                .label
+                .as_ref()
+                .map_or(HirStatementKind::Continue, |label| {
+                    HirStatementKind::ContinueLabeled(Arc::from(label.name.as_str()))
+                }),
+        }),
         Statement::ReturnStatement(statement) if context.allows_return() => Ok(HirStatement {
             span: source_span(statement.span),
             completion: StatementCompletion::Empty,

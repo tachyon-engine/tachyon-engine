@@ -206,3 +206,110 @@ fn catch_dispatch_and_cross_frame_throw_work_for_every_dispatch_batch() {
     assert_catch_batch::<8>();
     assert_catch_batch::<16>();
 }
+
+const LABELLED_CONTROL_FIXTURES: &[(&str, &str)] = &[
+    (
+        "nested-loop-and-finally",
+        r#"
+            let score = 0;
+            outer: for (let i = 0; i < 3; i += 1) {
+                inner: for (let j = 0; j < 3; j += 1) {
+                    score += 1;
+                    if (j === 0) continue outer;
+                    break inner;
+                }
+            }
+            block: {
+                score += 10;
+                break block;
+                score += 1000;
+            }
+            let finalizers = 0;
+            escape: for (let k = 0; k < 2; k += 1) {
+                try {
+                    if (k === 0) continue escape;
+                    break escape;
+                } finally {
+                    finalizers += 1;
+                }
+            }
+            score === 13 && finalizers === 2;
+        "#,
+    ),
+    (
+        "labelled-for-of-close",
+        r#"
+            let closes = 0;
+            let steps = 0;
+            let iterable = {
+                [Symbol.iterator]() {
+                    return {
+                        next() {
+                            steps += 1;
+                            return { value: steps, done: false };
+                        },
+                        return() {
+                            closes += 1;
+                            return { done: true };
+                        }
+                    };
+                }
+            };
+            outer: for (const value of iterable) {
+                if (value === 1) break outer;
+            }
+            closes === 1 && steps === 1;
+        "#,
+    ),
+];
+
+#[test]
+fn labelled_control_is_stable_for_every_dispatch_batch() {
+    assert_labelled_control_batch::<1>(false);
+    assert_labelled_control_batch::<2>(false);
+    assert_labelled_control_batch::<4>(false);
+    assert_labelled_control_batch::<8>(false);
+    assert_labelled_control_batch::<16>(false);
+}
+
+#[test]
+fn labelled_control_survives_forced_major_collections() {
+    assert_labelled_control_batch::<4>(true);
+    assert_labelled_control_batch::<8>(true);
+}
+
+/// Compiles and executes every labelled-control fixture under one dispatch/collection policy.
+fn assert_labelled_control_batch<const N: usize>(forced_major: bool) {
+    for (index, (label, source)) in LABELLED_CONTROL_FIXTURES.iter().enumerate() {
+        let module = Compiler
+            .compile(
+                SourceText::new(
+                    SourceId::new(9_600 + N as u32 * 10 + index as u32),
+                    SourceName::new("labelled-control-fixture"),
+                    MediaType::JavaScript,
+                    Arc::from(*source),
+                ),
+                CompileOptions::default(),
+            )
+            .unwrap_or_else(|error| panic!("{label} fixture compiles: {error:?}"));
+        let mut isolate = test_isolate_with_heap_spans(64);
+        if forced_major {
+            isolate
+                .heap
+                .set_forced_collection_mode(ForcedCollectionMode::Major);
+        }
+        let outcome = isolate
+            .execute_with_batch::<N>(
+                &module,
+                ExecutionBudget {
+                    fuel: 262_144,
+                    quantum: 262_144,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{label} fixture executes: {error:?}"));
+        assert!(
+            matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+            "{label}, dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+        );
+    }
+}

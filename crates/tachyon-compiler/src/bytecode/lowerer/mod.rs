@@ -30,6 +30,7 @@ pub(super) struct Lowerer<'a> {
     pub(super) binding_plan: Vec<BindingPlanEntry>,
     pub(super) break_targets: Vec<ControlTarget>,
     pub(super) continue_targets: Vec<ControlTarget>,
+    pub(super) pending_loop_labels: Vec<std::sync::Arc<str>>,
     pub(super) handlers: Vec<Option<HandlerEntry>>,
     pub(super) suspend_points: Vec<SuspendPoint>,
     pub(super) finally_depth: u32,
@@ -55,10 +56,11 @@ pub(super) struct Lowerer<'a> {
     pub(super) environments: &'a EnvironmentPlans,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct ControlTarget {
     label: Label,
     finally_depth: u32,
+    name: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1497,11 +1499,14 @@ impl Lowerer<'_> {
 
     pub(super) fn current_break_target(
         &self,
+        name: Option<&str>,
         span: SourceSpan,
     ) -> Result<ControlTarget, CompileError> {
         self.break_targets
-            .last()
-            .copied()
+            .iter()
+            .rev()
+            .find(|target| target.name.as_deref() == name)
+            .cloned()
             .ok_or_else(|| CompileError::UnsupportedSyntax {
                 source_name: self.source_name.clone(),
                 span,
@@ -1511,19 +1516,73 @@ impl Lowerer<'_> {
 
     pub(super) fn current_continue_target(
         &self,
+        name: Option<&str>,
         span: SourceSpan,
     ) -> Result<ControlTarget, CompileError> {
         self.continue_targets
-            .last()
-            .copied()
+            .iter()
+            .rev()
+            .find(|target| target.name.as_deref() == name)
+            .cloned()
             .ok_or_else(|| self.unsupported(span, "continue outside loop"))
     }
 
     #[inline]
-    pub(super) const fn control_target(&self, label: Label) -> ControlTarget {
+    pub(super) fn control_target(&self, label: Label) -> ControlTarget {
         ControlTarget {
             label,
             finally_depth: self.finally_depth,
+            name: None,
         }
+    }
+
+    #[inline]
+    pub(super) fn named_control_target(
+        &self,
+        label: Label,
+        name: std::sync::Arc<str>,
+    ) -> ControlTarget {
+        ControlTarget {
+            label,
+            finally_depth: self.finally_depth,
+            name: Some(name),
+        }
+    }
+
+    #[inline]
+    pub(super) fn control_target_at_depth(
+        &self,
+        label: Label,
+        finally_depth: u32,
+    ) -> ControlTarget {
+        ControlTarget {
+            label,
+            finally_depth,
+            name: None,
+        }
+    }
+
+    /// Publishes one unnamed loop target plus aliases for directly enclosing labels.
+    pub(super) fn push_loop_control_targets(
+        &mut self,
+        break_target: ControlTarget,
+        continue_label: Label,
+    ) -> (usize, usize) {
+        let break_checkpoint = self.break_targets.len();
+        let continue_checkpoint = self.continue_targets.len();
+        self.break_targets.push(break_target);
+        self.continue_targets
+            .push(self.control_target(continue_label));
+        for name in core::mem::take(&mut self.pending_loop_labels) {
+            let target = self.named_control_target(continue_label, name);
+            self.continue_targets.push(target);
+        }
+        (break_checkpoint, continue_checkpoint)
+    }
+
+    #[inline]
+    pub(super) fn pop_loop_control_targets(&mut self, checkpoints: (usize, usize)) {
+        self.break_targets.truncate(checkpoints.0);
+        self.continue_targets.truncate(checkpoints.1);
     }
 }

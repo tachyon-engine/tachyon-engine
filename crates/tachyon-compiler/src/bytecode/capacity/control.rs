@@ -11,6 +11,9 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
     for statement in statements {
         let nested = match &statement.kind {
             HirStatementKind::Block(statements) => statements_handler_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_handler_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -70,6 +73,8 @@ pub(super) fn statements_handler_count(statements: &[HirStatement]) -> Result<us
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -85,6 +90,9 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
     for statement in statements {
         let nested = match &statement.kind {
             HirStatementKind::Block(statements) => statements_handler_depth(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_handler_depth(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -153,6 +161,8 @@ pub(super) fn statements_handler_depth(statements: &[HirStatement]) -> Result<u3
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -168,6 +178,9 @@ pub(super) fn statements_finally_depth(statements: &[HirStatement]) -> Result<u3
     for statement in statements {
         let nested = match &statement.kind {
             HirStatementKind::Block(statements) => statements_finally_depth(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_finally_depth(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -241,6 +254,9 @@ pub(super) fn statements_binding_count(statements: &[HirStatement]) -> Result<us
             HirStatementKind::VariableDeclaration(declaration) => declaration.declarators.len(),
             HirStatementKind::FunctionDeclaration(_) => 1,
             HirStatementKind::Block(statements) => statements_binding_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_binding_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -314,6 +330,8 @@ pub(super) fn statements_binding_count(statements: &[HirStatement]) -> Result<us
             HirStatementKind::Expression(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -392,6 +410,14 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
                 count = checked_count_add(
                     count,
                     statements_label_count(statements)?,
+                    "bytecode labels",
+                )?;
+            }
+            HirStatementKind::Labeled { body, .. } => {
+                count = checked_count_add(count, 1, "bytecode labels")?;
+                count = checked_count_add(
+                    count,
+                    statements_label_count(core::slice::from_ref(body))?,
                     "bytecode labels",
                 )?;
             }
@@ -490,6 +516,8 @@ pub(super) fn statements_label_count(statements: &[HirStatement]) -> Result<usiz
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Empty => {}
         }
     }
@@ -670,6 +698,9 @@ pub(super) fn statements_expression_count(
         let statement_count = match &statement.kind {
             HirStatementKind::Expression(_) => 1,
             HirStatementKind::Block(statements) => statements_expression_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_expression_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -707,6 +738,8 @@ pub(super) fn statements_expression_count(
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -735,6 +768,9 @@ pub(super) fn statements_switch_count(statements: &[HirStatement]) -> Result<usi
     for statement in statements {
         let nested = match &statement.kind {
             HirStatementKind::Block(statements) => statements_switch_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_switch_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -785,6 +821,8 @@ pub(super) fn statements_switch_count(statements: &[HirStatement]) -> Result<usi
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
@@ -800,6 +838,9 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
     for statement in statements {
         let nested = match &statement.kind {
             HirStatementKind::Block(statements) => statements_loop_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_loop_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -850,11 +891,83 @@ pub(super) fn statements_loop_count(statements: &[HirStatement]) -> Result<usize
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, nested, "loop continue targets")?;
+    }
+    Ok(count)
+}
+
+/// Counts every labelled wrapper as a conservative capacity for compiler-only name aliases.
+pub(super) fn statements_labeled_count(statements: &[HirStatement]) -> Result<usize, CompileError> {
+    let mut count = 0;
+    for statement in statements {
+        let nested = match &statement.kind {
+            HirStatementKind::Labeled { body, .. } => checked_count_add(
+                1,
+                statements_labeled_count(core::slice::from_ref(body))?,
+                "labelled control targets",
+            )?,
+            HirStatementKind::Block(statements) => statements_labeled_count(statements)?,
+            HirStatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                let mut nested = statements_labeled_count(core::slice::from_ref(consequent))?;
+                if let Some(alternate) = alternate {
+                    nested = checked_count_add(
+                        nested,
+                        statements_labeled_count(core::slice::from_ref(alternate))?,
+                        "labelled control targets",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::For { body, .. }
+            | HirStatementKind::ForIn { body, .. }
+            | HirStatementKind::ForOf { body, .. }
+            | HirStatementKind::Loop { body, .. } => {
+                statements_labeled_count(core::slice::from_ref(body))?
+            }
+            HirStatementKind::Switch { cases, .. } => {
+                let mut nested = 0;
+                for case in cases.iter() {
+                    nested = checked_count_add(
+                        nested,
+                        statements_labeled_count(&case.consequent)?,
+                        "labelled control targets",
+                    )?;
+                }
+                nested
+            }
+            HirStatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => try_children_count(
+                block,
+                handler.as_ref(),
+                finalizer.as_deref(),
+                "labelled control targets",
+                statements_labeled_count,
+            )?,
+            HirStatementKind::Expression(_)
+            | HirStatementKind::VariableDeclaration(_)
+            | HirStatementKind::FunctionDeclaration(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
+            | HirStatementKind::Return(_)
+            | HirStatementKind::Throw(_)
+            | HirStatementKind::Empty => 0,
+        };
+        count = checked_count_add(count, nested, "labelled control targets")?;
     }
     Ok(count)
 }

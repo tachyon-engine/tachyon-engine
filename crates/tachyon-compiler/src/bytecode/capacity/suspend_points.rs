@@ -30,6 +30,7 @@ fn statements_suspend_point_count(statements: &[HirStatement]) -> Result<usize, 
                 declaration_suspend_point_count(declaration)?
             }
             HirStatementKind::Block(body) => statements_suspend_point_count(body)?,
+            HirStatementKind::Labeled { body, .. } => statement_suspend_point_count(body)?,
             HirStatementKind::If {
                 test,
                 consequent,
@@ -125,6 +126,8 @@ fn statements_suspend_point_count(statements: &[HirStatement]) -> Result<usize, 
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Empty => 0,
         };
         count = add(count, nested)?;

@@ -21,6 +21,7 @@ pub(super) struct LoweringCapacity {
     pub(super) binding_plan: usize,
     pub(super) break_targets: usize,
     pub(super) continue_targets: usize,
+    pub(super) loop_labels: usize,
     pub(super) handlers: usize,
     pub(super) suspend_points: usize,
     pub(super) max_handler_depth: u32,
@@ -98,8 +99,19 @@ pub(super) fn estimate_entry(
         })?;
     let labels = control::hir_label_count(hir)?;
     let local_bindings = control::hir_binding_count(hir)?;
-    let break_targets = control::statements_switch_count(hir.statements())?;
-    let continue_targets = control::statements_loop_count(hir.statements())?;
+    let loop_count = control::statements_loop_count(hir.statements())?;
+    let label_count = control::statements_labeled_count(hir.statements())?;
+    let break_targets = control::statements_switch_count(hir.statements())?
+        .checked_add(label_count)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "break targets",
+        })?;
+    let continue_targets =
+        loop_count
+            .checked_add(label_count)
+            .ok_or(CompileError::LoweringCapacityOverflow {
+                collection: "continue targets",
+            })?;
 
     Ok(LoweringCapacity {
         bytecode_words,
@@ -108,6 +120,7 @@ pub(super) fn estimate_entry(
         binding_plan,
         break_targets,
         continue_targets,
+        loop_labels: label_count,
         handlers,
         suspend_points: 0,
         max_handler_depth,
@@ -194,8 +207,19 @@ pub(super) fn estimate_function(
         .ok_or(CompileError::LoweringCapacityOverflow {
             collection: "bytecode labels",
         })?;
-    let break_targets = control::statements_switch_count(&function.body)?;
-    let continue_targets = control::statements_loop_count(&function.body)?;
+    let loop_count = control::statements_loop_count(&function.body)?;
+    let label_count = control::statements_labeled_count(&function.body)?;
+    let break_targets = control::statements_switch_count(&function.body)?
+        .checked_add(label_count)
+        .ok_or(CompileError::LoweringCapacityOverflow {
+            collection: "break targets",
+        })?;
+    let continue_targets =
+        loop_count
+            .checked_add(label_count)
+            .ok_or(CompileError::LoweringCapacityOverflow {
+                collection: "continue targets",
+            })?;
     let suspend_points = suspend_points::function_suspend_point_count(
         &function.body,
         &function.parameter_initializers,
@@ -208,6 +232,7 @@ pub(super) fn estimate_function(
         binding_plan,
         break_targets,
         continue_targets,
+        loop_labels: label_count,
         handlers,
         suspend_points,
         max_handler_depth,

@@ -55,6 +55,9 @@ pub(super) fn statements_scope_name_count(
             }
             HirStatementKind::FunctionDeclaration(_) => 1,
             HirStatementKind::Block(statements) => statements_scope_name_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_scope_name_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 test,
                 consequent,
@@ -131,7 +134,11 @@ pub(super) fn statements_scope_name_count(
                 .transpose()?
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_scope_name_count(argument)?,
-            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
+            HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "scope names")?;
     }
@@ -679,6 +686,9 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 .unwrap_or(0),
             HirStatementKind::Throw(argument) => expression_literal_count(argument)?,
             HirStatementKind::Block(statements) => statements_literal_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => {
+                statements_literal_count(core::slice::from_ref(body))?
+            }
             HirStatementKind::If {
                 test,
                 consequent,
@@ -754,7 +764,11 @@ fn statements_literal_count(statements: &[HirStatement]) -> Result<usize, Compil
                 statements_literal_count,
             )?,
             HirStatementKind::FunctionDeclaration(_) => 0,
-            HirStatementKind::Break | HirStatementKind::Continue | HirStatementKind::Empty => 0,
+            HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
+            | HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode constants")?;
     }

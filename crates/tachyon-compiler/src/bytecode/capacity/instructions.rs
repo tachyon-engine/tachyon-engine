@@ -37,6 +37,11 @@ pub(super) fn statements_instruction_count(
                 "bytecode instructions",
             )?,
             HirStatementKind::Block(statements) => statements_instruction_count(statements)?,
+            HirStatementKind::Labeled { body, .. } => checked_count_add(
+                1,
+                statements_instruction_count(core::slice::from_ref(body))?,
+                "bytecode instructions",
+            )?,
             HirStatementKind::If {
                 test,
                 consequent,
@@ -141,7 +146,10 @@ pub(super) fn statements_instruction_count(
                 };
                 checked_count_add(nested, control, "bytecode instructions")?
             }
-            HirStatementKind::Break | HirStatementKind::Continue => 1,
+            HirStatementKind::Break
+            | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_) => 1,
             HirStatementKind::Empty => 0,
         };
         count = checked_count_add(count, statement_count, "bytecode instructions")?;

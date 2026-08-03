@@ -159,6 +159,7 @@ fn lower_entry(
         matches!(
             statement.kind,
             HirStatementKind::Block(_)
+                | HirStatementKind::Labeled { .. }
                 | HirStatementKind::If { .. }
                 | HirStatementKind::For { .. }
                 | HirStatementKind::ForIn { .. }
@@ -168,6 +169,8 @@ fn lower_entry(
                 | HirStatementKind::Try { .. }
                 | HirStatementKind::Break
                 | HirStatementKind::Continue
+                | HirStatementKind::BreakLabeled(_)
+                | HirStatementKind::ContinueLabeled(_)
                 | HirStatementKind::Throw(_)
         )
     });
@@ -193,6 +196,7 @@ fn lower_entry(
         binding_plan: Vec::with_capacity(entry_capacity.binding_plan),
         break_targets: Vec::with_capacity(entry_capacity.break_targets),
         continue_targets: Vec::with_capacity(entry_capacity.continue_targets),
+        pending_loop_labels: Vec::with_capacity(entry_capacity.loop_labels),
         handlers: Vec::with_capacity(entry_capacity.handlers),
         suspend_points: Vec::with_capacity(entry_capacity.suspend_points),
         finally_depth: 0,
@@ -272,6 +276,7 @@ fn lower_entry(
                             });
                         }
                         HirStatementKind::Block(_)
+                        | HirStatementKind::Labeled { .. }
                         | HirStatementKind::If { .. }
                         | HirStatementKind::For { .. }
                         | HirStatementKind::ForIn { .. }
@@ -281,6 +286,8 @@ fn lower_entry(
                         | HirStatementKind::Try { .. }
                         | HirStatementKind::Break
                         | HirStatementKind::Continue
+                        | HirStatementKind::BreakLabeled(_)
+                        | HirStatementKind::ContinueLabeled(_)
                         | HirStatementKind::Throw(_) => {
                             unreachable!("control flow uses entry lowering")
                         }
@@ -930,6 +937,13 @@ fn collect_captured_slots(
                 excluded_scope,
                 slots,
             )?,
+            HirStatementKind::Labeled { body, .. } => collect_captured_slots(
+                core::slice::from_ref(body),
+                force_dynamic_bindings,
+                forced_captures,
+                excluded_scope,
+                slots,
+            )?,
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -1109,6 +1123,8 @@ fn collect_captured_slots(
             | HirStatementKind::Throw(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Empty => {}
         }
     }
@@ -1149,6 +1165,7 @@ fn lower_function(
         binding_plan: Vec::with_capacity(function_capacity.binding_plan),
         break_targets: Vec::with_capacity(function_capacity.break_targets),
         continue_targets: Vec::with_capacity(function_capacity.continue_targets),
+        pending_loop_labels: Vec::with_capacity(function_capacity.loop_labels),
         handlers: Vec::with_capacity(function_capacity.handlers),
         suspend_points: Vec::with_capacity(function_capacity.suspend_points),
         finally_depth: 0,
@@ -1479,6 +1496,9 @@ fn collect_var_declared_bindings(
             HirStatementKind::Block(statements) => {
                 collect_var_declared_bindings(statements, bindings);
             }
+            HirStatementKind::Labeled { body, .. } => {
+                collect_var_declared_bindings(core::slice::from_ref(body), bindings);
+            }
             HirStatementKind::If {
                 consequent,
                 alternate,
@@ -1540,6 +1560,8 @@ fn collect_var_declared_bindings(
             | HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Return(_)
             | HirStatementKind::Throw(_)
             | HirStatementKind::Empty => {}

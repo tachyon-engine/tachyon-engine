@@ -116,13 +116,26 @@ impl Lowerer<'_> {
                 result,
                 statement.span,
             ),
+            HirStatementKind::Labeled { label, body } => {
+                self.entry_labeled_statement(label, body, result, statement.span)
+            }
             HirStatementKind::Break => {
-                let target = self.current_break_target(statement.span)?;
+                let target = self.current_break_target(None, statement.span)?;
+                self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::BreakLabeled(label) => {
+                let target = self.current_break_target(Some(label), statement.span)?;
                 self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Continue => {
-                let target = self.current_continue_target(statement.span)?;
+                let target = self.current_continue_target(None, statement.span)?;
+                self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::ContinueLabeled(label) => {
+                let target = self.current_continue_target(Some(label), statement.span)?;
                 self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
                 Ok(true)
             }
@@ -132,6 +145,31 @@ impl Lowerer<'_> {
                 syntax: "top-level return",
             }),
         }
+    }
+
+    /// Lowers a labelled script statement and keeps its label in compiler-only control metadata.
+    fn entry_labeled_statement(
+        &mut self,
+        label: &std::sync::Arc<str>,
+        body: &HirStatement,
+        result: RegisterId,
+        _span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let pending_checkpoint = self.pending_loop_labels.len();
+        if directly_labels_iteration(body) {
+            self.pending_loop_labels.push(label.clone());
+        }
+        let break_checkpoint = self.break_targets.len();
+        self.break_targets
+            .push(self.named_control_target(end, label.clone()));
+        let _ = self.entry_statement(body, result)?;
+        self.break_targets.truncate(break_checkpoint);
+        self.pending_loop_labels.truncate(pending_checkpoint);
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        Ok(false)
     }
 
     /// Emits a script conditional and updates the shared completion register only in executed arms.
@@ -201,12 +239,9 @@ impl Lowerer<'_> {
                 )
                 .map_err(CompileError::Builder)?;
         }
-        self.break_targets.push(self.control_target(end));
-        self.continue_targets
-            .push(self.control_target(update_label));
+        let targets = self.push_loop_control_targets(self.control_target(end), update_label);
         self.entry_statement(body, result)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.builder
             .bind_label(update_label)
             .map_err(CompileError::Builder)?;
@@ -232,11 +267,9 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (condition, end) = self.for_in_prelude(left, right, span)?;
-        self.break_targets.push(self.control_target(end));
-        self.continue_targets.push(self.control_target(condition));
+        let targets = self.push_loop_control_targets(self.control_target(end), condition);
         self.entry_statement(body, result)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(end)
@@ -263,11 +296,9 @@ impl Lowerer<'_> {
         self.builder
             .bind_label(body_label)
             .map_err(CompileError::Builder)?;
-        self.break_targets.push(self.control_target(end));
-        self.continue_targets.push(self.control_target(condition));
+        let targets = self.push_loop_control_targets(self.control_target(end), condition);
         self.entry_statement(body, result)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.builder
             .bind_label(condition)
             .map_err(CompileError::Builder)?;
@@ -397,13 +428,26 @@ impl Lowerer<'_> {
                 finalizer.as_deref(),
                 statement.span,
             ),
+            HirStatementKind::Labeled { label, body } => {
+                self.function_labeled_statement(label, body, statement.span)
+            }
             HirStatementKind::Break => {
-                let target = self.current_break_target(statement.span)?;
+                let target = self.current_break_target(None, statement.span)?;
+                self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::BreakLabeled(label) => {
+                let target = self.current_break_target(Some(label), statement.span)?;
                 self.emit_control_jump(target, Opcode::BreakThroughFinally, statement.span)?;
                 Ok(true)
             }
             HirStatementKind::Continue => {
-                let target = self.current_continue_target(statement.span)?;
+                let target = self.current_continue_target(None, statement.span)?;
+                self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
+                Ok(true)
+            }
+            HirStatementKind::ContinueLabeled(label) => {
+                let target = self.current_continue_target(Some(label), statement.span)?;
                 self.emit_control_jump(target, Opcode::ContinueThroughFinally, statement.span)?;
                 Ok(true)
             }
@@ -414,6 +458,30 @@ impl Lowerer<'_> {
                 syntax: "nested function declaration",
             }),
         }
+    }
+
+    /// Lowers a labelled function statement while preserving completion transfer through finally.
+    fn function_labeled_statement(
+        &mut self,
+        label: &std::sync::Arc<str>,
+        body: &HirStatement,
+        _span: SourceSpan,
+    ) -> Result<bool, CompileError> {
+        let end = self.builder.new_label().map_err(CompileError::Builder)?;
+        let pending_checkpoint = self.pending_loop_labels.len();
+        if directly_labels_iteration(body) {
+            self.pending_loop_labels.push(label.clone());
+        }
+        let break_checkpoint = self.break_targets.len();
+        self.break_targets
+            .push(self.named_control_target(end, label.clone()));
+        let _ = self.function_statement(body)?;
+        self.break_targets.truncate(break_checkpoint);
+        self.pending_loop_labels.truncate(pending_checkpoint);
+        self.builder
+            .bind_label(end)
+            .map_err(CompileError::Builder)?;
+        Ok(false)
     }
 
     /// Emits a classic function-body for-loop with explicit break and continue label stacks.
@@ -446,12 +514,9 @@ impl Lowerer<'_> {
                 )
                 .map_err(CompileError::Builder)?;
         }
-        self.break_targets.push(self.control_target(end));
-        self.continue_targets
-            .push(self.control_target(update_label));
+        let targets = self.push_loop_control_targets(self.control_target(end), update_label);
         self.function_statement(body)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.builder
             .bind_label(update_label)
             .map_err(CompileError::Builder)?;
@@ -476,11 +541,9 @@ impl Lowerer<'_> {
     ) -> Result<(), CompileError> {
         let checkpoint = self.locals.len();
         let (condition, end) = self.for_in_prelude(left, right, span)?;
-        self.break_targets.push(self.control_target(end));
-        self.continue_targets.push(self.control_target(condition));
+        let targets = self.push_loop_control_targets(self.control_target(end), condition);
         self.function_statement(body)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(end)
@@ -501,14 +564,12 @@ impl Lowerer<'_> {
         let checkpoint = self.locals.len();
         let (iterator, condition, natural_end, end, finally_slot, protected_start) =
             self.for_of_prelude(left, right, span)?;
-        self.break_targets.push(ControlTarget {
-            label: end,
-            finally_depth: self.finally_depth - 1,
-        });
-        self.continue_targets.push(self.control_target(condition));
+        let targets = self.push_loop_control_targets(
+            self.control_target_at_depth(end, self.finally_depth - 1),
+            condition,
+        );
         self.entry_statement(body, result)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -544,14 +605,12 @@ impl Lowerer<'_> {
         let checkpoint = self.locals.len();
         let (iterator, condition, natural_end, end, finally_slot, protected_start) =
             self.for_of_prelude(left, right, span)?;
-        self.break_targets.push(ControlTarget {
-            label: end,
-            finally_depth: self.finally_depth - 1,
-        });
-        self.continue_targets.push(self.control_target(condition));
+        let targets = self.push_loop_control_targets(
+            self.control_target_at_depth(end, self.finally_depth - 1),
+            condition,
+        );
         self.function_statement(body)?;
-        self.continue_targets.pop();
-        self.break_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -634,18 +693,16 @@ impl Lowerer<'_> {
         )?;
         let protected_start = self.emit_marker(span)?;
         self.store_for_in_left(left, value, span)?;
-        self.continue_targets.push(self.control_target(condition));
-        self.break_targets.push(ControlTarget {
-            label: end,
-            finally_depth: self.finally_depth - 1,
-        });
+        let targets = self.push_loop_control_targets(
+            self.control_target_at_depth(end, self.finally_depth - 1),
+            condition,
+        );
         if let Some(result) = entry_result {
             self.entry_statement(body, result)?;
         } else {
             self.function_statement(body)?;
         }
-        self.break_targets.pop();
-        self.continue_targets.pop();
+        self.pop_loop_control_targets(targets);
         self.emit_jump(condition, span)?;
         self.builder
             .bind_label(natural_end)
@@ -1551,5 +1608,17 @@ impl Lowerer<'_> {
         }
         self.emit_jump(default.unwrap_or(end), span)?;
         Ok((labels, end))
+    }
+}
+
+/// Returns whether a label directly wraps an iteration statement through only other labels.
+fn directly_labels_iteration(statement: &HirStatement) -> bool {
+    match &statement.kind {
+        HirStatementKind::Labeled { body, .. } => directly_labels_iteration(body),
+        HirStatementKind::For { .. }
+        | HirStatementKind::ForIn { .. }
+        | HirStatementKind::ForOf { .. }
+        | HirStatementKind::Loop { .. } => true,
+        _ => false,
     }
 }

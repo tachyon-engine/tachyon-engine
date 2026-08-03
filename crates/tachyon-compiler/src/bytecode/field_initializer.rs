@@ -41,8 +41,13 @@ fn collect_statements(statements: &[HirStatement], bindings: &mut Vec<BindingId>
             HirStatementKind::FunctionDeclaration(_)
             | HirStatementKind::Break
             | HirStatementKind::Continue
+            | HirStatementKind::BreakLabeled(_)
+            | HirStatementKind::ContinueLabeled(_)
             | HirStatementKind::Empty => {}
             HirStatementKind::Block(body) => collect_statements(body, bindings),
+            HirStatementKind::Labeled { body, .. } => {
+                collect_statements(core::slice::from_ref(body), bindings);
+            }
             HirStatementKind::If {
                 test,
                 consequent,
