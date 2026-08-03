@@ -526,6 +526,40 @@ fn compiler_emits_owned_and_inherited_environment_binding_plans() {
 }
 
 #[test]
+fn compiler_promotes_root_block_lexicals_captured_by_nested_functions() {
+    let module = Compiler
+        .compile(
+            source(
+                MediaType::JavaScript,
+                "{ let value = 41; globalThis.read = function() { return value + 1; }; } read();",
+            ),
+            CompileOptions::default(),
+        )
+        .expect("root block capture compiles through the entry environment");
+    let entry = module
+        .function(tachyon_bytecode::FunctionId::new(0))
+        .expect("entry function is frozen");
+    let closure = module
+        .function(tachyon_bytecode::FunctionId::new(1))
+        .expect("nested closure is frozen");
+    assert_eq!(entry.layout().environment_slot_count, 1);
+    assert!(entry.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "value"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::Environment { depth: 0, slot: 0 }
+            )
+    }));
+    assert!(closure.binding_plan().iter().any(|binding| {
+        binding.name.as_ref() == "value"
+            && matches!(
+                binding.location,
+                tachyon_bytecode::BindingLocation::Environment { depth: 0, slot: 0 }
+            )
+    }));
+}
+
+#[test]
 /// Freezes exact owner states into storage reserved from the captured-slot count.
 fn compiler_freezes_captured_slot_state_and_record_metadata() {
     let module = Compiler

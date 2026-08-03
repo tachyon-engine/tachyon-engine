@@ -359,14 +359,12 @@ pub(super) fn new_binding(
         .ok_or_else(|| super::missing_semantic(source, span, "binding symbol"))?;
     let binding_scope = semantic.scoping().symbol_scope_id(symbol);
     let binding_function = nearest_function_scope(semantic, binding_scope);
-    let captured = binding_function.is_some_and(|binding_function| {
-        semantic
-            .scoping()
-            .get_resolved_references(symbol)
-            .any(|reference| {
-                nearest_function_scope(semantic, reference.scope_id()) != Some(binding_function)
-            })
-    });
+    let captured = semantic
+        .scoping()
+        .get_resolved_references(symbol)
+        .any(|reference| {
+            nearest_function_scope(semantic, reference.scope_id()) != binding_function
+        });
     Ok(HirBinding {
         id: super::program::BindingId(symbol.index() as u32),
         scope: to_scope_id(binding_scope),

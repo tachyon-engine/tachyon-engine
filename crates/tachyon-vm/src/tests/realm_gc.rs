@@ -699,6 +699,51 @@ fn captured_environment_survives_forced_major_allocation() {
 }
 
 #[test]
+fn root_block_capture_survives_every_dispatch_batch_and_forced_major() {
+    assert_root_block_capture_batch::<1>(false);
+    assert_root_block_capture_batch::<2>(false);
+    assert_root_block_capture_batch::<4>(true);
+    assert_root_block_capture_batch::<8>(true);
+    assert_root_block_capture_batch::<16>(false);
+}
+
+/// Executes a root-block lexical through its escaped closure under one dispatch/GC policy.
+fn assert_root_block_capture_batch<const N: usize>(forced_major: bool) {
+    let module = Compiler
+        .compile(
+            SourceText::new(
+                SourceId::new(7_560 + N as u32),
+                SourceName::new("root-block-capture"),
+                MediaType::JavaScript,
+                Arc::from(
+                    "{ let value = 40; globalThis.read = function() { return value + 2; }; } read();",
+                ),
+            ),
+            CompileOptions::default(),
+        )
+        .expect("root block capture compiles");
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 1_024,
+                quantum: 1_024,
+            },
+        )
+        .expect("root block capture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_i32() == Some(42)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+#[test]
 /// Forced major collections cover closure prototype creation and receiver chain publication.
 fn instanceof_prototype_chain_survives_forced_major() {
     let mut isolate = test_isolate();
