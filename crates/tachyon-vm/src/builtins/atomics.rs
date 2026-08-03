@@ -46,6 +46,9 @@ impl Isolate {
         if function == AtomicsFunction::IsLockFree {
             return self.begin_atomics_is_lock_free(site);
         }
+        if function == AtomicsFunction::Notify {
+            return self.begin_atomics_notify(site);
+        }
         let undefined = Value::from_immediate(Immediate::Undefined);
         let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
         let snapshot = self.validate_atomic_typed_array(receiver)?;
@@ -150,6 +153,180 @@ impl Isolate {
             }
             _ => Err(ExecutionError::MissingNativeContinuation),
         }
+    }
+
+    /// Validates the waitable view before converting index and count in order.
+    fn begin_atomics_notify(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
+        let snapshot = self.validate_waitable_typed_array(receiver)?;
+        let shared = matches!(
+            self.resolve_buffer_backing(snapshot.buffer)?,
+            BufferBacking::Shared(_)
+        );
+        let index = self.call_argument(site, 1)?.unwrap_or(undefined);
+        let count = self.call_argument(site, 2)?.unwrap_or(undefined);
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if !self.is_object_value(index) {
+            let index = self.ecma_to_index(index)?;
+            if index >= snapshot.length {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            if !self.is_object_value(count) {
+                let count = self.convert_atomics_notify_count(count)?;
+                return self.finish_atomics_notify(
+                    continuation_site,
+                    receiver,
+                    index,
+                    count,
+                    shared,
+                );
+            }
+            let state = self.allocate_atomics_notify_state(
+                site,
+                receiver,
+                Value::from_f64(index as f64),
+                count,
+                snapshot.length,
+                shared,
+            )?;
+            return self.convert_atomics_value(
+                continuation_site,
+                state,
+                ConversionConsumer::AtomicsNotifyCount,
+                count,
+            );
+        }
+        let state = self.allocate_atomics_notify_state(
+            site,
+            receiver,
+            index,
+            count,
+            snapshot.length,
+            shared,
+        )?;
+        self.convert_atomics_value(
+            continuation_site,
+            state,
+            ConversionConsumer::AtomicsNotifyIndex,
+            index,
+        )
+    }
+
+    /// Continues observable notify index/count conversion without entering a backing lock.
+    pub(crate) fn resume_atomics_notify_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        consumer: ConversionConsumer,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        match consumer {
+            ConversionConsumer::AtomicsNotifyIndex => {
+                let index = self.ecma_to_index(value)?;
+                let pending = self.native_call_state_snapshot(state)?;
+                if index >= atomic_usize(pending.values[ATOMICS_INITIAL_LENGTH])? {
+                    return Err(ExecutionError::InvalidArrayLength);
+                }
+                self.set_atomics_value(state, ATOMICS_INDEX, Value::from_f64(index as f64))?;
+                let count = pending.values[ATOMICS_VALUE];
+                if !self.is_object_value(count) {
+                    let count = self.convert_atomics_notify_count(count)?;
+                    return self.finish_atomics_notify_state(site, state, count);
+                }
+                self.convert_atomics_value(
+                    site,
+                    state,
+                    ConversionConsumer::AtomicsNotifyCount,
+                    count,
+                )
+            }
+            ConversionConsumer::AtomicsNotifyCount => {
+                let count = self.convert_atomics_notify_count(value)?;
+                self.set_atomics_value(state, ATOMICS_VALUE, Value::from_f64(count))?;
+                self.finish_atomics_notify_state(site, state, count)
+            }
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
+    /// Revalidates a notify location and returns zero until a waiter provider owns registrations.
+    fn finish_atomics_notify_state(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        count: f64,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        self.finish_atomics_notify(
+            site,
+            pending.values[ATOMICS_RECEIVER],
+            atomic_usize(pending.values[ATOMICS_INDEX])?,
+            count,
+            pending.values[ATOMICS_REPLACEMENT].as_immediate() == Some(Immediate::True),
+        )
+    }
+
+    /// Returns zero for ordinary backing and validates retained shared backing for future waiters.
+    fn finish_atomics_notify(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+        index: usize,
+        count: f64,
+        shared: bool,
+    ) -> Result<(), ExecutionError> {
+        if shared {
+            let snapshot = self.validate_waitable_typed_array(receiver)?;
+            if index >= snapshot.length {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            let _backing = self.resolve_buffer_backing(snapshot.buffer)?;
+        }
+        debug_assert!(count >= 0.0 || count == f64::INFINITY);
+        self.write(site.caller_base, site.destination, Value::from_i32(0))
+    }
+
+    /// Publishes the callback-spanning notify state in the destination root slot.
+    fn allocate_atomics_notify_state(
+        &mut self,
+        site: &CallSite,
+        receiver: Value,
+        index: Value,
+        count: Value,
+        initial_length: usize,
+        shared: bool,
+    ) -> Result<GcRef<NativeCallState>, ExecutionError> {
+        let state = self.allocate_atomics_state(NativeCallState {
+            values: [
+                receiver,
+                index,
+                count,
+                boolean_value(shared),
+                Value::from_f64(initial_length as f64),
+            ],
+            count: ATOMICS_STATE_SLOTS,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        Ok(state)
+    }
+
+    /// Implements notify's undefined-to-infinity and non-negative count normalization.
+    fn convert_atomics_notify_count(&mut self, value: Value) -> Result<f64, ExecutionError> {
+        if value.as_immediate() == Some(Immediate::Undefined) {
+            return Ok(f64::INFINITY);
+        }
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        Ok(atomic_integer_or_infinity(number).max(0.0))
     }
 
     /// Implements the allocation-free path after validating before conversion.
@@ -286,6 +463,9 @@ impl Isolate {
                     }
                 }
                 AtomicsFunction::Exchange | AtomicsFunction::Store => operand,
+                AtomicsFunction::Notify => {
+                    return Err(ExecutionError::MissingNativeContinuation);
+                }
                 AtomicsFunction::Or => old | operand,
                 AtomicsFunction::Sub => old.wrapping_sub(operand),
                 AtomicsFunction::Xor => old ^ operand,
@@ -323,6 +503,21 @@ impl Isolate {
         if matches!(
             snapshot.kind,
             TypedArrayKind::Uint8Clamped | TypedArrayKind::Float32 | TypedArrayKind::Float64
+        ) {
+            return Err(ExecutionError::TypedArrayContentTypeMismatch);
+        }
+        Ok(snapshot)
+    }
+
+    /// Restricts waiter-list operations to Int32Array and BigInt64Array views.
+    fn validate_waitable_typed_array(
+        &mut self,
+        receiver: Value,
+    ) -> Result<TypedArraySnapshot, ExecutionError> {
+        let snapshot = self.validated_typed_array_snapshot(receiver)?;
+        if !matches!(
+            snapshot.kind,
+            TypedArrayKind::Int32 | TypedArrayKind::BigInt64
         ) {
             return Err(ExecutionError::TypedArrayContentTypeMismatch);
         }
@@ -416,6 +611,12 @@ impl Isolate {
                 value,
                 site.call_site,
             );
+        }
+        if matches!(
+            consumer,
+            ConversionConsumer::AtomicsNotifyIndex | ConversionConsumer::AtomicsNotifyCount
+        ) {
+            return self.resume_atomics_notify_conversion(site, state, consumer, value);
         }
         self.resume_atomics_conversion(site, state, consumer, value)
     }
