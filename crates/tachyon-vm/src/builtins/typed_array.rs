@@ -14,6 +14,7 @@ mod sort;
 mod subarray;
 mod to_reversed;
 mod to_sorted;
+mod transform;
 mod with;
 
 use super::super::*;

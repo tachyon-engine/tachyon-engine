@@ -62,6 +62,8 @@ impl TypedArraySearchDirection {
 pub(crate) enum TypedArrayCallbackKind {
     Every,
     Some,
+    Map,
+    Filter,
     ForEach,
     Reduce,
     ReduceRight,
@@ -77,6 +79,8 @@ impl TypedArrayCallbackKind {
         match self {
             Self::Every => "every",
             Self::Some => "some",
+            Self::Map => "map",
+            Self::Filter => "filter",
             Self::ForEach => "forEach",
             Self::Reduce => "reduce",
             Self::ReduceRight => "reduceRight",

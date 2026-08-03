@@ -326,7 +326,8 @@ use runtime::{
         StringMatchStage, StringPrototypeOperation, StringPrototypeStage, StringRawStage,
         StringReplaceAllStage, StringSplitStage, SymbolAllocationRoots, ToPrimitiveStage,
         TypedArrayConstructionStage, TypedArraySetStage, TypedArraySliceStage,
-        TypedArraySubarrayStage, VmRoots, WrapForValidIteratorStage, next_to_primitive_stage,
+        TypedArraySubarrayStage, TypedArrayTransformStage, VmRoots, WrapForValidIteratorStage,
+        next_to_primitive_stage,
     },
     realm::{
         GlobalLexicalSlotId, GlobalSlotId, IntrinsicSlotId, PrimitiveHintStrings, Realm,

@@ -445,6 +445,7 @@ pub(crate) enum ConversionConsumer {
     TypedArraySliceEnd,
     TypedArraySubarrayStart,
     TypedArraySubarrayEnd,
+    TypedArrayTransformElement,
     TypedArraySearchFromIndex,
 }
 
@@ -564,7 +565,8 @@ impl ConversionConsumer {
             | Self::TypedArrayIndexSet
             | Self::TypedArrayAtIndex
             | Self::TypedArrayWithIndex
-            | Self::TypedArrayWithValue => None,
+            | Self::TypedArrayWithValue
+            | Self::TypedArrayTransformElement => None,
             Self::TypedArrayIncludesFromIndex
             | Self::TypedArrayFillValue
             | Self::TypedArrayFillStart
@@ -1606,6 +1608,16 @@ pub(crate) enum TypedArraySubarrayStage {
     Construct,
 }
 
+/// Observable callback and species boundaries in TypedArray map/filter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum TypedArrayTransformStage {
+    Constructor,
+    Species,
+    Construct,
+    Callback,
+}
+
 /// Observable callback boundaries in `Signal.State` construction and mutation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1701,6 +1713,7 @@ pub(crate) enum NativeContinuationKind {
     CollectionForEach,
     ArrayForEach(ArrayForEachStage),
     TypedArrayCallback(TypedArrayCallbackStage),
+    TypedArrayTransform(TypedArrayTransformStage),
     ArrayConcat(ArrayConcatStage),
     ArrayFlat(ArrayFlatStage),
     ArrayFlatMap(ArrayFlatMapStage),
@@ -3066,6 +3079,22 @@ impl NativeContinuation {
             kind: NativeContinuationKind::TypedArrayCallback(stage),
             first: state,
             second: element,
+        }
+    }
+
+    /// Roots one TypedArray map/filter state across callback, species, and construction frames.
+    #[inline]
+    pub(crate) const fn typed_array_transform(
+        site: NativeContinuationSite,
+        stage: TypedArrayTransformStage,
+        state: Value,
+        retained: Value,
+    ) -> Self {
+        Self {
+            site,
+            kind: NativeContinuationKind::TypedArrayTransform(stage),
+            first: state,
+            second: retained,
         }
     }
 

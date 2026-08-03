@@ -391,7 +391,7 @@ impl Isolate {
 }
 
 #[inline(always)]
-const fn typed_array_callback_mode(kind: TypedArrayCallbackKind, has_second_argument: bool) -> u8 {
+fn typed_array_callback_mode(kind: TypedArrayCallbackKind, has_second_argument: bool) -> u8 {
     match (kind, has_second_argument) {
         (TypedArrayCallbackKind::Every, _) => CALLBACK_EVERY,
         (TypedArrayCallbackKind::Some, _) => CALLBACK_SOME,
@@ -404,6 +404,9 @@ const fn typed_array_callback_mode(kind: TypedArrayCallbackKind, has_second_argu
         (TypedArrayCallbackKind::Reduce, true) => CALLBACK_REDUCE_INITIALIZED,
         (TypedArrayCallbackKind::ReduceRight, false) => CALLBACK_REDUCE_RIGHT_UNINITIALIZED,
         (TypedArrayCallbackKind::ReduceRight, true) => CALLBACK_REDUCE_RIGHT_INITIALIZED,
+        (TypedArrayCallbackKind::Map | TypedArrayCallbackKind::Filter, _) => {
+            unreachable!("map/filter use the TypedArray transform state machine")
+        }
     }
 }
 

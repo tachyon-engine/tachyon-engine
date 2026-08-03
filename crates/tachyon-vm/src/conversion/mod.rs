@@ -717,6 +717,14 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::TypedArrayTransformElement {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_typed_array_transform_element_conversion(
+                            continuation.site,
+                            state,
+                            value,
+                        );
+                    }
                     if continuation.consumer == ConversionConsumer::TypedArrayIncludesFromIndex {
                         let state = self.native_call_state_reference(continuation.receiver)?;
                         return self.resume_typed_array_includes_conversion(
@@ -1689,6 +1697,9 @@ impl Isolate {
                 }
                 ConversionConsumer::TypedArrayIndexSet => {
                     unreachable!("TypedArray indexed set resumes inside its state machine")
+                }
+                ConversionConsumer::TypedArrayTransformElement => {
+                    unreachable!("TypedArray transform conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayAtIndex => {
                     unreachable!("TypedArray at conversion resumes inside its state machine")

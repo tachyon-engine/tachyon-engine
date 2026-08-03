@@ -3,6 +3,7 @@
 use super::*;
 use crate::module::ModuleBindingTarget;
 use crate::property::{ArrayLengthSetConsumer, TypedArrayIndexSetMode};
+use crate::runtime::callable::TypedArrayCallbackKind;
 
 #[inline(always)]
 pub(crate) fn environment_access_error(
@@ -2516,6 +2517,9 @@ impl Isolate {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::TypedArrayCallback(_) => {
+                return Err(ExecutionError::MissingNativeContinuation);
+            }
+            NativeContinuationKind::TypedArrayTransform(_) => {
                 return Err(ExecutionError::MissingNativeContinuation);
             }
             NativeContinuationKind::ArrayConcat(_) => {
@@ -7246,6 +7250,12 @@ impl Isolate {
                     return self.begin_typed_array_search(&site, direction);
                 }
                 FunctionExecutable::Native(NativeFunction::TypedArrayCallback(kind)) => {
+                    if matches!(
+                        kind,
+                        TypedArrayCallbackKind::Map | TypedArrayCallbackKind::Filter
+                    ) {
+                        return self.begin_typed_array_transform(&site, kind);
+                    }
                     return self.begin_typed_array_callback(&site, kind);
                 }
                 FunctionExecutable::Native(
@@ -8608,6 +8618,16 @@ impl Isolate {
                 NativeContinuationKind::TypedArrayCallback(stage) => {
                     let state = self.native_call_state_reference(continuation.first())?;
                     self.resume_typed_array_callback(
+                        site,
+                        state,
+                        stage,
+                        value,
+                        continuation.second(),
+                    )
+                }
+                NativeContinuationKind::TypedArrayTransform(stage) => {
+                    let state = self.native_call_state_reference(continuation.first())?;
+                    self.resume_typed_array_transform(
                         site,
                         state,
                         stage,

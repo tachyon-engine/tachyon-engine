@@ -489,6 +489,8 @@ impl Isolate {
         for kind in [
             TypedArrayCallbackKind::Every,
             TypedArrayCallbackKind::Some,
+            TypedArrayCallbackKind::Map,
+            TypedArrayCallbackKind::Filter,
             TypedArrayCallbackKind::ForEach,
             TypedArrayCallbackKind::Reduce,
             TypedArrayCallbackKind::ReduceRight,
