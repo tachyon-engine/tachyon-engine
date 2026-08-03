@@ -1025,6 +1025,9 @@ impl Isolate {
         receiver: Value,
         getter: TypedArrayGetter,
     ) -> Result<Value, ExecutionError> {
+        if getter == TypedArrayGetter::ToStringTag {
+            return self.typed_array_to_string_tag(receiver);
+        }
         let snapshot = self.typed_array_snapshot(receiver)?;
         let attached = match getter {
             TypedArrayGetter::Length
@@ -1034,7 +1037,8 @@ impl Isolate {
                 Err(ExecutionError::DetachedArrayBuffer) => false,
                 Err(error) => return Err(error),
             },
-            TypedArrayGetter::Buffer | TypedArrayGetter::ToStringTag => true,
+            TypedArrayGetter::Buffer => true,
+            TypedArrayGetter::ToStringTag => unreachable!("handled before the branded getters"),
         };
         Ok(match getter {
             TypedArrayGetter::Length if !attached => Value::from_i32(0),
@@ -1050,11 +1054,32 @@ impl Isolate {
                     .ok_or(ExecutionError::InvalidArrayLength)? as u64,
             ),
             TypedArrayGetter::ByteOffset => safe_integer_value(snapshot.byte_offset as u64),
-            TypedArrayGetter::ToStringTag => {
-                let atom = self.intern_intrinsic_name(snapshot.kind.name().as_bytes())?;
-                self.atom_string_value(atom)?
-            }
+            TypedArrayGetter::ToStringTag => unreachable!("handled before the branded getters"),
         })
+    }
+
+    /// Reads `[[TypedArrayName]]` without applying ValidateTypedArray or inspecting its backing.
+    fn typed_array_to_string_tag(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        let Some(raw) = receiver.as_heap_ref() else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        let Ok(array) = self
+            .heap
+            .checked_reference(raw, self.types.typed_array_object)
+        else {
+            return Ok(Value::from_immediate(Immediate::Undefined));
+        };
+        let kind = self.heap.with_running_scope(|scope| {
+            let array = scope.root(array).map_err(ExecutionError::Root)?;
+            scope.with_no_gc_scope(|no_gc| {
+                no_gc
+                    .borrow(array, self.types.typed_array_object)
+                    .map(|array| array.kind)
+                    .map_err(ExecutionError::NoGcBorrow)
+            })
+        })?;
+        let atom = self.intern_intrinsic_name(kind.name().as_bytes())?;
+        self.atom_string_value(atom)
     }
 
     /// Classifies CanonicalNumericIndexString while keeping common array indices allocation-free.

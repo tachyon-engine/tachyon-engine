@@ -336,6 +336,33 @@ typedSourceNumberMismatch && typedSourceBigIntMismatch &&
 indexedNumberMismatch && numberIndexedBigIntMismatch;
 "#;
 
+const TYPED_ARRAY_TO_STRING_TAG_SOURCE: &str = r#"
+var typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+var descriptor = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag);
+var getter = descriptor.get;
+var constructors = [
+  Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+  Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array
+];
+var names = [
+  "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array",
+  "Int32Array", "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array"
+];
+var tagsOkay = true;
+for (var index = 0; index < constructors.length; index++) {
+  tagsOkay = tagsOkay && getter.call(new constructors[index](0)) === names[index];
+}
+var detached = new Uint8Array(1);
+detached.buffer.transfer();
+tagsOkay && getter.call(detached) === "Uint8Array" &&
+  getter.call({}) === undefined && getter.call(new ArrayBuffer(0)) === undefined &&
+  getter.call(new DataView(new ArrayBuffer(1))) === undefined &&
+  getter.call(undefined) === undefined && getter.call(null) === undefined &&
+  getter.call(true) === undefined && getter.call(1) === undefined &&
+  getter.call("value") === undefined &&
+  descriptor.set === undefined && !descriptor.enumerable && descriptor.configurable;
+"#;
+
 #[test]
 fn fixed_number_typed_arrays_work_for_every_dispatch_batch() {
     assert_typed_array_source::<1>(false);
@@ -366,6 +393,20 @@ fn bigint_typed_array_edges_survive_forced_major_collection() {
     assert_bigint_typed_array_source::<4>(true);
     assert_bigint_typed_array_source::<8>(true);
     assert_bigint_typed_array_source::<16>(true);
+}
+
+#[test]
+fn typed_array_to_string_tag_works_for_every_dispatch_batch() {
+    assert_typed_array_to_string_tag::<1>(false);
+    assert_typed_array_to_string_tag::<2>(false);
+    assert_typed_array_to_string_tag::<4>(false);
+    assert_typed_array_to_string_tag::<8>(false);
+    assert_typed_array_to_string_tag::<16>(false);
+}
+
+#[test]
+fn typed_array_to_string_tag_survives_forced_major_collection() {
+    assert_typed_array_to_string_tag::<8>(true);
 }
 
 #[test]
@@ -659,6 +700,33 @@ fn assert_bigint_typed_array_source<const N: usize>(forced_major: bool) {
             },
         )
         .expect("BigInt TypedArray fixture executes");
+    assert!(
+        matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
+        "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
+    );
+}
+
+/// Executes the unbranded TypedArray name getter under one dispatch and collection policy.
+fn assert_typed_array_to_string_tag<const N: usize>(forced_major: bool) {
+    let module = compile_typed_array_source(
+        TYPED_ARRAY_TO_STRING_TAG_SOURCE,
+        7_475 + N as u32 + u32::from(forced_major) * 32,
+    );
+    let mut isolate = test_isolate();
+    if forced_major {
+        isolate
+            .heap
+            .set_forced_collection_mode(ForcedCollectionMode::Major);
+    }
+    let outcome = isolate
+        .execute_with_batch::<N>(
+            &module,
+            ExecutionBudget {
+                fuel: 131_072,
+                quantum: 131_072,
+            },
+        )
+        .expect("TypedArray toStringTag fixture executes");
     assert!(
         matches!(outcome, RunOutcome::Completed(value) if value.as_immediate() == Some(Immediate::True)),
         "dispatch batch {N}, forced_major={forced_major} returned {outcome:?}"
