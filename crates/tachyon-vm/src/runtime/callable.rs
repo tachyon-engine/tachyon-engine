@@ -110,6 +110,69 @@ pub(crate) enum DataViewElement {
     BigUint64,
 }
 
+/// Non-blocking functions installed on the `%Atomics%` namespace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum AtomicsFunction {
+    Add,
+    And,
+    CompareExchange,
+    Exchange,
+    IsLockFree,
+    Load,
+    Or,
+    Store,
+    Sub,
+    Xor,
+}
+
+impl AtomicsFunction {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Add,
+        Self::And,
+        Self::CompareExchange,
+        Self::Exchange,
+        Self::IsLockFree,
+        Self::Load,
+        Self::Or,
+        Self::Store,
+        Self::Sub,
+        Self::Xor,
+    ];
+
+    #[inline(always)]
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::And => "and",
+            Self::CompareExchange => "compareExchange",
+            Self::Exchange => "exchange",
+            Self::IsLockFree => "isLockFree",
+            Self::Load => "load",
+            Self::Or => "or",
+            Self::Store => "store",
+            Self::Sub => "sub",
+            Self::Xor => "xor",
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn length(self) -> i32 {
+        match self {
+            Self::IsLockFree => 1,
+            Self::Load => 2,
+            Self::CompareExchange => 4,
+            Self::Add
+            | Self::And
+            | Self::Exchange
+            | Self::Or
+            | Self::Store
+            | Self::Sub
+            | Self::Xor => 3,
+        }
+    }
+}
+
 impl DataViewElement {
     #[inline(always)]
     pub(crate) const fn byte_width(self) -> usize {
@@ -295,6 +358,7 @@ pub(crate) enum NativeFunction {
     SignalIsState,
     SignalIsComputed,
     SignalIsWatcher,
+    Atomics(AtomicsFunction),
     ObjectConstructor,
     ObjectDefineProperty,
     ObjectDefineProperties,
@@ -1020,6 +1084,9 @@ impl NativeFunction {
 
     #[inline(always)]
     pub(crate) const fn length(self) -> i32 {
+        if let Self::Atomics(function) = self {
+            return function.length();
+        }
         if let Some(function) = self.math_function() {
             return function.length();
         }
@@ -1435,11 +1502,15 @@ impl NativeFunction {
             Self::HostCreateRealm => 0,
             Self::HostEvalScript => 1,
             Self::HostDetachArrayBuffer => 1,
+            Self::Atomics(_) => unreachable!(),
         }
     }
 
     #[inline]
     pub(crate) const fn name(self) -> &'static str {
+        if let Self::Atomics(function) = self {
+            return function.name();
+        }
         if let Some(function) = self.math_function() {
             return function.name();
         }
@@ -1887,7 +1958,8 @@ impl NativeFunction {
             | Self::GlobalDecodeUri
             | Self::GlobalDecodeUriComponent
             | Self::GlobalEncodeUri
-            | Self::GlobalEncodeUriComponent => unreachable!(),
+            | Self::GlobalEncodeUriComponent
+            | Self::Atomics(_) => unreachable!(),
         }
     }
 
@@ -2513,6 +2585,7 @@ pub(crate) struct RealmIntrinsicAtoms {
     pub(crate) iterator: AtomId,
     pub(crate) array_buffer: AtomId,
     pub(crate) shared_array_buffer: AtomId,
+    pub(crate) atomics: AtomId,
     pub(crate) data_view: AtomId,
     pub(crate) typed_arrays: [AtomId; TypedArrayKind::ALL.len()],
     pub(crate) object: AtomId,
@@ -2542,7 +2615,7 @@ pub(crate) struct RealmIntrinsicAtoms {
 }
 
 impl RealmIntrinsicAtoms {
-    pub(crate) const BINDING_COUNT: usize = 30
+    pub(crate) const BINDING_COUNT: usize = 31
         + TypedArrayKind::ALL.len()
         + NativeErrorKind::ALL.len()
         + GlobalNumberFunction::ALL.len()

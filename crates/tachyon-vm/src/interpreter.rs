@@ -7145,6 +7145,9 @@ impl Isolate {
                     };
                     return self.write(site.caller_base, site.destination, result);
                 }
+                FunctionExecutable::Native(NativeFunction::Atomics(function)) => {
+                    return self.begin_atomics(&site, function);
+                }
                 FunctionExecutable::Native(NativeFunction::ArrayConstructor) => {
                     let array = self.create_array_from_site(&site)?;
                     return self.write(site.caller_base, site.destination, array);

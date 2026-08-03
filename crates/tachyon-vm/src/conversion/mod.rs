@@ -719,6 +719,23 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::AtomicsIndex(_)
+                            | ConversionConsumer::AtomicsValue(_)
+                            | ConversionConsumer::AtomicsReplacement(_)
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_atomics_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if continuation.consumer == ConversionConsumer::AtomicsIsLockFree {
+                        return self.resume_atomics_is_lock_free(continuation.site, value);
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::TypedArrayWithIndex
                             | ConversionConsumer::TypedArrayWithValue
                     ) {
@@ -1748,6 +1765,12 @@ impl Isolate {
                 ConversionConsumer::TypedArrayWithIndex
                 | ConversionConsumer::TypedArrayWithValue => {
                     unreachable!("TypedArray with conversion resumes inside its state machine")
+                }
+                ConversionConsumer::AtomicsIndex(_)
+                | ConversionConsumer::AtomicsValue(_)
+                | ConversionConsumer::AtomicsReplacement(_)
+                | ConversionConsumer::AtomicsIsLockFree => {
+                    unreachable!("Atomics conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayIncludesFromIndex => {
                     unreachable!("TypedArray includes conversion resumes inside its state machine")

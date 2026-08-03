@@ -158,8 +158,8 @@ fn typed_array_with_state_survives_forced_major_collection() {
 #[test]
 fn typed_array_with_uses_the_active_realm_same_kind_intrinsic() {
     let module = compile_typed_array_with_fixture(TYPED_ARRAY_WITH_CROSS_REALM_SOURCE);
-    // Two complete Realms include the default SharedArrayBuffer intrinsic surface.
-    let mut isolate = test_isolate_with_heap_spans(10);
+    // Two complete Realms include SharedArrayBuffer and the default Atomics namespace.
+    let mut isolate = test_isolate_with_heap_spans(11);
     let (_, child_global) = isolate.create_realm().expect("child Realm initializes");
     let constructor_atom = isolate.intern_intrinsic_name(b"Uint16Array").unwrap();
     let foreign_constructor = isolate

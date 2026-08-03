@@ -1539,7 +1539,8 @@ fn assert_generator_delegate_errors<const N: usize>(forced_major: bool) {
 
 /// Executes a generated stress fixture and returns both the isolate and its final generator value.
 fn execute_generator_fixture(source_id: u32, source: &str) -> (Isolate, Value) {
-    execute_generator_fixture_with_heap(source_id, source, 9)
+    // The stress payload shares its bound with the complete default intrinsic graph.
+    execute_generator_fixture_with_heap(source_id, source, 10)
 }
 
 /// Executes a stress fixture under an explicit heap bound sized to its intentional object churn.

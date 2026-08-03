@@ -405,6 +405,10 @@ pub(crate) enum ConversionConsumer {
     SharedArrayBufferGrowLength,
     SharedArrayBufferSliceStart,
     SharedArrayBufferSliceEnd,
+    AtomicsIndex(AtomicsFunction),
+    AtomicsValue(AtomicsFunction),
+    AtomicsReplacement(AtomicsFunction),
+    AtomicsIsLockFree,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -547,6 +551,10 @@ impl ConversionConsumer {
             | Self::SharedArrayBufferGrowLength
             | Self::SharedArrayBufferSliceStart
             | Self::SharedArrayBufferSliceEnd
+            | Self::AtomicsIndex(_)
+            | Self::AtomicsValue(_)
+            | Self::AtomicsReplacement(_)
+            | Self::AtomicsIsLockFree
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount

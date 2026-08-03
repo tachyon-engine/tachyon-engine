@@ -5,7 +5,8 @@ mod string_iterator;
 use super::*;
 use crate::object::TypedArrayKind;
 use crate::runtime::callable::{
-    DataViewElement, TypedArrayCallbackKind, TypedArrayGetter, TypedArraySearchDirection,
+    AtomicsFunction, DataViewElement, TypedArrayCallbackKind, TypedArrayGetter,
+    TypedArraySearchDirection,
 };
 
 impl Isolate {
@@ -45,6 +46,7 @@ impl Isolate {
         self.initialize_shared_array_buffer_intrinsics()?;
         self.initialize_data_view_intrinsics()?;
         self.initialize_typed_array_intrinsics()?;
+        self.initialize_atomics_intrinsics()?;
         self.initialize_collection_intrinsics()?;
         self.initialize_weak_ref_intrinsics()?;
         self.initialize_finalization_registry_intrinsics()?;
@@ -241,6 +243,55 @@ impl Isolate {
         let tag_value = self.atom_string_value(tag_atom)?;
         self.define_data_property(
             prototype,
+            tag,
+            DataPropertyDescriptor {
+                value: Some(tag_value),
+                writable: Some(false),
+                enumerable: Some(false),
+                configurable: Some(true),
+            },
+        )
+    }
+
+    /// Builds the non-constructor Atomics namespace after integer TypedArray intrinsics exist.
+    fn initialize_atomics_intrinsics(&mut self) -> Result<(), ExecutionError> {
+        let object = self.allocate_intrinsic_ordinary_object(OrdinaryObject {
+            shape: ShapeId::EMPTY,
+            extensible: true,
+            storage: None,
+            prototype: self
+                .realm
+                .object_prototype
+                .expect("Object prototype initializes before Atomics"),
+        })?;
+        self.realm.atomics_object = Some(object);
+        let function_prototype = self
+            .realm
+            .function_prototype
+            .expect("Function prototype initializes before Atomics methods");
+        for function in AtomicsFunction::ALL {
+            let method = self.allocate_native_function(
+                NativeFunction::Atomics(function),
+                OrdinaryObject {
+                    shape: ShapeId::EMPTY,
+                    extensible: true,
+                    storage: None,
+                    prototype: function_prototype,
+                },
+            )?;
+            let atom = self.intern_intrinsic_name(function.name().as_bytes())?;
+            self.set_intrinsic_data_property(object, atom, method, true)?;
+        }
+        let tag = self.property_key(
+            self.agent
+                .well_known_symbols
+                .to_string_tag
+                .expect("Symbol.toStringTag initializes before Atomics"),
+        )?;
+        let tag_atom = self.intern_intrinsic_name(b"Atomics")?;
+        let tag_value = self.atom_string_value(tag_atom)?;
+        self.define_data_property(
+            object,
             tag,
             DataPropertyDescriptor {
                 value: Some(tag_value),
@@ -2114,6 +2165,7 @@ impl Isolate {
             iterator: self.intern_intrinsic_name(b"Iterator")?,
             array_buffer: self.intern_intrinsic_name(b"ArrayBuffer")?,
             shared_array_buffer: self.intern_intrinsic_name(b"SharedArrayBuffer")?,
+            atomics: self.intern_intrinsic_name(b"Atomics")?,
             data_view: self.intern_intrinsic_name(b"DataView")?,
             typed_arrays: [
                 self.intern_intrinsic_name(b"Int8Array")?,
@@ -4494,6 +4546,13 @@ impl Isolate {
             self.realm
                 .shared_array_buffer_constructor
                 .expect("SharedArrayBuffer initializes before global publication"),
+            true,
+        )?;
+        self.realm.publish_intrinsic(
+            atoms.atomics,
+            self.realm
+                .atomics_object
+                .expect("Atomics initializes before global publication"),
             true,
         )?;
         self.realm.publish_intrinsic(

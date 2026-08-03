@@ -38,6 +38,7 @@ mod array_to_sorted;
 mod assign;
 mod async_from_sync_iterator;
 mod async_function;
+mod atomics;
 mod bigint;
 mod call_spread;
 mod calls;

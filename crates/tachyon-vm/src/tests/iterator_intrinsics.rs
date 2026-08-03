@@ -578,7 +578,8 @@ fn iterator_intrinsic_roots_and_continuations_survive_forced_major_collection() 
 fn iterator_constructor_fallback_uses_the_new_target_realm() {
     let child_module = compile_iterator_source(FOREIGN_NEW_TARGET_SOURCE, 8_930);
     let main_module = compile_iterator_source(CROSS_REALM_FALLBACK_SOURCE, 8_931);
-    let mut isolate = test_isolate();
+    // The fallback fixture retains both complete Realm intrinsic graphs.
+    let mut isolate = test_isolate_with_heap_spans(10);
     isolate
         .heap
         .set_forced_collection_mode(ForcedCollectionMode::Major);

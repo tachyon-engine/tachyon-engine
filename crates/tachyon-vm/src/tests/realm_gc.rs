@@ -4,7 +4,8 @@ use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName
 #[test]
 /// Forces collection at every child-intrinsic allocation and then executes each published graph.
 fn child_realms_have_distinct_globals_and_remain_gc_roots() {
-    let mut isolate = test_isolate();
+    // Three retained child Realms include the default Atomics namespace.
+    let mut isolate = test_isolate_with_heap_spans(11);
     isolate
         .heap
         .set_forced_collection_mode(ForcedCollectionMode::Major);
@@ -41,7 +42,8 @@ fn child_realms_have_distinct_globals_and_remain_gc_roots() {
 #[test]
 /// Proves every child publishes the Agent's complete well-known Symbol identity set.
 fn well_known_symbols_are_shared_across_realms_under_forced_major() {
-    let mut isolate = test_isolate();
+    // Three retained child Realms include the default Atomics namespace.
+    let mut isolate = test_isolate_with_heap_spans(11);
     let expected = isolate.agent.well_known_symbols;
     assert!(
         WellKnownSymbolId::ALL

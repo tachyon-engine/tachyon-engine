@@ -286,7 +286,7 @@ use runtime::code::is_conditional_branch;
 use runtime::{
     agent::{AgentState, RegisteredSymbol, WellKnownSymbolId},
     callable::{
-        AccessorPair, AccessorPropertyDescriptor, BoundFunctionSnapshot, CallSite,
+        AccessorPair, AccessorPropertyDescriptor, AtomicsFunction, BoundFunctionSnapshot, CallSite,
         DataPropertyDescriptor, DateUtcField, DateUtcSetter, ErrorIntrinsics,
         FunctionAuxiliaryEdge, FunctionExecutable, FunctionObject, GenericPropertyDescriptor,
         GlobalNumberFunction, GlobalUriFunction, IntrinsicPropertyAtoms, MathFunction,

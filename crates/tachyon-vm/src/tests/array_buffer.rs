@@ -1,6 +1,9 @@
 use tachyon_compiler::{CompileOptions, Compiler, MediaType, SourceId, SourceName, SourceText};
 
-use super::{fixtures::test_isolate, *};
+use super::{
+    fixtures::{test_isolate, test_isolate_with_heap_spans},
+    *,
+};
 
 const ARRAY_BUFFER_SOURCE: &str = r#"
 var b = new ArrayBuffer(8);
@@ -418,7 +421,8 @@ fn array_buffer_slice_observable_edges_survive_forced_major_collection() {
 #[test]
 fn array_buffer_slice_constructs_foreign_species_in_its_realm() {
     let module = compile_source(ARRAY_BUFFER_SLICE_CROSS_REALM_SOURCE, 7_413);
-    let mut isolate = test_isolate();
+    // Two complete Realms include SharedArrayBuffer and the Atomics namespace.
+    let mut isolate = test_isolate_with_heap_spans(10);
     let (_, child_global) = isolate.create_realm().expect("child Realm initializes");
     let constructor_atom = isolate.intern_intrinsic_name(b"ArrayBuffer").unwrap();
     let foreign_constructor = isolate

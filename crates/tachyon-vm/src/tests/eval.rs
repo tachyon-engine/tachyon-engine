@@ -142,7 +142,8 @@ fn dynamic_function_reads_and_writes_its_constructor_realm_global_object() {
         "var other = $262.createRealm().global; other.calls = 0; var fn = other.Function('calls += 1;'); fn(); other.calls;",
         1_171,
     );
-    let mut isolate = test_isolate();
+    // The dynamic function keeps two complete Realm graphs live during forced major GC.
+    let mut isolate = test_isolate_with_heap_spans(10);
     isolate
         .install_realm_hooks(eval_script_callback, dynamic_function_callback)
         .expect("dynamic-function hooks install");
