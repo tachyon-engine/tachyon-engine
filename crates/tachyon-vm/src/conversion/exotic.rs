@@ -31,6 +31,7 @@ impl Isolate {
             self.pop_native_conversion()?;
             return Err(error);
         }
+        let root_kind = NativeContinuationKind::ConversionCallRoot;
         let frame_depth = self.fiber.frames.len();
         let call_result = self.call(CallSite {
             caller_base: continuation.site.caller_base,
@@ -48,9 +49,22 @@ impl Isolate {
             call_site: continuation.site.call_site,
         });
         if let Err(error) = call_result {
-            self.pop_conversion_call_root()?;
-            self.pop_native_conversion()?;
+            if self
+                .fiber
+                .completions
+                .last_native_matches(root_kind, continuation.site)
+            {
+                self.pop_conversion_call_root()?;
+                self.pop_native_conversion()?;
+            }
             return Err(error);
+        }
+        if !self
+            .fiber
+            .completions
+            .last_native_matches(root_kind, continuation.site)
+        {
+            return Ok(ConversionCallbackResult::Suspended);
         }
         if self.fiber.frames.len() != frame_depth {
             let frame = self

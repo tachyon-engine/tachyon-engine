@@ -19,51 +19,25 @@ impl Isolate {
             return self.math_variadic_value(function, site);
         }
         let first = self.math_number_argument(site, 0)?;
-        let result = match function {
-            MathFunction::Abs => first.abs(),
-            MathFunction::Acos => first.acos(),
-            MathFunction::Acosh => math_acosh(first),
-            MathFunction::Asin => first.asin(),
-            MathFunction::Asinh => math_asinh(first),
-            MathFunction::Atan => first.atan(),
-            MathFunction::Atanh => first.atanh(),
-            MathFunction::Atan2 => first.atan2(self.math_number_argument(site, 1)?),
-            MathFunction::Cbrt => first.cbrt(),
-            MathFunction::Ceil => first.ceil(),
-            MathFunction::Clz32 => f64::from(to_uint32(first).leading_zeros()),
-            MathFunction::Cos => first.cos(),
-            MathFunction::Cosh => first.cosh(),
-            MathFunction::Exp => first.exp(),
-            MathFunction::Expm1 => first.exp_m1(),
-            MathFunction::Floor => first.floor(),
-            MathFunction::F16Round => round_to_binary16(first),
-            MathFunction::Fround => f64::from(first as f32),
-            MathFunction::Imul => {
-                let second = self.math_number_argument(site, 1)?;
-                f64::from((to_uint32(first) as i32).wrapping_mul(to_uint32(second) as i32))
-            }
-            MathFunction::Log => first.ln(),
-            MathFunction::Log1p => first.ln_1p(),
-            MathFunction::Log10 => first.log10(),
-            MathFunction::Log2 => first.log2(),
-            MathFunction::Pow => math_pow(first, self.math_number_argument(site, 1)?),
-            MathFunction::Round => math_round(first),
-            MathFunction::Sign => math_sign(first),
-            MathFunction::Sin => first.sin(),
-            MathFunction::Sinh => first.sinh(),
-            MathFunction::Sqrt => first.sqrt(),
-            MathFunction::Tan => first.tan(),
-            MathFunction::Tanh => first.tanh(),
-            MathFunction::Trunc => first.trunc(),
-            MathFunction::Hypot
-            | MathFunction::Max
-            | MathFunction::Min
-            | MathFunction::Random
-            | MathFunction::SumPrecise => {
-                unreachable!("special Math methods return before unary dispatch")
-            }
+        let second = if matches!(
+            function,
+            MathFunction::Atan2 | MathFunction::Imul | MathFunction::Pow
+        ) {
+            self.math_number_argument(site, 1)?
+        } else {
+            0.0
         };
-        Ok(Value::from_f64(result))
+        Ok(Value::from_f64(math_fixed_result(function, first, second)))
+    }
+
+    /// Completes a resumed fixed-arity Math call after left-to-right ToNumber conversion.
+    pub(crate) fn finish_math_fixed(
+        &mut self,
+        function: MathFunction,
+        first: f64,
+        second: f64,
+    ) -> Value {
+        Value::from_f64(math_fixed_result(function, first, second))
     }
 
     /// Converts one present-or-undefined Math argument without hiding object conversion gaps.
@@ -81,48 +55,15 @@ impl Isolate {
         function: MathFunction,
         site: &CallSite,
     ) -> Result<Value, ExecutionError> {
-        let mut result: f64 = match function {
-            MathFunction::Max => f64::NEG_INFINITY,
-            MathFunction::Min => f64::INFINITY,
-            MathFunction::Hypot => 0.0,
-            _ => unreachable!("only variadic Math methods use this path"),
-        };
-        let mut scale: f64 = 0.0;
-        let mut sum: f64 = 0.0;
-        let mut saw_nan = false;
+        let mut aggregate = math_variadic_initial(function);
+        let mut auxiliary = 0.0;
         for index in 0..site.argument_count {
             let number = self.math_number_argument(site, index)?;
-            match function {
-                MathFunction::Max => result = math_max(result, number),
-                MathFunction::Min => result = math_min(result, number),
-                MathFunction::Hypot if number.is_infinite() => scale = f64::INFINITY,
-                MathFunction::Hypot if number.is_nan() => saw_nan = true,
-                MathFunction::Hypot if scale.is_finite() => {
-                    let absolute = number.abs();
-                    if absolute > scale {
-                        let ratio = if scale == 0.0 { 0.0 } else { scale / absolute };
-                        sum = 1.0 + sum * ratio * ratio;
-                        scale = absolute;
-                    } else if absolute != 0.0 {
-                        let ratio = absolute / scale;
-                        sum += ratio * ratio;
-                    }
-                }
-                _ => {}
-            }
+            math_variadic_add(function, &mut aggregate, &mut auxiliary, number);
         }
-        if function == MathFunction::Hypot {
-            result = if scale.is_infinite() {
-                f64::INFINITY
-            } else if saw_nan {
-                f64::NAN
-            } else if scale == 0.0 {
-                0.0
-            } else {
-                scale * sum.sqrt()
-            };
-        }
-        Ok(Value::from_f64(result))
+        Ok(Value::from_f64(math_variadic_finish(
+            function, aggregate, auxiliary,
+        )))
     }
 
     /// Advances the realm-local deterministic PRNG without host I/O or shared atomics.
@@ -134,6 +75,113 @@ impl Isolate {
         self.math_random_state = state;
         let bits = state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11;
         bits as f64 * (1.0 / 9_007_199_254_740_992.0)
+    }
+}
+
+/// Executes one fixed-arity Math kernel after all observable conversions have completed.
+fn math_fixed_result(function: MathFunction, first: f64, second: f64) -> f64 {
+    match function {
+        MathFunction::Abs => first.abs(),
+        MathFunction::Acos => first.acos(),
+        MathFunction::Acosh => math_acosh(first),
+        MathFunction::Asin => first.asin(),
+        MathFunction::Asinh => math_asinh(first),
+        MathFunction::Atan => first.atan(),
+        MathFunction::Atanh => first.atanh(),
+        MathFunction::Atan2 => first.atan2(second),
+        MathFunction::Cbrt => first.cbrt(),
+        MathFunction::Ceil => first.ceil(),
+        MathFunction::Clz32 => f64::from(to_uint32(first).leading_zeros()),
+        MathFunction::Cos => first.cos(),
+        MathFunction::Cosh => first.cosh(),
+        MathFunction::Exp => first.exp(),
+        MathFunction::Expm1 => first.exp_m1(),
+        MathFunction::Floor => first.floor(),
+        MathFunction::F16Round => round_to_binary16(first),
+        MathFunction::Fround => f64::from(first as f32),
+        MathFunction::Imul => {
+            f64::from((to_uint32(first) as i32).wrapping_mul(to_uint32(second) as i32))
+        }
+        MathFunction::Log => first.ln(),
+        MathFunction::Log1p => first.ln_1p(),
+        MathFunction::Log10 => first.log10(),
+        MathFunction::Log2 => first.log2(),
+        MathFunction::Pow => math_pow(first, second),
+        MathFunction::Round => math_round(first),
+        MathFunction::Sign => math_sign(first),
+        MathFunction::Sin => first.sin(),
+        MathFunction::Sinh => first.sinh(),
+        MathFunction::Sqrt => first.sqrt(),
+        MathFunction::Tan => first.tan(),
+        MathFunction::Tanh => first.tanh(),
+        MathFunction::Trunc => first.trunc(),
+        MathFunction::Hypot
+        | MathFunction::Max
+        | MathFunction::Min
+        | MathFunction::Random
+        | MathFunction::SumPrecise => {
+            unreachable!("special Math methods return before unary dispatch")
+        }
+    }
+}
+
+#[inline(always)]
+pub(crate) fn math_variadic_initial(function: MathFunction) -> f64 {
+    match function {
+        MathFunction::Max => f64::NEG_INFINITY,
+        MathFunction::Min => f64::INFINITY,
+        MathFunction::Hypot => 0.0,
+        _ => unreachable!("only variadic Math methods have an aggregate identity"),
+    }
+}
+
+/// Accumulates one already-converted argument without introducing observable early exits.
+#[inline(always)]
+pub(crate) fn math_variadic_add(
+    function: MathFunction,
+    aggregate: &mut f64,
+    auxiliary: &mut f64,
+    number: f64,
+) {
+    match function {
+        MathFunction::Max => *aggregate = math_max(*aggregate, number),
+        MathFunction::Min => *aggregate = math_min(*aggregate, number),
+        MathFunction::Hypot if number.is_infinite() => *aggregate = f64::INFINITY,
+        MathFunction::Hypot if number.is_nan() => *auxiliary = f64::NAN,
+        MathFunction::Hypot if aggregate.is_finite() => {
+            let absolute = number.abs();
+            if absolute > *aggregate {
+                let ratio = if *aggregate == 0.0 {
+                    0.0
+                } else {
+                    *aggregate / absolute
+                };
+                *auxiliary = 1.0 + *auxiliary * ratio * ratio;
+                *aggregate = absolute;
+            } else if absolute != 0.0 {
+                let ratio = absolute / *aggregate;
+                *auxiliary += ratio * ratio;
+            }
+        }
+        MathFunction::Hypot => {}
+        _ => unreachable!("only variadic Math methods accumulate arguments"),
+    }
+}
+
+#[inline(always)]
+/// Selects the final hypot special state or returns the max/min aggregate unchanged.
+pub(crate) fn math_variadic_finish(function: MathFunction, aggregate: f64, auxiliary: f64) -> f64 {
+    if function != MathFunction::Hypot {
+        return aggregate;
+    }
+    if aggregate.is_infinite() {
+        f64::INFINITY
+    } else if auxiliary.is_nan() {
+        f64::NAN
+    } else if aggregate == 0.0 {
+        0.0
+    } else {
+        aggregate * auxiliary.sqrt()
     }
 }
 

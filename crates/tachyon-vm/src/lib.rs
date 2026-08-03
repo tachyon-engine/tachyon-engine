@@ -52,6 +52,7 @@ mod iterator;
 mod iterator_eager;
 mod iterator_helper;
 mod iterator_intrinsics;
+mod math_conversion;
 mod math_sum_precise;
 mod module;
 mod number;
@@ -225,7 +226,10 @@ use bigint::{BigIntValue, small_bigint_binary_hot, small_bigint_not_hot};
 use bound_function::BoundFunctionData;
 use builtins::object::PendingGetOwnPropertyDescriptors;
 use builtins::signals::{ComputedSignal, SignalRuntime, StateSignal, WatcherSignal};
-use builtins::{PendingDateNumericArguments, PendingJsonStringify};
+use builtins::{
+    PendingDateNumericArguments, PendingJsonStringify, math_variadic_add, math_variadic_finish,
+    math_variadic_initial,
+};
 use collection::{
     CollectionInitializerKind, MapObject, OrderedCollection, PendingCollectionForEach,
     PendingCollectionInitializer, PendingMapGetOrInsertComputed, SetObject,
@@ -248,6 +252,7 @@ use iterator::{
 };
 use iterator_eager::{IteratorEagerKind, IteratorEagerOperation};
 use iterator_helper::{IteratorHelperObject, WrapForValidIteratorObject};
+use math_conversion::PendingMathOperation;
 use math_sum_precise::ExactSumAccumulator;
 use object::{
     ArgumentsObject, BigIntObject, BooleanObject, DateObject, NumberObject, OrdinaryObject,
@@ -528,6 +533,7 @@ pub enum ExecutionError {
     NumberFormatBufferExhausted,
     NumberFormatInvalidDigit,
     NumberStringAllocationFailed,
+    MathArgumentAllocationFailed,
     StringBufferAllocationFailed,
     InvalidStringLength,
     InvalidStringRepeatCount(Value),

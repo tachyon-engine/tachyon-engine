@@ -7759,8 +7759,7 @@ impl Isolate {
                     let function = native
                         .math_function()
                         .expect("math guard establishes the native identity");
-                    let value = self.math_value(function, &site)?;
-                    return self.write(site.caller_base, site.destination, value);
+                    return self.begin_math_operation(function, &site);
                 }
                 FunctionExecutable::Native(native) if native.global_number_function().is_some() => {
                     let argument = self.call_argument(&site, 0)?;

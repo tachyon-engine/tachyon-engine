@@ -61,6 +61,7 @@ mod grouping;
 mod instance_of;
 mod iterator_flat_map;
 mod iterator_intrinsics;
+mod math_conversion;
 mod math_sum_precise;
 mod module;
 mod object_enumeration;

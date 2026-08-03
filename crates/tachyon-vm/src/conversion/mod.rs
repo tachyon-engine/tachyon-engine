@@ -522,6 +522,13 @@ impl Isolate {
                             value,
                         );
                     }
+                    if continuation.consumer == ConversionConsumer::MathArgument {
+                        return self.resume_math_argument_conversion(
+                            continuation.site,
+                            continuation.receiver,
+                            value,
+                        );
+                    }
                     if matches!(
                         continuation.consumer,
                         ConversionConsumer::StringRawLength
@@ -1381,6 +1388,7 @@ impl Isolate {
         if let Some(argument) = argument {
             return self.call_exotic_conversion_callback(continuation, callee, argument);
         }
+        let parent_kind = NativeContinuation::conversion(continuation).kind();
         self.push_native_conversion(continuation)?;
         let frame_depth = self.fiber.frames.len();
         let call_result = self.call(CallSite {
@@ -1399,8 +1407,21 @@ impl Isolate {
             call_site: continuation.site.call_site,
         });
         if let Err(error) = call_result {
-            self.pop_native_conversion()?;
+            if self
+                .fiber
+                .completions
+                .last_native_matches(parent_kind, continuation.site)
+            {
+                self.pop_native_conversion()?;
+            }
             return Err(error);
+        }
+        if !self
+            .fiber
+            .completions
+            .last_native_matches(parent_kind, continuation.site)
+        {
+            return Ok(ConversionCallbackResult::Suspended);
         }
         if self.fiber.frames.len() != frame_depth {
             let frame = self
@@ -1471,6 +1492,9 @@ impl Isolate {
                 }
                 ConversionConsumer::StringFromCodesElement => {
                     unreachable!("String code conversion resumes inside its state machine")
+                }
+                ConversionConsumer::MathArgument => {
+                    unreachable!("Math conversion resumes inside its state machine")
                 }
                 ConversionConsumer::StringRawLength
                 | ConversionConsumer::StringRawLiteral

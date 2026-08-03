@@ -2430,6 +2430,7 @@ pub(crate) struct VmTypes {
     pub(crate) pending_array_join: GcType<PendingArrayJoin>,
     pub(crate) pending_string_concat: GcType<PendingStringConcat>,
     pub(crate) pending_string_from_codes: GcType<PendingStringFromCodes>,
+    pub(crate) pending_math_operation: GcType<PendingMathOperation>,
     pub(crate) pending_string_raw: GcType<PendingStringRaw>,
     pub(crate) pending_array_flat: GcType<PendingArrayFlat>,
     pub(crate) pending_array_flat_map: GcType<PendingArrayFlatMap>,
