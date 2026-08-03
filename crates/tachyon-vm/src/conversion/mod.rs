@@ -749,6 +749,20 @@ impl Isolate {
                     }
                     if matches!(
                         continuation.consumer,
+                        ConversionConsumer::AtomicsWaitIndex
+                            | ConversionConsumer::AtomicsWaitExpected
+                            | ConversionConsumer::AtomicsWaitTimeout
+                    ) {
+                        let state = self.native_call_state_reference(continuation.receiver)?;
+                        return self.resume_atomics_wait_conversion(
+                            continuation.site,
+                            state,
+                            continuation.consumer,
+                            value,
+                        );
+                    }
+                    if matches!(
+                        continuation.consumer,
                         ConversionConsumer::TypedArrayWithIndex
                             | ConversionConsumer::TypedArrayWithValue
                     ) {
@@ -1784,7 +1798,10 @@ impl Isolate {
                 | ConversionConsumer::AtomicsReplacement(_)
                 | ConversionConsumer::AtomicsIsLockFree
                 | ConversionConsumer::AtomicsNotifyIndex
-                | ConversionConsumer::AtomicsNotifyCount => {
+                | ConversionConsumer::AtomicsNotifyCount
+                | ConversionConsumer::AtomicsWaitIndex
+                | ConversionConsumer::AtomicsWaitExpected
+                | ConversionConsumer::AtomicsWaitTimeout => {
                     unreachable!("Atomics conversion resumes inside its state machine")
                 }
                 ConversionConsumer::TypedArrayIncludesFromIndex => {

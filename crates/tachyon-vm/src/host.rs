@@ -1,12 +1,76 @@
 //! Host-owned capabilities used by ECMAScript builtins without platform access in engine core.
 
-use core::fmt;
+use core::{fmt, num::NonZeroUsize, time::Duration};
 
 /// Stable provider failure code suitable for Rust and FFI adapters without allocating messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostProviderError {
     Unavailable,
     Failure(u32),
+}
+
+/// Process-local identity for one shared backing store without exposing its representation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SharedMemoryId(NonZeroUsize);
+
+impl SharedMemoryId {
+    pub(crate) fn from_address(address: usize) -> Self {
+        Self(NonZeroUsize::new(address).expect("Arc backing addresses are non-zero"))
+    }
+}
+
+/// Waiter-list key shared by every isolate in one host-defined agent cluster.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AtomicsWaitLocation {
+    memory: SharedMemoryId,
+    byte_offset: usize,
+}
+
+impl AtomicsWaitLocation {
+    pub(crate) const fn new(memory: SharedMemoryId, byte_offset: usize) -> Self {
+        Self {
+            memory,
+            byte_offset,
+        }
+    }
+
+    #[must_use]
+    pub const fn memory(self) -> SharedMemoryId {
+        self.memory
+    }
+
+    #[must_use]
+    pub const fn byte_offset(self) -> usize {
+        self.byte_offset
+    }
+}
+
+/// Stable synchronous result returned by an injected Atomics waiter implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtomicsWaitResult {
+    Ok,
+    NotEqual,
+    TimedOut,
+}
+
+/// Host-owned waiter registry and parking capability for one ECMAScript agent cluster.
+///
+/// `wait` must serialize `condition` and waiter publication against `notify` for the same
+/// location. The provider owns blocking, clocks, threads, and wakeup primitives; the engine core
+/// only supplies a short comparison callback that cannot execute JavaScript or allocate.
+pub trait AtomicsWaiterProvider: Send {
+    fn notify(
+        &mut self,
+        location: AtomicsWaitLocation,
+        count: u64,
+    ) -> Result<u64, HostProviderError>;
+
+    fn wait(
+        &mut self,
+        location: AtomicsWaitLocation,
+        timeout: Option<Duration>,
+        condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
+    ) -> Result<AtomicsWaitResult, HostProviderError>;
 }
 
 /// Supplies Unix wall-clock milliseconds for `Date` without exposing `std::time` to the VM.
@@ -34,6 +98,8 @@ pub trait TimeZoneProvider: Send {
 pub struct HostProviders {
     wall_clock: Option<Box<dyn WallClockProvider>>,
     time_zone: Option<Box<dyn TimeZoneProvider>>,
+    atomics_waiter: Option<Box<dyn AtomicsWaiterProvider>>,
+    agent_can_suspend: bool,
 }
 
 impl HostProviders {
@@ -42,6 +108,8 @@ impl HostProviders {
         Self {
             wall_clock: None,
             time_zone: None,
+            atomics_waiter: None,
+            agent_can_suspend: false,
         }
     }
 
@@ -57,12 +125,34 @@ impl HostProviders {
         self
     }
 
+    #[must_use]
+    pub fn with_atomics_waiter(mut self, provider: impl AtomicsWaiterProvider + 'static) -> Self {
+        self.atomics_waiter = Some(Box::new(provider));
+        self
+    }
+
+    #[must_use]
+    pub const fn with_agent_can_suspend(mut self, can_suspend: bool) -> Self {
+        self.agent_can_suspend = can_suspend;
+        self
+    }
+
     pub(crate) fn wall_clock_mut(&mut self) -> Option<&mut (dyn WallClockProvider + 'static)> {
         self.wall_clock.as_deref_mut()
     }
 
     pub(crate) fn time_zone_mut(&mut self) -> Option<&mut (dyn TimeZoneProvider + 'static)> {
         self.time_zone.as_deref_mut()
+    }
+
+    pub(crate) fn atomics_waiter_mut(
+        &mut self,
+    ) -> Option<&mut (dyn AtomicsWaiterProvider + 'static)> {
+        self.atomics_waiter.as_deref_mut()
+    }
+
+    pub(crate) const fn agent_can_suspend(&self) -> bool {
+        self.agent_can_suspend
     }
 }
 
@@ -72,6 +162,8 @@ impl fmt::Debug for HostProviders {
             .debug_struct("HostProviders")
             .field("wall_clock", &self.wall_clock.is_some())
             .field("time_zone", &self.time_zone.is_some())
+            .field("atomics_waiter", &self.atomics_waiter.is_some())
+            .field("agent_can_suspend", &self.agent_can_suspend)
             .finish()
     }
 }

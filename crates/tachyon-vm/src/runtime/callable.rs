@@ -124,11 +124,12 @@ pub(crate) enum AtomicsFunction {
     Or,
     Store,
     Sub,
+    Wait,
     Xor,
 }
 
 impl AtomicsFunction {
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Add,
         Self::And,
         Self::CompareExchange,
@@ -139,6 +140,7 @@ impl AtomicsFunction {
         Self::Or,
         Self::Store,
         Self::Sub,
+        Self::Wait,
         Self::Xor,
     ];
 
@@ -155,6 +157,7 @@ impl AtomicsFunction {
             Self::Or => "or",
             Self::Store => "store",
             Self::Sub => "sub",
+            Self::Wait => "wait",
             Self::Xor => "xor",
         }
     }
@@ -164,7 +167,7 @@ impl AtomicsFunction {
         match self {
             Self::IsLockFree => 1,
             Self::Load => 2,
-            Self::CompareExchange => 4,
+            Self::CompareExchange | Self::Wait => 4,
             Self::Add
             | Self::And
             | Self::Exchange
@@ -2674,6 +2677,8 @@ pub(crate) fn execution_error_kind(error: &ExecutionError) -> Option<NativeError
         | ExecutionError::BigIntUnsignedRightShift
         | ExecutionError::BigIntMixedTypes
         | ExecutionError::TypedArrayContentTypeMismatch
+        | ExecutionError::AtomicsWaitRequiresSharedArrayBuffer
+        | ExecutionError::AtomicsWaitCannotSuspend
         | ExecutionError::InvalidDatePrimitiveHint(_)
         | ExecutionError::InvalidJsonCircularStructure
         | ExecutionError::TypedArraySpeciesResultTooShort

@@ -97,7 +97,10 @@ pub use finalization::{
     FinalizationCleanupJob, FinalizationJobQueueStats, FinalizationSafepointError,
     FinalizationSafepointStats,
 };
-pub use host::{HostProviderError, HostProviders, TimeZoneProvider, WallClockProvider};
+pub use host::{
+    AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider, HostProviderError,
+    HostProviders, SharedMemoryId, TimeZoneProvider, WallClockProvider,
+};
 pub use isolate::Isolate;
 pub use module::{
     DynamicImportAttribute, DynamicImportError, DynamicImportRequest, DynamicImportRequestId,
@@ -462,6 +465,8 @@ pub enum ExecutionError {
     WallClockProvider(HostProviderError),
     MissingTimeZoneProvider,
     TimeZoneProvider(HostProviderError),
+    MissingAtomicsWaiterProvider,
+    AtomicsWaiterProvider(HostProviderError),
     MissingEntryFunction(FunctionId),
     MissingFunctionSource { code: CodeId, function: FunctionId },
     RegisterWindowTooLarge(u32),
@@ -528,6 +533,8 @@ pub enum ExecutionError {
     InvalidSetSize(Value),
     NegativeSetSize(Value),
     TypedArrayContentTypeMismatch,
+    AtomicsWaitRequiresSharedArrayBuffer,
+    AtomicsWaitCannotSuspend,
     InvalidNumberRadix(Value),
     InvalidNumberPrecision(Value),
     InvalidDateValue,

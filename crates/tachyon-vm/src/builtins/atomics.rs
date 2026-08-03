@@ -1,5 +1,7 @@
 //! Resumable non-blocking `%Atomics%` operations over integer TypedArray views.
 
+use std::sync::Arc;
+
 use super::super::*;
 use super::array_buffer::BufferBacking;
 use super::data_view::{data_view_decode, data_view_encode};
@@ -48,6 +50,9 @@ impl Isolate {
         }
         if function == AtomicsFunction::Notify {
             return self.begin_atomics_notify(site);
+        }
+        if function == AtomicsFunction::Wait {
+            return self.begin_atomics_wait(site);
         }
         let undefined = Value::from_immediate(Immediate::Undefined);
         let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
@@ -285,7 +290,34 @@ impl Isolate {
             if index >= snapshot.length {
                 return Err(ExecutionError::InvalidArrayLength);
             }
-            let _backing = self.resolve_buffer_backing(snapshot.buffer)?;
+            let width = snapshot.kind.byte_width();
+            let byte_offset = snapshot
+                .byte_offset
+                .checked_add(
+                    index
+                        .checked_mul(width)
+                        .ok_or(ExecutionError::InvalidArrayLength)?,
+                )
+                .ok_or(ExecutionError::InvalidArrayLength)?;
+            let BufferBacking::Shared(backing) = self.resolve_buffer_backing(snapshot.buffer)?
+            else {
+                return Err(ExecutionError::DetachedArrayBuffer);
+            };
+            let location = AtomicsWaitLocation::new(
+                SharedMemoryId::from_address(Arc::as_ptr(&backing) as usize),
+                byte_offset,
+            );
+            if let Some(provider) = self.host_providers.atomics_waiter_mut() {
+                let count = atomics_notify_count(count);
+                let notified = provider
+                    .notify(location, count)
+                    .map_err(ExecutionError::AtomicsWaiterProvider)?;
+                return self.write(
+                    site.caller_base,
+                    site.destination,
+                    Value::from_f64(notified as f64),
+                );
+            }
         }
         debug_assert!(count >= 0.0 || count == f64::INFINITY);
         self.write(site.caller_base, site.destination, Value::from_i32(0))
@@ -327,6 +359,230 @@ impl Isolate {
         let number = numeric_value(self.convert_to_number(value)?)
             .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
         Ok(atomic_integer_or_infinity(number).max(0.0))
+    }
+
+    /// Validates shared waitable storage before converting index, expected value, and timeout.
+    fn begin_atomics_wait(&mut self, site: &CallSite) -> Result<(), ExecutionError> {
+        let undefined = Value::from_immediate(Immediate::Undefined);
+        let receiver = self.call_argument(site, 0)?.unwrap_or(undefined);
+        let snapshot = self.validate_waitable_typed_array(receiver)?;
+        if !matches!(
+            self.resolve_buffer_backing(snapshot.buffer)?,
+            BufferBacking::Shared(_)
+        ) {
+            return Err(ExecutionError::AtomicsWaitRequiresSharedArrayBuffer);
+        }
+        let index = self.call_argument(site, 1)?.unwrap_or(undefined);
+        let expected = self.call_argument(site, 2)?.unwrap_or(undefined);
+        let timeout = self.call_argument(site, 3)?.unwrap_or(undefined);
+        let continuation_site = NativeContinuationSite {
+            caller_base: site.caller_base,
+            destination: site.destination,
+            call_site: site.call_site,
+        };
+        if !self.is_object_value(index)
+            && !self.is_object_value(expected)
+            && !self.is_object_value(timeout)
+        {
+            let index = self.ecma_to_index(index)?;
+            if index >= snapshot.length {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
+            let expected = self.convert_atomics_wait_expected(snapshot.kind, expected)?;
+            let timeout = self.convert_atomics_wait_timeout(timeout)?;
+            return self.finish_atomics_wait(continuation_site, receiver, index, expected, timeout);
+        }
+        let state = self.allocate_atomics_state(NativeCallState {
+            values: [
+                receiver,
+                index,
+                expected,
+                timeout,
+                Value::from_f64(snapshot.length as f64),
+            ],
+            count: ATOMICS_STATE_SLOTS,
+        })?;
+        self.write(
+            site.caller_base,
+            site.destination,
+            Value::from_heap_ref(state.raw()),
+        )?;
+        self.convert_atomics_value(
+            continuation_site,
+            state,
+            ConversionConsumer::AtomicsWaitIndex,
+            index,
+        )
+    }
+
+    /// Continues the three observable wait conversions without retaining a backing lock.
+    pub(crate) fn resume_atomics_wait_conversion(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+        consumer: ConversionConsumer,
+        value: Value,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        match consumer {
+            ConversionConsumer::AtomicsWaitIndex => {
+                let index = self.ecma_to_index(value)?;
+                if index >= atomic_usize(pending.values[ATOMICS_INITIAL_LENGTH])? {
+                    return Err(ExecutionError::InvalidArrayLength);
+                }
+                self.set_atomics_value(state, ATOMICS_INDEX, Value::from_f64(index as f64))?;
+                self.convert_atomics_value(
+                    site,
+                    state,
+                    ConversionConsumer::AtomicsWaitExpected,
+                    pending.values[ATOMICS_VALUE],
+                )
+            }
+            ConversionConsumer::AtomicsWaitExpected => {
+                let kind = self
+                    .typed_array_snapshot(pending.values[ATOMICS_RECEIVER])?
+                    .kind;
+                let expected = self.convert_atomics_wait_expected(kind, value)?;
+                self.set_atomics_value(state, ATOMICS_VALUE, expected)?;
+                self.convert_atomics_value(
+                    site,
+                    state,
+                    ConversionConsumer::AtomicsWaitTimeout,
+                    pending.values[ATOMICS_REPLACEMENT],
+                )
+            }
+            ConversionConsumer::AtomicsWaitTimeout => {
+                let timeout = self.convert_atomics_wait_timeout(value)?;
+                self.set_atomics_value(state, ATOMICS_REPLACEMENT, Value::from_f64(timeout))?;
+                self.finish_atomics_wait_state(site, state)
+            }
+            _ => Err(ExecutionError::MissingNativeContinuation),
+        }
+    }
+
+    /// Restores the fully converted wait inputs from their traced state owner.
+    fn finish_atomics_wait_state(
+        &mut self,
+        site: NativeContinuationSite,
+        state: GcRef<NativeCallState>,
+    ) -> Result<(), ExecutionError> {
+        let pending = self.native_call_state_snapshot(state)?;
+        self.finish_atomics_wait(
+            site,
+            pending.values[ATOMICS_RECEIVER],
+            atomic_usize(pending.values[ATOMICS_INDEX])?,
+            pending.values[ATOMICS_VALUE],
+            numeric_value(pending.values[ATOMICS_REPLACEMENT])
+                .ok_or(ExecutionError::InvalidArrayLength)?,
+        )
+    }
+
+    /// Compares and parks through the host provider, then materializes the normative result string.
+    fn finish_atomics_wait(
+        &mut self,
+        site: NativeContinuationSite,
+        receiver: Value,
+        index: usize,
+        expected: Value,
+        timeout_ms: f64,
+    ) -> Result<(), ExecutionError> {
+        let snapshot = self.validate_waitable_typed_array(receiver)?;
+        if index >= snapshot.length {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        let width = snapshot.kind.byte_width();
+        let byte_offset = snapshot
+            .byte_offset
+            .checked_add(
+                index
+                    .checked_mul(width)
+                    .ok_or(ExecutionError::InvalidArrayLength)?,
+            )
+            .ok_or(ExecutionError::InvalidArrayLength)?;
+        let BufferBacking::Shared(backing) = self.resolve_buffer_backing(snapshot.buffer)? else {
+            return Err(ExecutionError::AtomicsWaitRequiresSharedArrayBuffer);
+        };
+        let expected = self.atomics_wait_expected_bits(snapshot.kind, expected)?;
+        let location = AtomicsWaitLocation::new(
+            SharedMemoryId::from_address(Arc::as_ptr(&backing) as usize),
+            byte_offset,
+        );
+        let timeout = atomics_wait_timeout(timeout_ms);
+        if !self.host_providers.agent_can_suspend() {
+            return Err(ExecutionError::AtomicsWaitCannotSuspend);
+        }
+        let mut condition = || {
+            let locked = backing
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let end = byte_offset
+                .checked_add(width)
+                .ok_or(HostProviderError::Failure(1))?;
+            let bytes = locked
+                .bytes
+                .get(byte_offset..end)
+                .filter(|_| end <= locked.byte_length)
+                .ok_or(HostProviderError::Failure(1))?;
+            Ok(atomic_read_bits(bytes) == expected)
+        };
+        let result = if let Some(provider) = self.host_providers.atomics_waiter_mut() {
+            provider
+                .wait(location, timeout, &mut condition)
+                .map_err(ExecutionError::AtomicsWaiterProvider)?
+        } else if !condition().map_err(ExecutionError::AtomicsWaiterProvider)? {
+            AtomicsWaitResult::NotEqual
+        } else if timeout == Some(core::time::Duration::ZERO) {
+            AtomicsWaitResult::TimedOut
+        } else {
+            return Err(ExecutionError::MissingAtomicsWaiterProvider);
+        };
+        let text = match result {
+            AtomicsWaitResult::Ok => b"ok".as_slice(),
+            AtomicsWaitResult::NotEqual => b"not-equal".as_slice(),
+            AtomicsWaitResult::TimedOut => b"timed-out".as_slice(),
+        };
+        let string = JsString::try_from_latin1(text).map_err(ExecutionError::PropertyKeyString)?;
+        let result = self.allocate_runtime_string(string)?;
+        self.write(site.caller_base, site.destination, result)
+    }
+
+    /// Converts the wait comparison operand without narrowing BigInt through a Number.
+    fn convert_atomics_wait_expected(
+        &mut self,
+        kind: TypedArrayKind,
+        value: Value,
+    ) -> Result<Value, ExecutionError> {
+        if kind == TypedArrayKind::BigInt64 {
+            return self.primitive_to_bigint(value);
+        }
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        Ok(Value::from_i32(atomics_to_int32(number)))
+    }
+
+    /// Applies wait's NaN/infinity and non-negative millisecond timeout normalization.
+    fn convert_atomics_wait_timeout(&mut self, value: Value) -> Result<f64, ExecutionError> {
+        let number = numeric_value(self.convert_to_number(value)?)
+            .ok_or(ExecutionError::UnsupportedNumberConversion(value))?;
+        if number.is_nan() || number == f64::INFINITY {
+            return Ok(f64::INFINITY);
+        }
+        Ok(number.max(0.0))
+    }
+
+    /// Encodes the converted expected operand into the exact waitable element representation.
+    fn atomics_wait_expected_bits(
+        &mut self,
+        kind: TypedArrayKind,
+        expected: Value,
+    ) -> Result<u64, ExecutionError> {
+        if kind == TypedArrayKind::BigInt64 {
+            return self.bigint_modulo_u64(expected);
+        }
+        let value = expected
+            .as_i32()
+            .ok_or(ExecutionError::UnsupportedNumberConversion(expected))?;
+        Ok(u64::from(u32::from_le_bytes(value.to_le_bytes())))
     }
 
     /// Implements the allocation-free path after validating before conversion.
@@ -469,7 +725,7 @@ impl Isolate {
                 AtomicsFunction::Or => old | operand,
                 AtomicsFunction::Sub => old.wrapping_sub(operand),
                 AtomicsFunction::Xor => old ^ operand,
-                AtomicsFunction::IsLockFree | AtomicsFunction::Load => {
+                AtomicsFunction::IsLockFree | AtomicsFunction::Load | AtomicsFunction::Wait => {
                     return Err(ExecutionError::MissingNativeContinuation);
                 }
             } & mask;
@@ -618,6 +874,14 @@ impl Isolate {
         ) {
             return self.resume_atomics_notify_conversion(site, state, consumer, value);
         }
+        if matches!(
+            consumer,
+            ConversionConsumer::AtomicsWaitIndex
+                | ConversionConsumer::AtomicsWaitExpected
+                | ConversionConsumer::AtomicsWaitTimeout
+        ) {
+            return self.resume_atomics_wait_conversion(site, state, consumer, value);
+        }
         self.resume_atomics_conversion(site, state, consumer, value)
     }
 
@@ -683,6 +947,39 @@ fn atomic_integer_or_infinity(number: f64) -> f64 {
         number
     } else {
         number.trunc()
+    }
+}
+
+#[inline(always)]
+fn atomics_notify_count(count: f64) -> u64 {
+    if count == f64::INFINITY || count >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        count as u64
+    }
+}
+
+#[inline(always)]
+fn atomics_wait_timeout(timeout_ms: f64) -> Option<core::time::Duration> {
+    if timeout_ms == f64::INFINITY {
+        return None;
+    }
+    let nanos = timeout_ms * 1_000_000.0;
+    Some(core::time::Duration::from_nanos(
+        nanos.min(u64::MAX as f64) as u64
+    ))
+}
+
+#[inline(always)]
+fn atomics_to_int32(number: f64) -> i32 {
+    if !number.is_finite() || number == 0.0 {
+        return 0;
+    }
+    let value = number.trunc().rem_euclid(4_294_967_296.0);
+    if value >= 2_147_483_648.0 {
+        (value - 4_294_967_296.0) as i32
+    } else {
+        value as i32
     }
 }
 

@@ -1,13 +1,14 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
     num::NonZeroU32,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Wake, Waker},
+    time::Instant,
 };
 
 use tachyon_compiler::{
@@ -16,11 +17,11 @@ use tachyon_compiler::{
 };
 use tachyon_gc::HeapLimit;
 use tachyon_vm::{
-    AtomHashSeed, AtomTableConfig, DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget,
-    ExecutionError, HostProviderError, HostProviders, Isolate, IsolateConfig, LoadedModule,
-    ModuleError, ModuleIdentity, ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId,
-    RealmLimits, ResolvedModuleRequest, RunOutcome, StackLimits, TimeZoneProvider, Value,
-    WallClockProvider,
+    AtomHashSeed, AtomTableConfig, AtomicsWaitLocation, AtomicsWaitResult, AtomicsWaiterProvider,
+    DynamicFunctionKind, DynamicFunctionSource, ExecutionBudget, ExecutionError, HostProviderError,
+    HostProviders, Isolate, IsolateConfig, LoadedModule, ModuleError, ModuleIdentity,
+    ModuleLoadError, ModuleLoader, PromiseOutcome, RealmId, RealmLimits, ResolvedModuleRequest,
+    RunOutcome, StackLimits, TimeZoneProvider, Value, WallClockProvider,
 };
 
 use crate::{EngineAdapter, EngineOutcome, EngineResponse, ExecutionRequest, Phase, SourceUnit};
@@ -90,6 +91,121 @@ impl TimeZoneProvider for Test262UtcTimeZone {
         local_milliseconds: i64,
     ) -> Result<i64, HostProviderError> {
         Ok(local_milliseconds)
+    }
+}
+
+#[derive(Default)]
+struct Test262WaiterCluster {
+    state: Mutex<Test262WaiterState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct Test262WaiterState {
+    queues: HashMap<AtomicsWaitLocation, VecDeque<u64>>,
+    next_waiter: u64,
+}
+
+#[derive(Clone, Default)]
+struct Test262AtomicsWaiter {
+    cluster: Arc<Test262WaiterCluster>,
+}
+
+impl AtomicsWaiterProvider for Test262AtomicsWaiter {
+    /// Removes the requested FIFO prefix while holding the location critical section.
+    fn notify(
+        &mut self,
+        location: AtomicsWaitLocation,
+        count: u64,
+    ) -> Result<u64, HostProviderError> {
+        let mut state = self.cluster.state.lock().map_err(waiter_failure)?;
+        let mut notified = 0_u64;
+        if let Some(queue) = state.queues.get_mut(&location) {
+            while notified < count && queue.pop_front().is_some() {
+                notified += 1;
+            }
+            if queue.is_empty() {
+                state.queues.remove(&location);
+            }
+        }
+        drop(state);
+        if notified != 0 {
+            self.cluster.changed.notify_all();
+        }
+        Ok(notified)
+    }
+
+    /// Compares and publishes atomically against notify, then parks only inside the runner.
+    fn wait(
+        &mut self,
+        location: AtomicsWaitLocation,
+        timeout: Option<core::time::Duration>,
+        condition: &mut dyn FnMut() -> Result<bool, HostProviderError>,
+    ) -> Result<AtomicsWaitResult, HostProviderError> {
+        let mut state = self.cluster.state.lock().map_err(waiter_failure)?;
+        if !condition()? {
+            return Ok(AtomicsWaitResult::NotEqual);
+        }
+        if timeout == Some(core::time::Duration::ZERO) {
+            return Ok(AtomicsWaitResult::TimedOut);
+        }
+        let waiter = state.next_waiter;
+        state.next_waiter = state.next_waiter.wrapping_add(1);
+        state.queues.entry(location).or_default().push_back(waiter);
+        let started = Instant::now();
+        loop {
+            if !waiter_is_registered(&state, location, waiter) {
+                return Ok(AtomicsWaitResult::Ok);
+            }
+            let Some(limit) = timeout else {
+                state = self.cluster.changed.wait(state).map_err(waiter_failure)?;
+                continue;
+            };
+            let Some(remaining) = limit.checked_sub(started.elapsed()) else {
+                remove_waiter(&mut state, location, waiter);
+                return Ok(AtomicsWaitResult::TimedOut);
+            };
+            let (next, elapsed) = self
+                .cluster
+                .changed
+                .wait_timeout(state, remaining)
+                .map_err(waiter_failure)?;
+            state = next;
+            if elapsed.timed_out() && waiter_is_registered(&state, location, waiter) {
+                remove_waiter(&mut state, location, waiter);
+                return Ok(AtomicsWaitResult::TimedOut);
+            }
+        }
+    }
+}
+
+#[inline]
+fn waiter_failure<T>(_error: std::sync::PoisonError<T>) -> HostProviderError {
+    HostProviderError::Failure(1)
+}
+
+#[inline]
+fn waiter_is_registered(
+    state: &Test262WaiterState,
+    location: AtomicsWaitLocation,
+    waiter: u64,
+) -> bool {
+    state
+        .queues
+        .get(&location)
+        .is_some_and(|queue| queue.contains(&waiter))
+}
+
+/// Removes one timed-out waiter without disturbing FIFO order for remaining agents.
+fn remove_waiter(state: &mut Test262WaiterState, location: AtomicsWaitLocation, waiter: u64) {
+    let Some(queue) = state.queues.get_mut(&location) else {
+        return;
+    };
+    if let Some(position) = queue.iter().position(|candidate| *candidate == waiter) {
+        queue.remove(position);
+    }
+    if queue.is_empty() {
+        state.queues.remove(&location);
     }
 }
 
@@ -230,7 +346,9 @@ fn execute_request(request: ExecutionRequest<'_>) -> EngineOutcome {
         ),
         HostProviders::new()
             .with_wall_clock(Test262WallClock::default())
-            .with_time_zone(Test262UtcTimeZone),
+            .with_time_zone(Test262UtcTimeZone)
+            .with_atomics_waiter(Test262AtomicsWaiter::default())
+            .with_agent_can_suspend(request.can_block),
     ) {
         Ok(isolate) => isolate,
         Err(error) => return unsupported(format!("Tachyon isolate creation failed: {error:?}")),

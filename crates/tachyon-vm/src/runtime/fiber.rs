@@ -411,6 +411,9 @@ pub(crate) enum ConversionConsumer {
     AtomicsIsLockFree,
     AtomicsNotifyIndex,
     AtomicsNotifyCount,
+    AtomicsWaitIndex,
+    AtomicsWaitExpected,
+    AtomicsWaitTimeout,
     ArraySpliceLength,
     ArraySpliceStart,
     ArraySpliceDeleteCount,
@@ -559,6 +562,9 @@ impl ConversionConsumer {
             | Self::AtomicsIsLockFree
             | Self::AtomicsNotifyIndex
             | Self::AtomicsNotifyCount
+            | Self::AtomicsWaitIndex
+            | Self::AtomicsWaitExpected
+            | Self::AtomicsWaitTimeout
             | Self::ArraySpliceLength
             | Self::ArraySpliceStart
             | Self::ArraySpliceDeleteCount
